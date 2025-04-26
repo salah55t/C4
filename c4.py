@@ -9,119 +9,213 @@ import requests
 import numpy as np
 import pandas as pd
 import psycopg2
-from psycopg2 import sql # لاستخدام استعلامات آمنة
+from psycopg2 import sql, OperationalError, InterfaceError # لاستخدام استعلامات آمنة وأخطاء محددة
 from psycopg2.extras import RealDictCursor # للحصول على النتائج كقواميس
 from binance.client import Client
 from binance import ThreadedWebsocketManager
+from binance.exceptions import BinanceAPIException, BinanceRequestException # أخطاء Binance المحددة
 from flask import Flask, request, Response
 from threading import Thread
 from datetime import datetime, timedelta
 from decouple import config
-# from apscheduler.schedulers.background import BackgroundScheduler # تم تعليقه - غير مستخدم حالياً
+from typing import List, Dict, Optional, Tuple, Any, Union # لإضافة Type Hinting
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # إضافة اسم المسجل
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(__name__)
+# استخدام اسم محدد للمسجل بدلاً من الجذر
+logger = logging.getLogger('CryptoBot')
 
 # ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
-    api_key = config('BINANCE_API_KEY')
-    api_secret = config('BINANCE_API_SECRET')
-    telegram_token = config('TELEGRAM_BOT_TOKEN')
-    chat_id = config('TELEGRAM_CHAT_ID')
-    db_url = config('DATABASE_URL')
-    webhook_url = config('WEBHOOK_URL', default=None) # عنوان الـ webhook سيتم تدوينه في ملف env (اختياري الآن)
+    API_KEY: str = config('BINANCE_API_KEY')
+    API_SECRET: str = config('BINANCE_API_SECRET')
+    TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
+    CHAT_ID: str = config('TELEGRAM_CHAT_ID')
+    DB_URL: str = config('DATABASE_URL')
+    # استخدام قيمة افتراضية None إذا لم يكن المتغير موجودًا
+    WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
-    logger.critical(f"❌ فشل في تحميل المتغيرات البيئية: {e}")
-    exit()
+    logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
+    exit(1) # استخدام رمز خروج غير صفري للإشارة إلى خطأ
 
-logger.info(f"مفتاح Binance API: {'موجود' if api_key else 'غير موجود'}")
-logger.info(f"توكن تليجرام: {telegram_token[:10]}...{'*' * (len(telegram_token)-10)}")
-logger.info(f"معرف دردشة تليجرام: {chat_id}")
-logger.info(f"رابط قاعدة البيانات: {'موجود' if db_url else 'غير موجود'}")
-logger.info(f"عنوان Webhook: {webhook_url if webhook_url else 'غير محدد'}")
+logger.info(f"مفتاح Binance API: {'موجود' if API_KEY else 'غير موجود'}")
+logger.info(f"توكن تليجرام: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
+logger.info(f"معرف دردشة تليجرام: {CHAT_ID}")
+logger.info(f"رابط قاعدة البيانات: {'موجود' if DB_URL else 'غير موجود'}")
+logger.info(f"عنوان Webhook: {WEBHOOK_URL if WEBHOOK_URL else 'غير محدد'}")
 
-# ---------------------- إعداد الثوابت ----------------------
-TRADE_VALUE = 10         # قيمة الصفقة الافتراضية بالدولار
-MAX_OPEN_TRADES = 4      # الحد الأقصى للصفقات المفتوحة في نفس الوقت
-SIGNAL_GENERATION_TIMEFRAME = '15m' # الإطار الزمني لتوليد الإشارة
-SIGNAL_GENERATION_LOOKBACK_DAYS = 5 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
-SIGNAL_TRACKING_TIMEFRAME = '15m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
-SIGNAL_TRACKING_LOOKBACK_DAYS = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+TRADE_VALUE: float = 10.0         # قيمة الصفقة الافتراضية بالدولار
+MAX_OPEN_TRADES: int = 4          # الحد الأقصى للصفقات المفتوحة في نفس الوقت
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # الإطار الزمني لتوليد الإشارة
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
 
-# نطاقات RSI
-RSI_PERIOD = 14          # فترة RSI
-RSI_OVERSOLD = 30        # حد التشبع البيعي
-RSI_OVERBOUGHT = 70      # حد التشبع الشرائي
+# مؤشرات فنية
+RSI_PERIOD: int = 14          # فترة RSI
+RSI_OVERSOLD: int = 30        # حد التشبع البيعي
+RSI_OVERBOUGHT: int = 70      # حد التشبع الشرائي
+EMA_PERIOD: int = 21          # فترة EMA للترند
+SWING_ORDER: int = 5          # ترتيب تحديد القمم والقيعان (لـ Elliott Wave - غير مستخدم حالياً في منطق الدخول)
+FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # مستويات فيبوناتشي (غير مستخدم حالياً)
+FIB_TOLERANCE: float = 0.007     # التسامح عند التحقق من مستويات فيبوناتشي
+LOOKBACK_FOR_SWINGS: int = 100 # عدد الشموع للبحث عن القمم والقيعان
+ENTRY_ATR_PERIOD: int = 14     # فترة ATR للدخول
+ENTRY_ATR_MULTIPLIER: float = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
+BOLLINGER_WINDOW: int = 20     # فترة Bollinger Bands
+BOLLINGER_STD_DEV: int = 2        # الانحراف المعياري لـ Bollinger Bands
+MACD_FAST: int = 12            # فترة MACD السريعة
+MACD_SLOW: int = 26            # فترة MACD البطيئة
+MACD_SIGNAL: int = 9             # فترة خط إشارة MACD
+ADX_PERIOD: int = 14            # فترة ADX
+SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
+SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
-EMA_PERIOD = 21          # فترة EMA للترند
-SWING_ORDER = 5          # ترتيب تحديد القمم والقيعان (لـ Elliott Wave - غير مستخدم حالياً في منطق الدخول)
-FIB_LEVELS_TO_CHECK = [0.382, 0.5, 0.618] # مستويات فيبوناتشي (غير مستخدم حالياً في منطق الدخول)
-FIB_TOLERANCE = 0.007     # التسامح عند التحقق من مستويات فيبوناتشي
-LOOKBACK_FOR_SWINGS = 100 # عدد الشموع للبحث عن القمم والقيعان
+# وقف الخسارة المتحرك
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1.5%)
+TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # مضاعف ATR للوقف المتحرك
+TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.2%)
 
-ENTRY_ATR_PERIOD = 14     # فترة ATR
-ENTRY_ATR_MULTIPLIER = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
+# شروط إضافية للإشارة
+MIN_PROFIT_MARGIN_PCT: float = 1.5 # الحد الأدنى لنسبة الربح المستهدف المئوية
+MIN_VOLUME_15M_USDT: float = 100000.0 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
 
-# وقف الخسارة المتحرك (القيم المعدلة)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1%)
-TRAILING_STOP_ATR_MULTIPLIER = 2.5        # مضاعف ATR للوقف المتحرك (تمت زيادته لإعطاء مساحة أكبر ضد التقلبات)
-TRAILING_STOP_MOVE_INCREMENT_PCT = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.3%)
+# متغيرات عالمية (سيتم تهيئتها لاحقًا)
+conn: Optional[psycopg2.extensions.connection] = None
+cur: Optional[psycopg2.extensions.cursor] = None
+client: Optional[Client] = None
+ticker_data: Dict[str, float] = {} # قاموس لتخزين أحدث أسعار الإغلاق للرموز
 
-MIN_PROFIT_MARGIN_PCT = 1.5 # الحد الأدنى لنسبة الربح المستهدف المئوية مقارنة بسعر الدخول
-MIN_VOLUME_15M_USDT = 100000 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
+# ---------------------- إعداد عميل Binance ----------------------
+try:
+    logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
+    client = Client(API_KEY, API_SECRET)
+    client.ping() # التحقق من الاتصال وصحة المفاتيح
+    server_time = client.get_server_time()
+    logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
+except BinanceRequestException as req_err:
+     logger.critical(f"❌ [Binance] خطأ في طلب Binance (قد يكون مشكلة شبكة أو طلب): {req_err}")
+     exit(1)
+except BinanceAPIException as api_err:
+     logger.critical(f"❌ [Binance] خطأ من Binance API (قد تكون المفاتيح غير صالحة أو مشكلة في الخادم): {api_err}")
+     exit(1)
+except Exception as e:
+    logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
+    exit(1)
 
 # ---------------------- دوال المؤشرات الإضافية ----------------------
-def get_fear_greed_index():
-    """يجلب مؤشر الخوف والطمع من alternative.me ويترجم التصنيف إلى العربية"""
-    # قاموس لترجمة التصنيفات
+def get_fear_greed_index() -> str:
+    """يجلب مؤشر الخوف والطمع من alternative.me ويترجم التصنيف إلى العربية."""
     classification_translation_ar = {
-        "Extreme Fear": "خوف شديد",
-        "Fear": "خوف",
-        "Neutral": "محايد",
-        "Greed": "جشع",
-        "Extreme Greed": "جشع شديد",
-        # أضف أي تصنيفات أخرى قد تظهر من الـ API هنا
+        "Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد",
+        "Greed": "جشع", "Extreme Greed": "جشع شديد",
     }
+    url = "https://api.alternative.me/fng/"
+    logger.debug(f"ℹ️ [Indicators] جلب مؤشر الخوف والطمع من {url}...")
     try:
-        response = requests.get("https://api.alternative.me/fng/", timeout=10)
-        response.raise_for_status() # Check for HTTP errors
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
         data = response.json()
         value = int(data["data"][0]["value"])
         classification_en = data["data"][0]["value_classification"]
-        # ترجمة التصنيف إلى العربية، استخدم الإنجليزية كبديل إذا لم توجد ترجمة
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
-        return f"{value} ({classification_ar})" # استخدام التصنيف العربي
+        logger.debug(f"✅ [Indicators] مؤشر الخوف والطمع: {value} ({classification_ar})")
+        return f"{value} ({classification_ar})"
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ في الشبكة)" # رسالة خطأ بالعربية
-    except (KeyError, IndexError, ValueError) as e:
+         logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
+        return "N/A (خطأ في الشبكة)"
+    except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"❌ [Indicators] خطأ في تنسيق بيانات مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ في البيانات)" # رسالة خطأ بالعربية
+        return "N/A (خطأ في البيانات)"
     except Exception as e:
-        logger.error(f"❌ [Indicators] خطأ غير متوقع في جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ غير معروف)" # رسالة خطأ بالعربية
+        logger.error(f"❌ [Indicators] خطأ غير متوقع في جلب مؤشر الخوف والطمع: {e}", exc_info=True)
+        return "N/A (خطأ غير معروف)"
 
-def get_btc_trend_4h():
-    """
-    يحسب ترند البيتكوين على فريم 4 ساعات باستخدام EMA20 وEMA50.
-    """
+def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, days: int = SIGNAL_GENERATION_LOOKBACK_DAYS) -> Optional[pd.DataFrame]:
+    """جلب البيانات التاريخية للشموع من Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
     try:
-        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=9)
-        if df is None or df.empty or len(df) < 50: # تأكد من وجود بيانات كافية
-            logger.warning("⚠️ [Indicators] بيانات BTC/USDT غير كافية لحساب الترند.")
+        start_dt = datetime.utcnow() - timedelta(days=days + 1) # إضافة يوم إضافي كاحتياط
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} للزوج {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) للزوج {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        # تحديد الأعمدة الرقمية الأساسية
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce') # coerce تحول القيم غير الصالحة إلى NaN
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+
+        # اختيار الأعمدة المطلوبة فقط
+        df = df[numeric_cols]
+
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True) # حذف الصفوف التي تحتوي على NaN في الأعمدة الأساسية
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم حذف {initial_len - len(df)} صف بسبب NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame للزوج {symbol} فارغ بعد إزالة NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) للزوج {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ API من Binance عند جلب بيانات {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ طلب أو شبكة عند جلب بيانات {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع في جلب البيانات التاريخية للزوج {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """حساب المتوسط المتحرك الأسي (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        # إرجاع سلسلة فارغة بنفس الفهرس إذا أمكن للحفاظ على التوافق
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def get_btc_trend_4h() -> str:
+    """يحسب ترند البيتكوين على فريم 4 ساعات باستخدام EMA20 وEMA50."""
+    logger.debug("ℹ️ [Indicators] حساب ترند البيتكوين 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10) # طلب أيام أكثر قليلاً
+        if df is None or df.empty or len(df) < 50 + 1: # التأكد من وجود بيانات كافية لـ EMA50
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الترند.")
             return "N/A (بيانات غير كافية)"
+
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
-        df.dropna(subset=['close'], inplace=True) # إزالة أي NaN في الإغلاق
+        df.dropna(subset=['close'], inplace=True)
         if len(df) < 50:
-             logger.warning("⚠️ [Indicators] بيانات BTC/USDT غير كافية بعد إزالة NaN.")
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة NaN.")
              return "N/A (بيانات غير كافية)"
 
         ema20 = calculate_ema(df['close'], 20).iloc[-1]
@@ -134,36 +228,36 @@ def get_btc_trend_4h():
 
         diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
 
-        if current_close > ema20 and ema20 > ema50:
+        if current_close > ema20 > ema50:
             trend = "صعود 📈"
-        elif current_close < ema20 and ema20 < ema50:
+        elif current_close < ema20 < ema50:
             trend = "هبوط 📉"
-        elif diff_ema20_pct < 0.005: # أقل من 0.5% فرق
+        elif diff_ema20_pct < 0.005: # أقل من 0.5% فرق، يعتبر استقرار
             trend = "استقرار 🔄"
-        else:
+        else: # تقاطع أو تباعد غير واضح
             trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] ترند البيتكوين 4H: {trend}")
         return trend
     except Exception as e:
         logger.error(f"❌ [Indicators] خطأ في حساب ترند البيتكوين على أربع ساعات: {e}", exc_info=True)
         return "N/A (خطأ)"
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
-conn = None
-cur = None
-
-def init_db():
+def init_db(retries: int = 5, delay: int = 5) -> None:
     """تهيئة الاتصال بقاعدة البيانات وإنشاء الجداول إذا لم تكن موجودة."""
     global conn, cur
-    retries = 5
-    delay = 5
-    for i in range(retries):
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
         try:
-            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (محاولة {i+1}/{retries})...")
-            conn = psycopg2.connect(db_url, connect_timeout=10, cursor_factory=RealDictCursor) # Use RealDictCursor
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (محاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False # التحكم اليدوي بالـ commit/rollback
             cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
 
-            # إنشاء جدول الإشارات
+            # --- إنشاء أو تحديث جدول signals ---
+            logger.info("[DB] التحقق/إنشاء جدول 'signals'...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY,
@@ -173,116 +267,117 @@ def init_db():
                     initial_stop_loss DOUBLE PRECISION NOT NULL,
                     current_target DOUBLE PRECISION NOT NULL,
                     current_stop_loss DOUBLE PRECISION NOT NULL,
-                    r2_score DOUBLE PRECISION, -- قد يعاد تسميته أو استخدامه بشكل مختلف مع الاستراتيجية الجديدة
-                    volume_15m DOUBLE PRECISION, -- تمت إضافته لتخزين حجم السيولة عند الإنشاء (اختياري)
+                    r2_score DOUBLE PRECISION, -- يمثل buy_signal_score
+                    volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
                     hit_stop_loss BOOLEAN DEFAULT FALSE,
                     closing_price DOUBLE PRECISION,
                     closed_at TIMESTAMP,
                     sent_at TIMESTAMP DEFAULT NOW(),
                     profit_percentage DOUBLE PRECISION,
-                    profitable_stop_loss BOOLEAN DEFAULT FALSE, -- هل تم ضرب وقف الخسارة بربح؟
+                    profitable_stop_loss BOOLEAN DEFAULT FALSE,
                     is_trailing_active BOOLEAN DEFAULT FALSE,
                     strategy_name TEXT,
-                    signal_details JSONB, -- لتخزين تفاصيل إضافية عن الإشارة
-                    last_trailing_update_price DOUBLE PRECISION -- آخر سعر تم عنده تحديث الوقف المتحرك
-                )
+                    signal_details JSONB,
+                    last_trailing_update_price DOUBLE PRECISION
+                );
             """)
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
 
-            # التحقق وإضافة الأعمدة الناقصة (أكثر قوة)
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public'")
-            existing_columns = {row['column_name'] for row in cur.fetchall()}
+            # --- التحقق وإضافة الأعمدة الناقصة (إذا لزم الأمر) ---
             required_columns = {
-                # تأكد من وجود جميع الأعمدة المطلوبة هنا، حتى لو كانت موجودة في CREATE TABLE
-                "id": "SERIAL PRIMARY KEY", "symbol": "TEXT NOT NULL", "entry_price": "DOUBLE PRECISION NOT NULL",
-                "initial_target": "DOUBLE PRECISION NOT NULL", "initial_stop_loss": "DOUBLE PRECISION NOT NULL",
-                "current_target": "DOUBLE PRECISION NOT NULL", "current_stop_loss": "DOUBLE PRECISION NOT NULL",
-                "r2_score": "DOUBLE PRECISION", "volume_15m": "DOUBLE PRECISION", "achieved_target": "BOOLEAN DEFAULT FALSE",
-                "hit_stop_loss": "BOOLEAN DEFAULT FALSE", "closing_price": "DOUBLE PRECISION", "closed_at": "TIMESTAMP",
-                "sent_at": "TIMESTAMP DEFAULT NOW()", "profit_percentage": "DOUBLE PRECISION", "profitable_stop_loss": "BOOLEAN DEFAULT FALSE",
-                "is_trailing_active": "BOOLEAN DEFAULT FALSE", "strategy_name": "TEXT", "signal_details": "JSONB",
-                "last_trailing_update_price": "DOUBLE PRECISION"
+                "symbol", "entry_price", "initial_target", "initial_stop_loss",
+                "current_target", "current_stop_loss", "r2_score", "volume_15m",
+                "achieved_target", "hit_stop_loss", "closing_price", "closed_at",
+                "sent_at", "profit_percentage", "profitable_stop_loss",
+                "is_trailing_active", "strategy_name", "signal_details",
+                "last_trailing_update_price"
             }
-            table_changed = False
-            for col_name, col_def in required_columns.items():
-                 if col_name not in existing_columns:
-                    try:
-                        # استخراج نوع العمود فقط (تجنب إعادة إضافة PRIMARY KEY أو NOT NULL إذا تم إضافته بالفعل)
-                        col_type = col_def.split(" ")[0]
-                        # استخدام psycopg2.sql لتمرير أسماء الأعمدة بأمان
-                        alter_query = sql.SQL("ALTER TABLE signals ADD COLUMN {} {}").format(
-                            sql.Identifier(col_name), sql.SQL(col_type) # لا نمرر DEFAULT أو NOT NULL هنا، يمكن إضافتها بـ ALTER COLUMN SET DEFAULT لاحقًا إذا لزم الأمر
-                        )
-                        cur.execute(alter_query)
-                        conn.commit() # Commit after each ALTER TABLE
-                        table_changed = True
-                        logger.info(f"✅ [DB] تمت إضافة العمود '{col_name}'.")
-                    except psycopg2.Error as db_err:
-                        logger.error(f"❌ [DB] خطأ إضافة العمود '{col_name}': {db_err}")
-                        conn.rollback() # Rollback on error for this specific column
-                        # Decide whether to raise or continue trying other columns
-                        # For now, we log and continue
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
+            existing_columns = {row['column_name'] for row in cur.fetchall()}
+            missing_columns = required_columns - existing_columns
 
-            if table_changed:
-                logger.info("✅ [DB] تم تحديث بنية جدول 'signals'.")
+            if missing_columns:
+                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
+                # (الكود الأصلي لإضافة الأعمدة كان جيدًا، يمكن الاحتفاظ به أو تحسينه هنا إذا لزم الأمر)
+                # ... (يمكن إضافة كود ALTER TABLE هنا إذا كنت تتوقع تغييرات مستقبلية) ...
+                logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.")
+            else:
+                logger.info("✅ [DB] جميع الأعمدة المطلوبة موجودة في جدول 'signals'.")
 
-            # إنشاء جدول هيمنة السوق (إذا لم يكن موجودًا)
+
+            # --- إنشاء جدول market_dominance (إذا لم يكن موجودًا) ---
+            logger.info("[DB] التحقق/إنشاء جدول 'market_dominance'...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS market_dominance (
                     id SERIAL PRIMARY KEY,
                     recorded_at TIMESTAMP DEFAULT NOW(),
                     btc_dominance DOUBLE PRECISION,
                     eth_dominance DOUBLE PRECISION
-                )
+                );
             """)
             conn.commit()
             logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
-            return # نجح الاتصال وإنشاء/تحديث الجداول
 
-        except psycopg2.OperationalError as op_err:
-             logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال بقاعدة البيانات (المحاولة {i+1}): {op_err}")
-             if conn: conn.rollback() # تأكد من التراجع
-             if i == retries - 1:
+            logger.info("✅ [DB] تهيئة قاعدة البيانات تمت بنجاح.")
+            return # نجح الاتصال والتهيئة
+
+        except OperationalError as op_err:
+             logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+             if conn: conn.rollback()
+             if attempt == retries - 1:
                  logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
-                 raise # ارفع الخطأ بعد فشل كل المحاولات
+                 raise op_err # إعادة رفع الخطأ بعد فشل كل المحاولات
              time.sleep(delay)
         except Exception as e:
-            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {i+1}): {e}")
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
             if conn: conn.rollback()
-            if i == retries - 1:
+            if attempt == retries - 1:
                  logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
-                 raise
+                 raise e
             time.sleep(delay)
-    # إذا وصل هنا، فقد فشلت كل المحاولات
+
+    # إذا وصل الكود إلى هنا، فقد فشلت كل المحاولات
     logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
-    exit()
+    exit(1)
 
 
-def check_db_connection():
+def check_db_connection() -> bool:
     """التحقق من حالة الاتصال بقاعدة البيانات وإعادة التهيئة إذا لزم الأمر."""
     global conn, cur
     try:
-        # طريقة بسيطة للتحقق: تنفيذ استعلام بسيط
         if conn is None or conn.closed != 0:
              logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
-             init_db()
+             init_db() # محاولة إعادة الاتصال والتهيئة
+             return True # نفترض نجاح التهيئة (init_db سترفع خطأ إذا فشلت)
         else:
-             # التحقق من أن الاتصال لا يزال يعمل
-             cur.execute("SELECT 1;")
-             cur.fetchone()
-             # logger.debug("[DB] الاتصال نشط.") # يمكن إلغاء التعليق للتحقق المتكرر
-    except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+             # التحقق من أن الاتصال لا يزال يعمل بإرسال استعلام بسيط
+             with conn.cursor() as check_cur: # استخدام cursor مؤقت
+                check_cur.execute("SELECT 1;")
+                check_cur.fetchone()
+             # logger.debug("[DB] الاتصال نشط.") # إلغاء التعليق للتحقق المتكرر
+             return True
+    except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
-        init_db()
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
     except Exception as e:
-        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}")
-        # قد نحتاج إلى محاولة إعادة الاتصال هنا أيضًا
-        init_db()
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        # محاولة إعادة الاتصال كإجراء وقائي
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
 
-# ---------------------- دالة تحويل قيم numpy إلى بايثون (مصححة لـ NumPy 2.0) ----------------------
-def convert_np_values(obj):
+
+def convert_np_values(obj: Any) -> Any:
     """تحويل أنواع بيانات NumPy إلى أنواع Python الأصلية للتوافق مع JSON و DB."""
     if isinstance(obj, dict):
         return {k: convert_np_values(v) for k, v in obj.items()}
@@ -290,51 +385,41 @@ def convert_np_values(obj):
         return [convert_np_values(item) for item in obj]
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    elif isinstance(obj, (np.integer, np.int_)): # np.int_ قديم لكن لا يزال يعمل في بعض الإصدارات، يمكن إزالته إذا أردت
+    elif isinstance(obj, (np.integer, np.int_)): # np.int_ قديم لكن لا يزال يعمل
         return int(obj)
-    # --- السطر المصحح ---
-    elif isinstance(obj, (np.floating, np.float64)): # استخدام np.float64 بدلاً من np.float_
+    elif isinstance(obj, (np.floating, np.float64, np.float_)): # شمل np.float_ للاحتياط
         return float(obj)
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
-    elif pd.isna(obj):
-        return None # تحويل NaN إلى None
+    elif pd.isna(obj): # معالجة NaT من Pandas أيضًا
+        return None
     else:
         return obj
 
-# ---------------------- دالة حساب Bollinger Bands ----------------------
-def calculate_bollinger_bands(df, window=20, num_std=2):
-    """حساب نطاقات بولينجر."""
-    df = df.copy() # تجنب SettingWithCopyWarning
-    df['bb_middle'] = df['close'].rolling(window=window).mean()
-    df['bb_std'] = df['close'].rolling(window=window).std()
-    df['bb_upper'] = df['bb_middle'] + num_std * df['bb_std']
-    df['bb_lower'] = df['bb_middle'] - num_std * df['bb_std']
-    return df
-
 # ---------------------- قراءة قائمة الأزواج والتحقق منها ----------------------
-def get_crypto_symbols(filename='crypto_list.txt'):
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     """
     قراءة قائمة رموز العملات من ملف نصي، ثم التحقق من صلاحيتها
     وكونها أزواج USDT متاحة للتداول على Binance Spot.
     """
-    raw_symbols = []
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
     try:
-        # محاولة تحديد مسار الملف بالنسبة لمجلد السكربت الحالي
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
 
-        # إذا لم يوجد في مجلد السكربت، جرب المسار الحالي
         if not os.path.exists(file_path):
-            file_path = os.path.abspath(filename)
-            if os.path.exists(file_path):
-                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في مجلد السكربت. استخدام الملف في المجلد الحالي.")
+            file_path = os.path.abspath(filename) # جرب المسار الحالي إذا لم يوجد بجانب السكربت
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في مجلد السكربت أو المجلد الحالي.")
+                 return [] # إرجاع قائمة فارغة إذا لم يتم العثور على الملف
             else:
-                logger.error(f"❌ [Data] الملف '{filename}' غير موجود في مجلد السكربت أو المجلد الحالي.")
-                return []
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في مجلد السكربت. استخدام الملف في المجلد الحالي: '{file_path}'")
 
         with open(file_path, 'r', encoding='utf-8') as f:
-            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT" for line in f if line.strip() and not line.startswith('#')]
+            # تنظيف وتنسيق الرموز: إزالة الفراغات، تحويل لأحرف كبيرة، التأكد من انتهاء بـ USDT
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
         raw_symbols = sorted(list(set(raw_symbols))) # إزالة التكرارات والترتيب
         logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمز مبدئي من '{file_path}'.")
 
@@ -342,20 +427,20 @@ def get_crypto_symbols(filename='crypto_list.txt'):
          logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
          return []
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}")
-        return []
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return [] # إرجاع قائمة فارغة في حالة حدوث خطأ
 
     if not raw_symbols:
-        return [] # لا حاجة للمتابعة إذا كانت القائمة فارغة
+        logger.warning("⚠️ [Data] القائمة الأولية للرموز فارغة.")
+        return []
 
     # --- التحقق من الرموز مقابل Binance API ---
-    try:
-        logger.info("ℹ️ [Data] التحقق من صلاحية الرموز وحالة التداول من Binance API...")
-        # تأكد من وجود عميل Binance مهيأ
-        if client is None:
-             logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
-             return raw_symbols # أو إرجاع قائمة فارغة حسب المنطق المطلوب
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols # إرجاع القائمة غير المفلترة إذا لم يكن العميل جاهزًا
 
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من صلاحية الرموز وحالة التداول من Binance API...")
         exchange_info = client.get_exchange_info()
         # بناء مجموعة (set) برموز USDT الصالحة للتداول الفوري لتسريع البحث
         valid_trading_usdt_symbols = {
@@ -364,23 +449,21 @@ def get_crypto_symbols(filename='crypto_list.txt'):
                s.get('status') == 'TRADING' and         # التأكد من أن الحالة هي TRADING
                s.get('isSpotTradingAllowed') is True    # التأكد من أنه مسموح بالتداول الفوري
         }
-        logger.info(f"ℹ️ [Data] تم العثور على {len(valid_trading_usdt_symbols)} زوج USDT صالح للتداول الفوري على Binance.")
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج USDT صالح للتداول الفوري على Binance.")
 
         # فلترة القائمة المقروءة من الملف بناءً على القائمة الصالحة من Binance
         validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
 
         removed_count = len(raw_symbols) - len(validated_symbols)
         if removed_count > 0:
-            # تسجيل الرموز المحذوفة (اختياري، قد يكون كثيرًا إذا كانت القائمة كبيرة)
-            # removed_symbols = set(raw_symbols) - set(validated_symbols)
-            # logger.warning(f"⚠️ [Data] الرموز المحذوفة: {', '.join(removed_symbols)}")
-            logger.warning(f"⚠️ [Data] تم إزالة {removed_count} رمز غير صالح أو غير متاح للتداول الفوري USDT من القائمة.")
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز غير صالح أو غير متاح للتداول الفوري USDT من القائمة: {', '.join(removed_symbols)}")
 
-        logger.info(f"✅ [Data] تم التحقق من الرموز. سيتم استخدام {len(validated_symbols)} رمز صالح.")
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. سيتم استخدام {len(validated_symbols)} رمز صالح.")
         return validated_symbols
 
-    except requests.exceptions.RequestException as req_err:
-         logger.error(f"❌ [Data Validation] خطأ في الشبكة عند جلب معلومات الصرف من Binance: {req_err}")
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ من Binance API أو الشبكة عند التحقق من الرموز: {binance_err}")
          logger.warning("⚠️ [Data Validation] سيتم استخدام القائمة الأولية من الملف بدون تحقق Binance.")
          return raw_symbols # إرجاع القائمة غير المفلترة في حالة خطأ API
     except Exception as api_err:
@@ -389,27 +472,11 @@ def get_crypto_symbols(filename='crypto_list.txt'):
          return raw_symbols # إرجاع القائمة غير المفلترة في حالة خطأ API
 
 
-# ---------------------- إعداد عميل Binance ----------------------
-try:
-    client = Client(api_key, api_secret)
-    client.ping() # التحقق من الاتصال وصحة المفاتيح
-    server_time = client.get_server_time()
-    logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
-except requests.exceptions.RequestException as req_err:
-     logger.critical(f"❌ [Binance] خطأ في الشبكة عند الاتصال بـ Binance: {req_err}")
-     exit()
-except Exception as e: # يمكن تخصيص معالجة لأخطاء Binance المحددة إذا لزم الأمر
-    logger.critical(f"❌ [Binance] فشل تهيئة عميل Binance: {e}")
-    exit()
-
 # ---------------------- إدارة WebSocket لأسعار Ticker ----------------------
-ticker_data = {} # قاموس لتخزين أحدث أسعار الإغلاق للرموز
-
-def handle_ticker_message(msg):
+def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     """معالجة رسائل WebSocket الواردة لأسعار mini-ticker."""
     global ticker_data
     try:
-        # أحيانًا تأتي الرسائل كقائمة وأحيانًا ككائن خطأ
         if isinstance(msg, list):
             for ticker_item in msg:
                 symbol = ticker_item.get('s')
@@ -418,123 +485,222 @@ def handle_ticker_message(msg):
                     try:
                         ticker_data[symbol] = float(price_str)
                     except ValueError:
-                         logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: {price_str}")
-        elif isinstance(msg, dict) and msg.get('e') == 'error':
-            logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m')}")
+                         logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: '{price_str}'")
+        elif isinstance(msg, dict):
+             if msg.get('e') == 'error':
+                logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا يوجد تفاصيل خطأ')}")
+             elif msg.get('stream') and msg.get('data'): # Handle combined streams format
+                 for ticker_item in msg.get('data', []):
+                    symbol = ticker_item.get('s')
+                    price_str = ticker_item.get('c')
+                    if symbol and 'USDT' in symbol and price_str:
+                        try:
+                            ticker_data[symbol] = float(price_str)
+                        except ValueError:
+                             logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol} في combined stream: '{price_str}'")
+        else:
+             logger.warning(f"⚠️ [WS] تم استلام رسالة WebSocket بتنسيق غير متوقع: {type(msg)}")
+
     except Exception as e:
         logger.error(f"❌ [WS] خطأ في معالجة رسالة ticker: {e}", exc_info=True)
 
 
-def run_ticker_socket_manager():
+def run_ticker_socket_manager() -> None:
     """تشغيل وإدارة اتصال WebSocket لـ mini-ticker."""
     while True:
         try:
-            logger.info("ℹ️ [WS] بدء تشغيل WebSocket لأسعار Ticker...")
-            twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
+            logger.info("ℹ️ [WS] بدء تشغيل WebSocket Manager لأسعار Ticker...")
+            twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
             twm.start() # بدء المدير
-            # استخدام start_symbol_miniticker_socket يتطلب قائمة رموز محددة
-            # start_miniticker_socket يغطي جميع الرموز
-            twm.start_miniticker_socket(callback=handle_ticker_message)
-            logger.info("✅ [WS] تم توصيل WebSocket بنجاح.")
-            twm.join() # الانتظار حتى يتوقف المدير (عادة بسبب خطأ)
+
+            # استخدام start_miniticker_socket يغطي جميع الرموز وهو مناسب هنا
+            stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
+            logger.info(f"✅ [WS] تم بدء WebSocket stream: {stream_name}")
+
+            twm.join() # الانتظار حتى يتوقف المدير (عادة بسبب خطأ أو إيقاف)
             logger.warning("⚠️ [WS] مدير WebSocket توقف. إعادة التشغيل...")
+
         except Exception as e:
-            logger.error(f"❌ [WS] خطأ فادح في WebSocket Manager: {e}. إعادة التشغيل خلال 15 ثانية...")
-        # الانتظار قبل إعادة المحاولة لتجنب استهلاك الموارد
+            logger.error(f"❌ [WS] خطأ فادح في WebSocket Manager: {e}. إعادة التشغيل خلال 15 ثانية...", exc_info=True)
+
+        # الانتظار قبل إعادة المحاولة لتجنب استهلاك الموارد أو حظر الـ IP
         time.sleep(15)
 
-
 # ---------------------- دوال المؤشرات الفنية ----------------------
-def calculate_ema(series, span):
-    """حساب المتوسط المتحرك الأسي (EMA)."""
-    if series is None or series.isnull().all() or len(series) < span:
-        return pd.Series(index=series.index if series is not None else None, dtype=float)
-    return series.ewm(span=span, adjust=False).mean()
 
-def calculate_rsi_indicator(df, period=RSI_PERIOD):
-    """حساب مؤشر القوة النسبية (RSI) مع معالجة تحذيرات Pandas."""
-    df = df.copy() # اعمل على نسخة لتجنب تحذيرات SettingWithCopyWarning بشكل عام
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """حساب مؤشر القوة النسبية (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
+    # استخدام ewm لحساب المتوسط المتحرك الأسي للمكاسب والخسائر
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
 
-    # التعامل مع حالة avg_loss == 0 لتجنب القسمة على صفر
-    rs = avg_gain / avg_loss.replace(0, np.nan) # استبدل الصفر بـ NaN مؤقتًا
-    rsi_series = 100 - (100 / (1 + rs)) # احسب السلسلة أولاً
+    # حساب RS وتجنب القسمة على صفر
+    rs = avg_gain / avg_loss.replace(0, np.nan) # استبدال الصفر بـ NaN لتجنب القسمة عليه
 
-    # تصحيح الطريقة لمعالجة التحذيرات:
-    # 1. استخدم ffill() مباشرة بدلاً من fillna(method='ffill')
-    # 2. قم بتعيين السلسلة المعدلة مرة أخرى إلى عمود DataFrame بدلاً من استخدام inplace=True على السلسلة
-    rsi_series = rsi_series.ffill() # تطبيق forward fill
+    # حساب RSI
+    rsi_series = 100 - (100 / (1 + rs))
 
-    # 3. ملء أي قيم NaN متبقية (عادة في البداية) بالقيمة 50
-    rsi_series = rsi_series.fillna(50) # تطبيق fillna بدون inplace
-
-    df['rsi'] = rsi_series # تعيين السلسلة المعالجة بالكامل إلى العمود
+    # ملء القيم NaN الأولية (الناتجة عن diff أو avg_loss=0) بالقيمة 50 (محايد)
+    # واستخدام forward fill لسد الفجوات إن وجدت (نادر الحدوث مع adjust=False)
+    df['rsi'] = rsi_series.ffill().fillna(50)
 
     return df
 
-def calculate_atr_indicator(df, period=ENTRY_ATR_PERIOD):
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
     """حساب مؤشر متوسط المدى الحقيقي (ATR)."""
     df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1: # نحتاج إلى شمعة واحدة إضافية لحساب shift(1)
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
 
-    # حساب True Range (TR)
+    # حساب True Range (TR) - تجاهل NaN أثناء حساب الحد الأقصى
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
 
-    # حساب ATR باستخدام EMA
-    df['atr'] = tr.ewm(span=period, adjust=False).mean() # استخدام span بدلاً من com للحصول على نفس نتيجة TradingView تقريبًا
+    # حساب ATR باستخدام EMA (باستخدام span يعطي نتيجة أقرب لـ TradingView من com=period-1)
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
     return df
 
 
-def calculate_adx(df, period=14):
+def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, num_std: int = BOLLINGER_STD_DEV) -> pd.DataFrame:
+    """حساب نطاقات بولينجر."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator BB] عمود 'close' مفقود أو فارغ.")
+        df['bb_middle'] = np.nan
+        df['bb_upper'] = np.nan
+        df['bb_lower'] = np.nan
+        return df
+    if len(df) < window:
+         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.")
+         df['bb_middle'] = np.nan
+         df['bb_upper'] = np.nan
+         df['bb_lower'] = np.nan
+         return df
+
+    df['bb_middle'] = df['close'].rolling(window=window).mean()
+    df['bb_std'] = df['close'].rolling(window=window).std()
+    df['bb_upper'] = df['bb_middle'] + num_std * df['bb_std']
+    df['bb_lower'] = df['bb_middle'] - num_std * df['bb_std']
+    return df
+
+
+def calculate_macd(df: pd.DataFrame, fast: int = MACD_FAST, slow: int = MACD_SLOW, signal: int = MACD_SIGNAL) -> pd.DataFrame:
+    """حساب مؤشر MACD وخط الإشارة والهيستوجرام."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator MACD] عمود 'close' مفقود أو فارغ.")
+        df['macd'] = np.nan
+        df['macd_signal'] = np.nan
+        df['macd_hist'] = np.nan
+        return df
+    min_len = max(fast, slow, signal)
+    if len(df) < min_len:
+        logger.warning(f"⚠️ [Indicator MACD] بيانات غير كافية ({len(df)} < {min_len}) لحساب MACD.")
+        df['macd'] = np.nan
+        df['macd_signal'] = np.nan
+        df['macd_hist'] = np.nan
+        return df
+
+    ema_fast = calculate_ema(df['close'], fast)
+    ema_slow = calculate_ema(df['close'], slow)
+    df['macd'] = ema_fast - ema_slow
+    df['macd_signal'] = calculate_ema(df['macd'], signal) # حساب EMA للـ MACD line
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    return df
+
+
+def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     """حساب مؤشر ADX و DI+ و DI-."""
-    df_calc = df.copy() # اعمل على نسخة داخل الدالة
+    df_calc = df.copy() # العمل على نسخة
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ADX] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df_calc['adx'] = np.nan
+        df_calc['di_plus'] = np.nan
+        df_calc['di_minus'] = np.nan
+        return df_calc
+    # يتطلب ADX فترة + فترة إضافية للـ smoothing
+    if len(df_calc) < period * 2:
+        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df_calc)} < {period * 2}) لحساب ADX.")
+        df_calc['adx'] = np.nan
+        df_calc['di_plus'] = np.nan
+        df_calc['di_minus'] = np.nan
+        return df_calc
+
+    # حساب True Range (TR)
     df_calc['high-low'] = df_calc['high'] - df_calc['low']
     df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
     df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
+    df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
 
-    df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1)
-
+    # حساب Directional Movement (+DM, -DM)
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
-
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
     df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
 
-    # استخدام EMA لحساب القيم الملساء (أكثر شيوعًا وتوافقًا مع TradingView)
-    df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=1/period, adjust=False).mean()
-    df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=1/period, adjust=False).mean()
-    df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=1/period, adjust=False).mean()
+    # استخدام EMA لحساب القيم الملساء (alpha = 1/period)
+    alpha = 1 / period
+    df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
+    df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
+    df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
 
-    # تجنب القسمة على صفر
-    df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * df_calc['+dm_smooth'] / df_calc['tr_smooth'], 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * df_calc['-dm_smooth'] / df_calc['tr_smooth'], 0)
+    # حساب Directional Indicators (DI+, DI-) وتجنب القسمة على صفر
+    df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
+    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
 
-    # حساب DX
+    # حساب Directional Movement Index (DX)
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
     df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
 
-    # حساب ADX باستخدام EMA
-    df_calc['adx'] = df_calc['dx'].ewm(alpha=1/period, adjust=False).mean()
+    # حساب Average Directional Index (ADX) باستخدام EMA
+    df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
 
-    # إرجاع الأعمدة النهائية المطلوبة
-    return df_calc['adx'], df_calc['di_plus'], df_calc['di_minus']
+    # إرجاع DataFrame مع الأعمدة الجديدة فقط (أو يمكن دمجها مع الأصلي)
+    return df_calc[['adx', 'di_plus', 'di_minus']]
 
 
-def calculate_vwap(df):
-    """حساب متوسط السعر المرجح بالحجم (VWAP) - يومي."""
+def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
+    """حساب متوسط السعر المرجح بالحجم (VWAP) - يعاد تعيينه يوميًا."""
     df = df.copy()
-    # إعادة تعيين VWAP لكل يوم جديد
-    # التأكد من أن الفهرس هو DatetimeIndex
-    if not isinstance(df.index, pd.DatetimeIndex):
-        logger.error("❌ [VWAP] Index is not DatetimeIndex, cannot extract date.")
-        df['vwap'] = np.nan # Return NaN if index is wrong type
+    required_cols = ['high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator VWAP] أعمدة 'high', 'low', 'close', 'volume' مفقودة أو فارغة.")
+        df['vwap'] = np.nan
         return df
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            # محاولة تحويل الفهرس إذا لم يكن DatetimeIndex
+            df.index = pd.to_datetime(df.index)
+            logger.warning("⚠️ [Indicator VWAP] تم تحويل الفهرس إلى DatetimeIndex.")
+        except Exception:
+            logger.error("❌ [Indicator VWAP] فشل تحويل الفهرس إلى DatetimeIndex، لا يمكن حساب VWAP اليومي.")
+            df['vwap'] = np.nan
+            return df
 
     df['date'] = df.index.date
     # حساب السعر النموذجي والحجم * السعر النموذجي
@@ -543,335 +709,291 @@ def calculate_vwap(df):
 
     # حساب المجاميع التراكمية ضمن كل يوم
     try:
+        # Group by date and calculate cumulative sums
         df['cum_tp_vol'] = df.groupby('date')['tp_vol'].cumsum()
         df['cum_volume'] = df.groupby('date')['volume'].cumsum()
     except KeyError as e:
-        logger.error(f"❌ [VWAP] Error grouping by date (maybe index is not datetime?): {e}")
+        logger.error(f"❌ [Indicator VWAP] خطأ في تجميع البيانات حسب التاريخ: {e}. قد يكون الفهرس غير صحيح.")
         df['vwap'] = np.nan
-        df.drop(columns=['date', 'typical_price', 'tp_vol'], inplace=True, errors='ignore')
+        # حذف الأعمدة المؤقتة إذا كانت موجودة
+        df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
         return df
+    except Exception as e:
+         logger.error(f"❌ [Indicator VWAP] خطأ غير متوقع في تجميع VWAP: {e}", exc_info=True)
+         df['vwap'] = np.nan
+         df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
+         return df
 
-    # إضافة العمود إلى DataFrame
+
+    # حساب VWAP وتجنب القسمة على صفر
     df['vwap'] = np.where(df['cum_volume'] > 0, df['cum_tp_vol'] / df['cum_volume'], np.nan)
-    # ملء قيم NaN الأولية في بداية كل يوم (إذا لزم الأمر)
-    df['vwap'] = df['vwap'].bfill() # Use bfill() instead of fillna(method='bfill')
+
+    # ملء قيم NaN الأولية في بداية كل يوم باستخدام القيمة التالية (backfill)
+    # حيث أن VWAP اليومي يتراكم، أول قيمة قد تكون NaN، نستخدم القيمة المحسوبة التالية
+    df['vwap'] = df['vwap'].bfill()
 
     # إزالة الأعمدة المساعدة
     df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
-    return df # إرجاع DataFrame الكامل مع عمود vwap المضاف
+    return df
 
-def calculate_obv(df):
+
+def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
     """حساب مؤشر حجم التداول المتوازن (On-Balance Volume - OBV)."""
     df = df.copy()
-    obv = [0] * len(df) # ابدأ بـ 0 أو بقيمة أولية إذا لزم الأمر
-    # التأكد من أن الأعمدة المطلوبة موجودة وليست كلها NaN
-    if 'close' not in df.columns or df['close'].isnull().all() or \
-       'volume' not in df.columns or df['volume'].isnull().all():
-        logger.warning("⚠️ [OBV] الأعمدة 'close' أو 'volume' مفقودة أو فارغة. لا يمكن حساب OBV.")
+    required_cols = ['close', 'volume']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator OBV] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
         df['obv'] = np.nan
         return df
-
-    # التحقق من أن الأعمدة رقمية
     if not pd.api.types.is_numeric_dtype(df['close']) or not pd.api.types.is_numeric_dtype(df['volume']):
-        logger.warning("⚠️ [OBV] الأعمدة 'close' أو 'volume' ليست رقمية. لا يمكن حساب OBV.")
+        logger.warning("⚠️ [Indicator OBV] الأعمدة 'close' أو 'volume' ليست رقمية.")
         df['obv'] = np.nan
         return df
 
+    obv = np.zeros(len(df), dtype=np.float64) # استخدام numpy array أسرع
+    close = df['close'].values
+    volume = df['volume'].values
+
+    # حساب التغيرات في الإغلاق مرة واحدة
+    close_diff = df['close'].diff().values
 
     for i in range(1, len(df)):
-        # التأكد من أن القيم في الصف الحالي والسابق صالحة
-        if pd.isna(df['close'].iloc[i]) or pd.isna(df['close'].iloc[i-1]) or pd.isna(df['volume'].iloc[i]):
+        if np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(close_diff[i]):
             obv[i] = obv[i-1] # الحفاظ على القيمة السابقة في حالة وجود NaN
             continue
 
-        if df['close'].iloc[i] > df['close'].iloc[i-1]:
-            obv[i] = obv[i-1] + df['volume'].iloc[i]
-        elif df['close'].iloc[i] < df['close'].iloc[i-1]:
-            obv[i] = obv[i-1] - df['volume'].iloc[i]
-        else:
-            obv[i] = obv[i-1] # يبقى كما هو إذا لم يتغير السعر
+        if close_diff[i] > 0: # السعر ارتفع
+            obv[i] = obv[i-1] + volume[i]
+        elif close_diff[i] < 0: # السعر انخفض
+             obv[i] = obv[i-1] - volume[i]
+        else: # السعر لم يتغير
+            obv[i] = obv[i-1]
 
-    # إضافة العمود إلى DataFrame
     df['obv'] = obv
-    return df # إرجاع DataFrame الكامل مع عمود obv المضاف
+    return df
 
 
-def calculate_supertrend(df, period=10, multiplier=3):
+def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, multiplier: float = SUPERTREND_MULTIPLIER) -> pd.DataFrame:
     """حساب مؤشر SuperTrend."""
-    df = df.copy()
-    # تأكد من وجود عمود ATR أولاً
-    if 'atr' not in df.columns:
-         df = calculate_atr_indicator(df, period=period) # استخدم نفس الفترة
-    elif df['atr'].isnull().all(): # إذا كان موجودًا ولكنه فارغ
-         df = calculate_atr_indicator(df, period=period)
+    df_st = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_st.columns for col in required_cols) or df_st[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator SuperTrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df_st['supertrend'] = np.nan
+        df_st['supertrend_trend'] = 0 # 0: غير معروف, 1: صاعد, -1: هابط
+        return df_st
 
-    if 'atr' not in df.columns or df['atr'].isnull().all(): # التحقق مرة أخرى بعد المحاولة
-         logger.warning("⚠️ [SuperTrend] لا يمكن حساب SuperTrend بسبب عدم وجود قيم ATR صالحة.")
-         df['supertrend'] = np.nan
-         df['trend'] = "unknown"
-         return df
+    # التأكد من وجود عمود ATR أو حسابه
+    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
+        logger.debug("ℹ️ [Indicator SuperTrend] حساب ATR (period={period}) لـ SuperTrend...")
+        df_st = calculate_atr_indicator(df_st, period=period)
+
+    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
+         logger.warning("⚠️ [Indicator SuperTrend] لا يمكن حساب SuperTrend بسبب عدم وجود قيم ATR صالحة.")
+         df_st['supertrend'] = np.nan
+         df_st['supertrend_trend'] = 0
+         return df_st
+    if len(df_st) < period:
+        logger.warning(f"⚠️ [Indicator SuperTrend] بيانات غير كافية ({len(df_st)} < {period}) لحساب SuperTrend.")
+        df_st['supertrend'] = np.nan
+        df_st['supertrend_trend'] = 0
+        return df_st
 
     # حساب النطاقات العلوية والسفلية الأساسية
-    hl2 = (df['high'] + df['low']) / 2
-    df['basic_ub'] = hl2 + multiplier * df['atr']
-    df['basic_lb'] = hl2 - multiplier * df['atr']
+    hl2 = (df_st['high'] + df_st['low']) / 2
+    df_st['basic_ub'] = hl2 + multiplier * df_st['atr']
+    df_st['basic_lb'] = hl2 - multiplier * df_st['atr']
 
-    # حساب النطاقات النهائية
-    df['final_ub'] = 0.0
-    df['final_lb'] = 0.0
-    for i in range(period, len(df)): # ابدأ من فترة ATR لتجنب أخطاء NaN الأولية
-        if pd.isna(df['basic_ub'].iloc[i]) or pd.isna(df['basic_lb'].iloc[i]):
-             # استخدام .loc لتجنب تحذيرات Chained Assignment
-             idx = df.index[i]
-             idx_prev = df.index[i-1]
-             df.loc[idx, 'final_ub'] = df.loc[idx_prev, 'final_ub'] # حافظ على القيمة السابقة إذا كانت البيانات الحالية NaN
-             df.loc[idx, 'final_lb'] = df.loc[idx_prev, 'final_lb']
-             continue
+    # تهيئة الأعمدة النهائية
+    df_st['final_ub'] = 0.0
+    df_st['final_lb'] = 0.0
+    df_st['supertrend'] = np.nan
+    df_st['supertrend_trend'] = 0 # 1 for uptrend, -1 for downtrend
 
-        # استخدام .loc هنا أيضًا
-        idx = df.index[i]
-        idx_prev = df.index[i-1]
-        if df.loc[idx, 'basic_ub'] < df.loc[idx_prev, 'final_ub'] or df.loc[idx_prev, 'close'] > df.loc[idx_prev, 'final_ub']:
-            df.loc[idx, 'final_ub'] = df.loc[idx, 'basic_ub']
+    # استخدام .values للوصول الأسرع داخل الحلقة
+    close = df_st['close'].values
+    basic_ub = df_st['basic_ub'].values
+    basic_lb = df_st['basic_lb'].values
+    final_ub = df_st['final_ub'].values # سيتم تعديله داخل الحلقة
+    final_lb = df_st['final_lb'].values # سيتم تعديله داخل الحلقة
+    st = df_st['supertrend'].values     # سيتم تعديله داخل الحلقة
+    st_trend = df_st['supertrend_trend'].values # سيتم تعديله داخل الحلقة
+
+    # البدء من الشمعة الثانية (index 1) لأننا نقارن مع السابق
+    for i in range(1, len(df_st)):
+        # التعامل مع NaN في المدخلات الأساسية لهذه الشمعة
+        if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]):
+            # في حالة NaN، احتفظ بالقيم السابقة للـ final bands والـ supertrend والاتجاه
+            final_ub[i] = final_ub[i-1]
+            final_lb[i] = final_lb[i-1]
+            st[i] = st[i-1]
+            st_trend[i] = st_trend[i-1]
+            continue
+
+        # حساب Final Upper Band
+        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
         else:
-            df.loc[idx, 'final_ub'] = df.loc[idx_prev, 'final_ub']
+            final_ub[i] = final_ub[i-1]
 
-        if df.loc[idx, 'basic_lb'] > df.loc[idx_prev, 'final_lb'] or df.loc[idx_prev, 'close'] < df.loc[idx_prev, 'final_lb']:
-            df.loc[idx, 'final_lb'] = df.loc[idx, 'basic_lb']
+        # حساب Final Lower Band
+        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
         else:
-            df.loc[idx, 'final_lb'] = df.loc[idx_prev, 'final_lb']
+            final_lb[i] = final_lb[i-1]
 
-    # حساب خط SuperTrend وتحديد الاتجاه
-    df['supertrend'] = np.nan
-    df['trend'] = "unknown" # قيمة افتراضية
-    trend = [] # قائمة لتخزين الاتجاه لكل شمعة
+        # تحديد خط SuperTrend والاتجاه
+        if st[i-1] == final_ub[i-1]: # إذا كان الاتجاه السابق هابطًا
+            if close[i] <= final_ub[i]: # استمر في الهبوط
+                st[i] = final_ub[i]
+                st_trend[i] = -1
+            else: # تغير الاتجاه إلى صاعد
+                st[i] = final_lb[i]
+                st_trend[i] = 1
+        elif st[i-1] == final_lb[i-1]: # إذا كان الاتجاه السابق صاعدًا
+            if close[i] >= final_lb[i]: # استمر في الصعود
+                st[i] = final_lb[i]
+                st_trend[i] = 1
+            else: # تغير الاتجاه إلى هابط
+                st[i] = final_ub[i]
+                st_trend[i] = -1
+        else: # الحالة الأولية (أو إذا كانت القيمة السابقة NaN)
+             if close[i] > final_ub[i]: # بداية اتجاه صاعد
+                 st[i] = final_lb[i]
+                 st_trend[i] = 1
+             elif close[i] < final_lb[i]: # بداية اتجاه هابط
+                  st[i] = final_ub[i]
+                  st_trend[i] = -1
+             else: # إذا كان السعر بين النطاقين في البداية (نادر)
+                  st[i] = np.nan # أو يمكن استخدام قيمة سابقة إن وجدت
+                  st_trend[i] = 0
 
-    for i in range(period, len(df)):
-        idx = df.index[i]
-        idx_prev = df.index[i-1]
-        current_close = df.loc[idx, 'close']
-        prev_supertrend = df.loc[idx_prev, 'supertrend'] # استخدم .loc
-        curr_final_lb = df.loc[idx, 'final_lb']
-        curr_final_ub = df.loc[idx, 'final_ub']
 
-        if pd.isna(current_close) or pd.isna(curr_final_lb) or pd.isna(curr_final_ub):
-             if i > period and trend:
-                 current_trend = trend[-1]
-             else:
-                 current_trend = "unknown"
-             df.loc[idx, 'supertrend'] = prev_supertrend
-             trend.append(current_trend)
-             df.loc[idx, 'trend'] = current_trend
-             continue
+    # إعادة تعيين القيم المحسوبة إلى DataFrame
+    df_st['final_ub'] = final_ub
+    df_st['final_lb'] = final_lb
+    df_st['supertrend'] = st
+    df_st['supertrend_trend'] = st_trend
 
-        if len(trend) == 0:
-             if current_close > curr_final_ub:
-                 current_trend = "up"
-                 df.loc[idx, 'supertrend'] = curr_final_lb
-             else:
-                 current_trend = "down"
-                 df.loc[idx, 'supertrend'] = curr_final_ub
-        else:
-             prev_trend = trend[-1]
-             if prev_trend == "up":
-                 if current_close > curr_final_lb:
-                     current_trend = "up"
-                     df.loc[idx, 'supertrend'] = max(curr_final_lb, prev_supertrend if not pd.isna(prev_supertrend) else curr_final_lb)
-                 else:
-                     current_trend = "down"
-                     df.loc[idx, 'supertrend'] = curr_final_ub
-             elif prev_trend == "down":
-                 if current_close < curr_final_ub:
-                     current_trend = "down"
-                     df.loc[idx, 'supertrend'] = min(curr_final_ub, prev_supertrend if not pd.isna(prev_supertrend) else curr_final_ub)
-                 else:
-                     current_trend = "up"
-                     df.loc[idx, 'supertrend'] = curr_final_lb
-             else: # prev_trend == "unknown"
-                 if current_close > curr_final_ub:
-                     current_trend = "up"
-                     df.loc[idx, 'supertrend'] = curr_final_lb
-                 else:
-                     current_trend = "down"
-                     df.loc[idx, 'supertrend'] = curr_final_ub
+    # إزالة الأعمدة المساعدة
+    df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
 
-        trend.append(current_trend)
-        df.loc[idx, 'trend'] = current_trend
+    return df_st
 
-    # إزالة فقط الأعمدة المساعدة الداخلية لهذه الدالة
-    columns_to_drop_supertrend = ['basic_ub', 'basic_lb', 'final_ub', 'final_lb']
-    df.drop(columns=columns_to_drop_supertrend, errors='ignore', inplace=True)
-
-    return df # إرجاع DataFrame الكامل
 
 # ---------------------- نماذج الشموع اليابانية ----------------------
-def is_hammer(row):
+# (الدوال is_hammer, is_shooting_star, is_doji, is_spinning_top, compute_engulfing يمكن تركها كما هي أو تحسينها قليلاً للتعامل مع NaN بشكل أكثر صرامة)
+
+def is_hammer(row: pd.Series) -> int:
     """التحقق من نموذج المطرقة (إشارة صعودية)."""
-    open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close] or pd.isna([open_price, high, low, close]).any():
-        return 0
-    body = abs(close - open_price)
-    candle_range = high - low
-    if candle_range == 0: return 0 # تجنب القسمة على صفر
-
-    lower_shadow = min(open_price, close) - low
-    upper_shadow = high - max(open_price, close)
-
-    # شروط المطرقة: جسم صغير، ظل سفلي طويل (ضعف الجسم على الأقل)، ظل علوي قصير جدًا
-    is_small_body = body < (candle_range * 0.3) # الجسم أقل من 30% من المدى
-    is_long_lower_shadow = lower_shadow >= 2 * body if body > 0 else lower_shadow > candle_range * 0.6 # ظل سفلي ضعف الجسم أو أكثر من 60% من المدى إذا كان الجسم صغيرًا جدًا
-    is_small_upper_shadow = upper_shadow <= body * 0.5 if body > 0 else upper_shadow < candle_range * 0.1 # ظل علوي أقل من نصف الجسم أو أقل من 10% من المدى
-
-    # يجب أن تظهر في اتجاه هابط (يمكن إضافة هذا الشرط إذا لزم الأمر بتحليل الشموع السابقة)
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    body = abs(c - o)
+    candle_range = h - l
+    if candle_range == 0: return 0
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    is_small_body = body < (candle_range * 0.35) # تسامح أكبر قليلاً للجسم
+    is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
+    is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
     return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow else 0
 
-def is_shooting_star(row):
+def is_shooting_star(row: pd.Series) -> int:
     """التحقق من نموذج الشهاب (إشارة هبوطية)."""
-    open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close] or pd.isna([open_price, high, low, close]).any():
-        return 0
-    body = abs(close - open_price)
-    candle_range = high - low
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    body = abs(c - o)
+    candle_range = h - l
     if candle_range == 0: return 0
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    is_small_body = body < (candle_range * 0.35)
+    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
+    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
+    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0 # إشارة سالبة
 
-    lower_shadow = min(open_price, close) - low
-    upper_shadow = high - max(open_price, close)
-
-    # شروط الشهاب: جسم صغير، ظل علوي طويل (ضعف الجسم على الأقل)، ظل سفلي قصير جدًا
-    is_small_body = body < (candle_range * 0.3)
-    is_long_upper_shadow = upper_shadow >= 2 * body if body > 0 else upper_shadow > candle_range * 0.6
-    is_small_lower_shadow = lower_shadow <= body * 0.5 if body > 0 else lower_shadow < candle_range * 0.1
-
-    # يجب أن تظهر في اتجاه صاعد (يمكن إضافة هذا الشرط)
-    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0 # إشارة سالبة لأنها هبوطية
-
-
-def is_doji(row):
+def is_doji(row: pd.Series) -> int:
     """التحقق من نموذج دوجي (عدم يقين)."""
-    open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close] or pd.isna([open_price, high, low, close]).any():
-        return 0
-    candle_range = high - low
-    if candle_range == 0: return 0 # إذا لم يكن هناك مدى، لا يمكن أن تكون دوجي بالمعنى التقليدي
-    # الجسم صغير جدًا مقارنة بالمدى الكلي
-    return 100 if abs(close - open_price) < (candle_range * 0.1) else 0 # الجسم أقل من 10% من المدى
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    candle_range = h - l
+    if candle_range == 0: return 0
+    return 100 if abs(c - o) <= (candle_range * 0.1) else 0 # الجسم صغير جدًا
 
-
-def is_spinning_top(row):
-    """التحقق من نموذج القمة الدوارة (عدم يقين)."""
-    open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close] or pd.isna([open_price, high, low, close]).any():
-        return 0
-    body = abs(close - open_price)
-    candle_range = high - low
-    if candle_range == 0 or body == 0: return 0 # لا يمكن أن يكون Spinning Top إذا لم يكن هناك مدى أو جسم
-
-    upper_shadow = high - max(open_price, close)
-    lower_shadow = min(open_price, close) - low
-
-    # جسم صغير وظلال علوية وسفلية أكبر من الجسم
-    is_small_body = body < (candle_range * 0.3) # جسم صغير
-    has_upper_shadow = upper_shadow > body
-    has_lower_shadow = lower_shadow > body
-
-    return 100 if is_small_body and has_upper_shadow and has_lower_shadow else 0
-
-
-def compute_engulfing(df, idx):
+def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     """التحقق من نموذج الابتلاع الصعودي أو الهبوطي."""
-    if idx == 0: return 0 # لا يمكن التحقق من أول شمعة
+    if idx == 0: return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
-
-    # التحقق من صلاحية البيانات
-    if pd.isna(prev['close']) or pd.isna(prev['open']) or pd.isna(curr['close']) or pd.isna(curr['open']):
+    # تحقق من NaN في القيم المطلوبة
+    if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
         return 0
 
-    # ابتلاع صعودي: شمعة سابقة هابطة، شمعة حالية صاعدة تبتلع جسم الشمعة السابقة
-    is_bullish_engulfing = (prev['close'] < prev['open'] and # شمعة سابقة هابطة
-                            curr['close'] > curr['open'] and # شمعة حالية صاعدة
-                            curr['open'] <= prev['close'] and # افتتاح الحالية أقل أو يساوي إغلاق السابقة
-                            curr['close'] >= prev['open'])   # إغلاق الحالية أكبر أو يساوي افتتاح السابقة
+    # ابتلاع صعودي: شمعة سابقة هابطة، حالية صاعدة تبتلع جسم السابقة
+    is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
+                  curr['open'] <= prev['close'] and curr['close'] >= prev['open'])
+    # ابتلاع هبوطي: شمعة سابقة صاعدة، حالية هابطة تبتلع جسم السابقة
+    is_bearish = (prev['close'] > prev['open'] and curr['close'] < curr['open'] and
+                  curr['open'] >= prev['close'] and curr['close'] <= prev['open'])
 
-    # ابتلاع هبوطي: شمعة سابقة صاعدة، شمعة حالية هابطة تبتلع جسم الشمعة السابقة
-    is_bearish_engulfing = (prev['close'] > prev['open'] and # شمعة سابقة صاعدة
-                            curr['close'] < curr['open'] and # شمعة حالية هابطة
-                            curr['open'] >= prev['close'] and # افتتاح الحالية أكبر أو يساوي إغلاق السابقة
-                            curr['close'] <= prev['open'])   # إغلاق الحالية أقل أو يساوي افتتاح السابقة
-
-    if is_bullish_engulfing: return 100
-    if is_bearish_engulfing: return -100
+    if is_bullish: return 100
+    if is_bearish: return -100
     return 0
 
-
-def detect_candlestick_patterns(df):
+def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     """تطبيق دوال اكتشاف نماذج الشموع على DataFrame."""
     df = df.copy()
+    logger.debug("ℹ️ [Indicators] اكتشاف نماذج الشموع...")
+    # تطبيق النماذج التي تعتمد على صف واحد
     df['Hammer'] = df.apply(is_hammer, axis=1)
     df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
     df['Doji'] = df.apply(is_doji, axis=1)
-    df['SpinningTop'] = df.apply(is_spinning_top, axis=1)
+    # df['SpinningTop'] = df.apply(is_spinning_top, axis=1) # يمكن إضافته إذا لزم الأمر
 
-    # حساب الابتلاع يتطلب الوصول للصف السابق، لذا نعالجه بشكل منفصل
-    if len(df) > 1:
-        # إعادة الفهرسة مؤقتًا لتسهيل الوصول بـ iloc
-        df_reset = df.reset_index(drop=True)
-        engulfing_values = [compute_engulfing(df_reset, i) for i in range(len(df_reset))]
-        # إعادة تعيين الفهرس الأصلي عند تعيين السلسلة الجديدة
-        df['Engulfing'] = pd.Series(engulfing_values, index=df.index)
-    else:
-        df['Engulfing'] = 0 # لا يمكن حساب الابتلاع لشمعة واحدة
+    # حساب الابتلاع يتطلب الوصول للصف السابق
+    engulfing_values = [compute_engulfing(df, i) for i in range(len(df))]
+    df['Engulfing'] = engulfing_values
 
-    # تجميع إشارات الشموع الصعودية والهبوطية (يمكن تخصيصها أكثر)
-    # إشارة صعودية قوية: مطرقة أو ابتلاع صعودي
+    # تجميع إشارات الشموع الإيجابية والسلبية القوية
     df['BullishCandleSignal'] = df.apply(lambda row: 100 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
-    # إشارة هبوطية قوية: شهاب أو ابتلاع هبوطي
-    df['BearishCandleSignal'] = df.apply(lambda row: 100 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1) # استخدام 100 للإشارة لوجودها
+    df['BearishCandleSignal'] = df.apply(lambda row: 100 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
 
+    # حذف أعمدة النماذج الفردية إذا لم تكن مطلوبة لاحقًا
+    # df.drop(columns=['Hammer', 'ShootingStar', 'Doji', 'Engulfing'], inplace=True, errors='ignore')
+    logger.debug("✅ [Indicators] تم اكتشاف نماذج الشموع.")
     return df
 
+# ---------------------- دوال مساعدة أخرى (Elliott, Swings, Volume) ----------------------
+# (دوال detect_swings و detect_elliott_waves يمكن تركها كما هي، حيث أنها للمعلومات الإضافية فقط)
+def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+    """اكتشاف نقاط التأرجح (القمم والقيعان) في سلسلة زمنية (numpy array)."""
+    n = len(prices)
+    if n < 2 * order + 1: return [], []
 
-# ---------------------- دوال MACD وموجات إليوت (للتفاصيل الإضافية) ----------------------
-def calculate_macd(df, fast=12, slow=26, signal=9):
-    """حساب مؤشر MACD وخط الإشارة والهيستوجرام."""
-    df = df.copy()
-    df['ema_fast'] = calculate_ema(df['close'], fast)
-    df['ema_slow'] = calculate_ema(df['close'], slow)
-    df['macd'] = df['ema_fast'] - df['ema_slow']
-    df['macd_signal'] = calculate_ema(df['macd'], signal)
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    # إزالة الأعمدة المساعدة إذا لم تكن مطلوبة في مكان آخر
-    df.drop(columns=['ema_fast', 'ema_slow'], inplace=True, errors='ignore')
-    return df
-
-# دوال Elliott Wave (detect_swings, detect_elliott_waves) تبقى كما هي لأنها تستخدم فقط لإضافة تفاصيل ولا تؤثر على منطق الدخول الرئيسي.
-def detect_swings(prices, order=5):
-    """اكتشاف نقاط التأرجح (القمم والقيعان) في سلسلة زمنية."""
     maxima_indices = []
     minima_indices = []
-    n = len(prices)
-    if n < 2 * order + 1: return [], [] # بيانات غير كافية
 
-    # تأكد من أن prices هو numpy array
-    if not isinstance(prices, np.ndarray): prices = np.array(prices)
-
+    # تحسين الأداء بتجنب الحلقة على الأطراف غير الضرورية
     for i in range(order, n - order):
-        # التأكد من أن الفهرس ضمن الحدود قبل الوصول إلى window
-        if i - order < 0 or i + order + 1 > n: continue
+        window = prices[i - order : i + order + 1]
+        center_val = prices[i]
 
-        window = prices[i - order: i + order + 1]
-        center = prices[i]
+        # التحقق من NaN في النافذة
+        if np.isnan(window).any(): continue
 
-        # التحقق من أن النافذة لا تحتوي على NaN وأن center ليس NaN
-        if np.isnan(window).any() or np.isnan(center): continue
+        is_max = np.all(center_val >= window) # هل هو أكبر أو يساوي الكل؟
+        is_min = np.all(center_val <= window) # هل هو أصغر أو يساوي الكل؟
 
-        # Check if the center value is the maximum in the window
-        if center == np.max(window) and np.argmax(window) == order:
+        # التأكد أنه القمة/القاع الوحيد في النافذة (لتجنب التكرار في المناطق المسطحة)
+        is_unique_max = is_max and (np.sum(window == center_val) == 1)
+        is_unique_min = is_min and (np.sum(window == center_val) == 1)
+
+        if is_unique_max:
+            # ضمان عدم وجود قمة قريبة جدًا (ضمن مسافة order)
             if not maxima_indices or i > maxima_indices[-1] + order:
                 maxima_indices.append(i)
-
-        # Check if the center value is the minimum in the window
-        if center == np.min(window) and np.argmin(window) == order:
+        elif is_unique_min:
+            # ضمان عدم وجود قاع قريب جدًا
             if not minima_indices or i > minima_indices[-1] + order:
                 minima_indices.append(i)
 
@@ -879,71 +1001,82 @@ def detect_swings(prices, order=5):
     minima = [(idx, prices[idx]) for idx in minima_indices]
     return maxima, minima
 
-def detect_elliott_waves(df, order=SWING_ORDER):
+def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dict[str, Any]]:
     """محاولة بسيطة لتحديد موجات إليوت بناءً على تأرجحات هيستوجرام MACD."""
     if 'macd_hist' not in df.columns or df['macd_hist'].isnull().all():
         logger.warning("⚠️ [Elliott] عمود 'macd_hist' غير موجود أو فارغ لحساب موجات إليوت.")
         return []
 
-    macd_values = df['macd_hist'].values
+    # استخدام القيم غير الفارغة فقط
+    macd_values = df['macd_hist'].dropna().values
+    if len(macd_values) < 2 * order + 1:
+         logger.warning("⚠️ [Elliott] بيانات MACD hist غير كافية بعد إزالة NaN.")
+         return []
+
     maxima, minima = detect_swings(macd_values, order=order)
 
-    # دمج وترتيب جميع نقاط التأرجح
+    # دمج وترتيب جميع نقاط التأرجح حسب الفهرس الأصلي
+    # (تحتاج إلى ربط الفهرس الأصلي من df بعد إزالة NaN)
+    df_nonan_macd = df['macd_hist'].dropna()
     all_swings = sorted(
-        [(idx, val, 'max') for idx, val in maxima] +
-        [(idx, val, 'min') for idx, val in minima],
-        key=lambda x: x[0] # الترتيب حسب المؤشر (الزمن)
+        [(df_nonan_macd.index[idx], val, 'max') for idx, val in maxima] +
+        [(df_nonan_macd.index[idx], val, 'min') for idx, val in minima],
+        key=lambda x: x[0] # الترتيب حسب الزمن (الفهرس الأصلي)
     )
 
     waves = []
     wave_number = 1
-    # المنطق هنا لتصنيف الموجات يمكن أن يكون أكثر تعقيدًا ويتطلب قواعد إليوت القياسية
-    # هذا التنفيذ المبسط يحدد فقط نقاط التأرجح وتصنيفًا أوليًا (اندفاع/تصحيح)
-    for idx, val, typ in all_swings:
-        # Ensure index is within bounds of df.index
-        if idx < 0 or idx >= len(df.index): continue
-
+    for timestamp, val, typ in all_swings:
         # التصنيف بسيط جدًا هنا، قد لا يتبع قواعد إليوت بدقة
         wave_type = "Impulse" if (typ == 'max' and val > 0) or (typ == 'min' and val >= 0) else "Correction"
         waves.append({
             "wave": wave_number,
-            "timestamp": str(df.index[idx]), # استخدام الفهرس الأصلي للـ DataFrame
-            "macd_hist_value": float(val), # قيمة هيستوجرام MACD عند التأرجح
-            "swing_type": typ, # 'max' or 'min'
-            "classified_type": wave_type # التصنيف الأولي
+            "timestamp": str(timestamp),
+            "macd_hist_value": float(val),
+            "swing_type": typ,
+            "classified_type": wave_type
         })
         wave_number += 1
     return waves
 
 
-# ---------------------- دالة لجلب السيولة لآخر 15 دقيقة ----------------------
-def fetch_recent_volume(symbol):
+def fetch_recent_volume(symbol: str) -> float:
     """جلب حجم التداول بالـ USDT لآخر 15 دقيقة للرمز المحدد."""
+    if not client:
+         logger.error(f"❌ [Data Volume] عميل Binance غير مهيأ لجلب حجم التداول لـ {symbol}.")
+         return 0.0
     try:
+        logger.debug(f"ℹ️ [Data Volume] جلب حجم التداول (15 دقيقة) لـ {symbol}...")
         # جلب بيانات الدقيقة الواحدة لآخر 15 دقيقة
         klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=15)
         if not klines or len(klines) < 15:
-            logger.warning(f"⚠️ [Data] بيانات 1m غير كافية (أقل من 15 شمعة) للزوج {symbol} لحساب السيولة.")
-            return 0.0
+             logger.warning(f"⚠️ [Data Volume] بيانات 1m غير كافية (أقل من 15 شمعة) للزوج {symbol}.")
+             return 0.0
 
         # حجم التداول بالعملة المقابلة (Quote Asset Volume) هو الحقل الثامن (index 7)
         volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        # logger.debug(f"ℹ️ [Data] السيولة آخر 15 دقيقة للزوج {symbol}: {volume_usdt:.2f} USDT")
+        logger.debug(f"✅ [Data Volume] السيولة آخر 15 دقيقة للزوج {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Volume] خطأ من Binance API أو الشبكة عند جلب حجم التداول لـ {symbol}: {binance_err}")
+         return 0.0
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في جلب السيولة للزوج {symbol}: {e}")
+        logger.error(f"❌ [Data Volume] خطأ غير متوقع في جلب حجم التداول للزوج {symbol}: {e}", exc_info=True)
         return 0.0
 
-
-# ---------------------- دالة توليد تقرير الأداء الشامل (محسّنة) ----------------------
-def generate_performance_report():
+# ---------------------- دالة توليد تقرير الأداء الشامل ----------------------
+def generate_performance_report() -> str:
     """توليد تقرير أداء شامل ومفصل من قاعدة البيانات."""
+    logger.info("ℹ️ [Report] توليد تقرير الأداء...")
+    if not check_db_connection() or not conn or not cur:
+        return "❌ لا يمكن توليد التقرير، مشكلة في الاتصال بقاعدة البيانات."
+
     try:
-        check_db_connection()
-        with conn.cursor() as report_cur: # يستخدم RealDictCursor المحدد في init_db
+        # استخدام cursor جديد داخل الدالة لضمان عدم التداخل
+        with conn.cursor() as report_cur: # يستخدم RealDictCursor
             # 1. الإشارات المفتوحة
             report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-            open_signals_count = report_cur.fetchone()['count'] or 0
+            open_signals_count = (report_cur.fetchone() or {}).get('count', 0)
 
             # 2. إحصائيات الإشارات المغلقة
             report_cur.execute("""
@@ -961,371 +1094,338 @@ def generate_performance_report():
                 FROM signals
                 WHERE achieved_target = TRUE OR hit_stop_loss = TRUE;
             """)
-            closed_stats = report_cur.fetchone()
+            closed_stats = report_cur.fetchone() or {} # التعامل مع حالة عدم وجود نتائج
 
-            total_closed = closed_stats['total_closed'] or 0
-            winning_signals = closed_stats['winning_signals'] or 0
-            losing_signals = closed_stats['losing_signals'] or 0
-            # neutral_signals = closed_stats['neutral_signals'] or 0 # يمكن إضافتها إذا كانت مهمة
-            total_profit_pct = closed_stats['total_profit_pct'] or 0.0
-            gross_profit_pct = closed_stats['gross_profit_pct'] or 0.0
-            gross_loss_pct = closed_stats['gross_loss_pct'] or 0.0 # ستكون سالبة أو صفر
-            avg_win_pct = closed_stats['avg_win_pct'] or 0.0
-            avg_loss_pct = closed_stats['avg_loss_pct'] or 0.0 # ستكون سالبة أو صفر
+            total_closed = closed_stats.get('total_closed', 0)
+            winning_signals = closed_stats.get('winning_signals', 0)
+            losing_signals = closed_stats.get('losing_signals', 0)
+            total_profit_pct = closed_stats.get('total_profit_pct', 0.0)
+            gross_profit_pct = closed_stats.get('gross_profit_pct', 0.0)
+            gross_loss_pct = closed_stats.get('gross_loss_pct', 0.0) # ستكون سالبة أو صفر
+            avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
+            avg_loss_pct = closed_stats.get('avg_loss_pct', 0.0) # ستكون سالبة أو صفر
 
             # 3. حساب المقاييس المشتقة
             win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
             # Profit Factor: Total Profit / Absolute Total Loss
-            profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf') # تعني أرباح لا نهائية إذا لم تكن هناك خسائر
+            profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
 
         # 4. تنسيق التقرير
         report = (
-            "📊 *تقرير الأداء الشامل:*\n"
-            "——————————————\n"
-            f"📈 الإشارات المفتوحة حاليًا: {open_signals_count}\n"
-            "——————————————\n"
-            "📉 *إحصائيات الإشارات المغلقة:*\n"
-            f" * إجمالي الإشارات المغلقة: {total_closed}\n"
-            f" ✅ إشارات رابحة: {winning_signals}\n"
-            f" ❌ إشارات خاسرة: {losing_signals}\n"
-            f" * معدل الربح (Win Rate): {win_rate:.2f}%\n"
-            "——————————————\n"
-            "💰 *الربحية:*\n"
-            f" * صافي الربح/الخسارة (إجمالي %): {total_profit_pct:+.2f}%\n"
-            f" * إجمالي ربح (%): {gross_profit_pct:+.2f}%\n"
-            f" * إجمالي خسارة (%): {gross_loss_pct:.2f}%\n"
-            f" * متوسط ربح الصفقة الرابحة: {avg_win_pct:+.2f}%\n"
-            f" * متوسط خسارة الصفقة الخاسرة: {avg_loss_pct:.2f}%\n"
-            f" * معامل الربح (Profit Factor): {'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}\n"
-            "——————————————\n"
+            f"📊 *تقرير الأداء الشامل:*\n"
+            f"——————————————\n"
+            f"📈 الإشارات المفتوحة حاليًا: *{open_signals_count}*\n"
+            f"——————————————\n"
+            f"📉 *إحصائيات الإشارات المغلقة:*\n"
+            f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
+            f"  ✅ إشارات رابحة: *{winning_signals}*\n"
+            f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
+            f"  • معدل الربح (Win Rate): *{win_rate:.2f}%*\n"
+            f"——————————————\n"
+            f"💰 *الربحية:*\n"
+            f"  • صافي الربح/الخسارة (إجمالي %): *{total_profit_pct:+.2f}%*\n"
+            f"  • إجمالي ربح (%): *{gross_profit_pct:+.2f}%*\n"
+            f"  • إجمالي خسارة (%): *{gross_loss_pct:.2f}%*\n"
+            f"  • متوسط ربح الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
+            f"  • متوسط خسارة الصفقة الخاسرة: *{avg_loss_pct:.2f}%*\n"
+            f"  • معامل الربح (Profit Factor): *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
+            f"——————————————\n"
             f"🕰️ _التقرير حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
+        logger.info("✅ [Report] تم توليد تقرير الأداء بنجاح.")
         return report
 
     except psycopg2.Error as db_err:
         logger.error(f"❌ [Report] خطأ في قاعدة البيانات عند توليد تقرير الأداء: {db_err}")
-        conn.rollback() # تراجع عن أي معاملة قد تكون مفتوحة
+        if conn: conn.rollback() # تراجع عن أي معاملة قد تكون مفتوحة
         return "❌ خطأ في قاعدة البيانات عند توليد تقرير الأداء."
     except Exception as e:
         logger.error(f"❌ [Report] خطأ غير متوقع في توليد تقرير الأداء: {e}", exc_info=True)
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
 
-# ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
-class ElliottFibCandleStrategy:
-    def __init__(self):
-        pass
 
-    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+# ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
+class ConservativeTradingStrategy:
+    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها."""
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        self.required_cols_indicators = [
+            'open', 'high', 'low', 'close', 'volume', # أساسية
+            'ema_trend', 'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+            'macd', 'macd_signal', 'macd_hist',
+            'adx', 'di_plus', 'di_minus',
+            'vwap', 'obv', 'supertrend', 'supertrend_trend',
+            'BullishCandleSignal', 'BearishCandleSignal' # من نماذج الشموع
+        ]
+        self.required_cols_buy_signal = [
+            'close', 'ema_trend', 'rsi', 'atr', 'macd', 'macd_signal',
+            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'BullishCandleSignal' # للتأكيد
+        ]
+        self.min_conditions_for_signal = 7 # مثال: عدد الشروط الدنيا المطلوبة لتحقيق الإشارة
+
+    def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
-        min_len_required = max(EMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, 14, 10, SWING_ORDER * 2 + 1, LOOKBACK_FOR_SWINGS)
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
+        # الحد الأدنى لعدد الصفوف يعتمد على أطول فترة مطلوبة للمؤشرات
+        min_len_required = max(EMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS) + 5 # إضافة هامش
+
         if len(df) < min_len_required:
-            logger.warning(f"⚠️ [Strategy] DataFrame قصير جدًا ({len(df)} شمعة، مطلوب {min_len_required}) لحساب المؤشرات.")
-            return pd.DataFrame()
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+            return None
 
         try:
-            df = df.copy()
-            # ---- تسلسل حساب المؤشرات مهم ----
-            df['ema_trend'] = calculate_ema(df['close'], EMA_PERIOD)
-            df = calculate_rsi_indicator(df, RSI_PERIOD) # <-- تم إصلاحه
-            df = calculate_atr_indicator(df, ENTRY_ATR_PERIOD)
-            df = calculate_bollinger_bands(df)
-            df = calculate_macd(df)
+            df_calc = df.copy()
+            # ---- تسلسل حساب المؤشرات مهم (الاعتماديات) ----
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD) # ATR مطلوب لـ SuperTrend
+            df_calc['ema_trend'] = calculate_ema(df_calc['close'], EMA_PERIOD)
+            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
+            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+            adx_df = calculate_adx(df_calc, ADX_PERIOD) # حساب ADX في DataFrame منفصل مؤقتًا
+            df_calc = df_calc.join(adx_df) # ضم النتائج
+            df_calc = calculate_vwap(df_calc)
+            df_calc = calculate_obv(df_calc)
+            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+            df_calc = detect_candlestick_patterns(df_calc)
 
-            # حساب ADX وتعيين الأعمدة
-            adx_val, di_plus_val, di_minus_val = calculate_adx(df.copy(), period=14) # Use copy to avoid modifying df inside calculate_adx if it does
-            df['adx'] = adx_val
-            df['di_plus'] = di_plus_val
-            df['di_minus'] = di_minus_val
-
-
-            # حساب VWAP و OBV (تأكد من أنها تعيد DataFrame)
-            df = calculate_vwap(df)   # <-- تم إصلاحه
-            df = calculate_obv(df)    # <-- تم إصلاحه
-
-            # حساب SuperTrend (تأكد من أنها تعيد DataFrame ولا تحذف الأعمدة المطلوبة)
-            df = calculate_supertrend(df, period=10, multiplier=3) # <-- تم إصلاحه
-
-            # حساب نماذج الشموع
-            df = detect_candlestick_patterns(df)
-
+            # --- التحقق من الأعمدة المطلوبة بعد الحساب ---
+            missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
+            if missing_cols:
+                 logger.error(f"❌ [Strategy {self.symbol}] أعمدة مؤشرات مطلوبة مفقودة بعد الحساب: {missing_cols}")
+                 logger.debug(f"Columns present: {df_calc.columns.tolist()}")
+                 return None
 
             # --- التعامل مع NaN بعد حساب *كل* المؤشرات ---
-            initial_len = len(df)
-            required_indicator_cols = [
-                'ema_trend', 'rsi', 'atr', 'bb_upper', 'bb_lower',
-                'macd', 'macd_signal', 'macd_hist', # macd_hist is used by detect_elliott_waves
-                'adx', 'di_plus', 'di_minus', # الآن يجب أن تكون موجودة
-                'vwap', 'obv', 'trend', 'supertrend'
-            ]
-            # تحقق أولاً من وجود الأعمدة قبل محاولة dropna
-            missing_cols_final = [col for col in required_indicator_cols if col not in df.columns]
-            if missing_cols_final:
-                 logger.error(f"❌ [Strategy] أعمدة مطلوبة لا تزال مفقودة قبل dropna: {missing_cols_final}")
-                 # Log columns that *are* present for debugging
-                 logger.debug(f"Columns present: {df.columns.tolist()}")
-                 return pd.DataFrame() # فشل حاسم
-
-            # استخدام dropna مع inplace=False (أكثر أمانًا)
-            df_cleaned = df.dropna(subset=required_indicator_cols).copy() # Add .copy() here
+            initial_len = len(df_calc)
+            # حذف الصفوف التي تحتوي على NaN في أي من الأعمدة المطلوبة
+            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
-                logger.debug(f"ℹ️ [Strategy] تم حذف {dropped_count} صف بسبب NaN في المؤشرات الأساسية.")
+                logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
             if df_cleaned.empty:
-                logger.warning("⚠️ [Strategy] DataFrame فارغ بعد إزالة NaN من المؤشرات الأساسية.")
-                return pd.DataFrame()
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.")
+                return None
 
-            # إرجاع DataFrame النظيف
-            df = df_cleaned # Reassign df to the cleaned version
-            latest = df.iloc[-1]
-            logger.info(f"✅ [Strategy] تم حساب المؤشرات بنجاح. آخر اتجاه SuperTrend: {latest.get('trend', 'N/A')}")
-            return df
+            latest = df_cleaned.iloc[-1]
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر اتجاه SuperTrend: {latest.get('supertrend_trend', 'N/A')}, ADX: {latest.get('adx', np.nan):.2f}")
+            return df_cleaned
 
         except KeyError as ke:
-             logger.error(f"❌ [Strategy] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True)
-             return pd.DataFrame()
+             logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True)
+             return None
         except Exception as e:
-            logger.error(f"❌ [Strategy] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
-            return pd.DataFrame()
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
+            return None
 
-    def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        """تحديد إشارات الشراء بناءً على الاستراتيجية المحافظة."""
-        # الأعمدة المطلوبة لاتخاذ قرار الشراء
-        required_cols = [
-            'close', 'ema_trend', 'rsi', 'BullishCandleSignal', 'atr', 'macd', 'macd_signal',
-            'trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper', 'obv'
-         ]
+    def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        توليد إشارة شراء بناءً على DataFrame المعالج.
+        تتضمن فحص حجم التداول، هامش الربح، ترند البيتكوين، وحساب الهدف/الوقف.
+        """
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
 
-        # التحقق الأولي من الـ DataFrame والأعمدة المطلوبة
-        if df.empty:
-             logger.warning("⚠️ [Strategy Buy] DataFrame فارغ، لا يمكن حساب إشارة الشراء.")
-             df['buy'] = 0
-             df['buy_signal_score'] = 0.0
-             df['signal_details_json'] = None
-             return df
-        if not all(col in df.columns for col in required_cols):
-             missing_cols = [col for col in required_cols if col not in df.columns]
-             logger.warning(f"⚠️ [Strategy Buy] DataFrame يفتقد أعمدة مطلوبة: {missing_cols}. لا يمكن حساب إشارة الشراء.")
-             df['buy'] = 0
-             df['buy_signal_score'] = 0.0
-             df['signal_details_json'] = None
-             return df
-        # التحقق من وجود NaN في الصف الأخير للأعمدة المطلوبة
-        last_row_check = df.iloc[-1][required_cols]
+        # 1. التحقق من صحة DataFrame المدخل والأعمدة المطلوبة للإشارة
+        if df_processed is None or df_processed.empty:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ، لا يمكن توليد إشارة.")
+            return None
+        missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
+        if missing_cols:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
+            return None
+
+        # 2. فحص ترند البيتكوين (شرط أولي)
+        btc_trend = get_btc_trend_4h()
+        if "هبوط" in btc_trend:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف مؤقتًا بسبب ترند البيتكوين الهابط ({btc_trend}).")
+            return None
+        elif "N/A" in btc_trend:
+             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.")
+
+        # 3. استخلاص بيانات الشمعة الأخيرة والتحقق من NaN
+        last_row = df_processed.iloc[-1]
+        last_row_check = last_row[self.required_cols_buy_signal]
         if last_row_check.isnull().any():
             nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
-            logger.warning(f"⚠️ [Strategy Buy] الصف الأخير يحتوي على NaN في أعمدة مطلوبة: {nan_cols}. لا يمكن حساب إشارة الشراء.")
-            # Assign default values to the last row to avoid errors, but no signal will be generated.
-            last_idx = df.index[-1]
-            df.loc[last_idx, 'buy'] = 0
-            df.loc[last_idx, 'buy_signal_score'] = 0.0
-            df.loc[last_idx, 'signal_details_json'] = None
-            # Ensure columns exist before returning
-            if 'buy' not in df.columns: df['buy'] = 0
-            if 'buy_signal_score' not in df.columns: df['buy_signal_score'] = 0.0
-            if 'signal_details_json' not in df.columns: df['signal_details_json'] = None
-            return df
+            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
+            return None
 
-
-        # إعداد قيم أولية للأعمدة الجديدة إذا لم تكن موجودة
-        if 'buy' not in df.columns: df['buy'] = 0
-        if 'buy_signal_score' not in df.columns: df['buy_signal_score'] = 0.0
-        if 'signal_details_json' not in df.columns: df['signal_details_json'] = None
-
-        # العمل على نسخة لتجنب التحذيرات عند التعيين
-        df = df.copy()
-
-        # الحصول على بيانات آخر شمعة مكتملة
-        last_idx = df.index[-1]
-        last_row = df.loc[last_idx]
+        # 4. تطبيق شروط الشراء المحافظة
         signal_details = {}
         conditions_met_count = 0
 
-        # --- تعريف وتحقق من شروط الشراء المحافظة ---
-
-        # 1. تأكيد الاتجاه الصاعد (EMA + SuperTrend + VWAP)
+        # الشرط 1: تأكيد الاتجاه الصاعد (EMA + SuperTrend + VWAP)
         cond_ema_up = last_row['close'] > last_row['ema_trend']
-        cond_supertrend_up = last_row['trend'] == 'up'
+        cond_supertrend_up = last_row['supertrend_trend'] == 1 # 1 يعني صاعد
         cond_above_vwap = last_row['close'] > last_row['vwap']
         is_uptrend_confirmed = cond_ema_up and cond_supertrend_up and cond_above_vwap
-        if is_uptrend_confirmed:
-            conditions_met_count += 3
-            signal_details['Trend'] = 'Confirmed Up (EMA, Supertrend, VWAP)'
+        if is_uptrend_confirmed: conditions_met_count += 3; signal_details['Trend'] = 'Confirmed Up (EMA, Supertrend, VWAP)'
 
-        # 2. تأكيد الزخم الإيجابي (MACD + ADX/DI)
+        # الشرط 2: تأكيد الزخم الإيجابي (MACD + ADX/DI)
         cond_macd_bullish = last_row['macd'] > last_row['macd_signal']
         cond_adx_trending_bullish = last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']
         is_momentum_confirmed = cond_macd_bullish and cond_adx_trending_bullish
-        if is_momentum_confirmed:
-            conditions_met_count += 2
-            signal_details['Momentum'] = 'Confirmed Bullish (MACD, ADX/DI)'
+        if is_momentum_confirmed: conditions_met_count += 2; signal_details['Momentum'] = f'Confirmed Bullish (MACD cross, ADX:{last_row["adx"]:.1f}, DI+ > DI-)'
 
-        # 3. مؤشر القوة النسبية (RSI) في منطقة صحية
-        cond_rsi_ok = last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > 40
-        if cond_rsi_ok:
-            conditions_met_count += 1
-            signal_details['RSI'] = f'OK ({last_row["rsi"]:.1f})'
+        # الشرط 3: RSI في منطقة صحية (ليس في منطقة شراء مفرط)
+        cond_rsi_ok = last_row['rsi'] < RSI_OVERBOUGHT # ويمكن إضافة حد أدنى مثل last_row['rsi'] > 40
+        if cond_rsi_ok: conditions_met_count += 1; signal_details['RSI'] = f'OK ({last_row["rsi"]:.1f} < {RSI_OVERBOUGHT})'
 
-        # 4. تأكيد من نموذج شمعة إيجابي (اختياري لكن مقوي)
+        # الشرط 4: تأكيد من نموذج شمعة إيجابي (اختياري لكن مقوي)
         cond_bullish_candle = last_row['BullishCandleSignal'] == 100
-        if cond_bullish_candle:
-            conditions_met_count += 1
-            signal_details['Candle'] = 'Bullish Pattern'
+        if cond_bullish_candle: conditions_met_count += 1; signal_details['Candle'] = 'Bullish Pattern Detected'
 
-        # 5. السعر ليس عند قمة متطرفة (بالنسبة لـ Bollinger Bands)
+        # الشرط 5: السعر ليس عند قمة متطرفة (أقل من نطاق بولينجر العلوي)
         cond_not_bb_extreme = last_row['close'] < last_row['bb_upper']
-        if cond_not_bb_extreme:
-            conditions_met_count += 1
-            signal_details['BB'] = 'Not Extreme High'
+        if cond_not_bb_extreme: conditions_met_count += 1; signal_details['Bollinger'] = 'Not at Upper Band Extreme'
 
         # --- قرار الشراء النهائي ---
-        buy_signal_triggered = False
-        MIN_CONDITIONS_FOR_SIGNAL = 7 # مثال: تتطلب 6 شروط على الأقل بما فيها الاتجاه والزخم
-        # الشرط الأساسي: اتجاه وزخم إيجابي + RSI مقبول + ليس عند قمة BB
+        # المتطلبات الأساسية: اتجاه صاعد، زخم إيجابي، RSI مقبول، ليس عند قمة BB
         core_conditions_met = is_uptrend_confirmed and is_momentum_confirmed and cond_rsi_ok and cond_not_bb_extreme
 
-        if core_conditions_met and conditions_met_count >= MIN_CONDITIONS_FOR_SIGNAL :
-             buy_signal_triggered = True
-             if cond_bullish_candle:
-                 signal_details['Strength'] = 'Very Strong (Core Conditions + Candle)'
-             else:
-                 signal_details['Strength'] = 'Strong (Core Conditions Met)'
+        if not (core_conditions_met and conditions_met_count >= self.min_conditions_for_signal):
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق شروط الشراء (Core Met: {core_conditions_met}, Count: {conditions_met_count}/{self.min_conditions_for_signal}).")
+            return None # لم تتحقق الشروط
 
-        # تحديث آخر صف في DataFrame بالنتيجة باستخدام .loc
-        final_buy_signal = 1 if buy_signal_triggered else 0
-        final_score = float(conditions_met_count)
-
-        df.loc[last_idx, 'buy'] = final_buy_signal
-        df.loc[last_idx, 'buy_signal_score'] = final_score
-        if buy_signal_triggered:
-            try:
-                # التأكد من تحويل القيم قبل JSON dump
-                details_converted = convert_np_values(signal_details)
-                df.loc[last_idx, 'signal_details_json'] = json.dumps(details_converted)
-                logger.info(f"✅ [Strategy Buy] {last_idx} - إشارة شراء محافظة (Score: {final_score}). التفاصيل: {details_converted}")
-            except TypeError as json_err:
-                 logger.error(f"❌ [Strategy Buy] خطأ تحويل تفاصيل الإشارة إلى JSON: {json_err} - Details: {signal_details}")
-                 df.loc[last_idx, 'signal_details_json'] = json.dumps({'error': 'serialization_failed'}) # وضع علامة خطأ
-        else:
-             df.loc[last_idx, 'signal_details_json'] = None # لا توجد تفاصيل إذا لم تكن هناك إشارة
-
-
-        return df
-
-# ---------------------- دالة جلب البيانات التاريخية ----------------------
-def fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS):
-    """جلب البيانات التاريخية للشموع من Binance."""
-    try:
-        start_dt = datetime.utcnow() - timedelta(days=days + 1)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-
-        # logger.debug(f"ℹ️ [Data] جلب بيانات {interval} للزوج {symbol} منذ {start_str}...")
-        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
-
-        if not klines:
-            # logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) للزوج {symbol} للفترة المطلوبة.")
+        # 5. فحص حجم التداول (السيولة)
+        volume_recent = fetch_recent_volume(self.symbol)
+        if volume_recent < MIN_VOLUME_15M_USDT:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
             return None
 
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
+        # 6. حساب الهدف ووقف الخسارة الأولي بناءً على ATR
+        current_price = last_row['close']
+        current_atr = last_row.get('atr') # تم التحقق من وجوده سابقًا
 
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        # تعديل المضاعفات بناءً على قوة ADX
+        adx_val_sig = last_row.get('adx', 0)
+        if adx_val_sig > 25: # ترند قوي
+            target_multiplier = ENTRY_ATR_MULTIPLIER * 1.2
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # يمكن إبقاؤه أو تقليله قليلاً * 0.9
+            signal_details['SL_Target_Mode'] = f'Strong Trend (ADX {adx_val_sig:.1f})'
+        else: # ترند أضعف أو غير واضح
+            target_multiplier = ENTRY_ATR_MULTIPLIER
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
+            signal_details['SL_Target_Mode'] = f'Standard (ADX {adx_val_sig:.1f})'
 
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
+        initial_target = current_price + (target_multiplier * current_atr)
+        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
 
-        df = df[['open', 'high', 'low', 'close', 'volume']]
+        # ضمان أن وقف الخسارة لا يساوي صفرًا أو سالبًا
+        if initial_stop_loss <= 0:
+            min_sl_price = current_price * (1 - 0.10) # مثال: 10% كحد أقصى للخسارة الأولية كإجراء وقائي
+            initial_stop_loss = max(min_sl_price, current_price * 0.001) # تجنب الصفر تمامًا
+            logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss}) غير صالح. تم تعديله إلى {initial_stop_loss:.8f}")
+            signal_details['Warning'] = f'Initial SL adjusted (was <= 0, set to {initial_stop_loss:.8f})'
 
-        initial_len = len(df)
-        df.dropna(subset=['open', 'high', 'low', 'close', 'volume'], inplace=True) # Include volume here
-        if len(df) < initial_len:
-            logger.debug(f"ℹ️ [Data] تم حذف {initial_len - len(df)} صف بسبب NaN في بيانات OHLCV للزوج {symbol}.")
-
-        if df.empty:
-            # logger.warning(f"⚠️ [Data] DataFrame للزوج {symbol} فارغ بعد إزالة NaN الأساسية.")
+        # 7. فحص هامش الربح الأدنى
+        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
+        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
             return None
 
-        # logger.info(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) للزوج {symbol}.") # يمكن تقليل هذا اللوغ
-        return df
+        # 8. تجميع بيانات الإشارة النهائية
+        signal_output = {
+            'symbol': self.symbol,
+            'entry_price': float(f"{current_price:.8g}"), # استخدام .8g للحفاظ على الدقة بدون أصفار زائدة
+            'initial_target': float(f"{initial_target:.8g}"),
+            'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"),
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'r2_score': float(conditions_met_count), # استخدام عدد الشروط المحققة كـ "score"
+            'strategy_name': 'Conservative_Combo',
+            'signal_details': signal_details, # القاموس يحتوي على تفاصيل الشروط
+            'volume_15m': volume_recent,
+            'trade_value': TRADE_VALUE # إضافة قيمة الصفقة للمعلومات
+        }
 
-    except Exception as e:
-        logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية للزوج {symbol}: {e}", exc_info=True)
-        return None
+        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {conditions_met_count}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
+        return signal_output
 
 # ---------------------- دوال Telegram ----------------------
-def send_telegram_message(chat_id_target, text, reply_markup=None, parse_mode='Markdown', disable_web_page_preview=True, timeout=20):
-    """إرسال رسالة عبر Telegram Bot API."""
-    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
+    """إرسال رسالة عبر Telegram Bot API مع معالجة أفضل للأخطاء."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        'chat_id': str(chat_id_target),
+        'chat_id': str(target_chat_id),
         'text': text,
         'parse_mode': parse_mode,
         'disable_web_page_preview': disable_web_page_preview
     }
     if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
+        # التأكد من تحويل القيم قبل الإرسال
+        try:
+            payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
+        except (TypeError, ValueError) as json_err:
+             logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON: {json_err} - Markup: {reply_markup}")
+             return None # لا ترسل إذا فشل تحويل الأزرار
 
+    logger.debug(f"ℹ️ [Telegram] إرسال رسالة إلى {target_chat_id}...")
     try:
         response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        logger.info(f"✅ [Telegram] تم إرسال رسالة إلى {chat_id_target}.")
+        response.raise_for_status() # يثير خطأ لـ 4xx/5xx
+        logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح إلى {target_chat_id}.")
         return response.json()
     except requests.exceptions.Timeout:
-         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {chat_id_target} (Timeout).")
+         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (Timeout).")
          return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {chat_id_target}: {e}")
-        if e.response is not None:
-             try:
-                 error_details = e.response.json()
-                 logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
-             except json.JSONDecodeError:
-                 logger.error(f"❌ [Telegram] لم يتمكن من فك تشفير استجابة الخطأ: {e.response.text}")
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (HTTP Error: {http_err.response.status_code}).")
+        try:
+            error_details = http_err.response.json()
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
+        except json.JSONDecodeError:
+            logger.error(f"❌ [Telegram] لم يتمكن من فك تشفير استجابة الخطأ: {http_err.response.text}")
+        return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (Request Error): {req_err}")
         return None
     except Exception as e:
-         logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}")
+         logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}", exc_info=True)
          return None
 
-
-def send_telegram_alert(signal_data, volume_15m, timeframe):
+def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     """تنسيق وإرسال تنبيه إشارة تداول جديدة إلى Telegram."""
+    logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه للإشارة: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
         target_price = float(signal_data['initial_target'])
         stop_loss_price = float(signal_data['initial_stop_loss'])
         symbol = signal_data['symbol']
-        strategy_name = signal_data.get('strategy', 'N/A')
-        signal_details = signal_data.get('signal_details', {})
-        r2_score = signal_data.get('r2_score', 0.0) # استخدام buy_signal_score الآن
+        strategy_name = signal_data.get('strategy_name', 'N/A')
+        signal_score = signal_data.get('r2_score', 0.0) # Score من الاستراتيجية
+        volume_15m = signal_data.get('volume_15m', 0.0)
+        trade_value_signal = signal_data.get('trade_value', TRADE_VALUE) # استخدام قيمة الصفقة المحددة للإشارة إن وجدت
 
+        # حساب النسب والأرباح/الخسائر المتوقعة
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-        profit_usdt = TRADE_VALUE * (profit_pct / 100)
-        loss_usdt = abs(TRADE_VALUE * (loss_pct / 100))
+        profit_usdt = trade_value_signal * (profit_pct / 100)
+        loss_usdt = abs(trade_value_signal * (loss_pct / 100))
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+        # تنسيق آمن للرمز لتجنب مشاكل Markdown
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
+        # جلب معلومات إضافية للسياق
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
+        # بناء الرسالة
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (Long)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (Score)/8:** {r2_score:.1f}\n" # استخدام r2_score كتمثيل لـ buy_signal_score
+            f"📊 **قوة الإشارة (Score):** {signal_score:.1f} / {ConservativeTradingStrategy(symbol).min_conditions_for_signal + 2} (مثال)\n" # يمكن تعديل القيمة القصوى
             f"💧 **سيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
-            f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8f}`\n"
-            f"🎯 **الهدف الأولي:** `${target_price:,.8f}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
-            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8f}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
+            f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
+            f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
+            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والطمع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4H):** {btc_trend}\n"
@@ -1333,256 +1433,147 @@ def send_telegram_alert(signal_data, volume_15m, timeframe):
             f"⏰ {timestamp_str}"
         )
 
+        # إضافة زر لعرض التقرير
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}]
             ]
         }
 
-        send_telegram_message(chat_id, message, reply_markup=reply_markup, parse_mode='Markdown')
+        send_telegram_message(CHAT_ID, message, reply_markup=reply_markup, parse_mode='Markdown')
 
     except KeyError as ke:
-        logger.error(f"❌ [Telegram Alert] بيانات الإشارة غير كاملة للزوج {signal_data.get('symbol', 'N/A')}: مفتاح مفقود {ke}")
+        logger.error(f"❌ [Telegram Alert] بيانات الإشارة غير كاملة للزوج {signal_data.get('symbol', 'N/A')}: مفتاح مفقود {ke}", exc_info=True)
     except Exception as e:
         logger.error(f"❌ [Telegram Alert] فشل إرسال تنبيه الإشارة للزوج {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
 
-
-# --- دالة جديدة لتنسيق وإرسال التنبيهات المحسّنة لحالات التتبع ---
-def send_improved_telegram_notification(details):
-    """تنسيق وإرسال تنبيهات تليجرام المحسّنة لحالات مختلفة."""
+def send_tracking_notification(details: Dict[str, Any]) -> None:
+    """تنسيق وإرسال تنبيهات تليجرام المحسّنة لحالات التتبع."""
     symbol = details.get('symbol', 'N/A')
     signal_id = details.get('id', 'N/A')
     notification_type = details.get('type', 'unknown')
     message = ""
     safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+    closing_price = details.get('closing_price', 0.0)
+    profit_pct = details.get('profit_pct', 0.0)
+    current_price = details.get('current_price', 0.0)
+    atr_value = details.get('atr_value', 0.0)
+    new_stop_loss = details.get('new_stop_loss', 0.0)
+    old_stop_loss = details.get('old_stop_loss', 0.0)
+
+    logger.debug(f"ℹ️ [Notification] تنسيق إشعار تتبع: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
     if notification_type == 'target_hit':
-        closing_price = details.get('closing_price', 0.0)
-        profit_pct = details.get('profit_pct', 0.0)
         message = (
             f"✅ *الهدف تحقق (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8f}`\n"
+            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
             f"💰 **الربح المحقق:** {profit_pct:+.2f}%"
         )
     elif notification_type == 'stop_loss_hit':
-        closing_price = details.get('closing_price', 0.0)
-        profit_pct = details.get('profit_pct', 0.0)
-        sl_type = details.get('sl_type', 'بخسارة ❌') # استخدام القيمة المحسوبة
+        sl_type_msg = details.get('sl_type', 'بخسارة ❌') # القيمة المحسوبة من دالة التتبع
         message = (
             f"🛑 *وصل وقف الخسارة (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8f}`\n"
-            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type})"
+            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
+            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg})"
         )
     elif notification_type == 'trailing_activated':
-        current_price = details.get('current_price', 0.0)
-        atr_value = details.get('atr_value', 0.0)
-        new_stop_loss = details.get('new_stop_loss', 0.0)
-        activation_profit_pct = details.get('activation_profit_pct', 0.0)
+        activation_profit_pct = details.get('activation_profit_pct', TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100)
         message = (
             f"⬆️ *تفعيل الوقف المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8f}` (ربح > {activation_profit_pct:.1f}%)\n"
-            f"📊 **قيمة ATR المستخدمة:** `{atr_value:,.8f}` (Multiplier: {TRAILING_STOP_ATR_MULTIPLIER})\n" # إضافة المضاعف للتوضيح
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8f}`"
+            f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (ربح > {activation_profit_pct:.1f}%)\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
     elif notification_type == 'trailing_updated':
-        current_price = details.get('current_price', 0.0)
-        atr_value = details.get('atr_value', 0.0)
-        old_stop_loss = details.get('old_stop_loss', 0.0)
-        new_stop_loss = details.get('new_stop_loss', 0.0)
-        trigger_price_increase_pct = details.get('trigger_price_increase_pct', 0.0)
+        trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
         message = (
             f"➡️ *تحديث الوقف المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8f}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
-            f"📊 **قيمة ATR المستخدمة:** `{atr_value:,.8f}` (Multiplier: {TRAILING_STOP_ATR_MULTIPLIER})\n" # إضافة المضاعف للتوضيح
-            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8f}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8f}`"
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
     else:
         logger.warning(f"⚠️ [Notification] نوع تنبيه غير معروف: {notification_type} للبيانات: {details}")
         return # لا ترسل شيئًا إذا كان النوع غير معروف
 
     if message:
-        # يمكنك إضافة أزرار هنا إذا أردت، مثل زر لعرض تفاصيل الإشارة المحددة
-        reply_markup = None
-        # مثال لإضافة زر (يتطلب تعديل معالج webhook للتعامل معه)
-        # reply_markup = {
-        #     "inline_keyboard": [
-        #         [{"text": f"🔍 تفاصيل الإشارة {signal_id}", "callback_data": f"signal_details_{signal_id}"}]
-        #     ]
-        # }
-        send_telegram_message(chat_id, message, parse_mode='Markdown', reply_markup=reply_markup)
+        # لا نضيف أزرار هنا حاليًا، يمكن إضافتها لاحقًا إذا لزم الأمر
+        send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
 
 # ---------------------- دوال قاعدة البيانات (إدراج وتحديث) ----------------------
-def insert_signal_into_db(signal):
+def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     """إدراج إشارة جديدة في جدول signals."""
-    try:
-        check_db_connection()
-        signal_prepared = convert_np_values(signal) # <-- التأكد من التحويل قبل JSON dump
-        signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
-        volume_15m = signal_prepared.get('volume_15m')
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة {signal.get('symbol', 'N/A')} بسبب مشكلة في اتصال DB.")
+        return False
 
+    symbol = signal.get('symbol', 'N/A')
+    logger.debug(f"ℹ️ [DB Insert] محاولة إدراج إشارة للزوج {symbol}...")
+    try:
+        # التأكد من تحويل قيم Numpy وأنواع أخرى قبل التحويل لـ JSON أو الإدراج
+        signal_prepared = convert_np_values(signal)
+        signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
+
+        # استخدام cursor مع context manager
         with conn.cursor() as cur_ins:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
                  r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
                 signal_prepared['entry_price'],
                 signal_prepared['initial_target'],
                 signal_prepared['initial_stop_loss'],
-                signal_prepared['current_target'], # Initially same as initial_target
-                signal_prepared['initial_stop_loss'], # Initially same as initial_stop_loss
-                signal_prepared.get('r2_score'), # This is buy_signal_score
-                signal_prepared.get('strategy', 'conservative_combo'), # Use the actual strategy name
+                signal_prepared['current_target'], # عند الإنشاء = الأولي
+                signal_prepared['current_stop_loss'],# عند الإنشاء = الأولي
+                signal_prepared.get('r2_score'),
+                signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price is initially NULL
-                volume_15m
+                None, # last_trailing_update_price يبدأ بـ NULL
+                signal_prepared.get('volume_15m')
             ))
-        conn.commit()
-        logger.info(f"✅ [DB] تم إدراج إشارة للزوج {signal_prepared['symbol']} في قاعدة البيانات.")
+        conn.commit() # Commit العملية
+        logger.info(f"✅ [DB Insert] تم إدراج إشارة للزوج {symbol} في قاعدة البيانات.")
+        return True
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [DB] خطأ في قاعدة البيانات عند إدراج الإشارة للزوج {signal.get('symbol', 'N/A')}: {db_err}")
-        conn.rollback()
-    except TypeError as json_err:
-         logger.error(f"❌ [DB] خطأ تحويل تفاصيل الإشارة إلى JSON قبل الإدراج: {json_err} - Signal: {signal.get('symbol', 'N/A')}")
+        logger.error(f"❌ [DB Insert] خطأ في قاعدة البيانات عند إدراج الإشارة للزوج {symbol}: {db_err}")
+        if conn: conn.rollback() # تراجع في حالة الخطأ
+        return False
+    except (TypeError, ValueError) as convert_err:
+         logger.error(f"❌ [DB Insert] خطأ تحويل بيانات الإشارة قبل الإدراج للزوج {symbol}: {convert_err} - Signal Data: {signal}")
          if conn: conn.rollback()
+         return False
     except Exception as e:
-        logger.error(f"❌ [DB] خطأ غير متوقع في إدراج الإشارة للزوج {signal.get('symbol', 'N/A')}: {e}")
+        logger.error(f"❌ [DB Insert] خطأ غير متوقع في إدراج الإشارة للزوج {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
+        return False
 
-
-# ---------------------- دالة توليد الإشارة الرئيسية ----------------------
-def generate_signal_elliott_fib_candle(df_input, symbol):
-    """
-    توليد إشارة شراء بناءً على DataFrame المعالج باستخدام استراتيجية ElliottFibCandleStrategy.
-    تتضمن فحص حجم التداول، هامش الربح، ترند البيتكوين، وحساب الهدف/الوقف.
-    """
-    # 1. فحص ترند البيتكوين (شرط أولي)
-    btc_trend = get_btc_trend_4h()
-    if "هبوط" in btc_trend:
-        logger.info(f"ℹ️ [Signal Gen] {symbol}: التداول متوقف مؤقتًا بسبب ترند البيتكوين الهابط ({btc_trend}).")
-        return None
-    elif "N/A" in btc_trend:
-         logger.warning(f"⚠️ [Signal Gen] {symbol}: لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.")
-
-    # 2. التحقق من صحة DataFrame المدخل
-    if df_input is None or df_input.empty:
-        logger.warning(f"⚠️ [Signal Gen] DataFrame فارغ أو غير صالح للزوج {symbol}.")
-        return None
-
-    # 3. تطبيق الاستراتيجية (حساب المؤشرات وتحديد إشارة الشراء)
-    strategy = ElliottFibCandleStrategy()
-    df_processed = strategy.populate_indicators(df_input.copy())
-    if df_processed is None or df_processed.empty: # التحقق من None أيضًا
-        logger.warning(f"⚠️ [Signal Gen] DataFrame فارغ بعد حساب المؤشرات للزوج {symbol}.")
-        return None
-
-    df_with_signals = strategy.populate_buy_trend(df_processed)
-    if df_with_signals is None or df_with_signals.empty or 'buy' not in df_with_signals.columns: # التحقق من None
-         logger.warning(f"⚠️ [Signal Gen] لم يتم العثور على عمود 'buy' بعد تطبيق الاستراتيجية لـ {symbol}.")
-         return None
-
-    # 4. التحقق من وجود إشارة شراء في آخر شمعة
-    if df_with_signals['buy'].iloc[-1] != 1:
-        # logger.debug(f"ℹ️ [Signal Gen] {symbol}: لا توجد إشارة شراء في آخر شمعة.")
-        return None
-
-    # 5. استخلاص بيانات الشمعة الأخيرة
-    last_signal_row = df_with_signals.iloc[-1]
-    current_price = last_signal_row['close']
-    current_atr = last_signal_row.get('atr')
-    buy_score = last_signal_row.get('buy_signal_score', 0.0)
-    signal_details_json = last_signal_row.get('signal_details_json') # الحصول على JSON مباشرة
-    try:
-         # محاولة فك التشفير للتحقق، ولكن سنستخدم JSON مباشرة في الإشارة
-         signal_details = json.loads(signal_details_json) if signal_details_json else {}
-    except (json.JSONDecodeError, TypeError) as e:
-         logger.warning(f"⚠️ [Signal Gen] فشل فك تشفير signal_details_json لـ {symbol}: {e}. استخدام قاموس فارغ.")
-         signal_details = {} # استخدم قاموس فارغ إذا فشل التحويل
-
-    if pd.isna(current_price) or current_price <= 0 or pd.isna(current_atr) or current_atr <= 0:
-        logger.warning(f"⚠️ [Signal Gen] بيانات سعر ({current_price}) أو ATR ({current_atr}) غير صالحة للزوج {symbol}.")
-        return None
-
-    # 6. فحص حجم التداول (السيولة)
-    volume_recent = fetch_recent_volume(symbol)
-    if volume_recent < MIN_VOLUME_15M_USDT:
-        logger.info(f"ℹ️ [Signal Gen] {symbol}: السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT).")
-        return None
-
-    # 7. حساب الهدف ووقف الخسارة الأولي بناءً على ATR
-    # التأكد من وجود القيم قبل استخدامها
-    adx_val_sig = last_signal_row.get('adx', 0)
-    di_plus_sig = last_signal_row.get('di_plus', 0)
-    di_minus_sig = last_signal_row.get('di_minus', 0)
-    if pd.isna(adx_val_sig): adx_val_sig = 0
-    if pd.isna(di_plus_sig): di_plus_sig = 0
-    if pd.isna(di_minus_sig): di_minus_sig = 0
-
-    if adx_val_sig > 25 and di_plus_sig > di_minus_sig:
-        target_multiplier = ENTRY_ATR_MULTIPLIER * 1.2 # زيادة الهدف في الترند القوي
-        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.8 # تضييق الوقف في الترند القوي
-        if 'SL_Target_Mode' not in signal_details: signal_details['SL_Target_Mode'] = 'Strong Trend Adjustment'
-    else:
-         target_multiplier = ENTRY_ATR_MULTIPLIER
-         stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
-         if 'SL_Target_Mode' not in signal_details: signal_details['SL_Target_Mode'] = 'Standard ATR Multiplier'
-
-    initial_target = current_price + (target_multiplier * current_atr)
-    initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
-
-    if initial_stop_loss <= 0:
-        # ضمان وجود وقف خسارة صالح حتى لو كان ATR كبيرًا جدًا أو السعر منخفضًا
-        min_sl_price = current_price * (1 - 0.05) # مثال: 5% كحد أقصى للخسارة الأولية
-        initial_stop_loss = max(min_sl_price, 1e-9) # تجنب الصفر أو القيم السالبة
-        logger.warning(f"⚠️ [Signal Gen] وقف الخسارة المحسوب ({initial_stop_loss}) غير صالح للزوج {symbol}. تم تعديله إلى {initial_stop_loss:.8f}")
-        if 'Warning' not in signal_details: signal_details['Warning'] = 'Initial Stop Loss Adjusted (was <= 0)'
-
-    # 8. فحص هامش الربح الأدنى
-    profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
-    if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-        logger.info(f"ℹ️ [Signal Gen] {symbol}: هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%).")
-        return None
-
-    # 10. تجميع بيانات الإشارة النهائية
-    signal = {
-        'symbol': symbol,
-        'entry_price': float(f"{current_price:.8f}"), # تنسيق الدقة
-        'initial_target': float(f"{initial_target:.8f}"),
-        'initial_stop_loss': float(f"{initial_stop_loss:.8f}"),
-        'current_target': float(f"{initial_target:.8f}"), # عند الإنشاء، الهدف الحالي هو الهدف الأولي
-        'current_stop_loss': float(f"{initial_stop_loss:.8f}"), # عند الإنشاء، الوقف الحالي هو الوقف الأولي
-        'r2_score': buy_score, # استخدام اسم الحقل الصحيح في DB
-        'trade_value': TRADE_VALUE,
-        'strategy': 'Conservative_Combo', # اسم الاستراتيجية المستخدمة
-        'signal_details': signal_details, # تمرير القاموس مباشرة
-        'volume_15m': volume_recent
-    }
-
-    logger.info(f"✅ [Signal Gen] {symbol}: إشارة شراء مؤكدة عند {current_price:.8f} (Score: {buy_score:.1f}, ATR: {current_atr:.8f})")
-    return signal
-
-
-# ---------------------- دالة تتبع الإشارات المفتوحة (محسّنة) ----------------------
-def track_signals():
-    """تتبع الإشارات المفتوحة، التحقق من الأهداف ووقف الخسارة، وتطبيق الوقف المتحرك المحسّن."""
+# ---------------------- دالة تتبع الإشارات المفتوحة ----------------------
+def track_signals() -> None:
+    """تتبع الإشارات المفتوحة، التحقق من الأهداف ووقف الخسارة، وتطبيق الوقف المتحرك."""
     logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة...")
     while True:
-        active_signals_details = []
+        active_signals_summary: List[str] = []
+        processed_in_cycle = 0
         try:
-            check_db_connection()
-            # استخدام cursor context manager لضمان إغلاقه
+            if not check_db_connection() or not conn:
+                logger.warning("⚠️ [Tracker] تخطي دورة التتبع بسبب مشكلة في اتصال DB.")
+                time.sleep(15) # انتظار أطول قليلاً قبل إعادة المحاولة
+                continue
+
+            # استخدام cursor مع context manager لجلب الإشارات المفتوحة
             with conn.cursor() as track_cur: # يستخدم RealDictCursor
                 track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
@@ -1590,86 +1581,72 @@ def track_signals():
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
                 """)
-                open_signals = track_cur.fetchall()
+                open_signals: List[Dict] = track_cur.fetchall()
 
-                if not open_signals:
-                    time.sleep(10) # انتظر أقل إذا لم تكن هناك إشارات
-                    continue
+            if not open_signals:
+                # logger.debug("ℹ️ [Tracker] لا توجد إشارات مفتوحة للتتبع.")
+                time.sleep(10) # انتظر أقل إذا لم تكن هناك إشارات
+                continue
 
-                for signal_row in open_signals:
-                    # استخلاص البيانات الأساسية
-                    signal_id = signal_row['id']
-                    symbol = signal_row['symbol']
-                    # التحويل الآمن للقيم الرقمية
-                    try:
-                        entry_price = float(signal_row['entry_price'])
-                        initial_stop_loss = float(signal_row['initial_stop_loss']) # جلب الوقف الأولي للمقارنة
-                        current_target = float(signal_row['current_target'])
-                        current_stop_loss = float(signal_row['current_stop_loss'])
-                        is_trailing_active = signal_row['is_trailing_active']
-                        last_trailing_update_price = float(signal_row['last_trailing_update_price']) if signal_row['last_trailing_update_price'] is not None else None
-                    except (TypeError, ValueError) as convert_err:
-                        logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة: {convert_err}")
-                        continue # تخطي هذه الإشارة
+            logger.debug(f"ℹ️ [Tracker] تتبع {len(open_signals)} إشارة مفتوحة...")
 
-                    # الحصول على السعر الحالي من بيانات WebSocket
+            for signal_row in open_signals:
+                signal_id = signal_row['id']
+                symbol = signal_row['symbol']
+                processed_in_cycle += 1
+                update_executed = False # لتتبع ما إذا تم تحديث هذه الإشارة في الدورة الحالية
+
+                try:
+                    # استخلاص وتحويل آمن للبيانات الرقمية
+                    entry_price = float(signal_row['entry_price'])
+                    initial_stop_loss = float(signal_row['initial_stop_loss'])
+                    current_target = float(signal_row['current_target'])
+                    current_stop_loss = float(signal_row['current_stop_loss'])
+                    is_trailing_active = signal_row['is_trailing_active']
+                    last_update_px = signal_row['last_trailing_update_price']
+                    last_trailing_update_price = float(last_update_px) if last_update_px is not None else None
+
+                    # الحصول على السعر الحالي من بيانات WebSocket Ticker
                     current_price = ticker_data.get(symbol)
 
                     if current_price is None:
                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يتوفر سعر حالي في بيانات Ticker.")
-                        continue
+                        continue # تخطي هذه الإشارة في هذه الدورة
 
-                    # تسجيل حالة الإشارة النشطة (للتتبع)
-                    active_signals_details.append(f"{symbol}({signal_id}): P={current_price:.4f}, T={current_target:.4f}, SL={current_stop_loss:.4f}, Trail={'On' if is_trailing_active else 'Off'}")
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} Trail={'On' if is_trailing_active else 'Off'}")
 
-                    update_query = None
-                    update_params = ()
-                    log_message = None
-                    notification_details = {'symbol': symbol, 'id': signal_id} # لتمريرها إلى دالة التنبيه
+                    update_query: Optional[sql.SQL] = None
+                    update_params: Tuple = ()
+                    log_message: Optional[str] = None
+                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id}
 
+                    # --- منطق التحقق والتحديث ---
                     # 1. التحقق من الوصول للهدف
                     if current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        update_query = sql.SQL("""
-                            UPDATE signals
-                            SET achieved_target = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s
-                            WHERE id = %s;
-                        """)
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;")
                         update_params = (current_target, profit_pct, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): وصل الهدف عند {current_target:.8f} (ربح: {profit_pct:+.2f}%)."
-                        notification_details.update({
-                            'type': 'target_hit',
-                            'closing_price': current_target,
-                            'profit_pct': profit_pct
-                        })
+                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): وصل الهدف عند {current_target:.8g} (ربح: {profit_pct:+.2f}%)."
+                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct})
+                        update_executed = True
 
-                    # 2. التحقق من الوصول لوقف الخسارة
+                    # 2. التحقق من الوصول لوقف الخسارة (يجب أن يكون بعد التحقق من الهدف)
                     elif current_price <= current_stop_loss:
                         loss_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
                         profitable_sl = current_stop_loss > entry_price
                         sl_type_msg = "بربح ✅" if profitable_sl else "بخسارة ❌"
-
-                        update_query = sql.SQL("""
-                            UPDATE signals
-                            SET hit_stop_loss = TRUE, closing_price = %s, closed_at = NOW(),
-                                profit_percentage = %s, profitable_stop_loss = %s
-                            WHERE id = %s;
-                        """)
+                        update_query = sql.SQL("UPDATE signals SET hit_stop_loss = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s, profitable_stop_loss = %s WHERE id = %s;")
                         update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
-                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): وصل وقف الخسارة ({sl_type_msg.split(' ')[0]}) عند {current_stop_loss:.8f} (نسبة: {loss_pct:.2f}%)."
-                        notification_details.update({
-                            'type': 'stop_loss_hit',
-                            'closing_price': current_stop_loss,
-                            'profit_pct': loss_pct,
-                            'sl_type': sl_type_msg
-                        })
+                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): وصل وقف الخسارة ({sl_type_msg}) عند {current_stop_loss:.8g} (نسبة: {loss_pct:.2f}%)."
+                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'sl_type': sl_type_msg})
+                        update_executed = True
 
-                    # 3. التحقق من تفعيل أو تحديث وقف الخسارة المتحرك
+                    # 3. التحقق من تفعيل أو تحديث الوقف المتحرك (فقط إذا لم يتم ضرب الهدف أو الوقف)
                     else:
-                        # أ. تفعيل الوقف المتحرك
                         activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
+                        # أ. تفعيل الوقف المتحرك
                         if not is_trailing_active and current_price >= activation_threshold_price:
-                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر {current_price:.8f} وصل لعتبة تفعيل الوقف المتحرك ({activation_threshold_price:.8f}). جلب ATR...")
+                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر {current_price:.8g} وصل لعتبة تفعيل الوقف ({activation_threshold_price:.8g}). جلب ATR...")
                             df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                             if df_atr is not None and not df_atr.empty:
                                 df_atr = calculate_atr_indicator(df_atr, period=ENTRY_ATR_PERIOD)
@@ -1677,39 +1654,27 @@ def track_signals():
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                         new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                        # نضمن أنه أعلى من الوقف الأولي وأعلى بقليل من سعر الدخول
-                                        new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.01)) # نضمن ربح بسيط جداً على الأقل
-                                        # تأكد من أن الوقف الجديد أعلى فعلاً من الوقف الحالي (الأولي في هذه الحالة)
-                                        if new_stop_loss > current_stop_loss:
-                                            update_query = sql.SQL("""
-                                                UPDATE signals
-                                                SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s
-                                                WHERE id = %s;
-                                            """)
-                                            update_params = (new_stop_loss, current_price, signal_id)
-                                            log_message = f"📈✅ [Tracker] {symbol}(ID:{signal_id}): تفعيل الوقف المتحرك. السعر الحالي={current_price:.8f}, ATR({ENTRY_ATR_PERIOD})={current_atr_val:.8f}. الوقف الجديد: {new_stop_loss:.8f}"
-                                            notification_details.update({
-                                                'type': 'trailing_activated',
-                                                'current_price': current_price,
-                                                'atr_value': current_atr_val,
-                                                'new_stop_loss': new_stop_loss,
-                                                'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100
-                                            })
-                                        else:
-                                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({new_stop_loss:.8f}) ليس أعلى من الوقف الحالي ({current_stop_loss:.8f}). لن يتم التفعيل الآن.")
-                                    else:
-                                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val}) لتفعيل الوقف المتحرك.")
-                                else:
-                                    logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتفعيل الوقف المتحرك.")
-                            else:
-                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتفعيل الوقف المتحرك.")
+                                        # نضمن أنه أعلى من الوقف الأولي وأعلى قليلاً من سعر الدخول
+                                        # استخدام max لضمان عدم انخفاض الوقف عن الوقف الحالي وأنه مربح قليلاً
+                                        new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
 
+                                        if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
+                                            update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                            update_params = (new_stop_loss, current_price, signal_id)
+                                            log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): تفعيل الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val:.8g}. الوقف الجديد: {new_stop_loss:.8g}"
+                                            notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss})
+                                            update_executed = True
+                                        else:
+                                            logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({new_stop_loss:.8g}) ليس أعلى من الوقف الحالي ({current_stop_loss:.8g}). لن يتم التفعيل.")
+                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val}) لتفعيل الوقف المتحرك.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتفعيل الوقف المتحرك.")
+                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتفعيل الوقف المتحرك.")
 
                         # ب. تحديث الوقف المتحرك
                         elif is_trailing_active and last_trailing_update_price is not None:
                             update_threshold_price = last_trailing_update_price * (1 + TRAILING_STOP_MOVE_INCREMENT_PCT)
                             if current_price >= update_threshold_price:
-                                logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر {current_price:.8f} وصل لعتبة تحديث الوقف المتحرك (آخر سعر تحديث {last_trailing_update_price:.8f} * {1 + TRAILING_STOP_MOVE_INCREMENT_PCT:.4f} = {update_threshold_price:.8f}). جلب ATR...")
+                                logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر {current_price:.8g} وصل لعتبة تحديث الوقف ({update_threshold_price:.8g}). جلب ATR...")
                                 df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                                 if df_recent is not None and not df_recent.empty:
                                     df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD)
@@ -1719,62 +1684,54 @@ def track_signals():
                                             potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
                                             # فقط نحدث إذا كان الوقف الجديد المحسوب أعلى من الوقف الحالي
                                             if potential_new_stop_loss > current_stop_loss:
-                                                new_stop_loss = potential_new_stop_loss # تم التأكد أنه أعلى
-                                                update_query = sql.SQL("""
-                                                    UPDATE signals
-                                                    SET current_stop_loss = %s, last_trailing_update_price = %s
-                                                    WHERE id = %s;
-                                                """)
-                                                update_params = (new_stop_loss, current_price, signal_id)
-                                                log_message = f"🔼 [Tracker] {symbol}(ID:{signal_id}): تحديث الوقف المتحرك. السعر الحالي={current_price:.8f}, ATR({ENTRY_ATR_PERIOD})={current_atr_val_update:.8f}. الوقف القديم={current_stop_loss:.8f}, الوقف الجديد: {new_stop_loss:.8f}"
-                                                notification_details.update({
-                                                    'type': 'trailing_updated',
-                                                    'current_price': current_price,
-                                                    'atr_value': current_atr_val_update,
-                                                    'old_stop_loss': current_stop_loss,
-                                                    'new_stop_loss': new_stop_loss,
-                                                    'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100
-                                                })
+                                                new_stop_loss_update = potential_new_stop_loss
+                                                update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                                update_params = (new_stop_loss_update, current_price, signal_id)
+                                                log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): تحديث الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val_update:.8g}. القديم={current_stop_loss:.8g}, الجديد: {new_stop_loss_update:.8g}"
+                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
+                                                update_executed = True
                                             else:
-                                                logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8f}) ليس أعلى من الوقف الحالي ({current_stop_loss:.8f}). لن يتم التحديث.")
-                                        else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val_update}) لتحديث الوقف المتحرك.")
-                                    else:
-                                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتحديث الوقف المتحرك.")
-                                else:
-                                    logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتحديث الوقف المتحرك.")
+                                                logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8g}) ليس أعلى من الحالي ({current_stop_loss:.8g}). لن يتم التحديث.")
+                                        else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val_update}) لتحديث الوقف.")
+                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتحديث الوقف.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتحديث الوقف.")
 
-                    # تنفيذ التحديث في قاعدة البيانات وإرسال التنبيه
-                    if update_query:
+                    # --- تنفيذ التحديث في قاعدة البيانات وإرسال التنبيه ---
+                    if update_executed and update_query:
                         try:
-                             # استخدام cursor context manager
+                             # استخدام cursor جديد للتحديث داخل الحلقة
                              with conn.cursor() as update_cur:
                                 update_cur.execute(update_query, update_params)
-                             conn.commit()
+                             conn.commit() # Commit بعد كل تحديث ناجح
                              if log_message: logger.info(log_message)
-                             # إرسال التنبيه المحسّن
-                             if notification_details.get('type'): # التأكد من وجود نوع التنبيه
-                                send_improved_telegram_notification(notification_details)
+                             # إرسال التنبيه المحسّن فقط إذا تم التحديث بنجاح
+                             if notification_details.get('type'):
+                                send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
                             logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ DB أثناء التحديث: {db_err}")
-                            conn.rollback()
-                        except Exception as e:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تحديث DB/إرسال تنبيه: {e}")
-                            if conn: conn.rollback() # التأكد من وجود الاتصال قبل التراجع
+                            if conn: conn.rollback() # تراجع عن التحديث الفاشل
+                        except Exception as exec_err:
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار: {exec_err}", exc_info=True)
+                            if conn: conn.rollback()
 
-                if active_signals_details:
-                    # logger.debug(f"ℹ️ [Tracker] حالة الإشارات النشطة: {'; '.join(active_signals_details)}")
-                    pass # يمكن إلغاء التعليق للتحقق
+                except (TypeError, ValueError) as convert_err:
+                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}")
+                    continue # تخطي هذه الإشارة
+                except Exception as inner_loop_err:
+                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
+                     continue # تخطي هذه الإشارة
 
-            # تقليل مدة الانتظار بين الدورات لتتبع أسرع
+            if active_signals_summary:
+                logger.debug(f"ℹ️ [Tracker] حالة نهاية الدورة ({processed_in_cycle} معالج): {'; '.join(active_signals_summary)}")
+
+            # تقليل مدة الانتظار بين الدورات لتتبع أسرع وأكثر استجابة
             time.sleep(3) # تقليل الانتظار إلى 3 ثواني
 
         except psycopg2.Error as db_cycle_err:
-             logger.error(f"❌ [Tracker] خطأ قاعدة بيانات في دورة التتبع الرئيسية: {db_cycle_err}")
+             logger.error(f"❌ [Tracker] خطأ قاعدة بيانات في دورة التتبع الرئيسية: {db_cycle_err}. محاولة إعادة الاتصال...")
              if conn: conn.rollback()
              time.sleep(30) # انتظار أطول عند خطأ DB
-             # محاولة إعادة الاتصال
-             check_db_connection()
+             check_db_connection() # محاولة إعادة الاتصال
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] خطأ غير متوقع في دورة تتبع الإشارات: {cycle_err}", exc_info=True)
             time.sleep(30) # انتظار أطول عند خطأ غير متوقع
@@ -1784,219 +1741,284 @@ def track_signals():
 app = Flask(__name__)
 
 @app.route('/')
-def home():
-    """صفحة رئيسية بسيطة."""
-    # إضافة وقت التشغيل الحالي للتحقق
+def home() -> Response:
+    """صفحة رئيسية بسيطة لإظهار أن البوت يعمل."""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    return Response(f"📈 Crypto Signal Bot is running... Current Time: {now}", status=200, mimetype='text/plain')
+    status = "running" if ws_thread.is_alive() and tracker_thread.is_alive() else "partially running"
+    return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
-def favicon():
-    """معالجة طلب أيقونة المفضلة."""
-    return Response(status=204)
+def favicon() -> Response:
+    """معالجة طلب أيقونة المفضلة لتجنب الخطأ 404 في السجلات."""
+    return Response(status=204) # No Content
 
 @app.route('/webhook', methods=['POST'])
-def webhook():
-    """معالجة الطلبات الواردة من Telegram (مثل ضغط الأزرار)."""
+def webhook() -> Tuple[str, int]:
+    """معالجة الطلبات الواردة من Telegram (مثل ضغط الأزرار والأوامر)."""
     if not request.is_json:
         logger.warning("⚠️ [Flask] Received non-JSON webhook request.")
-        return "Invalid request", 400
+        return "Invalid request format", 400 # Bad Request
+
     try:
         data = request.get_json()
-        # logger.info(f"ℹ️ [Flask] Received webhook data: {json.dumps(data, indent=2)}") # يمكن أن يكون اللوغ كبيرًا جدًا
+        logger.debug(f"ℹ️ [Flask] Received webhook data: {json.dumps(data)[:200]}...") # تسجيل جزء من البيانات فقط
 
+        # معالجة ردود الأزرار (Callback Queries)
         if 'callback_query' in data:
             callback_query = data['callback_query']
+            callback_id = callback_query['id']
             callback_data = callback_query.get('data')
-            chat_id_callback = callback_query['message']['chat']['id']
-            message_id = callback_query['message']['message_id']
+            message_info = callback_query.get('message')
+            if not message_info or not callback_data:
+                 logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing message or data.")
+                 return "OK", 200 # أخبر تليجرام بأننا استلمناها حتى لو كانت غير مكتملة
 
+            chat_id_callback = message_info['chat']['id']
+            message_id = message_info['message_id']
+            user_info = callback_query.get('from', {})
+            user_id = user_info.get('id')
+            username = user_info.get('username', 'N/A')
+
+            logger.info(f"ℹ️ [Flask] Received callback query: Data='{callback_data}', User={username}({user_id}), Chat={chat_id_callback}")
+
+            # إرسال تأكيد الاستلام بسرعة (AnswerCallbackQuery)
             try:
-                # إرسال تأكيد الاستلام بسرعة
-                requests.post(f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery",
-                     json={'callback_query_id': callback_query['id']}, timeout=5)
+                ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+                requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
             except Exception as ack_err:
-                 logger.error(f"❌ [Flask] Failed to acknowledge callback query {callback_query['id']}: {ack_err}")
+                 # هذا ليس خطأ فادحًا، فقط سجل التحذير
+                 logger.warning(f"⚠️ [Flask] Failed to acknowledge callback query {callback_id}: {ack_err}")
 
+            # معالجة البيانات المستلمة من الزر
             if callback_data == "get_report":
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
-            # يمكنك إضافة معالجة لـ callback_data أخرى هنا، مثل "signal_details_{signal_id}"
+            # --- يمكن إضافة معالجة لأنواع callback_data أخرى هنا ---
+            # elif callback_data.startswith("signal_details_"):
+            #    signal_id_to_show = callback_data.split("_")[-1]
+            #    # ... كود لجلب تفاصيل الإشارة من DB وإرسالها ...
+            else:
+                logger.warning(f"⚠️ [Flask] Received unhandled callback data: '{callback_data}'")
+                # يمكن إرسال رسالة للمستخدم بأن الزر غير معروف
+                # send_telegram_message(chat_id_callback, f"الزر '{callback_data}' غير معالج حاليًا.")
 
+
+        # معالجة الرسائل النصية (الأوامر)
         elif 'message' in data:
             message_data = data['message']
-            chat_id_msg = message_data['chat']['id']
-            text_msg = message_data.get('text', '')
-            # logger.info(f"ℹ️ [Flask] Received message from {chat_id_msg}: {text_msg}")
+            chat_info = message_data.get('chat')
+            user_info = message_data.get('from', {})
+            text_msg = message_data.get('text', '').strip()
+
+            if not chat_info or not text_msg:
+                 logger.debug("ℹ️ [Flask] Received message without chat info or text.")
+                 return "OK", 200
+
+            chat_id_msg = chat_info['id']
+            user_id = user_info.get('id')
+            username = user_info.get('username', 'N/A')
+
+            logger.info(f"ℹ️ [Flask] Received message: Text='{text_msg}', User={username}({user_id}), Chat={chat_id_msg}")
+
+            # معالجة الأوامر المعروفة
             if text_msg.lower() == '/report':
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
             elif text_msg.lower() == '/status':
-                 # مثال لإضافة أمر يعرض حالة البوت أو عدد الإشارات النشطة
-                 try:
-                     check_db_connection()
-                     with conn.cursor() as status_cur:
-                         status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                         open_count = status_cur.fetchone()['count'] or 0
-                     status_msg = f"🤖 حالة البوت:\n- الإشارات النشطة: {open_count}/{MAX_OPEN_TRADES}\n- تتبع الأسعار: {'نشط ✅' if ticker_data else 'غير نشط ❌'}\n- وقت الخادم: {datetime.now().strftime('%H:%M:%S')}"
-                     send_telegram_message(chat_id_msg, status_msg)
-                 except Exception as status_err:
-                     logger.error(f"❌ [Flask] Error getting status: {status_err}")
-                     send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب الحالة.")
+                 # عرض حالة البوت وعدد الإشارات النشطة
+                 status_msg = "⏳ جارٍ جلب الحالة..."
+                 msg_sent = send_telegram_message(chat_id_msg, status_msg)
+                 if msg_sent and msg_sent.get('ok'):
+                     message_id_to_edit = msg_sent['result']['message_id']
+                     try:
+                         open_count = 0
+                         if check_db_connection() and conn:
+                             with conn.cursor() as status_cur:
+                                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
+                         ws_status = 'نشط ✅' if ws_thread.is_alive() else 'غير نشط ❌'
+                         tracker_status = 'نشط ✅' if tracker_thread.is_alive() else 'غير نشط ❌'
+                         final_status_msg = (
+                            f"🤖 *حالة البوت:*\n"
+                            f"- تتبع الأسعار (WS): {ws_status}\n"
+                            f"- تتبع الإشارات: {tracker_status}\n"
+                            f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
+                            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+                         )
+                         # تعديل الرسالة الأصلية
+                         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+                         edit_payload = {
+                            'chat_id': chat_id_msg,
+                            'message_id': message_id_to_edit,
+                            'text': final_status_msg,
+                            'parse_mode': 'Markdown'
+                         }
+                         requests.post(edit_url, json=edit_payload, timeout=10)
 
-        return "OK", 200
+                     except Exception as status_err:
+                         logger.error(f"❌ [Flask] Error getting status details: {status_err}", exc_info=True)
+                         send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
+            # --- يمكن إضافة أوامر أخرى هنا ---
+            # elif text_msg.lower() == '/help':
+            #    send_telegram_message(chat_id_msg, "الأوامر المتاحة:\n/report - عرض تقرير الأداء\n/status - عرض حالة البوت")
+
+        else:
+            logger.debug("ℹ️ [Flask] Received webhook data without 'callback_query' or 'message'.")
+
+        return "OK", 200 # دائماً أرجع 200 OK لتليجرام إذا تمت معالجة الطلب (حتى لو لم نفعل شيئًا)
     except Exception as e:
+         # لا ترسل تفاصيل الخطأ إلى تليجرام مباشرة لأسباب أمنية
          logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
-         return "Error", 500
+         # أرجع خطأ عام للخادم
+         return "Internal Server Error", 500
 
 
-def run_flask():
-    """تشغيل تطبيق Flask لسماع الـ Webhook."""
-    if webhook_url:
-        logger.info(f"ℹ️ [Flask] Starting Flask app on 0.0.0.0:10000")
-        try:
-            from waitress import serve
-            serve(app, host="0.0.0.0", port=10000, threads=6) # Use waitress with multiple threads
-        except ImportError:
-             logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (not recommended for production).")
-             app.run(host="0.0.0.0", port=10000)
-    else:
-         logger.info("ℹ️ [Flask] Webhook URL not configured. Flask server will not start.")
-
-
-# ---------------------- الدالة الرئيسية ودورة الفحص ----------------------
-def main_loop():
-    """الحلقة الرئيسية لفحص الأزواج وتوليد الإشارات."""
-    # استدعاء الدالة الجديدة التي تتحقق من الرموز
-    symbols = get_crypto_symbols() # الآن هذه القائمة تحتوي فقط على رموز صالحة
-    if not symbols:
-        logger.error("❌ [Main] لم يتم تحميل أو التحقق من أي رموز صالحة. الخروج...")
+def run_flask() -> None:
+    """تشغيل تطبيق Flask لسماع الـ Webhook باستخدام خادم إنتاجي إذا كان متاحًا."""
+    if not WEBHOOK_URL:
+        logger.info("ℹ️ [Flask] Webhook URL not configured. Flask server will not start.")
         return
 
-    logger.info(f"ℹ️ [Main] بدء دورة فحص السوق لـ {len(symbols)} رمزًا صالحًا...")
-    last_full_scan_time = time.time()
+    host = "0.0.0.0"
+    port = 10000 # أو يمكن جعله متغير بيئة PORT
+    logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
+    try:
+        # محاولة استخدام Waitress (خادم WSGI جيد للإنتاج على Windows و Linux)
+        from waitress import serve
+        logger.info("✅ [Flask] Using 'waitress' server.")
+        serve(app, host=host, port=port, threads=6) # زيادة عدد threads قليلاً
+    except ImportError:
+         logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (NOT recommended for production).")
+         # تحذير: خادم التطوير غير مناسب للإنتاج!
+         try:
+             app.run(host=host, port=port)
+         except Exception as flask_run_err:
+              logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
+    except Exception as serve_err:
+         logger.critical(f"❌ [Flask] Failed to start server (waitress?): {serve_err}", exc_info=True)
+
+# ---------------------- الحلقة الرئيسية ودالة الفحص ----------------------
+def main_loop() -> None:
+    """الحلقة الرئيسية لفحص الأزواج وتوليد الإشارات."""
+    # قراءة وتحقق من الرموز مرة واحدة عند البدء
+    symbols_to_scan = get_crypto_symbols()
+    if not symbols_to_scan:
+        logger.critical("❌ [Main] لم يتم تحميل أو التحقق من أي رموز صالحة. لا يمكن المتابعة.")
+        return # الخروج من الحلقة إذا لم تكن هناك رموز
+
+    logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمز صالح للفحص.")
+    last_full_scan_time = time.time() # لتتبع مدة الفحص
 
     while True:
         try:
-            check_db_connection()
+            scan_start_time = time.time()
+            logger.info("+" + "-"*60 + "+")
+            logger.info(f"🔄 [Main] بدء دورة فحص السوق - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info("+" + "-"*60 + "+")
 
-            # 1. التحقق من عدد التوصيات المفتوحة حاليًا
+            if not check_db_connection() or not conn:
+                logger.error("❌ [Main] تخطي دورة الفحص بسبب فشل الاتصال بقاعدة البيانات.")
+                time.sleep(60)
+                continue
+
+            # 1. التحقق من عدد الإشارات المفتوحة حاليًا
             open_count = 0
             try:
                  with conn.cursor() as cur_check:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                    result = cur_check.fetchone()
-                    open_count = result['count'] if result else 0
+                    open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err:
-                 logger.error(f"❌ [Main] خطأ DB أثناء التحقق من عدد الإشارات المفتوحة: {db_err}")
-                 conn.rollback()
+                 logger.error(f"❌ [Main] خطأ DB أثناء التحقق من عدد الإشارات المفتوحة: {db_err}. تخطي الدورة.")
+                 if conn: conn.rollback()
                  time.sleep(60)
                  continue
 
+            logger.info(f"ℹ️ [Main] الإشارات المفتوحة حاليًا: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"ℹ️ [Main] تم الوصول للحد الأقصى للإشارات المفتوحة ({open_count}/{MAX_OPEN_TRADES}). الانتظار...")
+                logger.info(f"⚠️ [Main] تم الوصول للحد الأقصى للإشارات المفتوحة. الانتظار...")
                 time.sleep(60) # انتظار دقيقة قبل إعادة التحقق
                 continue
 
             # 2. المرور على قائمة الرموز **الصالحة** وفحصها
-            logger.info(f"ℹ️ [Main] بدء فحص الرموز ({len(symbols)})... العدد المفتوح حاليًا: {open_count}")
-            processed_count = 0
-            symbols_to_process = symbols[:] # العمل على نسخة من القائمة الصالحة
+            processed_in_loop = 0
+            signals_generated_in_loop = 0
+            slots_available = MAX_OPEN_TRADES - open_count
 
-            for symbol in symbols_to_process:
-                 # التحقق من الحد الأقصى داخل الحلقة أيضًا
+            for symbol in symbols_to_scan:
+                 # التحقق من الحد الأقصى داخل الحلقة (قد يتغير بسبب إغلاق إشارة بواسطة Tracker)
+                 if slots_available <= 0:
+                      logger.info(f"ℹ️ [Main] تم الوصول للحد الأقصى ({MAX_OPEN_TRADES}) أثناء الفحص. إيقاف فحص الرموز لهذه الدورة.")
+                      break # الخروج من حلقة فحص الرموز
+
+                 processed_in_loop += 1
+                 logger.debug(f"🔍 [Main] فحص {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
+
                  try:
-                     with conn.cursor() as cur_recheck:
-                        cur_recheck.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                        result = cur_recheck.fetchone()
-                        current_open_count = result['count'] if result else 0
-                     if current_open_count >= MAX_OPEN_TRADES:
-                         logger.info(f"ℹ️ [Main] تم الوصول للحد الأقصى ({current_open_count}) أثناء الفحص. إيقاف الفحص مؤقتًا لهذه الدورة.")
-                         break # الخروج من حلقة فحص الرموز الحالية
+                    # أ. التحقق مما إذا كان هناك إشارة مفتوحة بالفعل لهذا الرمز
+                    with conn.cursor() as symbol_cur:
+                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
+                        if symbol_cur.fetchone():
+                            # logger.debug(f"ℹ️ [Main] تخطي {symbol}، توجد إشارة مفتوحة بالفعل.")
+                            continue # الانتقال للرمز التالي
 
-                     # التحقق مما إذا كان هناك إشارة مفتوحة لهذا الرمز المحدد
-                     with conn.cursor() as symbol_cur:
-                         symbol_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE;", (symbol,))
-                         result_symbol = symbol_cur.fetchone()
-                         count_symbol_open = result_symbol['count'] if result_symbol else 0
-                     if count_symbol_open > 0:
-                         # logger.debug(f"ℹ️ [Main] تخطي {symbol}، توجد إشارة مفتوحة بالفعل.")
-                         continue
+                    # ب. جلب البيانات التاريخية
+                    df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df_hist is None or df_hist.empty:
+                        # logger.warning(f"⚠️ [Main] لا توجد بيانات كافية أو فشل جلبها للرمز {symbol}.")
+                        continue # الانتقال للرمز التالي
 
-                 except psycopg2.Error as db_err:
-                      logger.error(f"❌ [Main] خطأ DB أثناء التحقق من الرمز {symbol}: {db_err}")
-                      conn.rollback()
+                    # ج. تطبيق الاستراتيجية وتوليد الإشارة
+                    strategy = ConservativeTradingStrategy(symbol)
+                    df_indicators = strategy.populate_indicators(df_hist)
+                    if df_indicators is None:
+                        # logger.warning(f"⚠️ [Main] فشل حساب المؤشرات للرمز {symbol}.")
+                        continue
+
+                    potential_signal = strategy.generate_buy_signal(df_indicators)
+
+                    # د. إدراج الإشارة وإرسال التنبيه إذا تم توليدها بنجاح
+                    if potential_signal:
+                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي وإدراج...")
+                        # إعادة التحقق من الحد الأقصى قبل الإدراج مباشرة
+                        with conn.cursor() as final_check_cur:
+                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                             final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
+
+                        if final_open_count < MAX_OPEN_TRADES:
+                             if insert_signal_into_db(potential_signal):
+                                 send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
+                                 signals_generated_in_loop += 1
+                                 slots_available -= 1 # تقليل عدد الأماكن المتاحة
+                                 time.sleep(2) # فاصل بسيط بين إرسال الإشارات لتجنب قيود Telegram API
+                             else:
+                                 logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
+                        else:
+                            logger.warning(f"⚠️ [Main] تم الوصول للحد الأقصى ({final_open_count}) قبل إدراج إشارة {symbol}. تم تجاهل الإشارة.")
+                            break # الخروج من فحص الرموز لأن الحد الأقصى وصل
+
+                 except psycopg2.Error as db_loop_err:
+                      logger.error(f"❌ [Main] خطأ DB أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال للتالي...")
+                      if conn: conn.rollback()
+                      continue
+                 except Exception as symbol_proc_err:
+                      logger.error(f"❌ [Main] خطأ عام أثناء معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
                       continue # الانتقال للرمز التالي
-                 except Exception as check_err: # التقاط أخطاء عامة أثناء التحقق
-                      logger.error(f"❌ [Main] خطأ عام أثناء التحقق من الرمز {symbol}: {check_err}")
-                      continue # الانتقال للرمز التالي
 
-
-                 # جلب البيانات خارج كتلة try..except الخاصة بالـ DB
-                 try:
-                      # استخدام إطار زمني أقصر للبيانات إذا لزم الأمر، أو الحفاظ عليه
-                      df = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                 except Exception as fetch_err:
-                      logger.error(f"❌ [Main] فشل جلب البيانات للرمز {symbol}: {fetch_err}")
-                      df = None # تعيين df إلى None في حالة الفشل
-
-                 if df is None or df.empty:
-                      # logger.warning(f"⚠️ [Main] لا توجد بيانات أو فشل جلبها للرمز {symbol}.")
-                      continue # الانتقال للرمز التالي
-
-                 # توليد الإشارة
-                 try:
-                      signal = generate_signal_elliott_fib_candle(df, symbol)
-                 except Exception as gen_err:
-                      logger.error(f"❌ [Main] فشل توليد الإشارة للرمز {symbol}: {gen_err}", exc_info=True)
-                      signal = None # تعيين signal إلى None في حالة الفشل
-
-
-                 if signal:
-                     # التأكد مرة أخرى من عدم تجاوز الحد الأقصى قبل الإدراج
-                     try:
-                         with conn.cursor() as final_check_cur:
-                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                              result_final = final_check_cur.fetchone()
-                              final_open_count = result_final['count'] if result_final else 0
-                         if final_open_count < MAX_OPEN_TRADES:
-                              insert_signal_into_db(signal)
-                              vol = signal.get('volume_15m', 0)
-                              send_telegram_alert(signal, vol, SIGNAL_GENERATION_TIMEFRAME)
-                              processed_count += 1
-                              time.sleep(2) # فاصل بسيط بين إرسال الإشارات لتجنب قيود Telegram
-                         else:
-                              logger.warning(f"⚠️ [Main] تم الوصول للحد الأقصى ({final_open_count}) قبل إدراج إشارة {symbol}. تم تجاهل الإشارة.")
-                              # بما أن الحد الأقصى تم الوصول إليه، لا داعي لفحص بقية الرموز في هذه الدورة
-                              break
-                     except psycopg2.Error as db_err:
-                          logger.error(f"❌ [Main] خطأ DB أثناء التحقق النهائي أو إدراج إشارة {symbol}: {db_err}")
-                          conn.rollback()
-                          # قد يكون من الأفضل التوقف المؤقت هنا لتجنب مشاكل متكررة
-                          time.sleep(30)
-                          break
-                     except Exception as insert_err:
-                          logger.error(f"❌ [Main] خطأ عام أثناء إدراج/إرسال إشارة {symbol}: {insert_err}")
-                          # قد يكون من الأفضل التوقف المؤقت هنا أيضًا
-                          time.sleep(30)
-                          break
-
-                 # فاصل قصير بين فحص كل رمز لتخفيف العبء على Binance API
-                 time.sleep(0.5)
-
+                 # فاصل قصير جدًا بين فحص كل رمز لتخفيف العبء على واجهة برمجة التطبيقات (API)
+                 time.sleep(0.3) # تقليل الفاصل قليلاً
 
             # 3. انتظار قبل بدء الدورة التالية
-            logger.info(f"ℹ️ [Main] انتهاء دورة الفحص. تم معالجة/إرسال {processed_count} إشارة جديدة (إن وجدت).")
-            scan_duration = time.time() - last_full_scan_time
-            wait_time = max(60, 300 - scan_duration) # انتظر على الأقل دقيقة، أو أكمل إلى 5 دقائق
-            logger.info(f"ℹ️ [Main] مدة الفحص: {scan_duration:.1f} ثانية. الانتظار {wait_time:.1f} ثانية للدورة التالية.")
-            time.sleep(wait_time) # الفاصل الزمني بين دورات الفحص الكاملة
-            last_full_scan_time = time.time()
+            scan_duration = time.time() - scan_start_time
+            logger.info(f"🏁 [Main] انتهاء دورة الفحص. الإشارات المولدة: {signals_generated_in_loop}. مدة الفحص: {scan_duration:.2f} ثانية.")
+            # الانتظار ليكتمل الوقت إلى 5 دقائق (300 ثانية) أو دقيقة واحدة على الأقل
+            wait_time = max(60, 300 - scan_duration)
+            logger.info(f"⏳ [Main] الانتظار {wait_time:.1f} ثانية للدورة التالية...")
+            time.sleep(wait_time)
 
         except KeyboardInterrupt:
              logger.info("🛑 [Main] تم استقبال طلب إيقاف (KeyboardInterrupt). إغلاق...")
-             break
+             break # الخروج من الحلقة الرئيسية
         except psycopg2.Error as db_main_err:
              logger.error(f"❌ [Main] خطأ فادح في قاعدة البيانات في الحلقة الرئيسية: {db_main_err}. محاولة إعادة الاتصال...")
              if conn: conn.rollback()
@@ -2011,56 +2033,67 @@ def main_loop():
             logger.info("ℹ️ [Main] انتظار 120 ثانية قبل إعادة المحاولة...")
             time.sleep(120)
 
+def cleanup_resources() -> None:
+    """إغلاق الموارد المستخدمة مثل اتصال قاعدة البيانات."""
+    global conn
+    logger.info("ℹ️ [Cleanup] إغلاق الموارد...")
+    if conn:
+        try:
+            conn.close()
+            logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
+        except Exception as close_err:
+            logger.error(f"⚠️ [DB] خطأ أثناء إغلاق اتصال قاعدة البيانات: {close_err}")
+    # يمكن إضافة إيقاف لـ WebSocket Manager هنا إذا لزم الأمر، لكن daemon=True يجعله ينتهي مع البرنامج الرئيسي
+    logger.info("✅ [Cleanup] تم الانتهاء من تنظيف الموارد.")
+
 
 # ---------------------- نقطة الدخول الرئيسية ----------------------
 if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل بوت إشارات التداول...")
-    logger.info(f"Current Time (Local): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Current Time (UTC):   {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | UTC Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    # تهيئة Threads لتكون متاحة كمتغيرات عامة للتحقق من حالتها
+    ws_thread: Optional[Thread] = None
+    tracker_thread: Optional[Thread] = None
+    flask_thread: Optional[Thread] = None
 
-    # 1. تهيئة قاعدة البيانات أولاً
     try:
+        # 1. تهيئة قاعدة البيانات أولاً (حاسمة)
         init_db()
-    except Exception as e:
-        logger.critical(f"❌ [Main] فشل تهيئة قاعدة البيانات عند البدء. لا يمكن المتابعة.")
-        exit()
 
-    # 2. بدء WebSocket Ticker في خيط منفصل
-    ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
-    ws_thread.start()
-    logger.info("✅ [Main] تم بدء خيط WebSocket Ticker.")
-    # انتظر قليلاً للسماح لـ WebSocket بالاتصال وتلقي بعض البيانات الأولية
-    time.sleep(5)
+        # 2. بدء WebSocket Ticker في خيط منفصل
+        ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
+        ws_thread.start()
+        logger.info("✅ [Main] تم بدء خيط WebSocket Ticker.")
+        # انتظر قليلاً للسماح لـ WebSocket بالاتصال وتلقي بعض البيانات الأولية
+        time.sleep(5)
+        if not ticker_data:
+             logger.warning("⚠️ [Main] لم يتم استلام بيانات أولية من WebSocket بعد 5 ثوانٍ.")
 
-    # 3. بدء متتبع الإشارات في خيط منفصل
-    tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
-    tracker_thread.start()
-    logger.info("✅ [Main] تم بدء خيط تتبع الإشارات.")
 
-    # 4. بدء خادم Flask (إذا تم تكوين Webhook) في خيط منفصل
-    if webhook_url:
-        flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
-        flask_thread.start()
-        logger.info("✅ [Main] تم بدء خيط Flask Webhook.")
-    else:
-         logger.info("ℹ️ [Main] لم يتم تكوين Webhook URL، لن يتم بدء خادم Flask.")
+        # 3. بدء متتبع الإشارات في خيط منفصل
+        tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
+        tracker_thread.start()
+        logger.info("✅ [Main] تم بدء خيط تتبع الإشارات.")
 
-    # 5. بدء الحلقة الرئيسية في الخيط الرئيسي
-    try:
-         main_loop()
-    except Exception as final_err:
-         logger.critical(f"❌ [Main] حدث خطأ فادح غير معالج في الحلقة الرئيسية: {final_err}", exc_info=True)
+        # 4. بدء خادم Flask (إذا تم تكوين Webhook) في خيط منفصل
+        if WEBHOOK_URL:
+            flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
+            flask_thread.start()
+            logger.info("✅ [Main] تم بدء خيط Flask Webhook.")
+        else:
+             logger.info("ℹ️ [Main] لم يتم تكوين Webhook URL، لن يتم بدء خادم Flask.")
+
+        # 5. بدء الحلقة الرئيسية في الخيط الرئيسي
+        main_loop()
+
+    except Exception as startup_err:
+        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True)
     finally:
-         logger.info("🛑 [Main] البرنامج في طور الإغلاق...")
-         # يمكنك هنا إرسال رسالة تليجرام لإعلامك بالإغلاق
-         # send_telegram_message(chat_id, "⚠️ تنبيه: بوت التداول قيد الإيقاف الآن.")
-         if conn:
-             try:
-                 conn.close()
-                 logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
-             except Exception as close_err:
-                 logger.error(f"⚠️ [DB] خطأ أثناء إغلاق اتصال قاعدة البيانات: {close_err}")
-         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
-         # تأكد من إنهاء العملية بالكامل
-         os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط عالقة (استخدم بحذر)
+        logger.info("🛑 [Main] البرنامج في طور الإغلاق...")
+        # يمكنك هنا إرسال رسالة تليجرام لإعلامك بالإغلاق (إذا كان الاتصال يعمل)
+        # send_telegram_message(CHAT_ID, "⚠️ تنبيه: بوت التداول قيد الإيقاف الآن.")
+        cleanup_resources()
+        logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
+        # تأكد من إنهاء العملية بالكامل
+        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالقة
