@@ -1783,57 +1783,46 @@ def favicon():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """معالجة الطلبات الواردة من Telegram (مثل ضغط الأزرار)."""
     if not request.is_json:
-        logger.warning("⚠️ [Flask] Received non-JSON webhook request.")
         return "Invalid request", 400
     try:
         data = request.get_json()
-        # logger.info(f"ℹ️ [Flask] Received webhook data: {json.dumps(data, indent=2)}") # يمكن أن يكون اللوغ كبيرًا جدًا
 
         if 'callback_query' in data:
             callback_query = data['callback_query']
             callback_data = callback_query.get('data')
             chat_id_callback = callback_query['message']['chat']['id']
-            message_id = callback_query['message']['message_id']
 
+            # acknowledge callback
             try:
-                # إرسال تأكيد الاستلام بسرعة
-                requests.post(f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery",
-                     json={'callback_query_id': callback_query['id']}, timeout=5)
+                requests.post(
+                    f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery",
+                    json={'callback_query_id': callback_query['id']},
+                    timeout=5
+                )
             except Exception as ack_err:
-                 logger.error(f"❌ [Flask] Failed to acknowledge callback query {callback_query['id']}: {ack_err}")
+                logger.error(f"❌ [Flask] Failed to ack callback: {ack_err}")
 
-            if callback_data == "get_report":
+            # هنا نتعامل مع كلتا القيمتين
+            if callback_data in ("get_report", "تقرير عام"):
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
-                        if callback_data in ("get_report", "تقرير عام"):
-            report_text = generate_performance_report()
-            send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
 
-            # يمكنك إضافة معالجة لـ callback_data أخرى هنا، مثل "signal_details_{signal_id}"
+        elif 'message' in data:
+            message_data = data['message']
+            chat_id_msg = message_data['chat']['id']
+            text_msg = message_data.get('text', '').strip().lower()
 
-                if text_msg.lower() in ("/report", "تقرير عام"):
-            report_text = generate_performance_report()
-            send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
+            if text_msg in ("/report", "تقرير عام"):
+                report_text = generate_performance_report()
+                send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
 
-                 # مثال لإضافة أمر يعرض حالة البوت أو عدد الإشارات النشطة
-                 try:
-                     check_db_connection()
-                     with conn.cursor() as status_cur:
-                         status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                         open_count = status_cur.fetchone()['count'] or 0
-                     status_msg = f"🤖 حالة البوت:\n- الإشارات النشطة: {open_count}/{MAX_OPEN_TRADES}\n- تتبع الأسعار: {'نشط ✅' if ticker_data else 'غير نشط ❌'}\n- وقت الخادم: {datetime.now().strftime('%H:%M:%S')}"
-                     send_telegram_message(chat_id_msg, status_msg)
-                 except Exception as status_err:
-                     logger.error(f"❌ [Flask] Error getting status: {status_err}")
-                     send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب الحالة.")
-
-
-        return "OK", 200
     except Exception as e:
-         logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
-         return "Error", 500
+        logger.error(f"❌ [Flask] Error in webhook: {e}", exc_info=True)
+        return "Error", 500
+
+    return "OK", 200
+
 
 
 def run_flask():
