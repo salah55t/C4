@@ -957,7 +957,9 @@ def generate_performance_report():
                     COALESCE(SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END), 0) AS gross_profit_pct,
                     COALESCE(SUM(CASE WHEN profit_percentage < 0 THEN profit_percentage ELSE 0 END), 0) AS gross_loss_pct,
                     COALESCE(AVG(CASE WHEN profit_percentage > 0 THEN profit_percentage END), 0) AS avg_win_pct,
-                    COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct
+                    COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct,
+                    -- إضافة حساب مجموع الربح بعملة USDT
+                    COALESCE(SUM((profit_percentage / 100.0) * trade_value), 0) AS total_profit_usdt
                 FROM signals
                 WHERE achieved_target = TRUE OR hit_stop_loss = TRUE;
             """)
@@ -972,6 +974,7 @@ def generate_performance_report():
             gross_loss_pct = closed_stats['gross_loss_pct'] or 0.0 # ستكون سالبة أو صفر
             avg_win_pct = closed_stats['avg_win_pct'] or 0.0
             avg_loss_pct = closed_stats['avg_loss_pct'] or 0.0 # ستكون سالبة أو صفر
+            total_profit_usdt = closed_stats['total_profit_usdt'] or 0.0 # استخلاص مجموع الربح بالدولار
 
             # 3. حساب المقاييس المشتقة
             win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
@@ -997,6 +1000,7 @@ def generate_performance_report():
             f" * متوسط ربح الصفقة الرابحة: {avg_win_pct:+.2f}%\n"
             f" * متوسط خسارة الصفقة الخاسرة: {avg_loss_pct:.2f}%\n"
             f" * معامل الربح (Profit Factor): {'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}\n"
+            f" * مجموع الربح/الخسارة (USDT): {total_profit_usdt:+.2f} USDT\n" # إضافة مجموع الربح بالدولار
             "——————————————\n"
             f"🕰️ _التقرير حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
@@ -1009,7 +1013,6 @@ def generate_performance_report():
     except Exception as e:
         logger.error(f"❌ [Report] خطأ غير متوقع في توليد تقرير الأداء: {e}", exc_info=True)
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
-
 # ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
 class ElliottFibCandleStrategy:
     def __init__(self):
