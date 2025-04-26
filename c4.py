@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import time
 import os
 import json
@@ -48,9 +51,9 @@ logger.info(f"عنوان Webhook: {webhook_url if webhook_url else 'غير مح�
 # ---------------------- إعداد الثوابت ----------------------
 TRADE_VALUE = 10         # قيمة الصفقة الافتراضية بالدولار
 MAX_OPEN_TRADES = 4      # الحد الأقصى للصفقات المفتوحة في نفس الوقت
-SIGNAL_GENERATION_TIMEFRAME = '30m' # الإطار الزمني لتوليد الإشارة
+SIGNAL_GENERATION_TIMEFRAME = '15m' # الإطار الزمني لتوليد الإشارة
 SIGNAL_GENERATION_LOOKBACK_DAYS = 5 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
-SIGNAL_TRACKING_TIMEFRAME = '30m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
+SIGNAL_TRACKING_TIMEFRAME = '15m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
 SIGNAL_TRACKING_LOOKBACK_DAYS = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
 
 # نطاقات RSI
@@ -68,32 +71,43 @@ ENTRY_ATR_PERIOD = 14     # فترة ATR
 ENTRY_ATR_MULTIPLIER = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
 
 # وقف الخسارة المتحرك (القيم المعدلة)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.01 # نسبة الربح لتفعيل الوقف المتحرك (1%)
-TRAILING_STOP_ATR_MULTIPLIER = 2.2        # مضاعف ATR للوقف المتحرك (تمت زيادته لإعطاء مساحة أكبر ضد التقلبات)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1%)
+TRAILING_STOP_ATR_MULTIPLIER = 2.5        # مضاعف ATR للوقف المتحرك (تمت زيادته لإعطاء مساحة أكبر ضد التقلبات)
 TRAILING_STOP_MOVE_INCREMENT_PCT = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.3%)
 
-MIN_PROFIT_MARGIN_PCT = 1.0 # الحد الأدنى لنسبة الربح المستهدف المئوية مقارنة بسعر الدخول
+MIN_PROFIT_MARGIN_PCT = 1.5 # الحد الأدنى لنسبة الربح المستهدف المئوية مقارنة بسعر الدخول
 MIN_VOLUME_15M_USDT = 100000 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
 
 # ---------------------- دوال المؤشرات الإضافية ----------------------
 def get_fear_greed_index():
-    """يجلب مؤشر الخوف والطمع من alternative.me"""
+    """يجلب مؤشر الخوف والطمع من alternative.me ويترجم التصنيف إلى العربية"""
+    # قاموس لترجمة التصنيفات
+    classification_translation_ar = {
+        "Extreme Fear": "خوف شديد",
+        "Fear": "خوف",
+        "Neutral": "محايد",
+        "Greed": "جشع",
+        "Extreme Greed": "جشع شديد",
+        # أضف أي تصنيفات أخرى قد تظهر من الـ API هنا
+    }
     try:
         response = requests.get("https://api.alternative.me/fng/", timeout=10)
         response.raise_for_status() # Check for HTTP errors
         data = response.json()
         value = int(data["data"][0]["value"])
-        classification = data["data"][0]["value_classification"]
-        return f"{value} ({classification})"
+        classification_en = data["data"][0]["value_classification"]
+        # ترجمة التصنيف إلى العربية، استخدم الإنجليزية كبديل إذا لم توجد ترجمة
+        classification_ar = classification_translation_ar.get(classification_en, classification_en)
+        return f"{value} ({classification_ar})" # استخدام التصنيف العربي
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (Network Error)"
+        return "N/A (خطأ في الشبكة)" # رسالة خطأ بالعربية
     except (KeyError, IndexError, ValueError) as e:
         logger.error(f"❌ [Indicators] خطأ في تنسيق بيانات مؤشر الخوف والطمع: {e}")
-        return "N/A (Data Error)"
+        return "N/A (خطأ في البيانات)" # رسالة خطأ بالعربية
     except Exception as e:
         logger.error(f"❌ [Indicators] خطأ غير متوقع في جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (Unknown Error)"
+        return "N/A (خطأ غير معروف)" # رسالة خطأ بالعربية
 
 def get_btc_trend_4h():
     """
@@ -1166,7 +1180,7 @@ class ElliottFibCandleStrategy:
 
         # --- قرار الشراء النهائي ---
         buy_signal_triggered = False
-        MIN_CONDITIONS_FOR_SIGNAL = 6 # مثال: تتطلب 6 شروط على الأقل بما فيها الاتجاه والزخم
+        MIN_CONDITIONS_FOR_SIGNAL = 7 # مثال: تتطلب 6 شروط على الأقل بما فيها الاتجاه والزخم
         # الشرط الأساسي: اتجاه وزخم إيجابي + RSI مقبول + ليس عند قمة BB
         core_conditions_met = is_uptrend_confirmed and is_momentum_confirmed and cond_rsi_ok and cond_not_bb_extreme
 
@@ -1306,7 +1320,7 @@ def send_telegram_alert(signal_data, volume_15m, timeframe):
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (Long)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (Score):** {r2_score:.1f}\n" # استخدام r2_score كتمثيل لـ buy_signal_score
+            f"📊 **قوة الإشارة (Score)/8:** {r2_score:.1f}\n" # استخدام r2_score كتمثيل لـ buy_signal_score
             f"💧 **سيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8f}`\n"
@@ -1664,7 +1678,7 @@ def track_signals():
                                     if current_atr_val > 0:
                                         new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
                                         # نضمن أنه أعلى من الوقف الأولي وأعلى بقليل من سعر الدخول
-                                        new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً على الأقل
+                                        new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.01)) # نضمن ربح بسيط جداً على الأقل
                                         # تأكد من أن الوقف الجديد أعلى فعلاً من الوقف الحالي (الأولي في هذه الحالة)
                                         if new_stop_loss > current_stop_loss:
                                             update_query = sql.SQL("""
@@ -1783,46 +1797,58 @@ def favicon():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """معالجة الطلبات الواردة من Telegram (مثل ضغط الأزرار)."""
     if not request.is_json:
+        logger.warning("⚠️ [Flask] Received non-JSON webhook request.")
         return "Invalid request", 400
     try:
         data = request.get_json()
+        # logger.info(f"ℹ️ [Flask] Received webhook data: {json.dumps(data, indent=2)}") # يمكن أن يكون اللوغ كبيرًا جدًا
 
         if 'callback_query' in data:
             callback_query = data['callback_query']
             callback_data = callback_query.get('data')
             chat_id_callback = callback_query['message']['chat']['id']
+            message_id = callback_query['message']['message_id']
 
-            # acknowledge callback
             try:
-                requests.post(
-                    f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery",
-                    json={'callback_query_id': callback_query['id']},
-                    timeout=5
-                )
+                # إرسال تأكيد الاستلام بسرعة
+                requests.post(f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery",
+                     json={'callback_query_id': callback_query['id']}, timeout=5)
             except Exception as ack_err:
-                logger.error(f"❌ [Flask] Failed to ack callback: {ack_err}")
+                 logger.error(f"❌ [Flask] Failed to acknowledge callback query {callback_query['id']}: {ack_err}")
 
-            # هنا نتعامل مع كلتا القيمتين
-            if callback_data in ("get_report", "تقرير عام"):
+            if callback_data == "get_report":
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
+            # يمكنك إضافة معالجة لـ callback_data أخرى هنا، مثل "signal_details_{signal_id}"
 
         elif 'message' in data:
             message_data = data['message']
             chat_id_msg = message_data['chat']['id']
-            text_msg = message_data.get('text', '').strip().lower()
-
-            if text_msg in ("/report", "تقرير عام"):
+            text_msg = message_data.get('text', '')
+            # logger.info(f"ℹ️ [Flask] Received message from {chat_id_msg}: {text_msg}")
+            if text_msg.lower() == '/report':
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
+            elif text_msg.lower() == '/status':
+                 # مثال لإضافة أمر يعرض حالة البوت أو عدد الإشارات النشطة
+                 try:
+                     check_db_connection()
+                     with conn.cursor() as status_cur:
+                         status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                         open_count = status_cur.fetchone()['count'] or 0
+                     status_msg = f"🤖 حالة البوت:\n- الإشارات النشطة: {open_count}/{MAX_OPEN_TRADES}\n- تتبع الأسعار: {'نشط ✅' if ticker_data else 'غير نشط ❌'}\n- وقت الخادم: {datetime.now().strftime('%H:%M:%S')}"
+                     send_telegram_message(chat_id_msg, status_msg)
+                 except Exception as status_err:
+                     logger.error(f"❌ [Flask] Error getting status: {status_err}")
+                     send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب الحالة.")
 
+
+        return "OK", 200
     except Exception as e:
-        logger.error(f"❌ [Flask] Error in webhook: {e}", exc_info=True)
-        return "Error", 500
-
-    return "OK", 200
-
+         logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
+         return "Error", 500
 
 
 def run_flask():
