@@ -51,10 +51,10 @@ logger.info(f"عنوان Webhook: {webhook_url if webhook_url else 'غير مح�
 # ---------------------- إعداد الثوابت ----------------------
 TRADE_VALUE = 10         # قيمة الصفقة الافتراضية بالدولار
 MAX_OPEN_TRADES = 4      # الحد الأقصى للصفقات المفتوحة في نفس الوقت
-SIGNAL_GENERATION_TIMEFRAME = '30m' # الإطار الزمني لتوليد الإشارة
-SIGNAL_GENERATION_LOOKBACK_DAYS = 5 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
-SIGNAL_TRACKING_TIMEFRAME = '30m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
-SIGNAL_TRACKING_LOOKBACK_DAYS = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
+SIGNAL_GENERATION_TIMEFRAME = '5m' # الإطار الزمني لتوليد الإشارة
+SIGNAL_GENERATION_LOOKBACK_DAYS = 2 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
+SIGNAL_TRACKING_TIMEFRAME = '5m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
+SIGNAL_TRACKING_LOOKBACK_DAYS = 2   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
 
 # نطاقات RSI
 RSI_PERIOD = 14          # فترة RSI
@@ -71,43 +71,32 @@ ENTRY_ATR_PERIOD = 14     # فترة ATR
 ENTRY_ATR_MULTIPLIER = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
 
 # وقف الخسارة المتحرك (القيم المعدلة)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1%)
-TRAILING_STOP_ATR_MULTIPLIER = 2.6        # مضاعف ATR للوقف المتحرك (تمت زيادته لإعطاء مساحة أكبر ضد التقلبات)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.01 # نسبة الربح لتفعيل الوقف المتحرك (1%)
+TRAILING_STOP_ATR_MULTIPLIER = 2.2        # مضاعف ATR للوقف المتحرك (تمت زيادته لإعطاء مساحة أكبر ضد التقلبات)
 TRAILING_STOP_MOVE_INCREMENT_PCT = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.3%)
 
-MIN_PROFIT_MARGIN_PCT = 1.5 # الحد الأدنى لنسبة الربح المستهدف المئوية مقارنة بسعر الدخول
-MIN_VOLUME_15M_USDT = 100000 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
+MIN_PROFIT_MARGIN_PCT = 1.0 # الحد الأدنى لنسبة الربح المستهدف المئوية مقارنة بسعر الدخول
+MIN_VOLUME_15M_USDT = 300000 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
 
 # ---------------------- دوال المؤشرات الإضافية ----------------------
 def get_fear_greed_index():
-    """يجلب مؤشر الخوف والطمع من alternative.me ويترجم التصنيف إلى العربية"""
-    # قاموس لترجمة التصنيفات
-    classification_translation_ar = {
-        "Extreme Fear": "خوف شديد",
-        "Fear": "خوف",
-        "Neutral": "محايد",
-        "Greed": "جشع",
-        "Extreme Greed": "جشع شديد",
-        # أضف أي تصنيفات أخرى قد تظهر من الـ API هنا
-    }
+    """يجلب مؤشر الخوف والطمع من alternative.me"""
     try:
         response = requests.get("https://api.alternative.me/fng/", timeout=10)
         response.raise_for_status() # Check for HTTP errors
         data = response.json()
         value = int(data["data"][0]["value"])
-        classification_en = data["data"][0]["value_classification"]
-        # ترجمة التصنيف إلى العربية، استخدم الإنجليزية كبديل إذا لم توجد ترجمة
-        classification_ar = classification_translation_ar.get(classification_en, classification_en)
-        return f"{value} ({classification_ar})" # استخدام التصنيف العربي
+        classification = data["data"][0]["value_classification"]
+        return f"{value} ({classification})"
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ في الشبكة)" # رسالة خطأ بالعربية
+        return "N/A (Network Error)"
     except (KeyError, IndexError, ValueError) as e:
         logger.error(f"❌ [Indicators] خطأ في تنسيق بيانات مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ في البيانات)" # رسالة خطأ بالعربية
+        return "N/A (Data Error)"
     except Exception as e:
         logger.error(f"❌ [Indicators] خطأ غير متوقع في جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ غير معروف)" # رسالة خطأ بالعربية
+        return "N/A (Unknown Error)"
 
 def get_btc_trend_4h():
     """
@@ -1180,7 +1169,7 @@ class ElliottFibCandleStrategy:
 
         # --- قرار الشراء النهائي ---
         buy_signal_triggered = False
-        MIN_CONDITIONS_FOR_SIGNAL = 7 # مثال: تتطلب 6 شروط على الأقل بما فيها الاتجاه والزخم
+        MIN_CONDITIONS_FOR_SIGNAL = 6 # مثال: تتطلب 6 شروط على الأقل بما فيها الاتجاه والزخم
         # الشرط الأساسي: اتجاه وزخم إيجابي + RSI مقبول + ليس عند قمة BB
         core_conditions_met = is_uptrend_confirmed and is_momentum_confirmed and cond_rsi_ok and cond_not_bb_extreme
 
@@ -1320,7 +1309,7 @@ def send_telegram_alert(signal_data, volume_15m, timeframe):
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (Long)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (Score/8):** {r2_score:.1f}\n" # استخدام r2_score كتمثيل لـ buy_signal_score
+            f"📊 **قوة الإشارة (Score):** {r2_score:.1f}\n" # استخدام r2_score كتمثيل لـ buy_signal_score
             f"💧 **سيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8f}`\n"
@@ -1678,7 +1667,7 @@ def track_signals():
                                     if current_atr_val > 0:
                                         new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
                                         # نضمن أنه أعلى من الوقف الأولي وأعلى بقليل من سعر الدخول
-                                        new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.01)) # نضمن ربح بسيط جداً على الأقل
+                                        new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً على الأقل
                                         # تأكد من أن الوقف الجديد أعلى فعلاً من الوقف الحالي (الأولي في هذه الحالة)
                                         if new_stop_loss > current_stop_loss:
                                             update_query = sql.SQL("""
@@ -2014,44 +2003,6 @@ def main_loop():
 
 # ---------------------- نقطة الدخول الرئيسية ----------------------
 if __name__ == "__main__":
-    
-    logger.info("✅ [Main] بدء تشغيل البوت...")
-
-    # التحقق من الاتصال بقاعدة البيانات
-    init_db()
-
-    # بدء WebSocket للأسعار
-    ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
-    ws_thread.start()
-
-    # بدء خادم Flask إذا كان webhook_url موجود
-    if webhook_url:
-        flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
-        flask_thread.start()
-
-        # تسجيل webhook لدى Telegram
-        try:
-            webhook_response = requests.get(
-                f"https://api.telegram.org/bot{telegram_token}/setWebhook",
-                params={
-                    "url": webhook_url,
-                    "allowed_updates": ["message", "callback_query"]
-                },
-                timeout=10
-            )
-            if webhook_response.status_code == 200:
-                logger.info(f"✅ تم تسجيل Webhook بنجاح: {webhook_response.json()}")
-            else:
-                logger.warning(f"⚠️ فشل تسجيل Webhook - {webhook_response.status_code}: {webhook_response.text}")
-        except Exception as e:
-            logger.error(f"❌ خطأ أثناء تسجيل Webhook: {e}")
-    else:
-        logger.warning("⚠️ لم يتم تحديد WEBHOOK_URL، سيتم تجاهل وضع Webhook.")
-
-    # إبقاء التطبيق شغالًا
-    while True:
-        time.sleep(10)
-
     logger.info("🚀 بدء تشغيل بوت إشارات التداول...")
     logger.info(f"Current Time (Local): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Current Time (UTC):   {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
