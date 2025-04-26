@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import time
 import os
 import json
@@ -1810,17 +1807,16 @@ def webhook():
             if callback_data == "get_report":
                 report_text = generate_performance_report()
                 send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
+                        if callback_data in ("get_report", "تقرير عام"):
+            report_text = generate_performance_report()
+            send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
+
             # يمكنك إضافة معالجة لـ callback_data أخرى هنا، مثل "signal_details_{signal_id}"
 
-        elif 'message' in data:
-            message_data = data['message']
-            chat_id_msg = message_data['chat']['id']
-            text_msg = message_data.get('text', '')
-            # logger.info(f"ℹ️ [Flask] Received message from {chat_id_msg}: {text_msg}")
-            if text_msg.lower() == '/report':
-                report_text = generate_performance_report()
-                send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
-            elif text_msg.lower() == '/status':
+                if text_msg.lower() in ("/report", "تقرير عام"):
+            report_text = generate_performance_report()
+            send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
+
                  # مثال لإضافة أمر يعرض حالة البوت أو عدد الإشارات النشطة
                  try:
                      check_db_connection()
