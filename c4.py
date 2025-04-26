@@ -2014,6 +2014,44 @@ def main_loop():
 
 # ---------------------- نقطة الدخول الرئيسية ----------------------
 if __name__ == "__main__":
+    
+    logger.info("✅ [Main] بدء تشغيل البوت...")
+
+    # التحقق من الاتصال بقاعدة البيانات
+    init_db()
+
+    # بدء WebSocket للأسعار
+    ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
+    ws_thread.start()
+
+    # بدء خادم Flask إذا كان webhook_url موجود
+    if webhook_url:
+        flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
+        flask_thread.start()
+
+        # تسجيل webhook لدى Telegram
+        try:
+            webhook_response = requests.get(
+                f"https://api.telegram.org/bot{telegram_token}/setWebhook",
+                params={
+                    "url": webhook_url,
+                    "allowed_updates": ["message", "callback_query"]
+                },
+                timeout=10
+            )
+            if webhook_response.status_code == 200:
+                logger.info(f"✅ تم تسجيل Webhook بنجاح: {webhook_response.json()}")
+            else:
+                logger.warning(f"⚠️ فشل تسجيل Webhook - {webhook_response.status_code}: {webhook_response.text}")
+        except Exception as e:
+            logger.error(f"❌ خطأ أثناء تسجيل Webhook: {e}")
+    else:
+        logger.warning("⚠️ لم يتم تحديد WEBHOOK_URL، سيتم تجاهل وضع Webhook.")
+
+    # إبقاء التطبيق شغالًا
+    while True:
+        time.sleep(10)
+
     logger.info("🚀 بدء تشغيل بوت إشارات التداول...")
     logger.info(f"Current Time (Local): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Current Time (UTC):   {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
