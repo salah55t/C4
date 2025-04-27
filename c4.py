@@ -54,9 +54,9 @@ logger.info(f"عنوان Webhook: {WEBHOOK_URL if WEBHOOK_URL else 'غير مح�
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0         # قيمة الصفقة الافتراضية بالدولار
 MAX_OPEN_TRADES: int = 4          # الحد الأقصى للصفقات المفتوحة في نفس الوقت
-SIGNAL_GENERATION_TIMEFRAME: str = '15m' # الإطار الزمني لتوليد الإشارة
+SIGNAL_GENERATION_TIMEFRAME: str = '30m' # الإطار الزمني لتوليد الإشارة
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # عدد الأيام للبيانات التاريخية لتوليد الإشارة
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
+SIGNAL_TRACKING_TIMEFRAME: str = '30m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
 
 # مؤشرات فنية
@@ -71,12 +71,12 @@ LOOKBACK_FOR_SWINGS: int = 100 # عدد الشموع للبحث عن القمم 
 ENTRY_ATR_PERIOD: int = 14     # فترة ATR للدخول
 ENTRY_ATR_MULTIPLIER: float = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
 BOLLINGER_WINDOW: int = 20     # فترة Bollinger Bands
-BOLLINGER_STD_DEV: int = 2        # الانحراف المعياري لـ Bollinger Bands
+BOLLINGER_STD_DEV: int = 2.5       # الانحراف المعياري لـ Bollinger Bands
 MACD_FAST: int = 12            # فترة MACD السريعة
 MACD_SLOW: int = 26            # فترة MACD البطيئة
 MACD_SIGNAL: int = 9             # فترة خط إشارة MACD
 ADX_PERIOD: int = 14            # فترة ADX
-SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
+SUPERTREND_PERIOD: int = 5     # فترة SuperTrend
 SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
