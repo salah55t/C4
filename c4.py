@@ -71,12 +71,12 @@ LOOKBACK_FOR_SWINGS: int = 100 # عدد الشموع للبحث عن القمم 
 ENTRY_ATR_PERIOD: int = 14     # فترة ATR للدخول
 ENTRY_ATR_MULTIPLIER: float = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
 BOLLINGER_WINDOW: int = 20     # فترة Bollinger Bands
-BOLLINGER_STD_DEV: int = 2.5       # الانحراف المعياري لـ Bollinger Bands
+BOLLINGER_STD_DEV: int = 2       # الانحراف المعياري لـ Bollinger Bands
 MACD_FAST: int = 12            # فترة MACD السريعة
 MACD_SLOW: int = 26            # فترة MACD البطيئة
 MACD_SIGNAL: int = 9             # فترة خط إشارة MACD
 ADX_PERIOD: int = 14            # فترة ADX
-SUPERTREND_PERIOD: int = 5     # فترة SuperTrend
+SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
 SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
