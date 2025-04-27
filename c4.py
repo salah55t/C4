@@ -131,7 +131,8 @@ def get_fear_greed_index() -> str:
         return f"{value} ({classification_ar})"
     except requests.exceptions.RequestException as e:
          logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
-        return "N/A (خطأ في الشبكة)"
+         # --- السطر المصحح ---
+         return "N/A (خطأ في الشبكة)"
     except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"❌ [Indicators] خطأ في تنسيق بيانات مؤشر الخوف والطمع: {e}")
         return "N/A (خطأ في البيانات)"
@@ -785,7 +786,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
 
     # التأكد من وجود عمود ATR أو حسابه
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-        logger.debug("ℹ️ [Indicator SuperTrend] حساب ATR (period={period}) لـ SuperTrend...")
+        logger.debug(f"ℹ️ [Indicator SuperTrend] حساب ATR (period={period}) لـ SuperTrend...")
         df_st = calculate_atr_indicator(df_st, period=period)
 
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
@@ -1744,7 +1745,10 @@ app = Flask(__name__)
 def home() -> Response:
     """صفحة رئيسية بسيطة لإظهار أن البوت يعمل."""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    status = "running" if ws_thread.is_alive() and tracker_thread.is_alive() else "partially running"
+    # التحقق من وجود الـ threads قبل فحص حالتها
+    ws_alive = ws_thread.is_alive() if ws_thread else False
+    tracker_alive = tracker_thread.is_alive() if tracker_thread else False
+    status = "running" if ws_alive and tracker_alive else "partially running"
     return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
@@ -1771,7 +1775,13 @@ def webhook() -> Tuple[str, int]:
             message_info = callback_query.get('message')
             if not message_info or not callback_data:
                  logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing message or data.")
-                 return "OK", 200 # أخبر تليجرام بأننا استلمناها حتى لو كانت غير مكتملة
+                 # Answer callback query even if invalid to remove loading indicator on button
+                 try:
+                     ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+                     requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
+                 except Exception as ack_err:
+                     logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
+                 return "OK", 200
 
             chat_id_callback = message_info['chat']['id']
             message_id = message_info['message_id']
@@ -1791,8 +1801,9 @@ def webhook() -> Tuple[str, int]:
 
             # معالجة البيانات المستلمة من الزر
             if callback_data == "get_report":
-                report_text = generate_performance_report()
-                send_telegram_message(chat_id_callback, report_text, parse_mode='Markdown')
+                # تشغيل توليد التقرير وإرساله في خيط منفصل لتجنب حظر Webhook
+                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown'))
+                report_thread.start()
             # --- يمكن إضافة معالجة لأنواع callback_data أخرى هنا ---
             # elif callback_data.startswith("signal_details_"):
             #    signal_id_to_show = callback_data.split("_")[-1]
@@ -1820,45 +1831,14 @@ def webhook() -> Tuple[str, int]:
 
             logger.info(f"ℹ️ [Flask] Received message: Text='{text_msg}', User={username}({user_id}), Chat={chat_id_msg}")
 
-            # معالجة الأوامر المعروفة
+            # معالجة الأوامر المعروفة (تشغيلها في خيوط منفصلة أيضًا)
             if text_msg.lower() == '/report':
-                report_text = generate_performance_report()
-                send_telegram_message(chat_id_msg, report_text, parse_mode='Markdown')
+                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
+                 report_thread.start()
             elif text_msg.lower() == '/status':
-                 # عرض حالة البوت وعدد الإشارات النشطة
-                 status_msg = "⏳ جارٍ جلب الحالة..."
-                 msg_sent = send_telegram_message(chat_id_msg, status_msg)
-                 if msg_sent and msg_sent.get('ok'):
-                     message_id_to_edit = msg_sent['result']['message_id']
-                     try:
-                         open_count = 0
-                         if check_db_connection() and conn:
-                             with conn.cursor() as status_cur:
-                                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                                 open_count = (status_cur.fetchone() or {}).get('count', 0)
+                 status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
+                 status_thread.start()
 
-                         ws_status = 'نشط ✅' if ws_thread.is_alive() else 'غير نشط ❌'
-                         tracker_status = 'نشط ✅' if tracker_thread.is_alive() else 'غير نشط ❌'
-                         final_status_msg = (
-                            f"🤖 *حالة البوت:*\n"
-                            f"- تتبع الأسعار (WS): {ws_status}\n"
-                            f"- تتبع الإشارات: {tracker_status}\n"
-                            f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-                            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
-                         )
-                         # تعديل الرسالة الأصلية
-                         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-                         edit_payload = {
-                            'chat_id': chat_id_msg,
-                            'message_id': message_id_to_edit,
-                            'text': final_status_msg,
-                            'parse_mode': 'Markdown'
-                         }
-                         requests.post(edit_url, json=edit_payload, timeout=10)
-
-                     except Exception as status_err:
-                         logger.error(f"❌ [Flask] Error getting status details: {status_err}", exc_info=True)
-                         send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
             # --- يمكن إضافة أوامر أخرى هنا ---
             # elif text_msg.lower() == '/help':
             #    send_telegram_message(chat_id_msg, "الأوامر المتاحة:\n/report - عرض تقرير الأداء\n/status - عرض حالة البوت")
@@ -1872,6 +1852,49 @@ def webhook() -> Tuple[str, int]:
          logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
          # أرجع خطأ عام للخادم
          return "Internal Server Error", 500
+
+def handle_status_command(chat_id_msg: int) -> None:
+    """دالة منفصلة لمعالجة أمر /status لتجنب حظر Webhook."""
+    logger.info(f"ℹ️ [Flask Status] Handling /status command for chat {chat_id_msg}")
+    status_msg = "⏳ جارٍ جلب الحالة..."
+    msg_sent = send_telegram_message(chat_id_msg, status_msg)
+    if not (msg_sent and msg_sent.get('ok')):
+        logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
+        return
+
+    message_id_to_edit = msg_sent['result']['message_id']
+    try:
+        open_count = 0
+        if check_db_connection() and conn:
+            with conn.cursor() as status_cur:
+                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                open_count = (status_cur.fetchone() or {}).get('count', 0)
+
+        ws_status = 'نشط ✅' if ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
+        tracker_status = 'نشط ✅' if tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
+        final_status_msg = (
+            f"🤖 *حالة البوت:*\n"
+            f"- تتبع الأسعار (WS): {ws_status}\n"
+            f"- تتبع الإشارات: {tracker_status}\n"
+            f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+        )
+        # تعديل الرسالة الأصلية
+        edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+        edit_payload = {
+            'chat_id': chat_id_msg,
+            'message_id': message_id_to_edit,
+            'text': final_status_msg,
+            'parse_mode': 'Markdown'
+        }
+        response = requests.post(edit_url, json=edit_payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"✅ [Flask Status] Status updated for chat {chat_id_msg}")
+
+    except Exception as status_err:
+        logger.error(f"❌ [Flask Status] Error getting/editing status details for chat {chat_id_msg}: {status_err}", exc_info=True)
+        # محاولة إرسال رسالة خطأ جديدة إذا فشل التعديل
+        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
 
 
 def run_flask() -> None:
@@ -1892,6 +1915,8 @@ def run_flask() -> None:
          logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (NOT recommended for production).")
          # تحذير: خادم التطوير غير مناسب للإنتاج!
          try:
+             # تشغيل خادم التطوير مع السماح بإعادة التحميل (للتطوير فقط)
+             # app.run(host=host, port=port, debug=True, use_reloader=False) # debug=True يتسبب في مشاكل مع الخيوط أحيانًا
              app.run(host=host, port=port)
          except Exception as flask_run_err:
               logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
@@ -2066,9 +2091,12 @@ if __name__ == "__main__":
         ws_thread.start()
         logger.info("✅ [Main] تم بدء خيط WebSocket Ticker.")
         # انتظر قليلاً للسماح لـ WebSocket بالاتصال وتلقي بعض البيانات الأولية
+        logger.info("ℹ️ [Main] الانتظار 5 ثوانٍ لتهيئة WebSocket...")
         time.sleep(5)
         if not ticker_data:
              logger.warning("⚠️ [Main] لم يتم استلام بيانات أولية من WebSocket بعد 5 ثوانٍ.")
+        else:
+             logger.info(f"✅ [Main] تم استلام بيانات أولية من WebSocket لـ {len(ticker_data)} رمز.")
 
 
         # 3. بدء متتبع الإشارات في خيط منفصل
