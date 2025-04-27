@@ -298,13 +298,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             existing_columns = {row['column_name'] for row in cur.fetchall()}
             missing_columns = required_columns - existing_columns
 
+            # --- !!! بداية قسم التصحيح !!! ---
             if missing_columns:
-                 logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
+                # تأكد من أن هذه الأسطر مزاحة بـ 4 مسافات إضافية عن الـ 'if'
+                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
                 # (الكود الأصلي لإضافة الأعمدة كان جيدًا، يمكن الاحتفاظ به أو تحسينه هنا إذا لزم الأمر)
                 # ... (يمكن إضافة كود ALTER TABLE هنا إذا كنت تتوقع تغييرات مستقبلية) ...
                 logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.")
             else:
+                # تأكد من أن 'else:' مزاحة بنفس مستوى 'if missing_columns:'
+                # وتأكد من أن هذا السطر مزاح بـ 4 مسافات إضافية عن الـ 'else'
                 logger.info("✅ [DB] جميع الأعمدة المطلوبة موجودة في جدول 'signals'.")
+            # --- !!! نهاية قسم التصحيح !!! ---
 
 
             # --- إنشاء جدول market_dominance (إذا لم يكن موجودًا) ---
@@ -324,6 +329,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             return # نجح الاتصال والتهيئة
 
         except OperationalError as op_err:
+            # تأكد من أن هذا الـ 'except' مزاح بنفس مستوى الـ 'try'
             logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
             if conn: conn.rollback()
             if attempt == retries - 1:
@@ -331,6 +337,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                  raise op_err # إعادة رفع الخطأ بعد فشل كل المحاولات
             time.sleep(delay)
         except Exception as e:
+            # تأكد من أن هذا الـ 'except' مزاح بنفس مستوى الـ 'try'
             logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
             if conn: conn.rollback()
             if attempt == retries - 1:
@@ -338,45 +345,9 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                  raise e
             time.sleep(delay)
 
-    # إذا وصل الكود إلى هنا، فقد فشلت كل المحاولات
+    # تأكد من أن هذا السطر خارج حلقة 'for' وبنفس مستوى إزاحة الحلقة
     logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
     exit(1)
-
-
-def check_db_connection() -> bool:
-    """التحقق من حالة الاتصال بقاعدة البيانات وإعادة التهيئة إذا لزم الأمر."""
-    global conn, cur
-    try:
-        if conn is None or conn.closed != 0:
-            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
-            init_db() # محاولة إعادة الاتصال والتهيئة
-            return True # نفترض نجاح التهيئة (init_db سترفع خطأ إذا فشلت)
-        else:
-             # التحقق من أن الاتصال لا يزال يعمل بإرسال استعلام بسيط
-             with conn.cursor() as check_cur: # استخدام cursor مؤقت
-                  check_cur.execute("SELECT 1;")
-                  check_cur.fetchone()
-             # logger.debug("[DB] الاتصال نشط.") # إلغاء التعليق للتحقق المتكرر
-             return True
-    except (OperationalError, InterfaceError) as e:
-        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
-        try:
-             init_db()
-            return True
-        except Exception as recon_err:
-            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
-            return False
-    except Exception as e:
-        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
-        # محاولة إعادة الاتصال كإجراء وقائي
-        try:
-            init_db()
-            return True
-        except Exception as recon_err:
-             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
-             return False
-
-
 def convert_np_values(obj: Any) -> Any:
     """تحويل أنواع بيانات NumPy إلى أنواع Python الأصلية للتوافق مع JSON و DB."""
     if isinstance(obj, dict):
