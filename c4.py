@@ -363,7 +363,7 @@ def check_db_connection() -> bool:
         try:
              init_db()
             return True
-        except Exception as recon_err:
+    except Exception as recon_err:
             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
             return False
     except Exception as e:
