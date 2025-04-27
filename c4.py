@@ -299,10 +299,10 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             missing_columns = required_columns - existing_columns
 
             if missing_columns:
-                 logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
+                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}.")
                 # (الكود الأصلي لإضافة الأعمدة كان جيدًا، يمكن الاحتفاظ به أو تحسينه هنا إذا لزم الأمر)
                 # ... (يمكن إضافة كود ALTER TABLE هنا إذا كنت تتوقع تغييرات مستقبلية) ...
-                logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.")
+                logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.") # This is the corrected line's indentation
             else:
                 logger.info("✅ [DB] جميع الأعمدة المطلوبة موجودة في جدول 'signals'.")
 
