@@ -42,8 +42,8 @@ try:
     # استخدام قيمة افتراضية None إذا لم يكن المتغير موجودًا
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
-    logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
-    exit(1) # استخدام رمز خروج غير صفري للإشارة إلى خطأ
+     logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
+     exit(1) # استخدام رمز خروج غير صفري للإشارة إلى خطأ
 
 logger.info(f"مفتاح Binance API: {'موجود' if API_KEY else 'غير موجود'}")
 logger.info(f"توكن تليجرام: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
@@ -281,8 +281,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     strategy_name TEXT,
                     signal_details JSONB,
                     last_trailing_update_price DOUBLE PRECISION
-                );
-            """)
+                );""")
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
 
@@ -325,12 +324,12 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             return # نجح الاتصال والتهيئة
 
         except OperationalError as op_err:
-             logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
-             if conn: conn.rollback()
-             if attempt == retries - 1:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
                  logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
                  raise op_err # إعادة رفع الخطأ بعد فشل كل المحاولات
-             time.sleep(delay)
+            time.sleep(delay)
         except Exception as e:
             logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
             if conn: conn.rollback()
@@ -349,14 +348,14 @@ def check_db_connection() -> bool:
     global conn, cur
     try:
         if conn is None or conn.closed != 0:
-             logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
-             init_db() # محاولة إعادة الاتصال والتهيئة
-             return True # نفترض نجاح التهيئة (init_db سترفع خطأ إذا فشلت)
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db() # محاولة إعادة الاتصال والتهيئة
+            return True # نفترض نجاح التهيئة (init_db سترفع خطأ إذا فشلت)
         else:
              # التحقق من أن الاتصال لا يزال يعمل بإرسال استعلام بسيط
              with conn.cursor() as check_cur: # استخدام cursor مؤقت
-                check_cur.execute("SELECT 1;")
-                check_cur.fetchone()
+                 check_cur.execute("SELECT 1;")
+                 check_cur.fetchone()
              # logger.debug("[DB] الاتصال نشط.") # إلغاء التعليق للتحقق المتكرر
              return True
     except (OperationalError, InterfaceError) as e:
@@ -388,8 +387,10 @@ def convert_np_values(obj: Any) -> Any:
         return obj.tolist()
     elif isinstance(obj, (np.integer, np.int_)): # np.int_ قديم لكن لا يزال يعمل
         return int(obj)
-    elif isinstance(obj, (np.floating, np.float64, np.float_)): # شمل np.float_ للاحتياط
+    # --- !!! السطر المصحح !!! ---
+    elif isinstance(obj, (np.floating, np.float64)): # Removed np.float_
         return float(obj)
+    # --- !!! نهاية التصحيح !!! ---
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
     elif pd.isna(obj): # معالجة NaT من Pandas أيضًا
@@ -489,7 +490,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                          logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: '{price_str}'")
         elif isinstance(msg, dict):
              if msg.get('e') == 'error':
-                logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا يوجد تفاصيل خطأ')}")
+                 logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا يوجد تفاصيل خطأ')}")
              elif msg.get('stream') and msg.get('data'): # Handle combined streams format
                  for ticker_item in msg.get('data', []):
                     symbol = ticker_item.get('s')
@@ -768,7 +769,7 @@ def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
         elif close_diff[i] < 0: # السعر انخفض
              obv[i] = obv[i-1] - volume[i]
         else: # السعر لم يتغير
-            obv[i] = obv[i-1]
+             obv[i] = obv[i-1]
 
     df['obv'] = obv
     return df
@@ -984,7 +985,6 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
 
         is_max = np.all(center_val >= window) # هل هو أكبر أو يساوي الكل؟
         is_min = np.all(center_val <= window) # هل هو أصغر أو يساوي الكل؟
-
         # التأكد أنه القمة/القاع الوحيد في النافذة (لتجنب التكرار في المناطق المسطحة)
         is_unique_max = is_max and (np.sum(window == center_val) == 1)
         is_unique_min = is_min and (np.sum(window == center_val) == 1)
@@ -992,7 +992,7 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
         if is_unique_max:
             # ضمان عدم وجود قمة قريبة جدًا (ضمن مسافة order)
             if not maxima_indices or i > maxima_indices[-1] + order:
-                maxima_indices.append(i)
+                 maxima_indices.append(i)
         elif is_unique_min:
             # ضمان عدم وجود قاع قريب جدًا
             if not minima_indices or i > minima_indices[-1] + order:
@@ -1144,7 +1144,6 @@ def generate_performance_report() -> str:
         logger.error(f"❌ [Report] خطأ غير متوقع في توليد تقرير الأداء: {e}", exc_info=True)
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
 
-
 # ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
 class ConservativeTradingStrategy:
     """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها."""
@@ -1205,7 +1204,7 @@ class ConservativeTradingStrategy:
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
-                logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
             if df_cleaned.empty:
                 logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.")
                 return None
@@ -1576,13 +1575,13 @@ def track_signals() -> None:
 
             # استخدام cursor مع context manager لجلب الإشارات المفتوحة
             with conn.cursor() as track_cur: # يستخدم RealDictCursor
-                track_cur.execute("""
+                 track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
                            is_trailing_active, last_trailing_update_price
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
-                """)
-                open_signals: List[Dict] = track_cur.fetchall()
+                 """)
+                 open_signals: List[Dict] = track_cur.fetchall()
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] لا توجد إشارات مفتوحة للتتبع.")
@@ -1702,7 +1701,7 @@ def track_signals() -> None:
                         try:
                              # استخدام cursor جديد للتحديث داخل الحلقة
                              with conn.cursor() as update_cur:
-                                update_cur.execute(update_query, update_params)
+                                 update_cur.execute(update_query, update_params)
                              conn.commit() # Commit بعد كل تحديث ناجح
                              if log_message: logger.info(log_message)
                              # إرسال التنبيه المحسّن فقط إذا تم التحديث بنجاح
@@ -1719,8 +1718,8 @@ def track_signals() -> None:
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}")
                     continue # تخطي هذه الإشارة
                 except Exception as inner_loop_err:
-                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
-                     continue # تخطي هذه الإشارة
+                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
+                    continue # تخطي هذه الإشارة
 
             if active_signals_summary:
                 logger.debug(f"ℹ️ [Tracker] حالة نهاية الدورة ({processed_in_cycle} معالج): {'; '.join(active_signals_summary)}")
@@ -2010,17 +2009,17 @@ def main_loop() -> None:
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
 
-                        if final_open_count < MAX_OPEN_TRADES:
-                             if insert_signal_into_db(potential_signal):
-                                 send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                                 signals_generated_in_loop += 1
-                                 slots_available -= 1 # تقليل عدد الأماكن المتاحة
-                                 time.sleep(2) # فاصل بسيط بين إرسال الإشارات لتجنب قيود Telegram API
+                             if final_open_count < MAX_OPEN_TRADES:
+                                 if insert_signal_into_db(potential_signal):
+                                     send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
+                                     signals_generated_in_loop += 1
+                                     slots_available -= 1 # تقليل عدد الأماكن المتاحة
+                                     time.sleep(2) # فاصل بسيط بين إرسال الإشارات لتجنب قيود Telegram API
+                                 else:
+                                     logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
                              else:
-                                 logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
-                        else:
-                            logger.warning(f"⚠️ [Main] تم الوصول للحد الأقصى ({final_open_count}) قبل إدراج إشارة {symbol}. تم تجاهل الإشارة.")
-                            break # الخروج من فحص الرموز لأن الحد الأقصى وصل
+                                 logger.warning(f"⚠️ [Main] تم الوصول للحد الأقصى ({final_open_count}) قبل إدراج إشارة {symbol}. تم تجاهل الإشارة.")
+                                 break # الخروج من فحص الرموز لأن الحد الأقصى وصل
 
                  except psycopg2.Error as db_loop_err:
                       logger.error(f"❌ [Main] خطأ DB أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال للتالي...")
@@ -2124,4 +2123,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
         # تأكد من إنهاء العملية بالكامل
-        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالقة
+        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالقة 
