@@ -299,7 +299,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             missing_columns = required_columns - existing_columns
 
             if missing_columns:
-                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
+                 logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
                 # (الكود الأصلي لإضافة الأعمدة كان جيدًا، يمكن الاحتفاظ به أو تحسينه هنا إذا لزم الأمر)
                 # ... (يمكن إضافة كود ALTER TABLE هنا إذا كنت تتوقع تغييرات مستقبلية) ...
                 logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.")
@@ -354,14 +354,14 @@ def check_db_connection() -> bool:
         else:
              # التحقق من أن الاتصال لا يزال يعمل بإرسال استعلام بسيط
              with conn.cursor() as check_cur: # استخدام cursor مؤقت
-                 check_cur.execute("SELECT 1;")
-                 check_cur.fetchone()
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
              # logger.debug("[DB] الاتصال نشط.") # إلغاء التعليق للتحقق المتكرر
              return True
     except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
         try:
-            init_db()
+             init_db()
             return True
         except Exception as recon_err:
             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
@@ -433,7 +433,7 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return [] # إرجاع قائمة فارغة في حالة حدوث خطأ
 
     if not raw_symbols:
-        logger.warning("⚠️ [Data] القائمة الأولية للرموز فارغة.")
+         logger.warning("⚠️ [Data] القائمة الأولية للرموز فارغة.")
         return []
 
     # --- التحقق من الرموز مقابل Binance API ---
@@ -1071,7 +1071,6 @@ def generate_performance_report() -> str:
     logger.info("ℹ️ [Report] توليد تقرير الأداء...")
     if not check_db_connection() or not conn or not cur:
         return "❌ لا يمكن توليد التقرير، مشكلة في الاتصال بقاعدة البيانات."
-
     try:
         # استخدام cursor جديد داخل الدالة لضمان عدم التداخل
         with conn.cursor() as report_cur: # يستخدم RealDictCursor
@@ -1108,7 +1107,7 @@ def generate_performance_report() -> str:
 
             # 3. حساب المقاييس المشتقة
             win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
-            # Profit Factor: Total Profit / Absolute Total Loss
+             # Profit Factor: Total Profit / Absolute Total Loss
             profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
 
         # 4. تنسيق التقرير
@@ -1143,7 +1142,6 @@ def generate_performance_report() -> str:
     except Exception as e:
         logger.error(f"❌ [Report] خطأ غير متوقع في توليد تقرير الأداء: {e}", exc_info=True)
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
-
 # ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
 class ConservativeTradingStrategy:
     """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها."""
@@ -1155,13 +1153,14 @@ class ConservativeTradingStrategy:
             'ema_trend', 'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
-            'vwap', 'obv', 'supertrend', 'supertrend_trend',
+            'vwap', 'obv', 'supertrend', 'supertrend_trend', # تأكد من وجود obv هنا (وهو موجود)
             'BullishCandleSignal', 'BearishCandleSignal' # من نماذج الشموع
         ]
         self.required_cols_buy_signal = [
             'close', 'ema_trend', 'rsi', 'atr', 'macd', 'macd_signal',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
-            'BullishCandleSignal' # للتأكيد
+            # --- !!! السطر الذي تم تعديله !!! ---
+            'BullishCandleSignal', 'obv' # أضفنا 'obv' هنا
         ]
         self.min_conditions_for_signal = 7 # مثال: عدد الشروط الدنيا المطلوبة لتحقيق الإشارة
 
@@ -1186,7 +1185,7 @@ class ConservativeTradingStrategy:
             adx_df = calculate_adx(df_calc, ADX_PERIOD) # حساب ADX في DataFrame منفصل مؤقتًا
             df_calc = df_calc.join(adx_df) # ضم النتائج
             df_calc = calculate_vwap(df_calc)
-            df_calc = calculate_obv(df_calc)
+            df_calc = calculate_obv(df_calc) # <-- استدعاء حساب OBV موجود هنا
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
             df_calc = detect_candlestick_patterns(df_calc)
 
@@ -1228,8 +1227,8 @@ class ConservativeTradingStrategy:
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
 
         # 1. التحقق من صحة DataFrame المدخل والأعمدة المطلوبة للإشارة
-        if df_processed is None or df_processed.empty:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ، لا يمكن توليد إشارة.")
+        if df_processed is None or df_processed.empty or len(df_processed) < 2: # نحتاج صفين للمقارنة
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<2)، لا يمكن توليد إشارة.")
             return None
         missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
         if missing_cols:
@@ -1244,13 +1243,21 @@ class ConservativeTradingStrategy:
         elif "N/A" in btc_trend:
              logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.")
 
-        # 3. استخلاص بيانات الشمعة الأخيرة والتحقق من NaN
+        # 3. استخلاص بيانات الشمعة الأخيرة **والسابقة** والتحقق من NaN
         last_row = df_processed.iloc[-1]
+                 # --- !!! السطر المضاف !!! ---
+        prev_row = df_processed.iloc[-2] # نحصل على الصف السابق لمقارنة OBV
+
         last_row_check = last_row[self.required_cols_buy_signal]
         if last_row_check.isnull().any():
             nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
             logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
             return None
+                 # --- !!! التحقق المضاف للـ OBV السابق !!! ---
+        if pd.isna(prev_row['obv']):
+           logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة OBV السابقة هي NaN. لا يمكن التحقق من اتجاه OBV.")
+           return None
+
 
         # 4. تطبيق شروط الشراء المحافظة
         signal_details = {}
@@ -1281,12 +1288,25 @@ class ConservativeTradingStrategy:
         cond_not_bb_extreme = last_row['close'] < last_row['bb_upper']
         if cond_not_bb_extreme: conditions_met_count += 1; signal_details['Bollinger'] = 'Not at Upper Band Extreme'
 
+                 # --- !!! الشرط المضاف: تأكيد OBV !!! ---
+        cond_obv_rising = last_row['obv'] > prev_row['obv']
+        if cond_obv_rising:
+             conditions_met_count += 1 # زيادة العداد عند تحقق الشرط
+             signal_details['OBV'] = 'Rising (Increasing Volume Pressure)' # إضافة تفاصيل
+        else:
+             signal_details['OBV'] = 'Not Rising'
+
+
         # --- قرار الشراء النهائي ---
-        # المتطلبات الأساسية: اتجاه صاعد، زخم إيجابي، RSI مقبول، ليس عند قمة BB
-        core_conditions_met = is_uptrend_confirmed and is_momentum_confirmed and cond_rsi_ok and cond_not_bb_extreme
+        # المتطلبات الأساسية: اتجاه صاعد، زخم إيجابي، RSI مقبول، ليس عند قمة BB، **وOBV يرتفع**
+        core_conditions_met = (is_uptrend_confirmed and
+                               is_momentum_confirmed and
+                               cond_rsi_ok and
+                               cond_not_bb_extreme and
+                               cond_obv_rising) # --- !!! أضفنا شرط OBV هنا !!! ---
 
         if not (core_conditions_met and conditions_met_count >= self.min_conditions_for_signal):
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق شروط الشراء (Core Met: {core_conditions_met}, Count: {conditions_met_count}/{self.min_conditions_for_signal}).")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق شروط الشراء (Core Met: {core_conditions_met}, OBV Rising: {cond_obv_rising}, Count: {conditions_met_count}/{self.min_conditions_for_signal}).")
             return None # لم تتحقق الشروط
 
         # 5. فحص حجم التداول (السيولة)
@@ -1303,7 +1323,7 @@ class ConservativeTradingStrategy:
         adx_val_sig = last_row.get('adx', 0)
         if adx_val_sig > 25: # ترند قوي
             target_multiplier = ENTRY_ATR_MULTIPLIER * 1.2
-            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # يمكن إبقاؤه أو تقليله قليلاً * 0.9
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.9 # يمكن إبقاؤه أو تقليله قليلاً
             signal_details['SL_Target_Mode'] = f'Strong Trend (ADX {adx_val_sig:.1f})'
         else: # ترند أضعف أو غير واضح
             target_multiplier = ENTRY_ATR_MULTIPLIER
@@ -1336,12 +1356,12 @@ class ConservativeTradingStrategy:
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(conditions_met_count), # استخدام عدد الشروط المحققة كـ "score"
             'strategy_name': 'Conservative_Combo',
-            'signal_details': signal_details, # القاموس يحتوي على تفاصيل الشروط
+            'signal_details': signal_details, # القاموس يحتوي على تفاصيل الشروط (الآن يتضمن OBV)
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE # إضافة قيمة الصفقة للمعلومات
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {conditions_met_count}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
+        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {conditions_met_count}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}, OBV Rising: {cond_obv_rising}")
         return signal_output
 
 # ---------------------- دوال Telegram ----------------------
@@ -1580,7 +1600,7 @@ def track_signals() -> None:
                            is_trailing_active, last_trailing_update_price
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
-                 """)
+                """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
             if not open_signals:
@@ -1610,7 +1630,7 @@ def track_signals() -> None:
                     current_price = ticker_data.get(symbol)
 
                     if current_price is None:
-                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يتوفر سعر حالي في بيانات Ticker.")
+                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يتوفر سعر حالي في بيانات Ticker.")
                         continue # تخطي هذه الإشارة في هذه الدورة
 
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} Trail={'On' if is_trailing_active else 'Off'}")
@@ -1653,7 +1673,7 @@ def track_signals() -> None:
                                 if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
-                                        new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
+                                         new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
                                         # نضمن أنه أعلى من الوقف الأولي وأعلى قليلاً من سعر الدخول
                                         # استخدام max لضمان عدم انخفاض الوقف عن الوقف الحالي وأنه مربح قليلاً
                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
@@ -1679,9 +1699,9 @@ def track_signals() -> None:
                                 if df_recent is not None and not df_recent.empty:
                                     df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD)
                                     if not df_recent.empty and 'atr' in df_recent.columns and pd.notna(df_recent['atr'].iloc[-1]):
-                                        current_atr_val_update = df_recent['atr'].iloc[-1]
+                                         current_atr_val_update = df_recent['atr'].iloc[-1]
                                         if current_atr_val_update > 0:
-                                            potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
+                                             potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
                                             # فقط نحدث إذا كان الوقف الجديد المحسوب أعلى من الوقف الحالي
                                             if potential_new_stop_loss > current_stop_loss:
                                                 new_stop_loss_update = potential_new_stop_loss
@@ -1691,7 +1711,7 @@ def track_signals() -> None:
                                                 notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
                                                 update_executed = True
                                             else:
-                                                logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8g}) ليس أعلى من الحالي ({current_stop_loss:.8g}). لن يتم التحديث.")
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8g}) ليس أعلى من الحالي ({current_stop_loss:.8g}). لن يتم التحديث.")
                                         else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val_update}) لتحديث الوقف.")
                                     else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتحديث الوقف.")
                                 else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتحديث الوقف.")
@@ -1701,7 +1721,7 @@ def track_signals() -> None:
                         try:
                              # استخدام cursor جديد للتحديث داخل الحلقة
                              with conn.cursor() as update_cur:
-                                 update_cur.execute(update_query, update_params)
+                                  update_cur.execute(update_query, update_params)
                              conn.commit() # Commit بعد كل تحديث ناجح
                              if log_message: logger.info(log_message)
                              # إرسال التنبيه المحسّن فقط إذا تم التحديث بنجاح
@@ -1718,7 +1738,7 @@ def track_signals() -> None:
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}")
                     continue # تخطي هذه الإشارة
                 except Exception as inner_loop_err:
-                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
+                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
                     continue # تخطي هذه الإشارة
 
             if active_signals_summary:
@@ -1840,7 +1860,7 @@ def webhook() -> Tuple[str, int]:
 
             # --- يمكن إضافة أوامر أخرى هنا ---
             # elif text_msg.lower() == '/help':
-            #    send_telegram_message(chat_id_msg, "الأوامر المتاحة:\n/report - عرض تقرير الأداء\n/status - عرض حالة البوت")
+                 #    send_telegram_message(chat_id_msg, "الأوامر المتاحة:\n/report - عرض تقرير الأداء\n/status - عرض حالة البوت")
 
         else:
             logger.debug("ℹ️ [Flask] Received webhook data without 'callback_query' or 'message'.")
@@ -1858,7 +1878,7 @@ def handle_status_command(chat_id_msg: int) -> None:
     status_msg = "⏳ جارٍ جلب الحالة..."
     msg_sent = send_telegram_message(chat_id_msg, status_msg)
     if not (msg_sent and msg_sent.get('ok')):
-        logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
+         logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
         return
 
     message_id_to_edit = msg_sent['result']['message_id']
@@ -1882,7 +1902,7 @@ def handle_status_command(chat_id_msg: int) -> None:
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
             'chat_id': chat_id_msg,
-            'message_id': message_id_to_edit,
+             'message_id': message_id_to_edit,
             'text': final_status_msg,
             'parse_mode': 'Markdown'
         }
@@ -2123,4 +2143,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
         # تأكد من إنهاء العملية بالكامل
-        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالقة 
+        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالق
