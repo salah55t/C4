@@ -59,17 +59,20 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # عدد الأيام للبيانات 
 SIGNAL_TRACKING_TIMEFRAME: str = '30m' # الإطار الزمني لتتبع الإشارة وتحديث وقف الخسارة
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # عدد الأيام للبيانات التاريخية لتتبع الإشارة
 
-# مؤشرات فنية
-RSI_PERIOD: int = 14          # فترة RSI
-RSI_OVERSOLD: int = 30        # حد التشبع البيعي
-RSI_OVERBOUGHT: int = 70      # حد التشبع الشرائي
-EMA_PERIOD: int = 21          # فترة EMA للترند
-SWING_ORDER: int = 5          # ترتيب تحديد القمم والقيعان (لـ Elliott Wave - غير مستخدم حالياً في منطق الدخول)
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # مستويات فيبوناتشي (غير مستخدم حالياً)
-FIB_TOLERANCE: float = 0.007     # التسامح عند التحقق من مستويات فيبوناتشي
-LOOKBACK_FOR_SWINGS: int = 100 # عدد الشموع للبحث عن القمم والقيعان
+# =============================================================================
+# --- تعديل قيم المؤشرات (مثال) ---
+# يمكنك تعديل هذه القيم لتناسب استراتيجيتك بشكل أفضل
+# =============================================================================
+RSI_PERIOD: int = 14          # فترة RSI (القيمة الأصلية: 14)
+RSI_OVERSOLD: int = 35        # حد التشبع البيعي (القيمة الأصلية: 30) - رفع الحد قليلاً
+RSI_OVERBOUGHT: int = 65      # حد التشبع الشرائي (القيمة الأصلية: 70) - خفض الحد قليلاً
+EMA_PERIOD: int = 26          # فترة EMA للترند (القيمة الأصلية: 21) - زيادة الفترة لتقليل الحساسية
+SWING_ORDER: int = 5          # ترتيب تحديد القمم والقيعان
+FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
+FIB_TOLERANCE: float = 0.007
+LOOKBACK_FOR_SWINGS: int = 100
 ENTRY_ATR_PERIOD: int = 14     # فترة ATR للدخول
-ENTRY_ATR_MULTIPLIER: float = 1.2 # مضاعف ATR لتحديد الهدف ووقف الخسارة الأولي
+ENTRY_ATR_MULTIPLIER: float = 1.5 # مضاعف ATR للهدف/الوقف الأولي (القيمة الأصلية: 1.2) - زيادة المضاعف
 BOLLINGER_WINDOW: int = 20     # فترة Bollinger Bands
 BOLLINGER_STD_DEV: int = 2       # الانحراف المعياري لـ Bollinger Bands
 MACD_FAST: int = 12            # فترة MACD السريعة
@@ -81,12 +84,15 @@ SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
 TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1.5%)
-TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # مضاعف ATR للوقف المتحرك
+TRAILING_STOP_ATR_MULTIPLIER: float = 2.0        # مضاعف ATR للوقف المتحرك (القيمة الأصلية: 2.5) - تقليل المضاعف ليكون أضيق
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.2%)
 
 # شروط إضافية للإشارة
 MIN_PROFIT_MARGIN_PCT: float = 1.5 # الحد الأدنى لنسبة الربح المستهدف المئوية
 MIN_VOLUME_15M_USDT: float = 100000.0 # الحد الأدنى للسيولة في آخر 15 دقيقة بالدولار
+# =============================================================================
+# --- نهاية تعديل قيم المؤشرات ---
+# =============================================================================
 
 # متغيرات عالمية (سيتم تهيئتها لاحقًا)
 conn: Optional[psycopg2.extensions.connection] = None
@@ -131,7 +137,6 @@ def get_fear_greed_index() -> str:
         return f"{value} ({classification_ar})"
     except requests.exceptions.RequestException as e:
          logger.error(f"❌ [Indicators] خطأ في الشبكة عند جلب مؤشر الخوف والطمع: {e}")
-         # --- السطر المصحح ---
          return "N/A (خطأ في الشبكة)"
     except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
         logger.error(f"❌ [Indicators] خطأ في تنسيق بيانات مؤشر الخوف والطمع: {e}")
@@ -206,6 +211,7 @@ def calculate_ema(series: pd.Series, span: int) -> pd.Series:
 
 def get_btc_trend_4h() -> str:
     """يحسب ترند البيتكوين على فريم 4 ساعات باستخدام EMA20 وEMA50."""
+    # ملاحظة: هذه الدالة لا تزال تستخدم EMA20 و EMA50 داخليًا، قد ترغب في توحيدها مع EMA_PERIOD العام إذا أردت
     logger.debug("ℹ️ [Indicators] حساب ترند البيتكوين 4 ساعات...")
     try:
         df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10) # طلب أيام أكثر قليلاً
@@ -219,8 +225,8 @@ def get_btc_trend_4h() -> str:
              logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة NaN.")
              return "N/A (بيانات غير كافية)"
 
-        ema20 = calculate_ema(df['close'], 20).iloc[-1]
-        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        ema20 = calculate_ema(df['close'], 20).iloc[-1] # لا يزال يستخدم 20 هنا
+        ema50 = calculate_ema(df['close'], 50).iloc[-1] # لا يزال يستخدم 50 هنا
         current_close = df['close'].iloc[-1]
 
         if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
@@ -268,7 +274,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     initial_stop_loss DOUBLE PRECISION NOT NULL,
                     current_target DOUBLE PRECISION NOT NULL,
                     current_stop_loss DOUBLE PRECISION NOT NULL,
-                    r2_score DOUBLE PRECISION, -- يمثل buy_signal_score
+                    r2_score DOUBLE PRECISION, -- يمثل الآن درجة الإشارة الموزونة
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
                     hit_stop_loss BOOLEAN DEFAULT FALSE,
@@ -386,10 +392,8 @@ def convert_np_values(obj: Any) -> Any:
         return obj.tolist()
     elif isinstance(obj, (np.integer, np.int_)): # np.int_ قديم لكن لا يزال يعمل
         return int(obj)
-    # --- !!! السطر المصحح !!! ---
-    elif isinstance(obj, (np.floating, np.float64)): # Removed np.float_
+    elif isinstance(obj, (np.floating, np.float64)): # تم استخدام np.float64 مباشرة
         return float(obj)
-    # --- !!! نهاية التصحيح !!! ---
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
     elif pd.isna(obj): # معالجة NaT من Pandas أيضًا
@@ -787,6 +791,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     # التأكد من وجود عمود ATR أو حسابه
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
         logger.debug(f"ℹ️ [Indicator SuperTrend] حساب ATR (period={period}) لـ SuperTrend...")
+        # استخدام فترة ATR الخاصة بـ SuperTrend هنا
         df_st = calculate_atr_indicator(df_st, period=period)
 
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
@@ -883,7 +888,6 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
 
 
 # ---------------------- نماذج الشموع اليابانية ----------------------
-# (الدوال is_hammer, is_shooting_star, is_doji, is_spinning_top, compute_engulfing يمكن تركها كما هي أو تحسينها قليلاً للتعامل مع NaN بشكل أكثر صرامة)
 
 def is_hammer(row: pd.Series) -> int:
     """التحقق من نموذج المطرقة (إشارة صعودية)."""
@@ -956,8 +960,9 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df['Engulfing'] = engulfing_values
 
     # تجميع إشارات الشموع الإيجابية والسلبية القوية
-    df['BullishCandleSignal'] = df.apply(lambda row: 100 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
-    df['BearishCandleSignal'] = df.apply(lambda row: 100 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
+    # لاحظ: قيمة الإشارة هنا هي 100 أو 0، الوزن سيطبق لاحقًا في الاستراتيجية
+    df['BullishCandleSignal'] = df.apply(lambda row: 1 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
+    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
 
     # حذف أعمدة النماذج الفردية إذا لم تكن مطلوبة لاحقًا
     # df.drop(columns=['Hammer', 'ShootingStar', 'Doji', 'Engulfing'], inplace=True, errors='ignore')
@@ -965,7 +970,6 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------- دوال مساعدة أخرى (Elliott, Swings, Volume) ----------------------
-# (دوال detect_swings و detect_elliott_waves يمكن تركها كما هي، حيث أنها للمعلومات الإضافية فقط)
 def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """اكتشاف نقاط التأرجح (القمم والقيعان) في سلسلة زمنية (numpy array)."""
     n = len(prices)
@@ -1141,27 +1145,56 @@ def generate_performance_report() -> str:
     except Exception as e:
         logger.error(f"❌ [Report] خطأ غير متوقع في توليد تقرير الأداء: {e}", exc_info=True)
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
+
 # ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
 class ConservativeTradingStrategy:
-    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها."""
+    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
+        # الأعمدة المطلوبة لحساب المؤشرات
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume', # أساسية
             'ema_trend', 'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
-            'vwap', 'obv', 'supertrend', 'supertrend_trend', # تأكد من وجود obv هنا (وهو موجود)
+            'vwap', 'obv', 'supertrend', 'supertrend_trend',
             'BullishCandleSignal', 'BearishCandleSignal' # من نماذج الشموع
         ]
+        # الأعمدة المطلوبة لتوليد إشارة الشراء (مع OBV السابق)
         self.required_cols_buy_signal = [
             'close', 'ema_trend', 'rsi', 'atr', 'macd', 'macd_signal',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
-            # --- !!! السطر الذي تم تعديله !!! ---
-            'BullishCandleSignal', 'obv' # أضفنا 'obv' هنا
+            'BullishCandleSignal', 'obv'
         ]
-        self.min_conditions_for_signal = 7 # مثال: عدد الشروط الدنيا المطلوبة لتحقيق الإشارة
+
+        # =====================================================================
+        # --- نظام النقاط (الأوزان) لشروط الشراء ---
+        # قم بتعديل هذه الأوزان لتعكس أهمية كل شرط في استراتيجيتك
+        # =====================================================================
+        self.condition_weights = {
+            'ema_up': 2.0,          # السعر فوق EMA
+            'supertrend_up': 2.5,   # SuperTrend صاعد (أهم)
+            'above_vwap': 1.5,      # السعر فوق VWAP
+            'macd_bullish': 2.0,    # تقاطع MACD إيجابي
+            'adx_trending_bullish': 2.0, # ADX قوي و DI+ أعلى
+            'rsi_ok': 1.0,          # RSI في منطقة مقبولة (ليس شراء مفرط)
+            'bullish_candle': 1.5,  # وجود شمعة ابتلاع أو مطرقة
+            'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي (أقل أهمية)
+            'obv_rising': 2.0       # OBV يرتفع (تأكيد حجم التداول)
+        }
+        # =====================================================================
+
+        # حساب إجمالي النقاط الممكنة
+        self.total_possible_score = sum(self.condition_weights.values())
+
+        # =====================================================================
+        # --- عتبة درجة الإشارة المطلوبة (كنسبة مئوية) ---
+        # مثال: 70% تعني أن الإشارة يجب أن تحقق 70% من إجمالي النقاط الممكنة
+        # =====================================================================
+        self.min_score_threshold_pct = 0.70 # 70%
+        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
+        # =====================================================================
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
@@ -1176,7 +1209,11 @@ class ConservativeTradingStrategy:
         try:
             df_calc = df.copy()
             # ---- تسلسل حساب المؤشرات مهم (الاعتماديات) ----
-            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD) # ATR مطلوب لـ SuperTrend
+            # ATR مطلوب لـ SuperTrend و وقف الخسارة/الهدف
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+            # SuperTrend يحتاج ATR محسوب بفترته الخاصة
+            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+            # باقي المؤشرات
             df_calc['ema_trend'] = calculate_ema(df_calc['close'], EMA_PERIOD)
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
             df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
@@ -1184,9 +1221,8 @@ class ConservativeTradingStrategy:
             adx_df = calculate_adx(df_calc, ADX_PERIOD) # حساب ADX في DataFrame منفصل مؤقتًا
             df_calc = df_calc.join(adx_df) # ضم النتائج
             df_calc = calculate_vwap(df_calc)
-            df_calc = calculate_obv(df_calc) # <-- استدعاء حساب OBV موجود هنا
-            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            df_calc = detect_candlestick_patterns(df_calc)
+            df_calc = calculate_obv(df_calc)
+            df_calc = detect_candlestick_patterns(df_calc) # يحسب BullishCandleSignal
 
             # --- التحقق من الأعمدة المطلوبة بعد الحساب ---
             missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
@@ -1220,13 +1256,12 @@ class ConservativeTradingStrategy:
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        توليد إشارة شراء بناءً على DataFrame المعالج.
-        تتضمن فحص حجم التداول، هامش الربح، ترند البيتكوين، وحساب الهدف/الوقف.
+        توليد إشارة شراء بناءً على DataFrame المعالج ونظام النقاط.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
 
         # 1. التحقق من صحة DataFrame المدخل والأعمدة المطلوبة للإشارة
-        if df_processed is None or df_processed.empty or len(df_processed) < 2: # نحتاج صفين للمقارنة
+        if df_processed is None or df_processed.empty or len(df_processed) < 2: # نحتاج صفين للمقارنة (OBV)
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<2)، لا يمكن توليد إشارة.")
             return None
         missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
@@ -1242,87 +1277,74 @@ class ConservativeTradingStrategy:
         elif "N/A" in btc_trend:
              logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.")
 
-        # 3. استخلاص بيانات الشمعة الأخيرة **والسابقة** والتحقق من NaN
+        # 3. استخلاص بيانات الشمعة الأخيرة والسابقة والتحقق من NaN
         last_row = df_processed.iloc[-1]
-                 # --- !!! السطر المضاف !!! ---
         prev_row = df_processed.iloc[-2] # نحصل على الصف السابق لمقارنة OBV
 
+        # التحقق من NaN في الأعمدة المطلوبة للصف الأخير
         last_row_check = last_row[self.required_cols_buy_signal]
         if last_row_check.isnull().any():
             nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
             logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
             return None
-                 # --- !!! التحقق المضاف للـ OBV السابق !!! ---
+        # التحقق من NaN في OBV للصف السابق
         if pd.isna(prev_row['obv']):
            logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة OBV السابقة هي NaN. لا يمكن التحقق من اتجاه OBV.")
            return None
 
-
-        # 4. تطبيق شروط الشراء المحافظة
+        # 4. تطبيق شروط الشراء وحساب الدرجة بناءً على الأوزان
         signal_details = {}
-        conditions_met_count = 0
+        current_score = 0.0
 
-        # الشرط 1: تأكيد الاتجاه الصاعد (EMA + SuperTrend + VWAP)
-        cond_ema_up = last_row['close'] > last_row['ema_trend']
-        cond_supertrend_up = last_row['supertrend_trend'] == 1 # 1 يعني صاعد
-        cond_above_vwap = last_row['close'] > last_row['vwap']
-        is_uptrend_confirmed = cond_ema_up and cond_supertrend_up and cond_above_vwap
-        if is_uptrend_confirmed: conditions_met_count += 3; signal_details['Trend'] = 'Confirmed Up (EMA, Supertrend, VWAP)'
+        # التحقق من كل شرط وإضافة وزنه إلى الدرجة إذا تحقق
+        if last_row['close'] > last_row['ema_trend']:
+            current_score += self.condition_weights['ema_up']
+            signal_details['EMA'] = f'Above {EMA_PERIOD} EMA (+{self.condition_weights["ema_up"]})'
+        if last_row['supertrend_trend'] == 1:
+            current_score += self.condition_weights['supertrend_up']
+            signal_details['SuperTrend'] = f'Up Trend (+{self.condition_weights["supertrend_up"]})'
+        if last_row['close'] > last_row['vwap']:
+            current_score += self.condition_weights['above_vwap']
+            signal_details['VWAP'] = f'Above VWAP (+{self.condition_weights["above_vwap"]})'
+        if last_row['macd'] > last_row['macd_signal']:
+            current_score += self.condition_weights['macd_bullish']
+            signal_details['MACD'] = f'Bullish Cross (+{self.condition_weights["macd_bullish"]})'
+        if last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']:
+            current_score += self.condition_weights['adx_trending_bullish']
+            signal_details['ADX/DI'] = f'Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-) (+{self.condition_weights["adx_trending_bullish"]})'
+        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD: # التأكد أنه ليس شراء أو بيع مفرط
+            current_score += self.condition_weights['rsi_ok']
+            signal_details['RSI'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
+        if last_row['BullishCandleSignal'] == 1: # القيمة الآن 0 أو 1
+            current_score += self.condition_weights['bullish_candle']
+            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights["bullish_candle"]})'
+        if last_row['close'] < last_row['bb_upper']:
+            current_score += self.condition_weights['not_bb_extreme']
+            signal_details['Bollinger'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
+        if last_row['obv'] > prev_row['obv']:
+            current_score += self.condition_weights['obv_rising']
+            signal_details['OBV'] = f'Rising (+{self.condition_weights["obv_rising"]})'
 
-        # الشرط 2: تأكيد الزخم الإيجابي (MACD + ADX/DI)
-        cond_macd_bullish = last_row['macd'] > last_row['macd_signal']
-        cond_adx_trending_bullish = last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']
-        is_momentum_confirmed = cond_macd_bullish and cond_adx_trending_bullish
-        if is_momentum_confirmed: conditions_met_count += 2; signal_details['Momentum'] = f'Confirmed Bullish (MACD cross, ADX:{last_row["adx"]:.1f}, DI+ > DI-)'
-
-        # الشرط 3: RSI في منطقة صحية (ليس في منطقة شراء مفرط)
-        cond_rsi_ok = last_row['rsi'] < RSI_OVERBOUGHT # ويمكن إضافة حد أدنى مثل last_row['rsi'] > 40
-        if cond_rsi_ok: conditions_met_count += 1; signal_details['RSI'] = f'OK ({last_row["rsi"]:.1f} < {RSI_OVERBOUGHT})'
-
-        # الشرط 4: تأكيد من نموذج شمعة إيجابي (اختياري لكن مقوي)
-        cond_bullish_candle = last_row['BullishCandleSignal'] == 100
-        if cond_bullish_candle: conditions_met_count += 1; signal_details['Candle'] = 'Bullish Pattern Detected'
-
-        # الشرط 5: السعر ليس عند قمة متطرفة (أقل من نطاق بولينجر العلوي)
-        cond_not_bb_extreme = last_row['close'] < last_row['bb_upper']
-        if cond_not_bb_extreme: conditions_met_count += 1; signal_details['Bollinger'] = 'Not at Upper Band Extreme'
-
-                 # --- !!! الشرط المضاف: تأكيد OBV !!! ---
-        cond_obv_rising = last_row['obv'] > prev_row['obv']
-        if cond_obv_rising:
-             conditions_met_count += 1 # زيادة العداد عند تحقق الشرط
-             signal_details['OBV'] = 'Rising (Increasing Volume Pressure)' # إضافة تفاصيل
-        else:
-             signal_details['OBV'] = 'Not Rising'
-
-
-        # --- قرار الشراء النهائي ---
-        # المتطلبات الأساسية: اتجاه صاعد، زخم إيجابي، RSI مقبول، ليس عند قمة BB، **وOBV يرتفع**
-        core_conditions_met = (is_uptrend_confirmed and
-                               is_momentum_confirmed and
-                               cond_rsi_ok and
-                               cond_not_bb_extreme and
-                               cond_obv_rising) # --- !!! أضفنا شرط OBV هنا !!! ---
-
-        if not (core_conditions_met and conditions_met_count >= self.min_conditions_for_signal):
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق شروط الشراء (Core Met: {core_conditions_met}, OBV Rising: {cond_obv_rising}, Count: {conditions_met_count}/{self.min_conditions_for_signal}).")
+        # --- قرار الشراء النهائي بناءً على الدرجة ---
+        if current_score < self.min_signal_score:
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق درجة الإشارة المطلوبة (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}).")
             return None # لم تتحقق الشروط
 
-        # 5. فحص حجم التداول (السيولة)
+        # 5. فحص حجم التداول (السيولة) - يبقى كما هو
         volume_recent = fetch_recent_volume(self.symbol)
         if volume_recent < MIN_VOLUME_15M_USDT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
             return None
 
-        # 6. حساب الهدف ووقف الخسارة الأولي بناءً على ATR
+        # 6. حساب الهدف ووقف الخسارة الأولي بناءً على ATR - يبقى كما هو
         current_price = last_row['close']
-        current_atr = last_row.get('atr') # تم التحقق من وجوده سابقًا
+        current_atr = last_row.get('atr')
 
-        # تعديل المضاعفات بناءً على قوة ADX
+        # تعديل المضاعفات بناءً على قوة ADX (يمكن الإبقاء عليه أو تعديله)
         adx_val_sig = last_row.get('adx', 0)
         if adx_val_sig > 25: # ترند قوي
-            target_multiplier = ENTRY_ATR_MULTIPLIER * 1.2
-            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.9 # يمكن إبقاؤه أو تقليله قليلاً
+            target_multiplier = ENTRY_ATR_MULTIPLIER # استخدام القيمة المعدلة
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.8 # يمكن تعديل مضاعف الوقف للترند القوي
             signal_details['SL_Target_Mode'] = f'Strong Trend (ADX {adx_val_sig:.1f})'
         else: # ترند أضعف أو غير واضح
             target_multiplier = ENTRY_ATR_MULTIPLIER
@@ -1334,33 +1356,34 @@ class ConservativeTradingStrategy:
 
         # ضمان أن وقف الخسارة لا يساوي صفرًا أو سالبًا
         if initial_stop_loss <= 0:
-            min_sl_price = current_price * (1 - 0.10) # مثال: 10% كحد أقصى للخسارة الأولية كإجراء وقائي
-            initial_stop_loss = max(min_sl_price, current_price * 0.001) # تجنب الصفر تمامًا
+            min_sl_price = current_price * (1 - 0.10) # مثال: 10% كحد أقصى للخسارة الأولية
+            initial_stop_loss = max(min_sl_price, current_price * 0.001)
             logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss}) غير صالح. تم تعديله إلى {initial_stop_loss:.8f}")
             signal_details['Warning'] = f'Initial SL adjusted (was <= 0, set to {initial_stop_loss:.8f})'
 
-        # 7. فحص هامش الربح الأدنى
+        # 7. فحص هامش الربح الأدنى - يبقى كما هو
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
             return None
 
-        # 8. تجميع بيانات الإشارة النهائية
+        # 8. تجميع بيانات الإشارة النهائية مع الدرجة الموزونة
         signal_output = {
             'symbol': self.symbol,
-            'entry_price': float(f"{current_price:.8g}"), # استخدام .8g للحفاظ على الدقة بدون أصفار زائدة
+            'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'r2_score': float(conditions_met_count), # استخدام عدد الشروط المحققة كـ "score"
-            'strategy_name': 'Conservative_Combo',
-            'signal_details': signal_details, # القاموس يحتوي على تفاصيل الشروط (الآن يتضمن OBV)
+            'r2_score': float(f"{current_score:.2f}"), # تخزين الدرجة الموزونة هنا
+            'strategy_name': 'Conservative_Weighted', # تغيير اسم الاستراتيجية ليعكس التعديل
+            'signal_details': signal_details, # تفاصيل الشروط المحققة وأوزانها
             'volume_15m': volume_recent,
-            'trade_value': TRADE_VALUE # إضافة قيمة الصفقة للمعلومات
+            'trade_value': TRADE_VALUE,
+            'total_possible_score': float(f"{self.total_possible_score:.2f}") # إضافة إجمالي النقاط الممكنة
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {conditions_met_count}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}, OBV Rising: {cond_obv_rising}")
+        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
         return signal_output
 
 # ---------------------- دوال Telegram ----------------------
@@ -1374,17 +1397,16 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         'disable_web_page_preview': disable_web_page_preview
     }
     if reply_markup:
-        # التأكد من تحويل القيم قبل الإرسال
         try:
             payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
         except (TypeError, ValueError) as json_err:
              logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON: {json_err} - Markup: {reply_markup}")
-             return None # لا ترسل إذا فشل تحويل الأزرار
+             return None
 
     logger.debug(f"ℹ️ [Telegram] إرسال رسالة إلى {target_chat_id}...")
     try:
         response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status() # يثير خطأ لـ 4xx/5xx
+        response.raise_for_status()
         logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح إلى {target_chat_id}.")
         return response.json()
     except requests.exceptions.Timeout:
@@ -1406,7 +1428,7 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
          return None
 
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
-    """تنسيق وإرسال تنبيه إشارة تداول جديدة إلى Telegram."""
+    """تنسيق وإرسال تنبيه إشارة تداول جديدة إلى Telegram مع عرض الدرجة."""
     logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه للإشارة: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
@@ -1414,32 +1436,31 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         stop_loss_price = float(signal_data['initial_stop_loss'])
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
-        signal_score = signal_data.get('r2_score', 0.0) # Score من الاستراتيجية
+        signal_score = signal_data.get('r2_score', 0.0) # الدرجة الموزونة
+        total_possible_score = signal_data.get('total_possible_score', 10.0) # القيمة الافتراضية قد تحتاج للتعديل
         volume_15m = signal_data.get('volume_15m', 0.0)
-        trade_value_signal = signal_data.get('trade_value', TRADE_VALUE) # استخدام قيمة الصفقة المحددة للإشارة إن وجدت
+        trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
 
-        # حساب النسب والأرباح/الخسائر المتوقعة
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         profit_usdt = trade_value_signal * (profit_pct / 100)
         loss_usdt = abs(trade_value_signal * (loss_pct / 100))
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # تنسيق آمن للرمز لتجنب مشاكل Markdown
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
-        # جلب معلومات إضافية للسياق
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
-        # بناء الرسالة
+        # بناء الرسالة مع الدرجة الموزونة
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (Long)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (Score):** {signal_score:.1f} / {ConservativeTradingStrategy(symbol).min_conditions_for_signal + 2} (مثال)\n" # يمكن تعديل القيمة القصوى
+            # --- تعديل لعرض الدرجة ---
+            f"📊 **قوة الإشارة (Score):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
             f"💧 **سيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
@@ -1452,7 +1473,6 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"⏰ {timestamp_str}"
         )
 
-        # إضافة زر لعرض التقرير
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}]
@@ -1525,12 +1545,11 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
         return # لا ترسل شيئًا إذا كان النوع غير معروف
 
     if message:
-        # لا نضيف أزرار هنا حاليًا، يمكن إضافتها لاحقًا إذا لزم الأمر
         send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
 
 # ---------------------- دوال قاعدة البيانات (إدراج وتحديث) ----------------------
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    """إدراج إشارة جديدة في جدول signals."""
+    """إدراج إشارة جديدة في جدول signals مع الدرجة الموزونة."""
     if not check_db_connection() or not conn:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة {signal.get('symbol', 'N/A')} بسبب مشكلة في اتصال DB.")
         return False
@@ -1538,11 +1557,10 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     symbol = signal.get('symbol', 'N/A')
     logger.debug(f"ℹ️ [DB Insert] محاولة إدراج إشارة للزوج {symbol}...")
     try:
-        # التأكد من تحويل قيم Numpy وأنواع أخرى قبل التحويل لـ JSON أو الإدراج
         signal_prepared = convert_np_values(signal)
+        # تحويل تفاصيل الإشارة إلى JSON (تأكد من أنها لا تحتوي على أنواع numpy)
         signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
 
-        # استخدام cursor مع context manager
         with conn.cursor() as cur_ins:
             insert_query = sql.SQL("""
                 INSERT INTO signals
@@ -1555,20 +1573,20 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared['entry_price'],
                 signal_prepared['initial_target'],
                 signal_prepared['initial_stop_loss'],
-                signal_prepared['current_target'], # عند الإنشاء = الأولي
-                signal_prepared['current_stop_loss'],# عند الإنشاء = الأولي
-                signal_prepared.get('r2_score'),
+                signal_prepared['current_target'],
+                signal_prepared['current_stop_loss'],
+                signal_prepared.get('r2_score'), # الدرجة الموزونة
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price يبدأ بـ NULL
+                None, # last_trailing_update_price
                 signal_prepared.get('volume_15m')
             ))
-        conn.commit() # Commit العملية
-        logger.info(f"✅ [DB Insert] تم إدراج إشارة للزوج {symbol} في قاعدة البيانات.")
+        conn.commit()
+        logger.info(f"✅ [DB Insert] تم إدراج إشارة للزوج {symbol} في قاعدة البيانات (Score: {signal_prepared.get('r2_score')}).")
         return True
     except psycopg2.Error as db_err:
         logger.error(f"❌ [DB Insert] خطأ في قاعدة البيانات عند إدراج الإشارة للزوج {symbol}: {db_err}")
-        if conn: conn.rollback() # تراجع في حالة الخطأ
+        if conn: conn.rollback()
         return False
     except (TypeError, ValueError) as convert_err:
          logger.error(f"❌ [DB Insert] خطأ تحويل بيانات الإشارة قبل الإدراج للزوج {symbol}: {convert_err} - Signal Data: {signal}")
@@ -1666,22 +1684,22 @@ def track_signals() -> None:
                         # أ. تفعيل الوقف المتحرك
                         if not is_trailing_active and current_price >= activation_threshold_price:
                             logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر {current_price:.8g} وصل لعتبة تفعيل الوقف ({activation_threshold_price:.8g}). جلب ATR...")
+                            # استخدام الإطار الزمني المحدد للتتبع
                             df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                             if df_atr is not None and not df_atr.empty:
+                                # استخدام فترة ATR المخصصة للدخول/التتبع
                                 df_atr = calculate_atr_indicator(df_atr, period=ENTRY_ATR_PERIOD)
                                 if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         # نضمن أنه أعلى من الوقف الأولي وأعلى قليلاً من سعر الدخول
-                                         # استخدام max لضمان عدم انخفاض الوقف عن الوقف الحالي وأنه مربح قليلاً
                                          new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
 
                                          if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                             update_params = (new_stop_loss, current_price, signal_id)
                                             log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): تفعيل الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val:.8g}. الوقف الجديد: {new_stop_loss:.8g}"
-                                            notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss})
+                                            notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
                                             update_executed = True
                                          else:
                                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({new_stop_loss:.8g}) ليس أعلى من الوقف الحالي ({current_stop_loss:.8g}). لن يتم التفعيل.")
@@ -1701,13 +1719,12 @@ def track_signals() -> None:
                                          current_atr_val_update = df_recent['atr'].iloc[-1]
                                          if current_atr_val_update > 0:
                                              potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
-                                             # فقط نحدث إذا كان الوقف الجديد المحسوب أعلى من الوقف الحالي
                                              if potential_new_stop_loss > current_stop_loss:
                                                 new_stop_loss_update = potential_new_stop_loss
                                                 update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                                 update_params = (new_stop_loss_update, current_price, signal_id)
                                                 log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): تحديث الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val_update:.8g}. القديم={current_stop_loss:.8g}, الجديد: {new_stop_loss_update:.8g}"
-                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
+                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100})
                                                 update_executed = True
                                              else:
                                                  logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8g}) ليس أعلى من الحالي ({current_stop_loss:.8g}). لن يتم التحديث.")
@@ -1718,42 +1735,39 @@ def track_signals() -> None:
                     # --- تنفيذ التحديث في قاعدة البيانات وإرسال التنبيه ---
                     if update_executed and update_query:
                         try:
-                             # استخدام cursor جديد للتحديث داخل الحلقة
                              with conn.cursor() as update_cur:
                                   update_cur.execute(update_query, update_params)
-                             conn.commit() # Commit بعد كل تحديث ناجح
+                             conn.commit()
                              if log_message: logger.info(log_message)
-                             # إرسال التنبيه المحسّن فقط إذا تم التحديث بنجاح
                              if notification_details.get('type'):
                                 send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
                             logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ DB أثناء التحديث: {db_err}")
-                            if conn: conn.rollback() # تراجع عن التحديث الفاشل
+                            if conn: conn.rollback()
                         except Exception as exec_err:
                             logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار: {exec_err}", exc_info=True)
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}")
-                    continue # تخطي هذه الإشارة
+                    continue
                 except Exception as inner_loop_err:
                      logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
-                     continue # تخطي هذه الإشارة
+                     continue
 
             if active_signals_summary:
                 logger.debug(f"ℹ️ [Tracker] حالة نهاية الدورة ({processed_in_cycle} معالج): {'; '.join(active_signals_summary)}")
 
-            # تقليل مدة الانتظار بين الدورات لتتبع أسرع وأكثر استجابة
-            time.sleep(3) # تقليل الانتظار إلى 3 ثواني
+            time.sleep(3) # الانتظار بين دورات التتبع
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] خطأ قاعدة بيانات في دورة التتبع الرئيسية: {db_cycle_err}. محاولة إعادة الاتصال...")
              if conn: conn.rollback()
-             time.sleep(30) # انتظار أطول عند خطأ DB
-             check_db_connection() # محاولة إعادة الاتصال
+             time.sleep(30)
+             check_db_connection()
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] خطأ غير متوقع في دورة تتبع الإشارات: {cycle_err}", exc_info=True)
-            time.sleep(30) # انتظار أطول عند خطأ غير متوقع
+            time.sleep(30)
 
 
 # ---------------------- خدمة Flask (اختياري للـ Webhook) ----------------------
@@ -1763,9 +1777,8 @@ app = Flask(__name__)
 def home() -> Response:
     """صفحة رئيسية بسيطة لإظهار أن البوت يعمل."""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # التحقق من وجود الـ threads قبل فحص حالتها
-    ws_alive = ws_thread.is_alive() if ws_thread else False
-    tracker_alive = tracker_thread.is_alive() if tracker_thread else False
+    ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
+    tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
     status = "running" if ws_alive and tracker_alive else "partially running"
     return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
 
@@ -1793,7 +1806,6 @@ def webhook() -> Tuple[str, int]:
             message_info = callback_query.get('message')
             if not message_info or not callback_data:
                  logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing message or data.")
-                 # Answer callback query even if invalid to remove loading indicator on button
                  try:
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
@@ -1809,27 +1821,19 @@ def webhook() -> Tuple[str, int]:
 
             logger.info(f"ℹ️ [Flask] Received callback query: Data='{callback_data}', User={username}({user_id}), Chat={chat_id_callback}")
 
-            # إرسال تأكيد الاستلام بسرعة (AnswerCallbackQuery)
+            # إرسال تأكيد الاستلام بسرعة
             try:
                 ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                 requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
             except Exception as ack_err:
-                 # هذا ليس خطأ فادحًا، فقط سجل التحذير
                  logger.warning(f"⚠️ [Flask] Failed to acknowledge callback query {callback_id}: {ack_err}")
 
             # معالجة البيانات المستلمة من الزر
             if callback_data == "get_report":
-                # تشغيل توليد التقرير وإرساله في خيط منفصل لتجنب حظر Webhook
                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown'))
                 report_thread.start()
-            # --- يمكن إضافة معالجة لأنواع callback_data أخرى هنا ---
-            # elif callback_data.startswith("signal_details_"):
-            #    signal_id_to_show = callback_data.split("_")[-1]
-            #    # ... كود لجلب تفاصيل الإشارة من DB وإرسالها ...
             else:
                 logger.warning(f"⚠️ [Flask] Received unhandled callback data: '{callback_data}'")
-                # يمكن إرسال رسالة للمستخدم بأن الزر غير معروف
-                # send_telegram_message(chat_id_callback, f"الزر '{callback_data}' غير معالج حاليًا.")
 
 
         # معالجة الرسائل النصية (الأوامر)
@@ -1849,7 +1853,7 @@ def webhook() -> Tuple[str, int]:
 
             logger.info(f"ℹ️ [Flask] Received message: Text='{text_msg}', User={username}({user_id}), Chat={chat_id_msg}")
 
-            # معالجة الأوامر المعروفة (تشغيلها في خيوط منفصلة أيضًا)
+            # معالجة الأوامر المعروفة
             if text_msg.lower() == '/report':
                  report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
                  report_thread.start()
@@ -1857,18 +1861,12 @@ def webhook() -> Tuple[str, int]:
                  status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
                  status_thread.start()
 
-            # --- يمكن إضافة أوامر أخرى هنا ---
-            # elif text_msg.lower() == '/help':
-                 #    send_telegram_message(chat_id_msg, "الأوامر المتاحة:\n/report - عرض تقرير الأداء\n/status - عرض حالة البوت")
-
         else:
             logger.debug("ℹ️ [Flask] Received webhook data without 'callback_query' or 'message'.")
 
-        return "OK", 200 # دائماً أرجع 200 OK لتليجرام إذا تمت معالجة الطلب (حتى لو لم نفعل شيئًا)
+        return "OK", 200
     except Exception as e:
-         # لا ترسل تفاصيل الخطأ إلى تليجرام مباشرة لأسباب أمنية
          logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
-         # أرجع خطأ عام للخادم
          return "Internal Server Error", 500
 
 def handle_status_command(chat_id_msg: int) -> None:
@@ -1888,8 +1886,9 @@ def handle_status_command(chat_id_msg: int) -> None:
                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
-        ws_status = 'نشط ✅' if ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
-        tracker_status = 'نشط ✅' if tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
+        # التحقق من وجود المتغيرات قبل الوصول إليها
+        ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
+        tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
         final_status_msg = (
             f"🤖 *حالة البوت:*\n"
             f"- تتبع الأسعار (WS): {ws_status}\n"
@@ -1911,7 +1910,6 @@ def handle_status_command(chat_id_msg: int) -> None:
 
     except Exception as status_err:
         logger.error(f"❌ [Flask Status] Error getting/editing status details for chat {chat_id_msg}: {status_err}", exc_info=True)
-        # محاولة إرسال رسالة خطأ جديدة إذا فشل التعديل
         send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
 
 
@@ -1922,19 +1920,15 @@ def run_flask() -> None:
         return
 
     host = "0.0.0.0"
-    port = 10000 # أو يمكن جعله متغير بيئة PORT
+    port = int(config('PORT', default=10000)) # استخدام متغير بيئة PORT أو قيمة افتراضية
     logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
     try:
-        # محاولة استخدام Waitress (خادم WSGI جيد للإنتاج على Windows و Linux)
         from waitress import serve
         logger.info("✅ [Flask] Using 'waitress' server.")
-        serve(app, host=host, port=port, threads=6) # زيادة عدد threads قليلاً
+        serve(app, host=host, port=port, threads=6)
     except ImportError:
          logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (NOT recommended for production).")
-         # تحذير: خادم التطوير غير مناسب للإنتاج!
          try:
-             # تشغيل خادم التطوير مع السماح بإعادة التحميل (للتطوير فقط)
-             # app.run(host=host, port=port, debug=True, use_reloader=False) # debug=True يتسبب في مشاكل مع الخيوط أحيانًا
              app.run(host=host, port=port)
          except Exception as flask_run_err:
               logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
@@ -1944,14 +1938,13 @@ def run_flask() -> None:
 # ---------------------- الحلقة الرئيسية ودالة الفحص ----------------------
 def main_loop() -> None:
     """الحلقة الرئيسية لفحص الأزواج وتوليد الإشارات."""
-    # قراءة وتحقق من الرموز مرة واحدة عند البدء
     symbols_to_scan = get_crypto_symbols()
     if not symbols_to_scan:
         logger.critical("❌ [Main] لم يتم تحميل أو التحقق من أي رموز صالحة. لا يمكن المتابعة.")
-        return # الخروج من الحلقة إذا لم تكن هناك رموز
+        return
 
     logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمز صالح للفحص.")
-    last_full_scan_time = time.time() # لتتبع مدة الفحص
+    last_full_scan_time = time.time()
 
     while True:
         try:
@@ -1980,50 +1973,45 @@ def main_loop() -> None:
             logger.info(f"ℹ️ [Main] الإشارات المفتوحة حاليًا: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"⚠️ [Main] تم الوصول للحد الأقصى للإشارات المفتوحة. الانتظار...")
-                time.sleep(60) # انتظار دقيقة قبل إعادة التحقق
+                time.sleep(60)
                 continue
 
-            # 2. المرور على قائمة الرموز **الصالحة** وفحصها
+            # 2. المرور على قائمة الرموز وفحصها
             processed_in_loop = 0
             signals_generated_in_loop = 0
             slots_available = MAX_OPEN_TRADES - open_count
 
             for symbol in symbols_to_scan:
-                 # التحقق من الحد الأقصى داخل الحلقة (قد يتغير بسبب إغلاق إشارة بواسطة Tracker)
                  if slots_available <= 0:
                       logger.info(f"ℹ️ [Main] تم الوصول للحد الأقصى ({MAX_OPEN_TRADES}) أثناء الفحص. إيقاف فحص الرموز لهذه الدورة.")
-                      break # الخروج من حلقة فحص الرموز
+                      break
 
                  processed_in_loop += 1
                  logger.debug(f"🔍 [Main] فحص {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
 
                  try:
-                    # أ. التحقق مما إذا كان هناك إشارة مفتوحة بالفعل لهذا الرمز
+                    # أ. التحقق من وجود إشارة مفتوحة بالفعل لهذا الرمز
                     with conn.cursor() as symbol_cur:
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone():
-                            # logger.debug(f"ℹ️ [Main] تخطي {symbol}، توجد إشارة مفتوحة بالفعل.")
-                            continue # الانتقال للرمز التالي
+                            continue
 
                     # ب. جلب البيانات التاريخية
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
-                        # logger.warning(f"⚠️ [Main] لا توجد بيانات كافية أو فشل جلبها للرمز {symbol}.")
-                        continue # الانتقال للرمز التالي
+                        continue
 
                     # ج. تطبيق الاستراتيجية وتوليد الإشارة
-                    strategy = ConservativeTradingStrategy(symbol)
+                    strategy = ConservativeTradingStrategy(symbol) # استخدام الاستراتيجية المعدلة
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
-                        # logger.warning(f"⚠️ [Main] فشل حساب المؤشرات للرمز {symbol}.")
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
-                    # د. إدراج الإشارة وإرسال التنبيه إذا تم توليدها بنجاح
+                    # د. إدراج الإشارة وإرسال التنبيه
                     if potential_signal:
-                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي وإدراج...")
-                        # إعادة التحقق من الحد الأقصى قبل الإدراج مباشرة
+                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}) التحقق النهائي وإدراج...")
                         with conn.cursor() as final_check_cur:
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
@@ -2032,13 +2020,13 @@ def main_loop() -> None:
                                  if insert_signal_into_db(potential_signal):
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1
-                                     slots_available -= 1 # تقليل عدد الأماكن المتاحة
-                                     time.sleep(2) # فاصل بسيط بين إرسال الإشارات لتجنب قيود Telegram API
+                                     slots_available -= 1
+                                     time.sleep(2)
                                  else:
                                      logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
                              else:
                                  logger.warning(f"⚠️ [Main] تم الوصول للحد الأقصى ({final_open_count}) قبل إدراج إشارة {symbol}. تم تجاهل الإشارة.")
-                                 break # الخروج من فحص الرموز لأن الحد الأقصى وصل
+                                 break
 
                  except psycopg2.Error as db_loop_err:
                       logger.error(f"❌ [Main] خطأ DB أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال للتالي...")
@@ -2046,28 +2034,26 @@ def main_loop() -> None:
                       continue
                  except Exception as symbol_proc_err:
                       logger.error(f"❌ [Main] خطأ عام أثناء معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
-                      continue # الانتقال للرمز التالي
+                      continue
 
-                 # فاصل قصير جدًا بين فحص كل رمز لتخفيف العبء على واجهة برمجة التطبيقات (API)
-                 time.sleep(0.3) # تقليل الفاصل قليلاً
+                 time.sleep(0.3)
 
             # 3. انتظار قبل بدء الدورة التالية
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] انتهاء دورة الفحص. الإشارات المولدة: {signals_generated_in_loop}. مدة الفحص: {scan_duration:.2f} ثانية.")
-            # الانتظار ليكتمل الوقت إلى 5 دقائق (300 ثانية) أو دقيقة واحدة على الأقل
-            wait_time = max(60, 300 - scan_duration)
+            wait_time = max(60, 300 - scan_duration) # انتظار 5 دقائق إجمالاً أو دقيقة على الأقل
             logger.info(f"⏳ [Main] الانتظار {wait_time:.1f} ثانية للدورة التالية...")
             time.sleep(wait_time)
 
         except KeyboardInterrupt:
              logger.info("🛑 [Main] تم استقبال طلب إيقاف (KeyboardInterrupt). إغلاق...")
-             break # الخروج من الحلقة الرئيسية
+             break
         except psycopg2.Error as db_main_err:
              logger.error(f"❌ [Main] خطأ فادح في قاعدة البيانات في الحلقة الرئيسية: {db_main_err}. محاولة إعادة الاتصال...")
              if conn: conn.rollback()
              time.sleep(60)
              try:
-                 init_db() # محاولة إعادة تهيئة الاتصال
+                 init_db()
              except Exception as recon_err:
                  logger.critical(f"❌ [Main] فشلت محاولة إعادة الاتصال بقاعدة البيانات: {recon_err}. الخروج...")
                  break
@@ -2086,7 +2072,6 @@ def cleanup_resources() -> None:
             logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
         except Exception as close_err:
             logger.error(f"⚠️ [DB] خطأ أثناء إغلاق اتصال قاعدة البيانات: {close_err}")
-    # يمكن إضافة إيقاف لـ WebSocket Manager هنا إذا لزم الأمر، لكن daemon=True يجعله ينتهي مع البرنامج الرئيسي
     logger.info("✅ [Cleanup] تم الانتهاء من تنظيف الموارد.")
 
 
@@ -2095,20 +2080,19 @@ if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل بوت إشارات التداول...")
     logger.info(f"Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | UTC Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # تهيئة Threads لتكون متاحة كمتغيرات عامة للتحقق من حالتها
+    # تهيئة Threads لتكون متاحة كمتغيرات عامة
     ws_thread: Optional[Thread] = None
     tracker_thread: Optional[Thread] = None
     flask_thread: Optional[Thread] = None
 
     try:
-        # 1. تهيئة قاعدة البيانات أولاً (حاسمة)
+        # 1. تهيئة قاعدة البيانات أولاً
         init_db()
 
-        # 2. بدء WebSocket Ticker في خيط منفصل
+        # 2. بدء WebSocket Ticker
         ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
         ws_thread.start()
         logger.info("✅ [Main] تم بدء خيط WebSocket Ticker.")
-        # انتظر قليلاً للسماح لـ WebSocket بالاتصال وتلقي بعض البيانات الأولية
         logger.info("ℹ️ [Main] الانتظار 5 ثوانٍ لتهيئة WebSocket...")
         time.sleep(5)
         if not ticker_data:
@@ -2117,12 +2101,12 @@ if __name__ == "__main__":
              logger.info(f"✅ [Main] تم استلام بيانات أولية من WebSocket لـ {len(ticker_data)} رمز.")
 
 
-        # 3. بدء متتبع الإشارات في خيط منفصل
+        # 3. بدء متتبع الإشارات
         tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
         tracker_thread.start()
         logger.info("✅ [Main] تم بدء خيط تتبع الإشارات.")
 
-        # 4. بدء خادم Flask (إذا تم تكوين Webhook) في خيط منفصل
+        # 4. بدء خادم Flask (إذا تم تكوين Webhook)
         if WEBHOOK_URL:
             flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
             flask_thread.start()
@@ -2130,16 +2114,14 @@ if __name__ == "__main__":
         else:
              logger.info("ℹ️ [Main] لم يتم تكوين Webhook URL، لن يتم بدء خادم Flask.")
 
-        # 5. بدء الحلقة الرئيسية في الخيط الرئيسي
+        # 5. بدء الحلقة الرئيسية
         main_loop()
 
     except Exception as startup_err:
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True)
     finally:
         logger.info("🛑 [Main] البرنامج في طور الإغلاق...")
-        # يمكنك هنا إرسال رسالة تليجرام لإعلامك بالإغلاق (إذا كان الاتصال يعمل)
-        # send_telegram_message(CHAT_ID, "⚠️ تنبيه: بوت التداول قيد الإيقاف الآن.")
+        # send_telegram_message(CHAT_ID, "⚠️ تنبيه: بوت التداول قيد الإيقاف الآن.") # يمكن إلغاء التعليق لإرسال تنبيه عند الإيقاف
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
-        # تأكد من إنهاء العملية بالكامل
-        os._exit(0) # طريقة لضمان الخروج حتى لو كانت هناك خيوط daemon عالقة
+        os._exit(0)
