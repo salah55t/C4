@@ -81,7 +81,7 @@ SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
 SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # نسبة الربح لتفعيل الوقف المتحرك (1.5%)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.02 د # نسبة الربح لتفعيل الوقف المتحرك (1.5%)
 TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # مضاعف ATR للوقف المتحرك (القيمة الأصلية: 2.5) - تقليل المضاعف ليكون أضيق
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.2%)
 
