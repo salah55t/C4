@@ -299,13 +299,12 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             missing_columns = required_columns - existing_columns
 
             if missing_columns:
-                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}.")
+                logger.warning(f"⚠️ [DB] الأعمدة التالية مفقودة في جدول 'signals': {missing_columns}. محاولة إضافتها...")
                 # (الكود الأصلي لإضافة الأعمدة كان جيدًا، يمكن الاحتفاظ به أو تحسينه هنا إذا لزم الأمر)
                 # ... (يمكن إضافة كود ALTER TABLE هنا إذا كنت تتوقع تغييرات مستقبلية) ...
-                logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.") # This is the corrected line's indentation
+                logger.warning("⚠️ [DB] لم يتم تنفيذ إضافة الأعمدة المفقودة تلقائيًا في هذا الإصدار المحسن. يرجى التحقق يدويًا إذا لزم الأمر.")
             else:
                 logger.info("✅ [DB] جميع الأعمدة المطلوبة موجودة في جدول 'signals'.")
-
 
             # --- إنشاء جدول market_dominance (إذا لم يكن موجودًا) ---
             logger.info("[DB] التحقق/إنشاء جدول 'market_dominance'...")
@@ -362,8 +361,8 @@ def check_db_connection() -> bool:
         logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
         try:
              init_db()
-            return True
-    except Exception as recon_err:
+             return True
+        except Exception as recon_err:
             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
             return False
     except Exception as e:
@@ -434,7 +433,7 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
     if not raw_symbols:
          logger.warning("⚠️ [Data] القائمة الأولية للرموز فارغة.")
-        return []
+         return []
 
     # --- التحقق من الرموز مقابل Binance API ---
     if not client:
@@ -511,7 +510,7 @@ def run_ticker_socket_manager() -> None:
     """تشغيل وإدارة اتصال WebSocket لـ mini-ticker."""
     while True:
         try:
-           logger.info("ℹ️ [WS] بدء تشغيل WebSocket Manager لأسعار Ticker...")
+            logger.info("ℹ️ [WS] بدء تشغيل WebSocket Manager لأسعار Ticker...")
             twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
             twm.start() # بدء المدير
 
@@ -1631,7 +1630,7 @@ def track_signals() -> None:
 
                     if current_price is None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يتوفر سعر حالي في بيانات Ticker.")
-                        continue # تخطي هذه الإشارة في هذه الدورة
+                         continue # تخطي هذه الإشارة في هذه الدورة
 
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} Trail={'On' if is_trailing_active else 'Off'}")
 
@@ -1674,17 +1673,17 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                        # نضمن أنه أعلى من الوقف الأولي وأعلى قليلاً من سعر الدخول
-                                        # استخدام max لضمان عدم انخفاض الوقف عن الوقف الحالي وأنه مربح قليلاً
-                                        new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
+                                         # نضمن أنه أعلى من الوقف الأولي وأعلى قليلاً من سعر الدخول
+                                         # استخدام max لضمان عدم انخفاض الوقف عن الوقف الحالي وأنه مربح قليلاً
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
 
-                                        if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
+                                         if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                             update_params = (new_stop_loss, current_price, signal_id)
                                             log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): تفعيل الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val:.8g}. الوقف الجديد: {new_stop_loss:.8g}"
                                             notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss})
                                             update_executed = True
-                                        else:
+                                         else:
                                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({new_stop_loss:.8g}) ليس أعلى من الوقف الحالي ({current_stop_loss:.8g}). لن يتم التفعيل.")
                                     else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val}) لتفعيل الوقف المتحرك.")
                                 else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتفعيل الوقف المتحرك.")
@@ -1700,19 +1699,19 @@ def track_signals() -> None:
                                     df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD)
                                     if not df_recent.empty and 'atr' in df_recent.columns and pd.notna(df_recent['atr'].iloc[-1]):
                                          current_atr_val_update = df_recent['atr'].iloc[-1]
-                                        if current_atr_val_update > 0:
+                                         if current_atr_val_update > 0:
                                              potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
-                                            # فقط نحدث إذا كان الوقف الجديد المحسوب أعلى من الوقف الحالي
-                                            if potential_new_stop_loss > current_stop_loss:
+                                             # فقط نحدث إذا كان الوقف الجديد المحسوب أعلى من الوقف الحالي
+                                             if potential_new_stop_loss > current_stop_loss:
                                                 new_stop_loss_update = potential_new_stop_loss
                                                 update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                                 update_params = (new_stop_loss_update, current_price, signal_id)
                                                 log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): تحديث الوقف المتحرك. السعر={current_price:.8g}, ATR={current_atr_val_update:.8g}. القديم={current_stop_loss:.8g}, الجديد: {new_stop_loss_update:.8g}"
                                                 notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
                                                 update_executed = True
-                                            else:
+                                             else:
                                                  logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): الوقف المتحرك المحسوب ({potential_new_stop_loss:.8g}) ليس أعلى من الحالي ({current_stop_loss:.8g}). لن يتم التحديث.")
-                                        else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val_update}) لتحديث الوقف.")
+                                         else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): قيمة ATR غير صالحة ({current_atr_val_update}) لتحديث الوقف.")
                                     else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب ATR لتحديث الوقف.")
                                 else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب بيانات لحساب ATR لتحديث الوقف.")
 
@@ -1739,7 +1738,7 @@ def track_signals() -> None:
                     continue # تخطي هذه الإشارة
                 except Exception as inner_loop_err:
                      logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع في معالجة الإشارة: {inner_loop_err}", exc_info=True)
-                    continue # تخطي هذه الإشارة
+                     continue # تخطي هذه الإشارة
 
             if active_signals_summary:
                 logger.debug(f"ℹ️ [Tracker] حالة نهاية الدورة ({processed_in_cycle} معالج): {'; '.join(active_signals_summary)}")
@@ -1879,7 +1878,7 @@ def handle_status_command(chat_id_msg: int) -> None:
     msg_sent = send_telegram_message(chat_id_msg, status_msg)
     if not (msg_sent and msg_sent.get('ok')):
          logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
-        return
+         return
 
     message_id_to_edit = msg_sent['result']['message_id']
     try:
