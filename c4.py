@@ -1148,42 +1148,48 @@ def generate_performance_report() -> str:
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
 
 # ---------------------- استراتيجية التداول المحافظة (المعدلة) ----------------------
-class ConservativeTradingStrategy:
+# ---------------------- استراتيجية التداول (المعدلة لتقاطع EMA) ----------------------
+class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
     """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # الأعمدة المطلوبة لحساب المؤشرات
+        # الأعمدة المطلوبة لحساب المؤشرات (تحديث لـ EMA)
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume', # أساسية
-            'ema_trend', 'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+            # 'ema_trend', # تم الإزالة
+            'ema_13', 'ema_34', # تمت الإضافة
+            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
             'vwap', 'obv', 'supertrend', 'supertrend_trend',
-            'BullishCandleSignal', 'BearishCandleSignal' # من نماذج الشموع
-        ]
-        # الأعمدة المطلوبة لتوليد إشارة الشراء (مع OBV السابق)
+            'BullishCandleSignal', 'BearishCandleSignal'
+        ] # [cite: 135]
+        # الأعمدة المطلوبة لتوليد إشارة الشراء (تحديث لـ EMA)
         self.required_cols_buy_signal = [
-            'close', 'ema_trend', 'rsi', 'atr', 'macd', 'macd_signal',
+            'close',
+            # 'ema_trend', # تم الإزالة
+            'ema_13', 'ema_34', # تمت الإضافة
+            'rsi', 'atr', 'macd', 'macd_signal',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
             'BullishCandleSignal', 'obv'
-        ]
+        ] # [cite: 136]
 
         # =====================================================================
-        # --- نظام النقاط (الأوزان) لشروط الشراء ---
-        # قم بتعديل هذه الأوزان لتعكس أهمية كل شرط في استراتيجيتك
+        # --- نظام النقاط (الأوزان) لشروط الشراء (تحديث لتقاطع EMA) ---
         # =====================================================================
         self.condition_weights = {
-            'ema_up': 2.0,          # السعر فوق EMA
+            # 'ema_up': 2.0,          # تم الإزالة
+            'ema_cross_bullish': 2.5, # شرط تقاطع EMA إيجابي (وزن جديد، يمكن تعديله)
             'supertrend_up': 2.5,   # SuperTrend صاعد (أهم)
             'above_vwap': 1.5,      # السعر فوق VWAP
             'macd_bullish': 2.0,    # تقاطع MACD إيجابي
-            'adx_trending_bullish': 2.0, # ADX قوي و DI+ أعلى
+            'adx_trending_bullish': 1.5, # ADX قوي و DI+ أعلى (يمكن تعديل الوزن)
             'rsi_ok': 1.0,          # RSI في منطقة مقبولة (ليس شراء مفرط)
             'bullish_candle': 1.5,  # وجود شمعة ابتلاع أو مطرقة
             'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي (أقل أهمية)
             'obv_rising': 2.0       # OBV يرتفع (تأكيد حجم التداول)
-        }
+        } # [cite: 137, 139]
         # =====================================================================
 
         # حساب إجمالي النقاط الممكنة
@@ -1191,17 +1197,16 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- عتبة درجة الإشارة المطلوبة (كنسبة مئوية) ---
-        # مثال: 70% تعني أن الإشارة يجب أن تحقق 70% من إجمالي النقاط الممكنة
         # =====================================================================
-        self.min_score_threshold_pct = 0.70 # 70%
+        self.min_score_threshold_pct = 0.70 # 70% (يمكن تعديلها)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
-        # =====================================================================
+        # ===================================================================== # [cite: 140]
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
-        # الحد الأدنى لعدد الصفوف يعتمد على أطول فترة مطلوبة للمؤشرات
-        min_len_required = max(EMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS) + 5 # إضافة هامش
+        # تحديث الحد الأدنى لعدد الصفوف
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS) + 5
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -1209,183 +1214,195 @@ class ConservativeTradingStrategy:
 
         try:
             df_calc = df.copy()
-            # ---- تسلسل حساب المؤشرات مهم (الاعتماديات) ----
             # ATR مطلوب لـ SuperTrend و وقف الخسارة/الهدف
-            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD) # [cite: 142]
             # SuperTrend يحتاج ATR محسوب بفترته الخاصة
-            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            # باقي المؤشرات
-            df_calc['ema_trend'] = calculate_ema(df_calc['close'], EMA_PERIOD)
-            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-            adx_df = calculate_adx(df_calc, ADX_PERIOD) # حساب ADX في DataFrame منفصل مؤقتًا
-            df_calc = df_calc.join(adx_df) # ضم النتائج
-            df_calc = calculate_vwap(df_calc)
-            df_calc = calculate_obv(df_calc)
-            df_calc = detect_candlestick_patterns(df_calc) # يحسب BullishCandleSignal
+            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER) # [cite: 142]
 
-            # --- التحقق من الأعمدة المطلوبة بعد الحساب ---
+            # --- تعديل حساب EMA ---
+            # df_calc['ema_trend'] = calculate_ema(df_calc['close'], EMA_PERIOD) # تم الإزالة
+            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD) # إضافة EMA 13
+            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD) # إضافة EMA 34
+            # ----------------------
+
+            # باقي المؤشرات
+            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD) # [cite: 143]
+            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV) # [cite: 143]
+            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL) # [cite: 143]
+            adx_df = calculate_adx(df_calc, ADX_PERIOD)
+            df_calc = df_calc.join(adx_df) # [cite: 143]
+            df_calc = calculate_vwap(df_calc) # [cite: 143]
+            df_calc = calculate_obv(df_calc) # [cite: 144]
+            df_calc = detect_candlestick_patterns(df_calc) # [cite: 144]
+
+            # التحقق من الأعمدة المطلوبة بعد الحساب
             missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
             if missing_cols:
-                 logger.error(f"❌ [Strategy {self.symbol}] أعمدة مؤشرات مطلوبة مفقودة بعد الحساب: {missing_cols}")
-                 logger.debug(f"Columns present: {df_calc.columns.tolist()}")
+                 logger.error(f"❌ [Strategy {self.symbol}] أعمدة مؤشرات مطلوبة مفقودة بعد الحساب: {missing_cols}") # [cite: 144, 145]
+                 logger.debug(f"Columns present: {df_calc.columns.tolist()}") # [cite: 145]
                  return None
 
-            # --- التعامل مع NaN بعد حساب *كل* المؤشرات ---
+            # التعامل مع NaN بعد حساب المؤشرات
             initial_len = len(df_calc)
-            # حذف الصفوف التي تحتوي على NaN في أي من الأعمدة المطلوبة
-            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
+            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy() # [cite: 146]
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
-                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.") # [cite: 146]
             if df_cleaned.empty:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.")
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.") # [cite: 147]
                 return None
 
-            latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر اتجاه SuperTrend: {latest.get('supertrend_trend', 'N/A')}, ADX: {latest.get('adx', np.nan):.2f}")
+            latest = df_cleaned.iloc[-1] # [cite: 147]
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}")
             return df_cleaned
 
         except KeyError as ke:
-             logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True)
+             logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True) # [cite: 148]
              return None
         except Exception as e:
-            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True) # [cite: 148, 149]
             return None
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         توليد إشارة شراء بناءً على DataFrame المعالج ونظام النقاط.
         """
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...") # [cite: 150]
 
-        # 1. التحقق من صحة DataFrame المدخل والأعمدة المطلوبة للإشارة
-        if df_processed is None or df_processed.empty or len(df_processed) < 2: # نحتاج صفين للمقارنة (OBV)
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<2)، لا يمكن توليد إشارة.")
+        # التحقق من DataFrame والأعمدة
+        if df_processed is None or df_processed.empty or len(df_processed) < 2:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<2)، لا يمكن توليد إشارة.") # [cite: 150]
             return None
         missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
         if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.") # [cite: 151]
             return None
 
-        # 2. فحص ترند البيتكوين (شرط أولي)
-        btc_trend = get_btc_trend_4h()
+        # فحص ترند البيتكوين
+        btc_trend = get_btc_trend_4h() # [cite: 151]
         if "هبوط" in btc_trend:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف مؤقتًا بسبب ترند البيتكوين الهابط ({btc_trend}).")
+            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف مؤقتًا بسبب ترند البيتكوين الهابط ({btc_trend}).") # [cite: 151, 152]
             return None
         elif "N/A" in btc_trend:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد ترند البيتكوين، سيتم تجاهل هذا الشرط.") # [cite: 152]
 
-        # 3. استخلاص بيانات الشمعة الأخيرة والسابقة والتحقق من NaN
-        last_row = df_processed.iloc[-1]
-        prev_row = df_processed.iloc[-2] # نحصل على الصف السابق لمقارنة OBV
+        # استخلاص بيانات الشمعة الأخيرة والسابقة
+        last_row = df_processed.iloc[-1] # [cite: 152]
+        prev_row = df_processed.iloc[-2] # [cite: 152]
 
-        # التحقق من NaN في الأعمدة المطلوبة للصف الأخير
-        last_row_check = last_row[self.required_cols_buy_signal]
+        # التحقق من NaN
+        last_row_check = last_row[self.required_cols_buy_signal] # [cite: 153]
         if last_row_check.isnull().any():
-            nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
-            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
+            nan_cols = last_row_check[last_row_check.isnull()].index.tolist() # [cite: 153]
+            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.") # [cite: 153]
             return None
-        # التحقق من NaN في OBV للصف السابق
-        if pd.isna(prev_row['obv']):
-           logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة OBV السابقة هي NaN. لا يمكن التحقق من اتجاه OBV.")
+        if pd.isna(prev_row['obv']): # [cite: 154]
+           logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة OBV السابقة هي NaN. لا يمكن التحقق من اتجاه OBV.") # [cite: 154, 155]
            return None
 
-        # 4. تطبيق شروط الشراء وحساب الدرجة بناءً على الأوزان
+        # تطبيق شروط الشراء وحساب الدرجة
         signal_details = {}
         current_score = 0.0
 
-        # التحقق من كل شرط وإضافة وزنه إلى الدرجة إذا تحقق
-        if last_row['close'] > last_row['ema_trend']:
-            current_score += self.condition_weights['ema_up']
-            signal_details['EMA'] = f'Above {EMA_PERIOD} EMA (+{self.condition_weights["ema_up"]})'
-        if last_row['supertrend_trend'] == 1:
+        # --- تعديل فحص الشروط لتقاطع EMA ---
+        # if last_row['close'] > last_row['ema_trend']: # تم الإزالة
+
+        # إضافة شرط تقاطع EMA
+        if last_row['ema_13'] > last_row['ema_34']: # [cite: 155]
+             current_score += self.condition_weights['ema_cross_bullish']
+             signal_details['EMA_Cross'] = f'EMA(13) > EMA(34) (+{self.condition_weights["ema_cross_bullish"]})'
+        # ---------------------------------
+
+        # باقي الشروط كما هي
+        if last_row['supertrend_trend'] == 1: # [cite: 156]
             current_score += self.condition_weights['supertrend_up']
             signal_details['SuperTrend'] = f'Up Trend (+{self.condition_weights["supertrend_up"]})'
-        if last_row['close'] > last_row['vwap']:
+        if last_row['close'] > last_row['vwap']: # [cite: 156]
             current_score += self.condition_weights['above_vwap']
             signal_details['VWAP'] = f'Above VWAP (+{self.condition_weights["above_vwap"]})'
-        if last_row['macd'] > last_row['macd_signal']:
+        if last_row['macd'] > last_row['macd_signal']: # [cite: 157]
             current_score += self.condition_weights['macd_bullish']
             signal_details['MACD'] = f'Bullish Cross (+{self.condition_weights["macd_bullish"]})'
-        if last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']:
+        if last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']: # [cite: 157]
             current_score += self.condition_weights['adx_trending_bullish']
             signal_details['ADX/DI'] = f'Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-) (+{self.condition_weights["adx_trending_bullish"]})'
-        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD: # التأكد أنه ليس شراء أو بيع مفرط
+        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD: # [cite: 157]
             current_score += self.condition_weights['rsi_ok']
-            signal_details['RSI'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
-        if last_row['BullishCandleSignal'] == 1: # القيمة الآن 0 أو 1
+            signal_details['RSI'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})' # [cite: 158]
+        if last_row['BullishCandleSignal'] == 1: # [cite: 158]
             current_score += self.condition_weights['bullish_candle']
             signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights["bullish_candle"]})'
-        if last_row['close'] < last_row['bb_upper']:
-            current_score += self.condition_weights['not_bb_extreme']
-            signal_details['Bollinger'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
-        if last_row['obv'] > prev_row['obv']:
+        if last_row['close'] < last_row['bb_upper']: # [cite: 158]
+             current_score += self.condition_weights['not_bb_extreme']
+             signal_details['Bollinger'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})' # [cite: 159]
+        if last_row['obv'] > prev_row['obv']: # [cite: 159]
             current_score += self.condition_weights['obv_rising']
             signal_details['OBV'] = f'Rising (+{self.condition_weights["obv_rising"]})'
 
-        # --- قرار الشراء النهائي بناءً على الدرجة ---
-        if current_score < self.min_signal_score:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق درجة الإشارة المطلوبة (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}).")
-            return None # لم تتحقق الشروط
-
-        # 5. فحص حجم التداول (السيولة) - يبقى كما هو
-        volume_recent = fetch_recent_volume(self.symbol)
-        if volume_recent < MIN_VOLUME_15M_USDT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
+        # قرار الشراء النهائي بناءً على الدرجة
+        if current_score < self.min_signal_score: # [cite: 159]
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق درجة الإشارة المطلوبة (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}).") # [cite: 160]
             return None
 
-        # 6. حساب الهدف ووقف الخسارة الأولي بناءً على ATR - يبقى كما هو
-        current_price = last_row['close']
-        current_atr = last_row.get('atr')
+        # فحص حجم التداول (السيولة)
+        volume_recent = fetch_recent_volume(self.symbol) # [cite: 160]
+        if volume_recent < MIN_VOLUME_15M_USDT:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.") # [cite: 160, 161]
+            return None
 
-        # تعديل المضاعفات بناءً على قوة ADX (يمكن الإبقاء عليه أو تعديله)
-        adx_val_sig = last_row.get('adx', 0)
-        if adx_val_sig > 25: # ترند قوي
-            target_multiplier = ENTRY_ATR_MULTIPLIER # استخدام القيمة المعدلة
-            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.8 # يمكن تعديل مضاعف الوقف للترند القوي
-            signal_details['SL_Target_Mode'] = f'Strong Trend (ADX {adx_val_sig:.1f})'
-        else: # ترند أضعف أو غير واضح
-            target_multiplier = ENTRY_ATR_MULTIPLIER
-            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
-            signal_details['SL_Target_Mode'] = f'Standard (ADX {adx_val_sig:.1f})'
+        # حساب الهدف ووقف الخسارة الأولي بناءً على ATR
+        current_price = last_row['close'] # [cite: 161]
+        current_atr = last_row.get('atr') # [cite: 161]
 
-        initial_target = current_price + (target_multiplier * current_atr)
-        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
+        adx_val_sig = last_row.get('adx', 0) # [cite: 161]
+        if adx_val_sig > 25:
+            target_multiplier = ENTRY_ATR_MULTIPLIER # [cite: 162]
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER * 0.8 # [cite: 162]
+            signal_details['SL_Target_Mode'] = f'Strong Trend (ADX {adx_val_sig:.1f})' # [cite: 162]
+        else:
+            target_multiplier = ENTRY_ATR_MULTIPLIER # [cite: 162]
+            stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # [cite: 163]
+            signal_details['SL_Target_Mode'] = f'Standard (ADX {adx_val_sig:.1f})' # [cite: 163]
+
+        initial_target = current_price + (target_multiplier * current_atr) # [cite: 163]
+        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr) # [cite: 163]
 
         # ضمان أن وقف الخسارة لا يساوي صفرًا أو سالبًا
-        if initial_stop_loss <= 0:
-            min_sl_price = current_price * (1 - 0.10) # مثال: 10% كحد أقصى للخسارة الأولية
-            initial_stop_loss = max(min_sl_price, current_price * 0.001)
-            logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss}) غير صالح. تم تعديله إلى {initial_stop_loss:.8f}")
-            signal_details['Warning'] = f'Initial SL adjusted (was <= 0, set to {initial_stop_loss:.8f})'
+        if initial_stop_loss <= 0: # [cite: 163]
+            min_sl_price = current_price * (1 - 0.10) # [cite: 163]
+            initial_stop_loss = max(min_sl_price, current_price * 0.001) # [cite: 164]
+            logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss}) غير صالح. تم تعديله إلى {initial_stop_loss:.8f}") # [cite: 164, 165]
+            signal_details['Warning'] = f'Initial SL adjusted (was <= 0, set to {initial_stop_loss:.8f})' # [cite: 165]
 
-        # 7. فحص هامش الربح الأدنى - يبقى كما هو
-        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
+        # فحص هامش الربح الأدنى
+        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0 # [cite: 165]
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
+            logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.") # [cite: 165, 166]
             return None
 
-        # 8. تجميع بيانات الإشارة النهائية مع الدرجة الموزونة
+        # تجميع بيانات الإشارة النهائية
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"),
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'r2_score': float(f"{current_score:.2f}"), # تخزين الدرجة الموزونة هنا
-            'strategy_name': 'Conservative_Weighted', # تغيير اسم الاستراتيجية ليعكس التعديل
-            'signal_details': signal_details, # تفاصيل الشروط المحققة وأوزانها
-            'volume_15m': volume_recent,
-            'trade_value': TRADE_VALUE,
-            'total_possible_score': float(f"{self.total_possible_score:.2f}") # إضافة إجمالي النقاط الممكنة
+            'current_target': float(f"{initial_target:.8g}"), # [cite: 167]
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # [cite: 167]
+            'r2_score': float(f"{current_score:.2f}"), # [cite: 167]
+            'strategy_name': 'EMA_Cross_Weighted', # تم تغيير اسم الاستراتيجية [cite: 167]
+            'signal_details': signal_details,
+            'volume_15m': volume_recent, # [cite: 167]
+            'trade_value': TRADE_VALUE, # [cite: 167]
+            'total_possible_score': float(f"{self.total_possible_score:.2f}") # [cite: 168]
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
+        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}") # [cite: 168, 169]
         return signal_output
+
+
+
+
 
 # ---------------------- دوال Telegram ----------------------
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
