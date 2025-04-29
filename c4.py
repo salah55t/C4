@@ -1,3 +1,4 @@
+
 import time
 import os
 import json
@@ -63,7 +64,7 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # عدد الأيام للبيانات 
 RSI_PERIOD: int = 14          # فترة RSI (القيمة الأصلية: 14)
 RSI_OVERSOLD: int = 30        # حد التشبع البيعي (القيمة الأصلية: 30) - رفع الحد قليلاً
 RSI_OVERBOUGHT: int = 70      # حد التشبع الشرائي (القيمة الأصلية: 70) - خفض الحد قليلاً
-# EMA_PERIOD: int = 26          # فترة EMA للترند (تم التعليق)
+# EMA_PERIOD: int = 26          # فترة EMA للترند (تم التعليق) [cite: 5]
 EMA_SHORT_PERIOD: int = 13      # فترة EMA القصيرة (جديد)
 EMA_LONG_PERIOD: int = 34       # فترة EMA الطويلة (جديد)
 SWING_ORDER: int = 5          # ترتيب تحديد القمم والقيعان
@@ -83,7 +84,7 @@ SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
 SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.02  # نسبة الربح لتفعيل الوقف المتحرك1.5%
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.02  # نسبة الربح لتفعيل الوقف المتحرك1.5% 
 TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # مضاعف ATR للوقف المتحرك (القيمة الأصلية: 2.5) - تقليل المضاعف ليكون أضيق
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.2%)
 
@@ -1121,8 +1122,9 @@ def generate_performance_report() -> str:
             f"——————————————\n"
             f"📉 *إحصائيات الإشارات المغلقة:*\n"
             f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
-            f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n" # إضافة معدل الربح هنا
+            f"  ✅ إشارات رابحة: *{winning_signals}*\n"
             f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
+            f"  • معدل الربح (Win Rate): *{win_rate:.2f}%*\n"
             f"——————————————\n"
             f"💰 *الربحية:*\n"
             f"  • صافي الربح/الخسارة (إجمالي %): *{total_profit_pct:+.2f}%*\n"
@@ -1147,75 +1149,180 @@ def generate_performance_report() -> str:
 
 # ---------------------- استراتيجية التداول (المعدلة لتقاطع EMA) -------------------
 
-class ConservativeTradingStrategy:
-    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط وشروط إجبارية."""
+
+# ---------------------- استراتيجية التداول (المعدلة لتقاطع EMA) -------------------
+class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
+    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # الأعمدة المطلوبة لحساب المؤشرات
+        # الأعمدة المطلوبة لحساب المؤشرات (تحديث لـ EMA)
         self.required_cols_indicators = [
-            'open', 'high', 'low', 'close', 'volume',
-            'ema_13', 'ema_34',
+            'open', 'high', 'low', 'close', 'volume', # أساسية
+            'ema_13', 'ema_34', # تمت الإضافة
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-            'macd', 'macd_signal', 'macd_hist',
+            'macd', 'macd_signal', 'macd_hist', # تأكد من وجود macd_hist
             'adx', 'di_plus', 'di_minus',
             'vwap', 'obv', 'supertrend', 'supertrend_trend',
             'BullishCandleSignal', 'BearishCandleSignal'
         ]
-        # الأعمدة المطلوبة لتوليد إشارة الشراء
+        # الأعمدة المطلوبة لتوليد إشارة الشراء (تحديث لـ EMA وإضافة macd_hist)
         self.required_cols_buy_signal = [
             'close',
             'ema_13', 'ema_34',
             'rsi', 'atr',
-            'macd', 'macd_signal', 'macd_hist',
+            'macd', 'macd_signal', 'macd_hist', # إضافة macd_hist هنا
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
             'BullishCandleSignal', 'obv'
         ]
 
         # =====================================================================
-        # --- نظام النقاط (الأوزان) للشروط الاختيارية ---
-        # (هذه الشروط تساهم في الدرجة ولكن ليست إجبارية)
+        # --- نظام النقاط (الأوزان) لشروط الشراء (تحديث لتقاطع EMA وشرط MACD الجديد) ---
         # =====================================================================
         self.condition_weights = {
-            # 'ema_cross_bullish': 2.0, # أصبح شرطًا إجباريًا
-            # 'supertrend_up': 2.0,   # أصبح شرطًا إجباريًا
-            'above_vwap': 1.0,      # السعر فوق VWAP
-            # 'macd_positive_or_cross': 1.5, # أصبح شرطًا إجباريًا
-            # 'adx_trending_bullish': 1.0, # أصبح شرطًا إجباريًا
-            'rsi_ok': 0.5,          # RSI في منطقة مقبولة (ليس تشبع شراء شديد)
-            'bullish_candle': 1.0,  # وجود شمعة ابتلاع أو مطرقة
-            'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي (لا يزال مفيداً لبعض الاستراتيجيات، لكن وزن أقل للاختراق)
-            'obv_rising': 1.5,       # OBV يرتفع
+            'ema_cross_bullish': 2.5, # شرط تقاطع EMA إيجابي
+            'supertrend_up': 2.5,   # SuperTrend صاعد
+            'above_vwap': 1.5,      # السعر فوق VWAP
+            # 'macd_bullish': 2.0,    # تم استبداله بالشرط الجديد أدناه
+            'macd_positive_or_cross': 2.0, # شرط MACD الجديد (هستوجرام موجب أو عبور فوق الصفر)
+            'adx_trending_bullish': 1.5, # ADX قوي و DI+ أعلى
+            'rsi_ok': 1.0,          # RSI في منطقة مقبولة
+            'bullish_candle': 1.5,  # وجود شمعة ابتلاع أو مطرقة
+            'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي
+            'obv_rising': 2.0       # OBV يرتفع
+        }
+        # =====================================================================
 
-            # --- شروط استراتيجية الاختراق الجديدة (بعضها أصبح إجباريًا) ---
-            # 'breakout_bb_upper': 3.0, # أصبح شرطًا إجباريًا
-            'rsi_filter_breakout': 1.5, # فلتر RSI للاختراق (اختياري)
-            'macd_filter_breakout': 1.5 # فلتر MACD هستوجرام موجب للاختراق (اختياري)
+        # حساب إجمالي النقاط الممكنة (تحديث تلقائي)
+        self.total_possible_score = sum(self.condition_weights.values())
+
+        # =====================================================================
+        # --- عتبة درجة الإشارة المطلوبة (كنسبة مئوية) ---
+        # =====================================================================
+        self.min_score_threshold_pct = 0.70 # 70% (يمكن تعديلها)
+        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
+        # =====================================================================
+
+    # ... (دالة populate_indicators كما هي) ...
+
+    def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
+        # تحديث الحد الأدنى لعدد الصفوف
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS) + 5
+
+        if len(df) < min_len_required:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+            return None
+
+        try:
+            df_calc = df.copy()
+            # ATR مطلوب لـ SuperTrend و وقف الخسارة/الهدف
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+            # SuperTrend يحتاج ATR محسوب بفترته الخاصة
+            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+
+            # --- تعديل حساب EMA ---
+            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD) # إضافة EMA 13
+            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD) # إضافة EMA 34
+            # ----------------------
+
+            # باقي المؤشرات
+            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
+            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL) # تأكد من حساب macd_hist هنا
+            adx_df = calculate_adx(df_calc, ADX_PERIOD)
+            df_calc = df_calc.join(adx_df)
+            df_calc = calculate_vwap(df_calc)
+            df_calc = calculate_obv(df_calc)
+            df_calc = detect_candlestick_patterns(df_calc)
+
+            # التحقق من الأعمدة المطلوبة بعد الحساب
+            missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
+            if missing_cols:
+                 logger.error(f"❌ [Strategy {self.symbol}] أعمدة مؤشرات مطلوبة مفقودة بعد الحساب: {missing_cols}")
+                 logger.debug(f"Columns present: {df_calc.columns.tolist()}")
+                 return None
+
+            # التعامل مع NaN بعد حساب المؤشرات
+            initial_len = len(df_calc)
+            # استخدم required_cols_indicators التي تحتوي على كل الأعمدة المحسوبة
+            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
+            dropped_count = initial_len - len(df_cleaned)
+
+            if dropped_count > 0:
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
+            if df_cleaned.empty:
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.")
+                return None
+
+            latest = df_cleaned.iloc[-1]
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            return df_cleaned
+
+        except KeyError as ke:
+             logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True)
+             return None
+        except Exception as e:
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
+            return None
+class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
+    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        # الأعمدة المطلوبة لحساب المؤشرات (تحديث لـ EMA)
+        self.required_cols_indicators = [
+            'open', 'high', 'low', 'close', 'volume', # أساسية
+            'ema_13', 'ema_34', # تمت الإضافة
+            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+            'macd', 'macd_signal', 'macd_hist', # تأكد من وجود macd_hist
+            'adx', 'di_plus', 'di_minus',
+            'vwap', 'obv', 'supertrend', 'supertrend_trend',
+            'BullishCandleSignal', 'BearishCandleSignal'
+        ]
+        # الأعمدة المطلوبة لتوليد إشارة الشراء (تحديث لـ EMA وإضافة macd_hist والاختراق)
+        self.required_cols_buy_signal = [
+            'close',
+            'ema_13', 'ema_34',
+            'rsi', 'atr',
+            'macd', 'macd_signal', 'macd_hist', # إضافة macd_hist هنا
+            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'BullishCandleSignal', 'obv'
+        ]
+
+        # =====================================================================
+        # --- نظام النقاط (الأوزان) لشروط الشراء (تحديث لتقاطع EMA وشرط MACD الجديد وإضافة الاختراق) ---
+        # =====================================================================
+        self.condition_weights = {
+            'ema_cross_bullish': 2.0, # شرط تقاطع EMA إيجابي (تم تعديل الوزن قليلاً)
+            'supertrend_up': 2.0,   # SuperTrend صاعد (تم تعديل الوزن قليلاً)
+            'above_vwap': 1.0,      # السعر فوق VWAP (تم تعديل الوزن قليلاً)
+            'macd_positive_or_cross': 1.5, # شرط MACD الجديد (هستوجرام موجب أو عبور فوق الصفر) (تم تعديل الوزن)
+            'adx_trending_bullish': 1.0, # ADX قوي و DI+ أعلى (تم تعديل الوزن قليلاً)
+            'rsi_ok': 0.5,          # RSI في منطقة مقبولة (تم تعديل الوزن قليلاً)
+            'bullish_candle': 1.0,  # وجود شمعة ابتلاع أو مطرقة (تم تعديل الوزن قليلاً)
+            'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي (لا يزال مفيداً لبعض الاستراتيجيات، لكن وزن أقل للاختراق)
+            'obv_rising': 1.5,       # OBV يرتفع (تم تعديل الوزن قليلاً)
+
+            # --- شروط استراتيجية الاختراق الجديدة ---
+            'breakout_bb_upper': 3.0, # السعر يغلق فوق الحد العلوي لبولينجر باند (وزن عالي)
+            'rsi_filter_breakout': 1.5, # RSI في نطاق صعودي عند الاختراق (مثال: 55-75)
+            'macd_filter_breakout': 1.5 # MACD هستوجرام موجب عند الاختراق
             # ----------------------------------------
         }
         # =====================================================================
 
-        # =====================================================================
-        # --- الشروط الإجبارية للدخول (يجب تحقيقها جميعًا) ---
-        # =====================================================================
-        self.essential_conditions = [
-            'ema_cross_bullish',
-            'supertrend_up',
-            'macd_positive_or_cross',
-            'adx_trending_bullish',
-            'breakout_bb_upper' # إضافة شرط الاختراق كشرط إجباري
-        ]
-        # =====================================================================
-
-
-        # حساب إجمالي النقاط الممكنة للشروط *الاختيارية*
+        # حساب إجمالي النقاط الممكنة (تحديث تلقائي)
         self.total_possible_score = sum(self.condition_weights.values())
 
-        # عتبة درجة الإشارة المطلوبة للشروط *الاختيارية* (كنسبة مئوية)
+        # =====================================================================
+        # --- عتبة درجة الإشارة المطلوبة (كنسبة مئوية) ---
+        # =====================================================================
         # قد تحتاج لضبط هذه العتبة بناءً على الأوزان الجديدة وأداء الاستراتيجية
-        self.min_score_threshold_pct = 0.50 # مثال: 50% من النقاط الاختيارية (يمكن تعديلها)
+        self.min_score_threshold_pct = 0.65 # مثال: 65% (يمكن تعديلها)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
-
+        # =====================================================================
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
@@ -1282,7 +1389,9 @@ class ConservativeTradingStrategy:
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        توليد إشارة شراء بناءً على DataFrame المعالج، الشروط الإجبارية، ونظام النقاط.
+        توليد إشارة شراء بناءً على DataFrame المعالج ونظام النقاط.
+        تم التعديل ليشمل تأكيد إغلاق السعر فوق SuperTrend مع تحول صاعد،
+        وإضافة شروط الاختراق مع فلاتر RSI/MACD.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
 
@@ -1297,7 +1406,7 @@ class ConservativeTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
             return None
 
-        # فحص ترند البيتكوين (لا يزال فلترًا إلزاميًا)
+        # فحص ترند البيتكوين
         btc_trend = get_btc_trend_4h()
         # السماح بالإشارة حتى لو كان ترند البيتكوين محايدًا أو غير معروف، ولكن ليس هابطًا
         if "هبوط" in btc_trend:
@@ -1316,148 +1425,96 @@ class ConservativeTradingStrategy:
         last_row_check = last_row[required_cols_with_breakout]
         if last_row_check.isnull().any():
             nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
-            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}. لا يمكن توليد إشارة.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
             return None
         # التحقق من OBV السابق بشكل منفصل
         if pd.isna(prev_row['obv']):
            logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة OBV السابقة هي NaN. لا يمكن التحقق من اتجاه OBV.")
            # يمكن الاستمرار ولكن لن يتم إضافة نقاط OBV
 
-        # =====================================================================
-        # --- التحقق من الشروط الإجبارية أولاً ---
-        # إذا فشل أي شرط إجباري، يتم رفض الإشارة فورًا
-        # =====================================================================
-        essential_passed = True
-        failed_essential_conditions = []
-        signal_details = {} # لتخزين تفاصيل الشروط التي تم فحصها (الإجبارية والاختيارية)
+        # تطبيق شروط الشراء وحساب الدرجة
+        signal_details = {}
+        current_score = 0.0
 
-        # شرط تقاطع EMA إيجابي
-        if not (last_row['ema_13'] > last_row['ema_34']):
-            essential_passed = False
-            failed_essential_conditions.append('EMA Cross (Bullish)')
-            signal_details['EMA_Cross'] = f'Failed: EMA(13) <= EMA(34)'
-        else:
-             signal_details['EMA_Cross'] = f'Passed: EMA(13) > EMA(34)'
+        # --- شروط الاستراتيجية الأساسية (المعدلة) ---
+
+        # شرط تقاطع EMA
+        if last_row['ema_13'] > last_row['ema_34']:
+             current_score += self.condition_weights['ema_cross_bullish']
+             signal_details['EMA_Cross'] = f'EMA(13) > EMA(34) (+{self.condition_weights["ema_cross_bullish"]})'
 
         # شرط SuperTrend: السعر يغلق فوق SuperTrend واتجاه SuperTrend صاعد
-        if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-             essential_passed = False
-             failed_essential_conditions.append('SuperTrend (Up Trend & Price Above)')
-             detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-             signal_details['SuperTrend'] = f'Failed: Not Up Trend or Price Not Above ({detail_st})'
-        else:
-            signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
-
-
-        # شرط MACD (هستوجرام موجب أو عبور صعودي)
-        if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']):
-             essential_passed = False
-             failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
-             detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'Failed: Hist Not Positive AND No Bullish Cross ({detail_macd})'
-        else:
-             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
-             detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
-             signal_details['MACD'] = f'Passed: {detail_macd}'
-
-
-        # شرط ADX قوي و DI+ أعلى
-        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']):
-             essential_passed = False
-             failed_essential_conditions.append('ADX/DI (Trending Bullish)')
-             detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-             signal_details['ADX/DI'] = f'Failed: Not Trending Bullish (ADX <= 20 or DI+ <= DI-) ({detail_adx})'
-        else:
-             signal_details['ADX/DI'] = f'Passed: Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
-
-        # شرط الاختراق: السعر يغلق فوق الحد العلوي لبولينجر باند
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']):
-             essential_passed = False
-             failed_essential_conditions.append('Breakout (Closed Above BB Upper)')
-             detail_bb = f'Close:{last_row.get("close", np.nan):.4f}, BB Upper:{last_row.get("bb_upper", np.nan):.4f}'
-             signal_details['Breakout_BB'] = f'Failed: Not Closed Above BB Upper ({detail_bb})'
-        else:
-             signal_details['Breakout_BB'] = f'Passed: Closed Above BB Upper'
-
-
-        # إذا فشل أي شرط إجباري، ارفض الإشارة فورًا
-        if not essential_passed:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] فشلت الشروط الإجبارية: {', '.join(failed_essential_conditions)}. تم رفض الإشارة.")
-            # يمكن إضافة تفاصيل الشروط الفاشلة إلى السجل هنا إذا لزم الأمر
-            return None
-        # =====================================================================
-
-
-        # =====================================================================
-        # --- حساب النقاط للشروط الاختيارية (إذا تم اجتياز الإجبارية) ---
-        # =====================================================================
-        current_score = 0.0
+        if pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1:
+            current_score += self.condition_weights['supertrend_up']
+            signal_details['SuperTrend'] = f'Price closed above SuperTrend & Trend Up (+{self.condition_weights["supertrend_up"]})'
 
         # السعر فوق VWAP
         if last_row['close'] > last_row['vwap']:
             current_score += self.condition_weights['above_vwap']
             signal_details['VWAP'] = f'Above VWAP (+{self.condition_weights["above_vwap"]})'
-        else:
-             signal_details['VWAP'] = f'Below VWAP (0)'
+
+        # شرط MACD (هستوجرام موجب أو عبور صعودي)
+        if last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']:
+             current_score += self.condition_weights['macd_positive_or_cross']
+             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
+             detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
+             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
+             signal_details['MACD'] = f'{detail_macd} (+{self.condition_weights["macd_positive_or_cross"]})'
+
+
+        # ADX قوي و DI+ أعلى
+        if last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']:
+            current_score += self.condition_weights['adx_trending_bullish']
+            signal_details['ADX/DI'] = f'Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-) (+{self.condition_weights["adx_trending_bullish"]})'
 
         # RSI في منطقة مقبولة (ليس تشبع شراء شديد)
         if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights['rsi_ok']
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
-        else:
-             signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
-
 
         # وجود شمعة ابتلاع أو مطرقة
         if last_row['BullishCandleSignal'] == 1:
             current_score += self.condition_weights['bullish_candle']
             signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights["bullish_candle"]})'
-        else:
-             signal_details['Candle'] = f'No Bullish Pattern (0)'
-
 
         # السعر ليس عند نطاق بولينجر العلوي (هذا الشرط قد يتعارض مع الاختراق، لذا وزنه أقل)
-        # يتم تطبيق هذا الشرط فقط إذا لم يحدث اختراق واضح للحد العلوي (هذا الشرط لم يعد إجباريًا)
+        # يتم تطبيق هذا الشرط فقط إذا لم يحدث اختراق واضح للحد العلوي
         if last_row['close'] < last_row['bb_upper'] * 0.995: # تسامح بسيط
              current_score += self.condition_weights['not_bb_extreme']
              signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
-        else:
-             signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
-
 
         # OBV يرتفع
         # التحقق من OBV فقط إذا كانت القيمة السابقة صالحة
         if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']:
             current_score += self.condition_weights['obv_rising']
             signal_details['OBV'] = f'Rising (+{self.condition_weights["obv_rising"]})'
-        else:
-             signal_details['OBV'] = f'Not Rising (0)'
 
+        # --- شروط استراتيجية الاختراق مع الفلاتر ---
 
-        # فلتر RSI للاختراق (اختياري): RSI في نطاق صعودي (مثال: بين 55 و 75)
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
-             current_score += self.condition_weights['rsi_filter_breakout']
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights["rsi_filter_breakout"]})'
-        else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
+        # شرط الاختراق: السعر يغلق فوق الحد العلوي لبولينجر باند
+        if pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']:
+            current_score += self.condition_weights['breakout_bb_upper']
+            signal_details['Breakout_BB'] = f'Closed Above BB Upper (+{self.condition_weights["breakout_bb_upper"]})'
 
+            # فلتر RSI للاختراق: RSI في نطاق صعودي (مثال: بين 55 و 75)
+            # يمكن تعديل هذا النطاق بناءً على الاختبار
+            if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
+                 current_score += self.condition_weights['rsi_filter_breakout']
+                 signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights["rsi_filter_breakout"]})'
 
-        # فلتر MACD للاختراق (اختياري): MACD هستوجرام موجب
-        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
-             current_score += self.condition_weights['macd_filter_breakout']
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights["macd_filter_breakout"]})'
-        else:
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
+            # فلتر MACD للاختراق: MACD هستوجرام موجب
+            if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
+                 current_score += self.condition_weights['macd_filter_breakout']
+                 signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights["macd_filter_breakout"]})'
 
         # ------------------------------------------
 
-        # قرار الشراء النهائي بناءً على درجة الشروط الاختيارية
+        # قرار الشراء النهائي بناءً على الدرجة
         if current_score < self.min_signal_score:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق درجة الإشارة المطلوبة من الشروط الاختيارية (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}). تم رفض الإشارة.")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم تتحقق درجة الإشارة المطلوبة (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}).")
             return None
 
-        # فحص حجم التداول (السيولة) - لا يزال فلترًا إلزاميًا
+        # فحص حجم التداول (السيولة)
         volume_recent = fetch_recent_volume(self.symbol)
         if volume_recent < MIN_VOLUME_15M_USDT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
@@ -1494,10 +1551,10 @@ class ConservativeTradingStrategy:
              if initial_stop_loss < max_sl_price:
                   logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss:.8g}) بعيد جدًا. تم تعديله إلى {max_sl_price:.8f}")
                   initial_stop_loss = max_sl_price
-                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # استخدم القيمة الجديدة هنا
+                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_sl_price:.8f})'
 
 
-        # فحص هامش الربح الأدنى (بعد حساب الهدف ووقف الخسارة النهائي) - لا يزال فلترًا إلزاميًا
+        # فحص هامش الربح الأدنى (بعد حساب الهدف ووقف الخسارة النهائي)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
@@ -1511,15 +1568,15 @@ class ConservativeTradingStrategy:
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'r2_score': float(f"{current_score:.2f}"), # درجة الشروط الاختيارية
-            'strategy_name': 'Breakout_Filtered_Strict', # تغيير اسم الاستراتيجية ليعكس التعديل
-            'signal_details': signal_details, # الآن يحتوي على تفاصيل الشروط الإجبارية والاختيارية
+            'r2_score': float(f"{current_score:.2f}"),
+            'strategy_name': 'Breakout_Filtered', # تغيير اسم الاستراتيجية ليعكس التعديل
+            'signal_details': signal_details,
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
-            'total_possible_score': float(f"{self.total_possible_score:.2f}") # إجمالي نقاط الشروط الاختيارية
+            'total_possible_score': float(f"{self.total_possible_score:.2f}")
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
+        logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
         return signal_output
 
 
@@ -1574,11 +1631,10 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         stop_loss_price = float(signal_data['initial_stop_loss'])
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
-        signal_score = signal_data.get('r2_score', 0.0) # الدرجة الموزونة للشروط الاختيارية
-        total_possible_score = signal_data.get('total_possible_score', 10.0) # إجمالي نقاط الشروط الاختيارية
+        signal_score = signal_data.get('r2_score', 0.0) # الدرجة الموزونة
+        total_possible_score = signal_data.get('total_possible_score', 10.0) # القيمة الافتراضية قد تحتاج للتعديل
         volume_15m = signal_data.get('volume_15m', 0.0)
         trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
-        signal_details = signal_data.get('signal_details', {})
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -1591,7 +1647,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
-        # بناء الرسالة مع الدرجة الموزونة وتفاصيل الشروط
+        # بناء الرسالة مع الدرجة الموزونة
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
             f"——————————————\n"
@@ -1599,19 +1655,12 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"📈 **نوع الإشارة:** شراء (Long)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
             # --- تعديل لعرض الدرجة ---
-            f"📊 **قوة الإشارة (Score - Optional):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
+            f"📊 **قوة الإشارة (Score):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
             f"💧 **سيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
             f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
-            f"——————————————\n"
-            f"✅ *الشروط الإجبارية المتحققة:*\n"
-            f"  - EMA Cross: {signal_details.get('EMA_Cross', 'N/A').replace('Passed: ', '')}\n"
-            f"  - SuperTrend: {signal_details.get('SuperTrend', 'N/A').replace('Passed: ', '')}\n"
-            f"  - MACD: {signal_details.get('MACD', 'N/A').replace('Passed: ', '')}\n"
-            f"  - ADX/DI: {signal_details.get('ADX/DI', 'N/A').replace('Passed: ', '')}\n"
-            f"  - Breakout: {signal_details.get('Breakout_BB', 'N/A').replace('Passed: ', '')}\n"
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والطمع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4H):** {btc_trend}\n"
@@ -1958,18 +2007,8 @@ def webhook() -> Tuple[str, int]:
                  except Exception as ack_err:
                      logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
                  return "OK", 200
-            # Check if chat_id is available before accessing it
-            chat_id_callback = message_info.get('chat', {}).get('id')
-            if not chat_id_callback:
-                 logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing chat ID.")
-                 try:
-                     ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-                     requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
-                 except Exception as ack_err:
-                     logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
-                 return "OK", 200
 
-
+            chat_id_callback = message_info['chat']['id']
             message_id = message_info['message_id']
             user_info = callback_query.get('from', {})
             user_id = user_info.get('id')
