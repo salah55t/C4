@@ -1266,11 +1266,132 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
         except Exception as e:
             logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
             return None
+class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
+    """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
+
+    def __init__(self, symbol: str):
+        self.symbol = symbol
+        # الأعمدة المطلوبة لحساب المؤشرات (تحديث لـ EMA)
+        self.required_cols_indicators = [
+            'open', 'high', 'low', 'close', 'volume', # أساسية
+            'ema_13', 'ema_34', # تمت الإضافة
+            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+            'macd', 'macd_signal', 'macd_hist', # تأكد من وجود macd_hist
+            'adx', 'di_plus', 'di_minus',
+            'vwap', 'obv', 'supertrend', 'supertrend_trend',
+            'BullishCandleSignal', 'BearishCandleSignal'
+        ]
+        # الأعمدة المطلوبة لتوليد إشارة الشراء (تحديث لـ EMA وإضافة macd_hist والاختراق)
+        self.required_cols_buy_signal = [
+            'close',
+            'ema_13', 'ema_34',
+            'rsi', 'atr',
+            'macd', 'macd_signal', 'macd_hist', # إضافة macd_hist هنا
+            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'BullishCandleSignal', 'obv'
+        ]
+
+        # =====================================================================
+        # --- نظام النقاط (الأوزان) لشروط الشراء (تحديث لتقاطع EMA وشرط MACD الجديد وإضافة الاختراق) ---
+        # =====================================================================
+        self.condition_weights = {
+            'ema_cross_bullish': 2.0, # شرط تقاطع EMA إيجابي (تم تعديل الوزن قليلاً)
+            'supertrend_up': 2.0,   # SuperTrend صاعد (تم تعديل الوزن قليلاً)
+            'above_vwap': 1.0,      # السعر فوق VWAP (تم تعديل الوزن قليلاً)
+            'macd_positive_or_cross': 1.5, # شرط MACD الجديد (هستوجرام موجب أو عبور فوق الصفر) (تم تعديل الوزن)
+            'adx_trending_bullish': 1.0, # ADX قوي و DI+ أعلى (تم تعديل الوزن قليلاً)
+            'rsi_ok': 0.5,          # RSI في منطقة مقبولة (تم تعديل الوزن قليلاً)
+            'bullish_candle': 1.0,  # وجود شمعة ابتلاع أو مطرقة (تم تعديل الوزن قليلاً)
+            'not_bb_extreme': 0.5,  # السعر ليس عند نطاق بولينجر العلوي (لا يزال مفيداً لبعض الاستراتيجيات، لكن وزن أقل للاختراق)
+            'obv_rising': 1.5,       # OBV يرتفع (تم تعديل الوزن قليلاً)
+
+            # --- شروط استراتيجية الاختراق الجديدة ---
+            'breakout_bb_upper': 3.0, # السعر يغلق فوق الحد العلوي لبولينجر باند (وزن عالي)
+            'rsi_filter_breakout': 1.5, # RSI في نطاق صعودي عند الاختراق (مثال: 55-75)
+            'macd_filter_breakout': 1.5 # MACD هستوجرام موجب عند الاختراق
+            # ----------------------------------------
+        }
+        # =====================================================================
+
+        # حساب إجمالي النقاط الممكنة (تحديث تلقائي)
+        self.total_possible_score = sum(self.condition_weights.values())
+
+        # =====================================================================
+        # --- عتبة درجة الإشارة المطلوبة (كنسبة مئوية) ---
+        # =====================================================================
+        # قد تحتاج لضبط هذه العتبة بناءً على الأوزان الجديدة وأداء الاستراتيجية
+        self.min_score_threshold_pct = 0.65 # مثال: 65% (يمكن تعديلها)
+        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
+        # =====================================================================
+
+    def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """حساب جميع المؤشرات المطلوبة للاستراتيجية."""
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
+        # تحديث الحد الأدنى لعدد الصفوف بناءً على أكبر فترة للمؤشرات المستخدمة
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5 # إضافة هامش بسيط
+
+        if len(df) < min_len_required:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+            return None
+
+        try:
+            df_calc = df.copy()
+            # ATR مطلوب لـ SuperTrend و وقف الخسارة/الهدف
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+            # SuperTrend يحتاج ATR محسوب بفترته الخاصة
+            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+
+            # --- تعديل حساب EMA ---
+            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD) # إضافة EMA 13
+            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD) # إضافة EMA 34
+            # ----------------------
+
+            # باقي المؤشرات
+            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
+            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL) # تأكد من حساب macd_hist هنا
+            adx_df = calculate_adx(df_calc, ADX_PERIOD)
+            df_calc = df_calc.join(adx_df)
+            df_calc = calculate_vwap(df_calc)
+            df_calc = calculate_obv(df_calc)
+            df_calc = detect_candlestick_patterns(df_calc)
+
+            # التحقق من الأعمدة المطلوبة بعد الحساب
+            missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
+            if missing_cols:
+                 logger.error(f"❌ [Strategy {self.symbol}] أعمدة مؤشرات مطلوبة مفقودة بعد الحساب: {missing_cols}")
+                 logger.debug(f"Columns present: {df_calc.columns.tolist()}")
+                 return None
+
+            # التعامل مع NaN بعد حساب المؤشرات
+            initial_len = len(df_calc)
+            # استخدم required_cols_indicators التي تحتوي على كل الأعمدة المحسوبة
+            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
+            dropped_count = initial_len - len(df_cleaned)
+
+            if dropped_count > 0:
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب NaN في المؤشرات.")
+            if df_cleaned.empty:
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة NaN من المؤشرات.")
+                return None
+
+            latest = df_cleaned.iloc[-1]
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            return df_cleaned
+
+        except KeyError as ke:
+             logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشرات: {ke}", exc_info=True)
+             return None
+        except Exception as e:
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشرات: {e}", exc_info=True)
+            return None
+
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         توليد إشارة شراء بناءً على DataFrame المعالج ونظام النقاط.
-        تم التعديل ليشمل تأكيد إغلاق السعر فوق SuperTrend مع تحول صاعد.
+        تم التعديل ليشمل تأكيد إغلاق السعر فوق SuperTrend مع تحول صاعد،
+        وإضافة شروط الاختراق مع فلاتر RSI/MACD.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة الشراء...")
 
@@ -1278,9 +1399,9 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
         if df_processed is None or df_processed.empty or len(df_processed) < 2:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<2)، لا يمكن توليد إشارة.")
             return None
-        # إضافة 'supertrend' إلى قائمة الأعمدة المطلوبة للإشارة إذا لم تكن موجودة بالفعل
-        required_cols_with_st = self.required_cols_buy_signal + ['supertrend']
-        missing_cols = [col for col in required_cols_with_st if col not in df_processed.columns]
+        # إضافة الأعمدة المطلوبة للاختراق إذا لم تكن موجودة بالفعل
+        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist']))
+        missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
         if missing_cols:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
             return None
@@ -1301,7 +1422,7 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
         prev_row = df_processed.iloc[-2]
 
         # التحقق من NaN في الأعمدة الأساسية المطلوبة للإشارة
-        last_row_check = last_row[required_cols_with_st]
+        last_row_check = last_row[required_cols_with_breakout]
         if last_row_check.isnull().any():
             nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
             logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على NaN في أعمدة مطلوبة للإشارة: {nan_cols}.")
@@ -1315,49 +1436,78 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
         signal_details = {}
         current_score = 0.0
 
-        # --- تعديل فحص شروط SuperTrend و EMA ---
+        # --- شروط الاستراتيجية الأساسية (المعدلة) ---
 
-        # شرط تقاطع EMA (كما هو)
+        # شرط تقاطع EMA
         if last_row['ema_13'] > last_row['ema_34']:
              current_score += self.condition_weights['ema_cross_bullish']
              signal_details['EMA_Cross'] = f'EMA(13) > EMA(34) (+{self.condition_weights["ema_cross_bullish"]})'
 
-        # شرط SuperTrend المعدل: السعر يغلق فوق SuperTrend واتجاه SuperTrend صاعد
-        # نحتاج أيضًا للتأكد من أن SuperTrend ليس NaN
+        # شرط SuperTrend: السعر يغلق فوق SuperTrend واتجاه SuperTrend صاعد
         if pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1:
             current_score += self.condition_weights['supertrend_up']
             signal_details['SuperTrend'] = f'Price closed above SuperTrend & Trend Up (+{self.condition_weights["supertrend_up"]})'
-        elif pd.notna(last_row['supertrend']) and last_row['supertrend_trend'] == 1:
-             # إذا كان الاتجاه صاعدًا ولكن السعر لم يغلق فوقه تمامًا (قد يكون قريبًا أو على الخط)
-             logger.debug(f"ℹ️ [Strategy {self.symbol}] SuperTrend صاعد ({last_row['supertrend']:.8g}) لكن السعر لم يغلق فوقه تمامًا ({last_row['close']:.8g}).")
-             # يمكن إضافة نقاط أقل هنا إذا أردت، أو لا شيء كما هو الحال الآن
 
-        # ---------------------------------
-
-        # باقي الشروط كما هي
+        # السعر فوق VWAP
         if last_row['close'] > last_row['vwap']:
             current_score += self.condition_weights['above_vwap']
             signal_details['VWAP'] = f'Above VWAP (+{self.condition_weights["above_vwap"]})'
-        if last_row['macd'] > last_row['macd_signal']:
-            current_score += self.condition_weights['macd_bullish']
-            signal_details['MACD'] = f'Bullish Cross (+{self.condition_weights["macd_bullish"]})'
+
+        # شرط MACD (هستوجرام موجب أو عبور صعودي)
+        if last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']:
+             current_score += self.condition_weights['macd_positive_or_cross']
+             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
+             detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
+             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
+             signal_details['MACD'] = f'{detail_macd} (+{self.condition_weights["macd_positive_or_cross"]})'
+
+
+        # ADX قوي و DI+ أعلى
         if last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']:
             current_score += self.condition_weights['adx_trending_bullish']
             signal_details['ADX/DI'] = f'Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-) (+{self.condition_weights["adx_trending_bullish"]})'
+
+        # RSI في منطقة مقبولة (ليس تشبع شراء شديد)
         if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights['rsi_ok']
-            signal_details['RSI'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
+            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
+
+        # وجود شمعة ابتلاع أو مطرقة
         if last_row['BullishCandleSignal'] == 1:
             current_score += self.condition_weights['bullish_candle']
             signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights["bullish_candle"]})'
-        if last_row['close'] < last_row['bb_upper']:
+
+        # السعر ليس عند نطاق بولينجر العلوي (هذا الشرط قد يتعارض مع الاختراق، لذا وزنه أقل)
+        # يتم تطبيق هذا الشرط فقط إذا لم يحدث اختراق واضح للحد العلوي
+        if last_row['close'] < last_row['bb_upper'] * 0.995: # تسامح بسيط
              current_score += self.condition_weights['not_bb_extreme']
-             signal_details['Bollinger'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
+             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
+
+        # OBV يرتفع
         # التحقق من OBV فقط إذا كانت القيمة السابقة صالحة
         if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']:
             current_score += self.condition_weights['obv_rising']
             signal_details['OBV'] = f'Rising (+{self.condition_weights["obv_rising"]})'
 
+        # --- شروط استراتيجية الاختراق مع الفلاتر ---
+
+        # شرط الاختراق: السعر يغلق فوق الحد العلوي لبولينجر باند
+        if pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']:
+            current_score += self.condition_weights['breakout_bb_upper']
+            signal_details['Breakout_BB'] = f'Closed Above BB Upper (+{self.condition_weights["breakout_bb_upper"]})'
+
+            # فلتر RSI للاختراق: RSI في نطاق صعودي (مثال: بين 55 و 75)
+            # يمكن تعديل هذا النطاق بناءً على الاختبار
+            if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
+                 current_score += self.condition_weights['rsi_filter_breakout']
+                 signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights["rsi_filter_breakout"]})'
+
+            # فلتر MACD للاختراق: MACD هستوجرام موجب
+            if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
+                 current_score += self.condition_weights['macd_filter_breakout']
+                 signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights["macd_filter_breakout"]})'
+
+        # ------------------------------------------
 
         # قرار الشراء النهائي بناءً على الدرجة
         if current_score < self.min_signal_score:
@@ -1379,9 +1529,7 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
              logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف ووقف الخسارة.")
              return None
 
-
-        adx_val_sig = last_row.get('adx', 0)
-        # يمكن تعديل هذه المضاعفات بناءً على ADX إذا أردت استراتيجية أكثر ديناميكية
+        # يمكن تعديل هذه المضاعفات بناءً على ADX أو غيره إذا أردت استراتيجية أكثر ديناميكية
         target_multiplier = ENTRY_ATR_MULTIPLIER
         stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
 
@@ -1391,7 +1539,8 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
         # ضمان أن وقف الخسارة لا يساوي صفرًا أو سالبًا وأنه أقل من سعر الدخول
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
             # استخدام نسبة مئوية كحد أدنى لوقف الخسارة إذا كان الحساب الأولي غير صالح
-            min_sl_price_pct = current_price * (1 - (stop_loss_multiplier * 0.01)) # مثال: 1.5% تحت السعر الحالي
+            # مثال: 1.5% تحت السعر الحالي كحد أدنى
+            min_sl_price_pct = current_price * (1 - (stop_loss_multiplier * 0.01))
             initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # ضمان أنه ليس قريبًا جدًا من الصفر
             logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss:.8g}) غير صالح أو أعلى من سعر الدخول. تم تعديله إلى {initial_stop_loss:.8f}")
             signal_details['Warning'] = f'Initial SL adjusted (was <= 0 or >= entry, set to {initial_stop_loss:.8f})'
@@ -1402,7 +1551,7 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
              if initial_stop_loss < max_sl_price:
                   logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss:.8g}) بعيد جدًا. تم تعديله إلى {max_sl_price:.8f}")
                   initial_stop_loss = max_sl_price
-                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})'
+                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_sl_price:.8f})'
 
 
         # فحص هامش الربح الأدنى (بعد حساب الهدف ووقف الخسارة النهائي)
@@ -1420,7 +1569,7 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"),
-            'strategy_name': 'EMA_SuperTrend_Weighted', # تغيير اسم الاستراتيجية ليعكس التعديل
+            'strategy_name': 'Breakout_Filtered', # تغيير اسم الاستراتيجية ليعكس التعديل
             'signal_details': signal_details,
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
@@ -1429,6 +1578,8 @@ class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس ال�
 
         logger.info(f"✅ [Strategy {self.symbol}] إشارة شراء مؤكدة. السعر: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
         return signal_output
+
+
 
 # ---------------------- دوال Telegram ----------------------
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
