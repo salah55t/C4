@@ -1148,7 +1148,7 @@ def generate_performance_report() -> str:
         return "❌ خطأ غير متوقع في توليد تقرير الأداء."
 
 # ---------------------- استراتيجية التداول (المعدلة لتقاطع EMA) -------------------
-  class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
+class ConservativeTradingStrategy: # تم تغيير الاسم ليعكس الاستراتيجية الجديدة
     """تغليف منطق استراتيجية التداول والمؤشرات المرتبطة بها مع نظام نقاط."""
 
     def __init__(self, symbol: str):
