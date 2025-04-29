@@ -1,4 +1,3 @@
-
 import time
 import os
 import json
@@ -64,8 +63,11 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # عدد الأيام للبيانات 
 RSI_PERIOD: int = 14          # فترة RSI (القيمة الأصلية: 14)
 RSI_OVERSOLD: int = 35        # حد التشبع البيعي (القيمة الأصلية: 30) - رفع الحد قليلاً
 RSI_OVERBOUGHT: int = 65      # حد التشبع الشرائي (القيمة الأصلية: 70) - خفض الحد قليلاً
-EMA_PERIOD: int = 26          # فترة EMA للترند (القيمة الأصلية: 21) - زيادة الفترة لتقليل الحساسية
+# EMA_PERIOD: int = 26          # فترة EMA للترند (تم التعليق) [cite: 5]
+EMA_SHORT_PERIOD: int = 13      # فترة EMA القصيرة (جديد)
+EMA_LONG_PERIOD: int = 34       # فترة EMA الطويلة (جديد)
 SWING_ORDER: int = 5          # ترتيب تحديد القمم والقيعان
+# ... (باقي الثوابت كما هي) ...
 FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
