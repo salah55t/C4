@@ -83,7 +83,7 @@ SUPERTREND_PERIOD: int = 10     # فترة SuperTrend
 SUPERTREND_MULTIPLIER: float = 3.0 # مضاعف SuperTrend
 
 # وقف الخسارة المتحرك
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.02 # نسبة الربح لتفعيل الوقف المتحرك1.5%
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # نسبة الربح لتفعيل الوقف المتحرك1.5%
 TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # مضاعف ATR للوقف المتحرك (القيمة الأصلية: 2.5) - تقليل المضاعف ليكون أضيق
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # نسبة الزيادة في السعر لتحريك الوقف المتحرك (0.2%)
 
@@ -1839,7 +1839,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.015)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.01)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
 
                                          if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
