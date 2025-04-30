@@ -72,7 +72,7 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
 ENTRY_ATR_PERIOD: int = 14     # فترة ATR للدخول
-ENTRY_ATR_MULTIPLIER: float = 1.5 # مضاعف ATR للهدف/الوقف الأولي (القيمة الأصلية: 1.2) - زيادة المضاعف
+ENTRY_ATR_MULTIPLIER: float = 3.5 # مضاعف ATR للهدف/الوقف الأولي (القيمة الأصلية: 1.2) - زيادة المضاعف
 BOLLINGER_WINDOW: int = 20     # فترة Bollinger Bands
 BOLLINGER_STD_DEV: int = 2       # الانحراف المعياري لـ Bollinger Bands
 MACD_FAST: int = 12            # فترة MACD السريعة
@@ -1839,7 +1839,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.01)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 - 0.005)) # نضمن ربح بسيط جداً أو الحفاظ على الوقف الحالي
 
                                          if new_stop_loss > current_stop_loss: # فقط إذا كان الوقف الجديد أعلى فعلاً
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
