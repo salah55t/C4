@@ -1893,12 +1893,17 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
         # Ensure last_trailing_update_price is not None or zero to avoid division errors
         price_change_since_last_update_pct = ((current_price - last_trailing_update_price) / last_trailing_update_price) * 100 if last_trailing_update_price and last_trailing_update_price != 0 else 0.0
 
+        # Build the percentage string with the conditional backslash separately
+        percentage_str = f"{price_change_since_last_update_pct:+.1f}%"
+        if price_change_since_last_update_pct > 0:
+            percentage_str = '\\' + percentage_str # Add backslash if positive for MarkdownV2 escaping
+
         message = (
             f"➡️ *تم تحديث وقف الخسارة المتحرك ({escape_markdown_v2(strategy_name)})*\n"
             f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            # Corrected f-string to move the conditional backslash outside the expression part
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}`{'\\' if price_change_since_last_update_pct > 0 else ''}{price_change_since_last_update_pct:+.1f}% منذ آخر تحديث)\n"
+            # Embed the pre-built percentage string
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}` ({percentage_str} منذ آخر تحديث)\n"
             f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value_str}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
             f"🔒 **الوقف السابق:** `${old_stop_loss_str}`\n"
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
@@ -2567,4 +2572,3 @@ if __name__ == "__main__":
         logger.info("👋 [Main] Trading signal bot stopped.")
         # Use os._exit(0) to ensure all threads (especially daemon ones) are terminated
         os._exit(0) # Exit cleanly
-
