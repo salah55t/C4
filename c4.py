@@ -73,7 +73,7 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry
-ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
+ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -721,7 +721,7 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     required_cols = ['high', 'low', 'close', 'volume']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator VWAP] 'high', 'low', 'close', 'volume' columns missing or empty.")
+        logger.warning("⚠️ [Indicator VWAP] 'high', 'low', 'close' or 'volume' columns missing or empty.")
         df['vwap'] = np.nan
         return df
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -876,30 +876,38 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
             final_lb[i] = final_lb[i-1]
 
         # Determine SuperTrend line and trend
-        if st[i-1] == final_ub[i-1]: # If previous trend was downtrend
+        if st_trend[i-1] == -1: # If previous trend was downtrend (-1)
             if close[i] <= final_ub[i]: # Continue downtrend
                 st[i] = final_ub[i]
                 st_trend[i] = -1
             else: # Trend changes to uptrend
                 st[i] = final_lb[i]
                 st_trend[i] = 1
-        elif st[i-1] == final_lb[i-1]: # If previous trend was uptrend
+        elif st_trend[i-1] == 1: # If previous trend was uptrend (1)
             if close[i] >= final_lb[i]: # Continue uptrend
                 st[i] = final_lb[i]
                 st_trend[i] = 1
             else: # Trend changes to downtrend
                 st[i] = final_ub[i]
                 st_trend[i] = -1
-        else: # Initial state (or if previous value was NaN)
+        else: # Initial state (or if previous value was NaN or 0)
              if close[i] > final_ub[i]: # Start of uptrend
                  st[i] = final_lb[i]
                  st_trend[i] = 1
              elif close[i] < final_lb[i]: # Start of downtrend
                   st[i] = final_ub[i]
                   st_trend[i] = -1
-             else: # If price is between bands initially (rare)
-                  st[i] = np.nan # Or can use previous value if available
-                  st_trend[i] = 0
+             else: # If price is between bands initially (rare) or previous trend was 0
+                  # Try to infer trend from current price vs bands if previous was 0
+                  if close[i] > basic_ub[i]:
+                      st[i] = basic_lb[i]
+                      st_trend[i] = 1
+                  elif close[i] < basic_lb[i]:
+                      st[i] = basic_ub[i]
+                      st_trend[i] = -1
+                  else: # Still between bands
+                      st[i] = np.nan # Or can use previous value if available
+                      st_trend[i] = 0
 
 
     # Assign calculated values back to DataFrame
@@ -1097,10 +1105,10 @@ def fetch_recent_volume(symbol: str) -> float:
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
 def generate_performance_report() -> str:
-    """Generates a comprehensive performance report from the database."""
+    """Generates a comprehensive performance report from the database in Arabic."""
     logger.info("ℹ️ [Report] Generating performance report...")
     if not check_db_connection() or not conn or not cur:
-        return "❌ Cannot generate report, database connection issue."
+        return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
     try:
         # Use a new cursor within the function to ensure no interference
         with conn.cursor() as report_cur: # Uses RealDictCursor
@@ -1140,26 +1148,26 @@ def generate_performance_report() -> str:
              # Profit Factor: Total Profit / Absolute Total Loss
             profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
 
-        # 4. Format the report
+        # 4. Format the report in Arabic
         report = (
-            f"📊 *Comprehensive Performance Report:*\n"
+            f"📊 *تقرير الأداء الشامل:*\n"
             f"——————————————\n"
-            f"📈 Currently Open Signals: *{open_signals_count}*\n"
+            f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
             f"——————————————\n"
-            f"📉 *Closed Signals Statistics:*\n"
-            f"  • Total Closed Signals: *{total_closed}*\n"
-            f"  ✅ Winning Signals: *{winning_signals}* ({win_rate:.2f}%)\n" # Add win rate here
-            f"  ❌ Losing Signals: *{losing_signals}*\n"
+            f"📉 *إحصائيات الإشارات المغلقة:*\n"
+            f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
+            f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n" # Add win rate here
+            f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
             f"——————————————\n"
-            f"💰 *Profitability:*\n"
-            f"  • Net Profit/Loss (Total %): *{total_profit_pct:+.2f}%*\n"
-            f"  • Gross Profit (%): *{gross_profit_pct:+.2f}%*\n"
-            f"  • Gross Loss (%): *{gross_loss_pct:.2f}%*\n"
-            f"  • Avg Winning Trade (%): *{avg_win_pct:+.2f}%*\n"
-            f"  • Avg Losing Trade (%): *{avg_loss_pct:.2f}%*\n"
-            f"  • Profit Factor: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
+            f"💰 *الربحية:*\n"
+            f"  • صافي الربح/الخسارة (الإجمالي %): *{total_profit_pct:+.2f}%*\n"
+            f"  • إجمالي الربح (%): *{gross_profit_pct:+.2f}%*\n"
+            f"  • إجمالي الخسارة (%): *{gross_loss_pct:.2f}%*\n"
+            f"  • متوسط الصفقة الرابحة (%): *{avg_win_pct:+.2f}%*\n"
+            f"  • متوسط الصفقة الخاسرة (%): *{avg_loss_pct:.2f}%*\n"
+            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
             f"——————————————\n"
-            f"🕰️ _Report up to: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
+            f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
         logger.info("✅ [Report] Performance report generated successfully.")
         return report
@@ -1167,10 +1175,10 @@ def generate_performance_report() -> str:
     except psycopg2.Error as db_err:
         logger.error(f"❌ [Report] Database error generating performance report: {db_err}")
         if conn: conn.rollback() # Rollback any potentially open transaction
-        return "❌ Database error generating performance report."
+        return "❌ خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء."
     except Exception as e:
         logger.error(f"❌ [Report] Unexpected error generating performance report: {e}", exc_info=True)
-        return "❌ Unexpected error generating performance report."
+        return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
 
 # ---------------------- Trading Strategy (Modified for EMA Cross and Breakout) -------------------
 
@@ -1202,11 +1210,12 @@ class ConservativeTradingStrategy:
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
         # (These conditions contribute to the score but are not mandatory)
+        # Removed 'above_vwap' as VWMA is now mandatory
         # =====================================================================
         self.condition_weights = {
             # 'ema_cross_bullish': 2.0, # Now a mandatory condition
             # 'supertrend_up': 2.0,   # Now a mandatory condition
-            'above_vwap': 1.5,      # Price above VWAP (Added and weighted)
+            # 'above_vwap': 1.5,      # Price above VWAP (Removed - VWMA is mandatory)
             # 'macd_positive_or_cross': 1.5, # Now a mandatory condition
             # 'adx_trending_bullish': 1.0, # Now a mandatory condition
             'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
@@ -1224,13 +1233,15 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
+        # Added 'above_vwma' as a mandatory condition
         # =====================================================================
         self.essential_conditions = [
             'ema_cross_bullish',
             'supertrend_up',
             'macd_positive_or_cross',
             'adx_trending_bullish',
-            'breakout_bb_upper' # Breakout condition added as mandatory
+            'breakout_bb_upper', # Breakout condition added as mandatory
+            'above_vwma' # VWMA condition added as mandatory
         ]
         # =====================================================================
 
@@ -1411,6 +1422,15 @@ class ConservativeTradingStrategy:
         else:
              signal_details['Breakout_BB'] = f'Passed: Closed Above BB Upper'
 
+        # VWMA condition: Price closes above the VWMA
+        if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']):
+             essential_passed = False
+             failed_essential_conditions.append('Above VWMA')
+             detail_vwma = f'Close:{last_row.get("close", np.nan):.4f}, VWMA:{last_row.get("vwma", np.nan):.4f}'
+             signal_details['VWMA_Mandatory'] = f'Failed: Not Closed Above VWMA ({detail_vwma})'
+        else:
+             signal_details['VWMA_Mandatory'] = f'Passed: Closed Above VWMA'
+
 
         # If any mandatory condition failed, reject the signal immediately
         if not essential_passed:
@@ -1425,34 +1445,26 @@ class ConservativeTradingStrategy:
         # =====================================================================
         current_score = 0.0
 
-        # Price above VWAP (New Optional Condition)
-        if pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']:
-            current_score += self.condition_weights['above_vwap']
-            signal_details['VWMA'] = f'Above VWMA ({last_row["vwma"]:.4f}) (+{self.condition_weights["above_vwap"]})'
-        else:
-             signal_details['VWMA'] = f'Not Above VWMA (0)'
-
-
-        # Price above VWAP (Original VWAP, daily reset)
+        # Price above VWAP (Original VWAP, daily reset) - Still optional
         if last_row['close'] > last_row['vwap']:
-            current_score += self.condition_weights['above_vwap'] # Re-using weight, consider separate weight if needed
-            signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights["above_vwap"]})'
+            current_score += self.condition_weights.get('above_vwap', 0) # Use .get with default 0 in case weight was removed
+            signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap", 0)})'
         else:
              signal_details['VWAP_Daily'] = f'Below Daily VWAP (0)'
 
 
         # RSI in acceptable zone (not extreme overbought)
         if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
-            current_score += self.condition_weights['rsi_ok']
-            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights["rsi_ok"]})'
+            current_score += self.condition_weights.get('rsi_ok', 0)
+            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
              signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
 
 
         # Bullish engulfing or hammer candle present
         if last_row['BullishCandleSignal'] == 1:
-            current_score += self.condition_weights['bullish_candle']
-            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights["bullish_candle"]})'
+            current_score += self.condition_weights.get('bullish_candle', 0)
+            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
         else:
              signal_details['Candle'] = f'No Bullish Pattern (0)'
 
@@ -1460,8 +1472,8 @@ class ConservativeTradingStrategy:
         # Price not at upper Bollinger Band (this condition might conflict with breakout, hence lower weight)
         # This condition is only applied if there wasn't a clear breakout above the upper band (this is no longer mandatory)
         if last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
-             current_score += self.condition_weights['not_bb_extreme']
-             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights["not_bb_extreme"]})'
+             current_score += self.condition_weights.get('not_bb_extreme', 0)
+             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
              signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
 
@@ -1469,24 +1481,24 @@ class ConservativeTradingStrategy:
         # OBV is rising
         # Check OBV only if the previous value is valid
         if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']:
-            current_score += self.condition_weights['obv_rising']
-            signal_details['OBV'] = f'Rising (+{self.condition_weights["obv_rising"]})'
+            current_score += self.condition_weights.get('obv_rising', 0)
+            signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
         else:
              signal_details['OBV'] = f'Not Rising (0)'
 
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
         if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
-             current_score += self.condition_weights['rsi_filter_breakout']
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights["rsi_filter_breakout"]})'
+             current_score += self.condition_weights.get('rsi_filter_breakout', 0)
+             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else:
              signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
 
 
         # MACD filter for breakout (optional): MACD histogram is positive
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
-             current_score += self.condition_weights['macd_filter_breakout']
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights["macd_filter_breakout"]})'
+             current_score += self.condition_weights.get('macd_filter_breakout', 0)
+             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else:
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
 
@@ -1523,7 +1535,6 @@ class ConservativeTradingStrategy:
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
             # Use a percentage as a minimum stop loss if the initial calculation is invalid
             # Example: 1.5% below current price as a minimum
-            min_sl_price_pct = current_price * (1 - (stop_loss_multiplier * 0.01)) # This calculation seems incorrect, should be a fixed percentage
             min_sl_price_pct = current_price * (1 - 0.015) # Example: 1.5% below entry
             initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # Ensure it's not too close to zero
             logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is invalid or above entry price. Adjusted to {initial_stop_loss:.8f}")
@@ -1607,7 +1618,7 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
          return None
 
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
-    """Formats and sends a new trading signal alert to Telegram, displaying the score."""
+    """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the score."""
     logger.debug(f"ℹ️ [Telegram Alert] Formatting and sending alert for signal: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
@@ -1627,42 +1638,44 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         loss_usdt = abs(trade_value_signal * (loss_pct / 100))
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Escape special characters for Markdown
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
-        # Build the message with weighted score and condition details
+        # Build the message in Arabic with weighted score and condition details
         message = (
-            f"💡 *New Trading Signal ({strategy_name.replace('_', ' ').title()})* 💡\n"
+            f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
             f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"📈 **Signal Type:** Buy (Long)\n"
-            f"🕰️ **Timeframe:** {timeframe}\n"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"📈 **نوع الإشارة:** شراء (طويل)\n"
+            f"🕰️ **الإطار الزمني:** {timeframe}\n"
             # --- Modification to display score ---
-            f"📊 **Signal Strength (Score - Optional):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **Liquidity (15m):** {volume_15m:,.0f} USDT\n"
+            f"📊 **قوة الإشارة (النقاط - اختيارية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
+            f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
-            f"➡️ **Suggested Entry Price:** `${entry_price:,.8g}`\n"
-            f"🎯 **Initial Target:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
-            f"🛑 **Initial Stop Loss:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
+            f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
+            f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
+            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
-            f"✅ *Mandatory Conditions Met:*\n"
-            f"  - EMA Cross: {signal_details.get('EMA_Cross', 'N/A').replace('Passed: ', '')}\n"
-            f"  - SuperTrend: {signal_details.get('SuperTrend', 'N/A').replace('Passed: ', '')}\n"
-            f"  - MACD: {signal_details.get('MACD', 'N/A').replace('Passed: ', '')}\n"
-            f"  - ADX/DI: {signal_details.get('ADX/DI', 'N/A').replace('Passed: ', '')}\n"
-            f"  - Breakout: {signal_details.get('Breakout_BB', 'N/A').replace('Passed: ', '')}\n"
+            f"✅ *الشروط الإلزامية المحققة:*\n"
+            f"  - تقاطع المتوسطات الأسيّة: {'تم ✅' if 'Passed' in signal_details.get('EMA_Cross', '') else 'فشل ❌'}\n"
+            f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
+            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
+            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
+            f"  - الاختراق: {'إغلاق فوق الحد العلوي لبولينجر ✅' if 'Passed' in signal_details.get('Breakout_BB', '') else 'لم يغلق فوق الحد العلوي ❌'}\n"
+            f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n" # Added VWMA mandatory check
             f"——————————————\n"
-            f"😨/🤑 **Fear & Greed Index:** {fear_greed}\n"
-            f"₿ **Bitcoin Trend (4H):** {btc_trend}\n"
+            f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
+            f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
             f"——————————————\n"
             f"⏰ {timestamp_str}"
         )
 
         reply_markup = {
             "inline_keyboard": [
-                [{"text": "📊 View Performance Report", "callback_data": "get_report"}]
+                [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}]
             ]
         }
 
@@ -1674,7 +1687,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         logger.error(f"❌ [Telegram Alert] Failed to send signal alert for symbol {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
 
 def send_tracking_notification(details: Dict[str, Any]) -> None:
-    """Formats and sends enhanced Telegram notifications for tracking events."""
+    """Formats and sends enhanced Telegram notifications for tracking events in Arabic."""
     symbol = details.get('symbol', 'N/A')
     signal_id = details.get('id', 'N/A')
     notification_type = details.get('type', 'unknown')
@@ -1691,41 +1704,41 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 
     if notification_type == 'target_hit':
         message = (
-            f"✅ *Target Reached (ID: {signal_id})*\n"
+            f"✅ *تم الوصول إلى الهدف (ID: {signal_id})*\n"
             f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"🎯 **Closing Price (Target):** `${closing_price:,.8g}`\n"
-            f"💰 **Realized Profit:** {profit_pct:+.2f}%"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
+            f"💰 **الربح المحقق:** {profit_pct:+.2f}%"
         )
     elif notification_type == 'stop_loss_hit':
-        sl_type_msg = details.get('sl_type', 'at a loss ❌') # Value calculated in the tracking function
+        sl_type_msg_ar = "بربح ✅" if details.get('profitable_sl', False) else "بخسارة ❌" # Use profitable_sl flag
         message = (
-            f"🛑 *Stop Loss Hit (ID: {signal_id})*\n"
+            f"🛑 *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
             f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"🚫 **Closing Price (Stop):** `${closing_price:,.8g}`\n"
-            f"📉 **Result:** {profit_pct:.2f}% ({sl_type_msg})"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
+            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})"
         )
     elif notification_type == 'trailing_activated':
         activation_profit_pct = details.get('activation_profit_pct', TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100)
         message = (
-            f"⬆️ *Trailing Stop Activated (ID: {signal_id})*\n"
+            f"⬆️ *تم تفعيل وقف الخسارة المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"📈 **Current Price (at activation):** `${current_price:,.8g}` (Profit > {activation_profit_pct:.1f}%)\n"
-            f"📊 **ATR Value ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (Multiplier: {TRAILING_STOP_ATR_MULTIPLIER})\n"
-            f"🛡️ **New Stop Loss:** `${new_stop_loss:,.8g}`"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (الربح > {activation_profit_pct:.1f}%)\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
     elif notification_type == 'trailing_updated':
         trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
         message = (
-            f"➡️ *Trailing Stop Updated (ID: {signal_id})*\n"
+            f"➡️ *تم تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"📈 **Current Price (at update):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% since last update)\n"
-            f"📊 **ATR Value ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (Multiplier: {TRAILING_STOP_ATR_MULTIPLIER})\n"
-            f"🔒 **Previous Stop:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **New Stop Loss:** `${new_stop_loss:,.8g}`"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
@@ -1862,7 +1875,7 @@ def track_signals() -> None:
                         update_query = sql.SQL("UPDATE signals SET hit_stop_loss = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s, profitable_stop_loss = %s WHERE id = %s;")
                         update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
                         log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
-                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'sl_type': sl_type_msg})
+                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
                         update_executed = True
 
                     # 3. Check for Trailing Stop Activation or Update (Only if Target or SL not hit)
@@ -1880,7 +1893,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.01)) # Ensure a very small profit or keep current stop
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
 
                                          if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
@@ -2069,7 +2082,7 @@ def webhook() -> Tuple[str, int]:
 def handle_status_command(chat_id_msg: int) -> None:
     """Separate function to handle /status command to avoid blocking the Webhook."""
     logger.info(f"ℹ️ [Flask Status] Handling /status command for chat {chat_id_msg}")
-    status_msg = "⏳ Fetching status..."
+    status_msg = "⏳ جلب الحالة..."
     msg_sent = send_telegram_message(chat_id_msg, status_msg)
     if not (msg_sent and msg_sent.get('ok')):
          logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
@@ -2084,14 +2097,14 @@ def handle_status_command(chat_id_msg: int) -> None:
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
         # Check if variables exist before accessing them
-        ws_status = 'Active ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'Inactive ❌'
-        tracker_status = 'Active ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'Inactive ❌'
+        ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
+        tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
         final_status_msg = (
-            f"🤖 *Bot Status:*\n"
-            f"- Price Tracking (WS): {ws_status}\n"
-            f"- Signal Tracking: {tracker_status}\n"
-            f"- Active Signals: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- Current Server Time: {datetime.now().strftime('%H:%M:%S')}"
+            f"🤖 *حالة البوت:*\n"
+            f"- تتبع الأسعار (WS): {ws_status}\n"
+            f"- تتبع الإشارات: {tracker_status}\n"
+            f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
         )
         # Edit the original message
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
@@ -2107,7 +2120,7 @@ def handle_status_command(chat_id_msg: int) -> None:
 
     except Exception as status_err:
         logger.error(f"❌ [Flask Status] Error getting/editing status details for chat {chat_id_msg}: {status_err}", exc_info=True)
-        send_telegram_message(chat_id_msg, "❌ An error occurred while fetching status details.")
+        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
 
 
 def run_flask() -> None:
