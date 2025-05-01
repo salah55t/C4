@@ -624,7 +624,7 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
         logger.warning("⚠️ [Indicator ATR] 'high', 'low', 'close' columns missing or empty.")
         df['atr'] = np.nan
         return df
-    # Need at least period candles PLUS one previous close for the first TR calculation
+    # Need at least period + 1 candles for the first TR calculation (current high/low vs previous close)
     if len(df) < period + 1:
         logger.warning(f"⚠️ [Indicator ATR] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
         df['atr'] = np.nan
@@ -996,7 +996,7 @@ def is_hammer(row: pd.Series) -> bool:
     is_very_small_upper_shadow = upper_shadow < (body * 0.1) if body > 0 else upper_shadow < (candle_range * 0.05) # Upper shadow is very small or absent
     # Optional: Hammer forms after a downtrend (previous close < previous open) - could add this for stricter criteria
     # if prev_row is not None and pd.notna([prev_row['open'], prev_row['close']]).all() and prev_row['close'] < prev_row['open']:
-    return is_small_body and is_long_lower_shadow and is_very_small_upper_shadow # Removed the downtrend check for broader applicability
+    return bool(is_small_body and is_long_lower_shadow and is_very_small_upper_shadow) # Removed the downtrend check for broader applicability
 
 
 def is_bullish_engulfing(df: pd.DataFrame, idx: int) -> bool:
@@ -1831,7 +1831,13 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     notification_type = details.get('type', 'unknown')
     message = ""
     # Escape special characters for Markdown v2
-    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`').replace(']', '\\]').replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('>', '\\>').replace('#', '\\#').replace('+', '\\+').replace('-', '\\-').replace('=', '\\=').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}').replace('.', '\\.').replace('!', '\\!')
+    def escape_markdown_v2(text: str) -> str:
+         if not isinstance(text, str):
+             return str(text) # Convert non-strings to string
+         escape_chars = '_*[]()~`>#+-=|{}.!'
+         return ''.join('\\' + char if char in escape_chars else char for char in text)
+
+    safe_symbol = escape_markdown_v2(symbol)
 
 
     closing_price = details.get('closing_price', 0.0)
@@ -1891,8 +1897,8 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"➡️ *تم تحديث وقف الخسارة المتحرك ({escape_markdown_v2(strategy_name)})*\n"
             f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            # Corrected f-string embedding the conditional escape and the calculated percentage change
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}` ({'\\' if price_change_since_last_update_pct > 0 else ''}{price_change_since_last_update_pct:+.1f}% منذ آخر تحديث)\n"
+            # Corrected f-string to move the conditional backslash outside the expression part
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}`{'\\' if price_change_since_last_update_pct > 0 else ''}{price_change_since_last_update_pct:+.1f}% منذ آخر تحديث)\n"
             f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value_str}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
             f"🔒 **الوقف السابق:** `${old_stop_loss_str}`\n"
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
