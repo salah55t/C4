@@ -723,7 +723,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    df_calc['-dm'] = np.where((df_calc['down_move'] > df_move['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
+    df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
 
     # Use EMA to calculate smoothed values (alpha = 1/period) with min_periods
     alpha = 1 / period
@@ -1798,7 +1798,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"—————————————————\n" # Adjusted line length
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
-            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_loss:.2f})\n" # Use loss_usdt variable
+            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n" # Use loss_usdt variable
             f"—————————————————\n" # Adjusted line length
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -1841,6 +1841,8 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
     strategy_name = details.get('strategy_name', 'N/A') # Get strategy name for notification
+    last_trailing_update_price = details.get('last_trailing_update_price', None) # Get the price from the details
+
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
@@ -1881,12 +1883,16 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
         )
     elif notification_type == 'trailing_updated':
-        trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
+        # Calculate the percentage change since the last trailing stop update price
+        # Ensure last_trailing_update_price is not None or zero to avoid division errors
+        price_change_since_last_update_pct = ((current_price - last_trailing_update_price) / last_trailing_update_price) * 100 if last_trailing_update_price and last_trailing_update_price != 0 else 0.0
+
         message = (
             f"➡️ *تم تحديث وقف الخسارة المتحرك ({escape_markdown_v2(strategy_name)})*\n"
             f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}` (\{}+{:,.1f}% منذ آخر تحديث)\n".format('\\' if TRAILING_STOP_MOVE_INCREMENT_PCT * 100 > 0 else '', TRAILING_STOP_MOVE_INCREMENT_PCT * 100) # Handle '+' escaping
+            # Corrected f-string embedding the conditional escape and the calculated percentage change
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}` ({'\\' if price_change_since_last_update_pct > 0 else ''}{price_change_since_last_update_pct:+.1f}% منذ آخر تحديث)\n"
             f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value_str}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
             f"🔒 **الوقف السابق:** `${old_stop_loss_str}`\n"
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
@@ -2092,7 +2098,7 @@ def track_signals() -> None:
                                                 update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                                 update_params = (new_stop_loss_update, current_price, signal_id)
                                                 log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val_update:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
-                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100})
+                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'last_trailing_update_price': last_trailing_update_price}) # Pass last_trailing_update_price
                                                 update_executed = True
                                              else:
                                                  logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
@@ -2555,3 +2561,4 @@ if __name__ == "__main__":
         logger.info("👋 [Main] Trading signal bot stopped.")
         # Use os._exit(0) to ensure all threads (especially daemon ones) are terminated
         os._exit(0) # Exit cleanly
+
