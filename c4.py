@@ -22,7 +22,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # إضافة اسم المسجل
     handlers=[
-        logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_momentum_pullback.log', encoding='utf-8'), # تحديث اسم ملف السجل
         logging.StreamHandler()
     ]
 )
@@ -53,27 +53,24 @@ TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # Historical data lookback in days for signal generation
-SIGNAL_TRACKING_TIMEFRAME: str = '30m' # Timeframe for signal tracking and stop loss updates
+SIGNAL_TRACKING_TIMEFRAME: str = '30m' # Timeframe for signal tracking and stop loss updates (يمكن أن تكون مختلفة عن التوليد)
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for signal tracking
 
 # =============================================================================
 # --- Indicator Parameters ---
-# You can adjust these values to better suit your strategy
+# These values are shared and used by indicator calculation functions
 # =============================================================================
-RSI_PERIOD: int = 14          # RSI Period (Original: 14)
-RSI_OVERSOLD: int = 30        # Oversold threshold (Original: 30) - Slightly increased
-RSI_OVERBOUGHT: int = 70      # Overbought threshold (Original: 70) - Slightly decreased
-# EMA_PERIOD: int = 26          # EMA Period for trend (Commented out)
-EMA_SHORT_PERIOD: int = 13      # Short EMA period (New)
-EMA_LONG_PERIOD: int = 34       # Long EMA period (New)
-VWMA_PERIOD: int = 20           # VWMA Period (New)
-SWING_ORDER: int = 5          # Order for swing point detection
-# ... (Rest of the constants remain the same) ...
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
-FIB_TOLERANCE: float = 0.007
-LOOKBACK_FOR_SWINGS: int = 100
-ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry
-ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
+RSI_PERIOD: int = 14          # RSI Period
+# RSI_OVERSOLD/OVERBOUGHT thresholds are now used as filters/points, not global constants
+EMA_SHORT_PERIOD: int = 13      # Short EMA period
+EMA_LONG_PERIOD: int = 34       # Long EMA period
+VWMA_PERIOD: int = 20           # VWMA Period
+SWING_ORDER: int = 5          # Order for swing point detection (For Elliott/Fib - not strictly used in the new strategy logic but kept)
+FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Not strictly used in the new strategy logic but kept
+FIB_TOLERANCE: float = 0.007 # Not strictly used in the new strategy logic but kept
+LOOKBACK_FOR_SWINGS: int = 100 # Not strictly used in the new strategy logic but kept
+ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry/tracking (This is for the ATR calculation itself)
+# ATR multipliers for initial TP/SL are now defined INSIDE the strategy class
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -83,14 +80,14 @@ ADX_PERIOD: int = 14            # ADX Period
 SUPERTREND_PERIOD: int = 10     # SuperTrend Period
 SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
 
-# Trailing Stop Loss
+# Trailing Stop Loss (These can remain global as they apply AFTER entry)
 TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # Profit percentage to activate trailing stop (1.5%)
-TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # ATR Multiplier for trailing stop (Original: 2.5) - Reduced multiplier for tighter stop
-TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to move trailing stop (0.1%)
+TRAILING_STOP_ATR_MULTIPLIER: float = 2.0        # ATR Multiplier for trailing stop (تعديل مقترح: 2.0)
+TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # Price increase percentage to move trailing stop (تعديل مقترح: 0.2%)
 
-# Additional Signal Conditions
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage
-MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
+# Additional Signal Conditions (Mandatory Filters)
+MIN_PROFIT_MARGIN_PCT: float = 1.5 # Minimum required profit margin percentage (تعديل مقترح: 1.5%)
+MIN_VOLUME_15M_USDT: float = 200000.0 # Minimum liquidity in the last 15 minutes in USDT (تعديل مقترح: 200k)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -260,16 +257,14 @@ def get_btc_trend_4h() -> str:
             logger.warning("⚠️ [Indicators] BTC EMA or current price values are NaN.")
             return "N/A (Calculation Error)"
 
-        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
-
-        if current_close > ema20 > ema50:
+        # Using a slightly wider spread for trend definition compared to the old code's 0.5%
+        # Consider using cross or clear separation instead of just relative position
+        if current_close > ema20 and ema20 > ema50:
             trend = "صعود 📈" # Uptrend
-        elif current_close < ema20 < ema50:
+        elif current_close < ema20 and ema20 < ema50:
             trend = "هبوط 📉" # Downtrend
-        elif diff_ema20_pct < 0.005: # Less than 0.5% difference, considered stable
-            trend = "استقرار 🔄" # Sideways
         else: # Crossover or unclear divergence
-            trend = "تذبذب 🔀" # Volatile
+            trend = "تذبذب/استقرار 🔀" # Volatile / Sideways
 
         logger.debug(f"✅ [Indicators] Bitcoin 4H Trend: {trend}")
         return trend
@@ -301,7 +296,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     initial_stop_loss DOUBLE PRECISION NOT NULL,
                     current_target DOUBLE PRECISION NOT NULL,
                     current_stop_loss DOUBLE PRECISION NOT NULL,
-                    r2_score DOUBLE PRECISION, -- Now represents the weighted signal score
+                    r2_score DOUBLE PRECISION, -- Represents the signal score
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
                     hit_stop_loss BOOLEAN DEFAULT FALSE,
@@ -313,7 +308,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     is_trailing_active BOOLEAN DEFAULT FALSE,
                     strategy_name TEXT,
                     signal_details JSONB,
-                    last_trailing_update_price DOUBLE PRECISION
+                    last_trailing_update_price DOUBLE PRECISION,
+                    total_possible_score DOUBLE PRECISION -- Add total possible score column
                 );""")
             conn.commit()
             logger.info("✅ [DB] 'signals' table exists or was created.")
@@ -325,7 +321,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 "achieved_target", "hit_stop_loss", "closing_price", "closed_at",
                 "sent_at", "profit_percentage", "profitable_stop_loss",
                 "is_trailing_active", "strategy_name", "signal_details",
-                "last_trailing_update_price"
+                "last_trailing_update_price", "total_possible_score" # Include new column
             }
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
@@ -333,9 +329,33 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
 
             if missing_columns:
                 logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
-                # (Original code to add columns was fine, can keep or improve here if needed)
-                # ... (ALTER TABLE code can be added here if you anticipate future changes) ...
-                logger.warning("⚠️ [DB] Automatic addition of missing columns is not implemented in this enhanced version. Please check manually if needed.")
+                # Add ALTER TABLE statements here for each missing column
+                for col in missing_columns:
+                    col_type = "DOUBLE PRECISION" if col in ["r2_score", "volume_15m", "profit_percentage", "last_trailing_update_price", "total_possible_score"] else \
+                               "BOOLEAN" if col in ["achieved_target", "hit_stop_loss", "profitable_stop_loss", "is_trailing_active"] else \
+                               "TEXT" if col == "strategy_name" else \
+                               "JSONB" if col == "signal_details" else \
+                               "TIMESTAMP" if col == "closed_at" else \
+                               "TEXT" # Default to TEXT if type not specified
+                    default_val = "DEFAULT FALSE" if col in ["achieved_target", "hit_stop_loss", "profitable_stop_loss", "is_trailing_active"] else \
+                                  "DEFAULT NULL" if col in ["closed_at", "closing_price", "profit_percentage", "last_trailing_update_price", "r2_score", "volume_15m", "total_possible_score"] else \
+                                  "DEFAULT ''" if col == "strategy_name" else "" # Default empty string for text, or NULL for others
+
+                    try:
+                        # Check if column already exists before adding to avoid errors on re-runs
+                        cur.execute(f"SELECT 1 FROM information_schema.columns WHERE table_name = 'signals' AND column_name = '{col}';")
+                        if not cur.fetchone():
+                            alter_stmt = sql.SQL("ALTER TABLE signals ADD COLUMN {} {};").format(sql.Identifier(col), sql.SQL(col_type + " " + default_val))
+                            cur.execute(alter_stmt)
+                            conn.commit()
+                            logger.info(f"✅ [DB] Added column '{col}' to 'signals' table.")
+                        else:
+                            logger.warning(f"⚠️ [DB] Column '{col}' already exists, skipping addition.")
+                    except Exception as alter_err:
+                         logger.error(f"❌ [DB] Failed to add column '{col}': {alter_err}", exc_info=True)
+                         conn.rollback() # Rollback the current alter statement if it fails
+
+                logger.info("✅ [DB] Attempted to add missing columns to 'signals' table. Please verify manually if needed.")
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
 
@@ -423,7 +443,7 @@ def convert_np_values(obj: Any) -> Any:
         return float(obj)
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
-    elif pd.isna(obj): # Handle NaT from Pandas as well
+    elif pd.isna(obj): # Handle NaT/NaN from Pandas as well
         return None
     else:
         return obj
@@ -522,7 +542,9 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
              if msg.get('e') == 'error':
                  logger.error(f"❌ [WS] Error message from WebSocket: {msg.get('m', 'No error details')}")
              elif msg.get('stream') and msg.get('data'): # Handle combined streams format
-                 for ticker_item in msg.get('data', []):
+                 # Ensure data is a list, even if only one item
+                 data_items = msg.get('data', []) if isinstance(msg.get('data'), list) else [msg.get('data')] if msg.get('data') else []
+                 for ticker_item in data_items:
                     symbol = ticker_item.get('s')
                     price_str = ticker_item.get('c')
                     if symbol and 'USDT' in symbol and price_str:
@@ -546,6 +568,7 @@ def run_ticker_socket_manager() -> None:
             twm.start() # Start the manager
 
             # Using start_miniticker_socket covers all symbols and is suitable here
+            # It sends updates for all symbols, not just specific ones
             stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
             logger.info(f"✅ [WS] WebSocket stream started: {stream_name}")
 
@@ -581,7 +604,8 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
 
     # Calculate RS and avoid division by zero
-    rs = avg_gain / avg_loss.replace(0, np.nan) # Replace zero with NaN to avoid division by zero
+    # Add a small epsilon to avg_loss to prevent division by exactly zero when all losses are 0
+    rs = avg_gain / (avg_loss + 1e-10)
 
     # Calculate RSI
     rsi_series = 100 - (100 / (1 + rs))
@@ -600,7 +624,8 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
         logger.warning("⚠️ [Indicator ATR] 'high', 'low', 'close' columns missing or empty.")
         df['atr'] = np.nan
         return df
-    if len(df) < period + 1: # We need one extra candle for shift(1)
+    # Need at least period candles PLUS one previous close for the first TR calculation
+    if len(df) < period + 1:
         logger.warning(f"⚠️ [Indicator ATR] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
         df['atr'] = np.nan
         return df
@@ -609,11 +634,12 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
 
-    # Calculate True Range (TR) - Ignore NaN during max calculation
+    # Calculate True Range (TR) - Ignore NaN during max calculation, if close.shift(1) is NaN, TR is also NaN
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
 
     # Calculate ATR using EMA (using span gives a result closer to TradingView than com=period-1)
-    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    # Use min_periods to ensure we have enough data for the first calculation
+    df['atr'] = tr.ewm(span=period, adjust=False, min_periods=period).mean()
     return df
 
 
@@ -625,16 +651,19 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, 
         df['bb_middle'] = np.nan
         df['bb_upper'] = np.nan
         df['bb_lower'] = np.nan
+        df['bb_std'] = np.nan # Also add std dev column
         return df
     if len(df) < window:
          logger.warning(f"⚠️ [Indicator BB] Insufficient data ({len(df)} < {window}) to calculate BB.")
          df['bb_middle'] = np.nan
          df['bb_upper'] = np.nan
          df['bb_lower'] = np.nan
+         df['bb_std'] = np.nan
          return df
 
-    df['bb_middle'] = df['close'].rolling(window=window).mean()
-    df['bb_std'] = df['close'].rolling(window=window).std()
+    # Use min_periods=window to ensure enough data points for initial calculation
+    df['bb_middle'] = df['close'].rolling(window=window, min_periods=window).mean()
+    df['bb_std'] = df['close'].rolling(window=window, min_periods=window).std()
     df['bb_upper'] = df['bb_middle'] + num_std * df['bb_std']
     df['bb_lower'] = df['bb_middle'] - num_std * df['bb_std']
     return df
@@ -687,30 +716,34 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['high-low'] = df_calc['high'] - df_calc['low']
     df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
     df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
+    # Ensure TR is NaN if any of the components requiring shift(1) are NaN
     df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
 
     # Calculate Directional Movement (+DM, -DM)
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
+    df_calc['-dm'] = np.where((df_calc['down_move'] > df_move['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
 
-    # Use EMA to calculate smoothed values (alpha = 1/period)
+    # Use EMA to calculate smoothed values (alpha = 1/period) with min_periods
     alpha = 1 / period
-    df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
-    df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
-    df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
+    df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+    df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+    df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+
 
     # Calculate Directional Indicators (DI+, DI-) and avoid division by zero
-    df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
+    # Use a small epsilon to prevent division by exactly zero
+    df_calc['di_plus'] = 100 * (df_calc['+dm_smooth'] / (df_calc['tr_smooth'] + 1e-10))
+    df_calc['di_minus'] = 100 * (df_calc['-dm_smooth'] / (df_calc['tr_smooth'] + 1e-10))
 
     # Calculate Directional Movement Index (DX)
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
-    df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
+     # Add a small epsilon to di_sum to prevent division by exactly zero
+    df_calc['dx'] = 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / (di_sum + 1e-10)
 
-    # Calculate Average Directional Index (ADX) using EMA
-    df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
+    # Calculate Average Directional Index (ADX) using EMA with min_periods
+    df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False, min_periods=period).mean()
 
     # Return DataFrame with only the new columns (or it can be merged with the original)
     return df_calc[['adx', 'di_plus', 'di_minus']]
@@ -742,6 +775,7 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     # Calculate cumulative sums within each day
     try:
         # Group by date and calculate cumulative sums
+        # Ensure cumulative sums start from the first non-NaN value for that day
         df['cum_tp_vol'] = df.groupby('date')['tp_vol'].cumsum()
         df['cum_volume'] = df.groupby('date')['volume'].cumsum()
     except KeyError as e:
@@ -758,7 +792,8 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
 
 
     # Calculate VWAP and avoid division by zero
-    df['vwap'] = np.where(df['cum_volume'] > 0, df['cum_tp_vol'] / df['cum_volume'], np.nan)
+    # Add a small epsilon to cum_volume to prevent division by exactly zero
+    df['vwap'] = df['cum_tp_vol'] / (df['cum_volume'] + 1e-10)
 
     # Backfill initial NaN values at the start of each day with the next calculated value
     # Since daily VWAP accumulates, the first value might be NaN, we use the next calculated value
@@ -790,16 +825,20 @@ def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
     close_diff = df['close'].diff().values
 
     for i in range(1, len(df)):
+        # Check for NaN in current close, volume, or close_diff
         if np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(close_diff[i]):
             obv[i] = obv[i-1] # Keep previous value in case of NaN
             continue
 
+        # Check if previous OBV is NaN before adding/subtracting
+        prev_obv = obv[i-1] if i > 0 else 0 # Initialize with 0 if it's the first iteration
+
         if close_diff[i] > 0: # Price increased
-            obv[i] = obv[i-1] + volume[i]
+            obv[i] = prev_obv + volume[i]
         elif close_diff[i] < 0: # Price decreased
-             obv[i] = obv[i-1] - volume[i]
+             obv[i] = prev_obv - volume[i]
         else: # Price unchanged
-             obv[i] = obv[i-1]
+             obv[i] = prev_obv
 
     df['obv'] = obv
     return df
@@ -815,11 +854,10 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
         df_st['supertrend_trend'] = 0 # 0: unknown, 1: uptrend, -1: downtrend
         return df_st
 
-    # Ensure ATR column exists or calculate it
-    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-        logger.debug(f"ℹ️ [Indicator SuperTrend] Calculating ATR (period={period}) for SuperTrend...")
-        # Use the ATR period specific to SuperTrend here
-        df_st = calculate_atr_indicator(df_st, period=period)
+    # Ensure ATR column exists or calculate it with min_periods
+    # Use the ATR period specific to SuperTrend here (usually the same as SuperTrend period)
+    df_st['atr'] = calculate_atr_indicator(df_st, period=period)['atr']
+
 
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
          logger.warning("⚠️ [Indicator SuperTrend] Cannot calculate SuperTrend due to missing valid ATR values.")
@@ -837,9 +875,9 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st['basic_ub'] = hl2 + multiplier * df_st['atr']
     df_st['basic_lb'] = hl2 - multiplier * df_st['atr']
 
-    # Initialize final columns
-    df_st['final_ub'] = 0.0
-    df_st['final_lb'] = 0.0
+    # Initialize final columns with NaN or 0
+    df_st['final_ub'] = np.nan
+    df_st['final_lb'] = np.nan
     df_st['supertrend'] = np.nan
     df_st['supertrend_trend'] = 0 # 1 for uptrend, -1 for downtrend
 
@@ -852,15 +890,41 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     st = df_st['supertrend'].values     # Will be modified within the loop
     st_trend = df_st['supertrend_trend'].values # Will be modified within the loop
 
-    # Start from the second candle (index 1) as we compare with the previous
-    for i in range(1, len(df_st)):
+    # Initialize the first values where sufficient data is available (after the ATR period)
+    # Find the first non-NaN index for basic_ub/lb (which depend on ATR)
+    first_valid_idx = df_st['basic_ub'].first_valid_index()
+    if first_valid_idx is not None:
+        first_idx_pos = df_st.index.get_loc(first_valid_idx)
+        if first_idx_pos is not None: # Ensure we got a valid integer position
+            # Initialize the first valid final bands and trend based on the first valid basic bands
+            final_ub[first_idx_pos] = basic_ub[first_idx_pos]
+            final_lb[first_idx_pos] = basic_lb[first_idx_pos]
+            # Initial trend determination for the first valid candle
+            if close[first_idx_pos] > final_ub[first_idx_pos]:
+                 st[first_idx_pos] = final_lb[first_idx_pos]
+                 st_trend[first_idx_pos] = 1
+            elif close[first_idx_pos] < final_lb[first_idx_pos]:
+                 st[first_idx_pos] = final_ub[first_idx_pos]
+                 st_trend[first_idx_pos] = -1
+            else:
+                 st[first_idx_pos] = np.nan # Undefined if within bands initially
+                 st_trend[first_idx_pos] = 0 # Undefined trend
+
+
+    # Start the loop from the first valid index + 1 (comparing current with previous)
+    if first_valid_idx is not None:
+        start_loop_idx = df_st.index.get_loc(first_valid_idx) + 1
+    else:
+        start_loop_idx = 1 # Fallback, though data should be checked earlier
+
+    for i in range(start_loop_idx, len(df_st)):
         # Handle NaN in essential inputs for this candle
-        if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]):
+        if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]) or pd.isna(final_ub[i-1]) or pd.isna(final_lb[i-1]) or pd.isna(close[i-1]):
             # In case of NaN, keep previous values for final bands, supertrend, and trend
-            final_ub[i] = final_ub[i-1]
-            final_lb[i] = final_lb[i-1]
-            st[i] = st[i-1]
-            st_trend[i] = st_trend[i-1]
+            final_ub[i] = final_ub[i-1] if i > 0 else np.nan
+            final_lb[i] = final_lb[i-1] if i > 0 else np.nan
+            st[i] = st[i-1] if i > 0 else np.nan
+            st_trend[i] = st_trend[i-1] if i > 0 else 0
             continue
 
         # Calculate Final Upper Band
@@ -891,23 +955,16 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
                 st[i] = final_ub[i]
                 st_trend[i] = -1
         else: # Initial state (or if previous value was NaN or 0)
+             # Try to infer trend from current price vs calculated final bands
              if close[i] > final_ub[i]: # Start of uptrend
                  st[i] = final_lb[i]
                  st_trend[i] = 1
              elif close[i] < final_lb[i]: # Start of downtrend
                   st[i] = final_ub[i]
                   st_trend[i] = -1
-             else: # If price is between bands initially (rare) or previous trend was 0
-                  # Try to infer trend from current price vs bands if previous was 0
-                  if close[i] > basic_ub[i]:
-                      st[i] = basic_lb[i]
-                      st_trend[i] = 1
-                  elif close[i] < basic_lb[i]:
-                      st[i] = basic_ub[i]
-                      st_trend[i] = -1
-                  else: # Still between bands
-                      st[i] = np.nan # Or can use previous value if available
-                      st_trend[i] = 0
+             else: # Still between bands or unclear
+                  st[i] = np.nan # Undefined
+                  st_trend[i] = 0
 
 
     # Assign calculated values back to DataFrame
@@ -916,95 +973,76 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st['supertrend'] = st
     df_st['supertrend_trend'] = st_trend
 
-    # Remove helper columns
-    df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
+    # Remove helper columns (optional)
+    # df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
 
     return df_st
 
 
 # ---------------------- Candlestick Patterns ----------------------
 
-def is_hammer(row: pd.Series) -> int:
-    """Checks for Hammer pattern (bullish signal)."""
+def is_hammer(row: pd.Series) -> bool:
+    """Checks for Hammer pattern (bullish signal). Returns True or False."""
     o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
+    if pd.isna([o, h, l, c]).any(): return False
     body = abs(c - o)
     candle_range = h - l
-    if candle_range == 0: return 0
+    if candle_range == 0: return False
     lower_shadow = min(o, c) - l
     upper_shadow = h - max(o, c)
-    is_small_body = body < (candle_range * 0.35) # Slightly larger tolerance for body
-    is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
-    is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
-    return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow else 0
+    # More standard hammer conditions
+    is_small_body = body <= (candle_range * 0.3) # Body is small
+    is_long_lower_shadow = lower_shadow >= 2.0 * body if body > 0 else lower_shadow > (candle_range * 0.6) # Lower shadow at least twice the body
+    is_very_small_upper_shadow = upper_shadow < (body * 0.1) if body > 0 else upper_shadow < (candle_range * 0.05) # Upper shadow is very small or absent
+    # Optional: Hammer forms after a downtrend (previous close < previous open) - could add this for stricter criteria
+    # if prev_row is not None and pd.notna([prev_row['open'], prev_row['close']]).all() and prev_row['close'] < prev_row['open']:
+    return is_small_body and is_long_lower_shadow and is_very_small_upper_shadow # Removed the downtrend check for broader applicability
 
-def is_shooting_star(row: pd.Series) -> int:
-    """Checks for Shooting Star pattern (bearish signal)."""
-    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
-    body = abs(c - o)
-    candle_range = h - l
-    if candle_range == 0: return 0
-    lower_shadow = min(o, c) - l
-    upper_shadow = h - max(o, c)
-    is_small_body = body < (candle_range * 0.35)
-    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
-    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
-    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0 # Negative signal
 
-def is_doji(row: pd.Series) -> int:
-    """Checks for Doji pattern (uncertainty)."""
-    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
-    candle_range = h - l
-    if candle_range == 0: return 0
-    return 100 if abs(c - o) <= (candle_range * 0.1) else 0 # Very small body
-
-def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
-    """Checks for Bullish or Bearish Engulfing pattern."""
-    if idx == 0: return 0
+def is_bullish_engulfing(df: pd.DataFrame, idx: int) -> bool:
+    """Checks for Bullish Engulfing pattern. Returns True or False."""
+    if idx == 0: return False
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
     # Check for NaN in required values
     if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
-        return 0
+        return False
 
     # Bullish Engulfing: Previous candle bearish, current bullish engulfing previous body
-    is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
-                  curr['open'] <= prev['close'] and curr['close'] >= prev['open'])
-    # Bearish Engulfing: Previous candle bullish, current bearish engulfing previous body
-    is_bearish = (prev['close'] > prev['open'] and curr['close'] < curr['open'] and
-                  curr['open'] >= prev['close'] and curr['close'] <= prev['open'])
+    is_prev_bearish = prev['close'] < prev['open']
+    is_curr_bullish = curr['close'] > curr['open']
+    is_engulfing = curr['open'] <= prev['close'] and curr['close'] >= prev['open']
 
-    if is_bullish: return 100
-    if is_bearish: return -100
-    return 0
+    return bool(is_prev_bearish and is_curr_bullish and is_engulfing) # Ensure boolean output
+
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     """Applies candlestick pattern detection functions to the DataFrame."""
     df = df.copy()
     logger.debug("ℹ️ [Indicators] Detecting candlestick patterns...")
+
     # Apply single-row patterns
     df['Hammer'] = df.apply(is_hammer, axis=1)
-    df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
-    df['Doji'] = df.apply(is_doji, axis=1)
-    # df['SpinningTop'] = df.apply(is_spinning_top, axis=1) # Can be added if needed
 
     # Engulfing requires access to the previous row
-    engulfing_values = [compute_engulfing(df, i) for i in range(len(df))]
-    df['Engulfing'] = engulfing_values
+    # Use a list comprehension to apply the function row by row with index
+    bullish_engulfing_values = [is_bullish_engulfing(df, i) for i in range(len(df))]
+    df['BullishEngulfing'] = bullish_engulfing_values
 
-    # Aggregate strong bullish and bearish candle signals
-    # Note: Signal value here is 100 or 0, weight will be applied later in the strategy
-    df['BullishCandleSignal'] = df.apply(lambda row: 1 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
-    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
+
+    # Aggregate strong bullish candle signals
+    # A bullish candle signal is present if Hammer OR Bullish Engulfing is True
+    df['BullishCandleSignal'] = df.apply(lambda row: row['Hammer'] or row['BullishEngulfing'], axis=1)
+
 
     # Drop individual pattern columns if not needed later
-    # df.drop(columns=['Hammer', 'ShootingStar', 'Doji', 'Engulfing'], inplace=True, errors='ignore')
+    # df.drop(columns=['Hammer', 'BullishEngulfing'], inplace=True, errors='ignore')
     logger.debug("✅ [Indicators] Candlestick patterns detected.")
     return df
 
+
 # ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
+# (Keeping these functions, though Elliott/Fib might not be used in the new strategy directly)
 def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
@@ -1013,22 +1051,26 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
     maxima_indices = []
     minima_indices = []
 
-    # Improve performance by avoiding loop on unnecessary edges
+    # Improve performance by avoiding loop on unnecessary edges and using numpy operations
+    # Ensure prices array does not contain NaN within the window check
     for i in range(order, n - order):
         window = prices[i - order : i + order + 1]
-        center_val = prices[i]
-
-        # Check for NaN in the window
         if np.isnan(window).any(): continue
 
-        is_max = np.all(center_val >= window) # Is it greater than or equal to all?
-        is_min = np.all(center_val <= window) # Is it less than or equal to all?
-        # Ensure it's the only peak/trough in the window (to avoid duplicates in flat areas)
+        center_val = prices[i]
+
+        is_max = np.all(center_val >= window)
+        is_min = np.all(center_val <= window)
+
+        # Ensure it's the only peak/trough in the window to avoid duplicates in flat areas
+        # Consider a tolerance for flat tops/bottoms if needed, but exact match is simpler
         is_unique_max = is_max and (np.sum(window == center_val) == 1)
         is_unique_min = is_min and (np.sum(window == center_val) == 1)
 
+
         if is_unique_max:
             # Ensure no peak is too close (within 'order' distance)
+            # This check helps filter out minor wiggles
             if not maxima_indices or i > maxima_indices[-1] + order:
                  maxima_indices.append(i)
         elif is_unique_min:
@@ -1046,20 +1088,25 @@ def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dic
         logger.warning("⚠️ [Elliott] 'macd_hist' column missing or empty for Elliott Wave calculation.")
         return []
 
-    # Use only non-null values
-    macd_values = df['macd_hist'].dropna().values
+    # Use only non-null values and their original index
+    df_nonan_macd = df['macd_hist'].dropna()
+    macd_values = df_nonan_macd.values
+
     if len(macd_values) < 2 * order + 1:
          logger.warning("⚠️ [Elliott] Insufficient MACD hist data after removing NaNs.")
          return []
 
-    maxima, minima = detect_swings(macd_values, order=order)
+    maxima_indices_local, minima_indices_local = detect_swings(macd_values, order=order)
 
-    # Merge and sort all swing points by original index
-    # (Need to link back to original index from df after dropping NaNs)
-    df_nonan_macd = df['macd_hist'].dropna()
+    # Map local indices back to original DataFrame indices
+    maxima = [(df_nonan_macd.index[idx], macd_values[idx]) for idx in maxima_indices_local]
+    minima = [(df_nonan_macd.index[idx], macd_values[idx]) for idx in minima_indices_local]
+
+
+    # Merge and sort all swing points by original index (timestamp)
     all_swings = sorted(
-        [(df_nonan_macd.index[idx], val, 'max') for idx, val in maxima] +
-        [(df_nonan_macd.index[idx], val, 'min') for idx, val in minima],
+        [(timestamp, val, 'max') for timestamp, val in maxima] +
+        [(timestamp, val, 'min') for timestamp, val in minima],
         key=lambda x: x[0] # Sort by time (original index)
     )
 
@@ -1067,11 +1114,12 @@ def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dic
     wave_number = 1
     for timestamp, val, typ in all_swings:
         # Very basic classification, may not strictly follow Elliott rules
+        # This classification might need significant refinement for actual EW analysis
         wave_type = "Impulse" if (typ == 'max' and val > 0) or (typ == 'min' and val >= 0) else "Correction"
         waves.append({
             "wave": wave_number,
-            "timestamp": str(timestamp),
-            "macd_hist_value": float(val),
+            "timestamp": str(timestamp), # Convert Timestamp to string for JSON
+            "macd_hist_value": float(val), # Ensure float
             "swing_type": typ,
             "classified_type": wave_type
         })
@@ -1090,6 +1138,14 @@ def fetch_recent_volume(symbol: str) -> float:
         klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=15)
         if not klines or len(klines) < 15:
              logger.warning(f"⚠️ [Data Volume] Insufficient 1m data (less than 15 candles) for {symbol}.")
+             # Fallback: Try fetching 15m candle data if 1m is not enough
+             klines_15m = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=1)
+             if klines_15m and len(klines_15m) > 0:
+                  # Use the quote volume of the last 15m candle
+                  volume_usdt_15m = float(klines_15m[0][7]) if len(klines_15m[0]) > 7 and klines_15m[0][7] else 0.0
+                  logger.debug(f"ℹ️ [Data Volume] Using last 15m candle volume as fallback for {symbol}: {volume_usdt_15m:.2f} USDT")
+                  return volume_usdt_15m
+             logger.warning(f"⚠️ [Data Volume] No 15m candle data available for {symbol} either.")
              return 0.0
 
         # Quote Asset Volume is the 8th field (index 7)
@@ -1180,86 +1236,89 @@ def generate_performance_report() -> str:
         logger.error(f"❌ [Report] Unexpected error generating performance report: {e}", exc_info=True)
         return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
 
-# ---------------------- Trading Strategy (Modified for EMA Cross and Breakout) -------------------
+# ---------------------- Trading Strategy (Momentum Pullback to VWMA & BB) -------------------
 
-class ConservativeTradingStrategy:
-    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions."""
+class MomentumPullbackStrategy:
+    """Encapsulates the Momentum Pullback trading strategy logic."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
+        self.strategy_name = 'Momentum_Pullback_VWMA_BB' # اسم الاستراتيجية الجديدة
+
         # Required columns for indicator calculation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume',
-            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
+            'ema_13', 'ema_34', 'vwma',
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
-            'vwap', 'obv', 'supertrend', 'supertrend_trend',
-            'BullishCandleSignal', 'BearishCandleSignal'
+            'vwap', # VWAP is calculated but used as an optional filter/point
+            'obv',
+            'supertrend', 'supertrend_trend',
+            'BullishCandleSignal', # Aggregated bullish candle signal
+            'Hammer', 'BullishEngulfing' # Keep individual pattern columns for detailed checking
         ]
-        # Required columns for buy signal generation
+        # Required columns for buy signal generation (ensure these are in df_processed)
         self.required_cols_buy_signal = [
-            'close',
-            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
+            'close', 'open', 'low', # Added open, low for candle checks and bounce check
+            'ema_13', 'ema_34', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
-            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
-            'BullishCandleSignal', 'obv'
+            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap',
+            'bb_upper', 'bb_lower', 'bb_middle', # Ensure BB components are here
+            'BullishCandleSignal', 'Hammer', 'BullishEngulfing', # Ensure candle signals are here
+            'obv'
         ]
 
-        # =====================================================================
-        # --- Scoring System (Weights) for Optional Conditions ---
-        # (These conditions contribute to the score but are not mandatory)
-        # Removed 'above_vwap' as VWMA is now mandatory
-        # =====================================================================
-        self.condition_weights = {
-            # 'ema_cross_bullish': 2.0, # Now a mandatory condition
-            # 'supertrend_up': 2.0,   # Now a mandatory condition
-            # 'above_vwap': 1.5,      # Price above VWAP (Removed - VWMA is mandatory)
-            # 'macd_positive_or_cross': 1.5, # Now a mandatory condition
-            # 'adx_trending_bullish': 1.0, # Now a mandatory condition
-            'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
-            'bullish_candle': 1.0,  # Bullish engulfing or hammer candle present
-            'not_bb_extreme': 0.5,  # Price not at upper Bollinger Band (still useful for some strategies, but lower weight for breakout)
-            'obv_rising': 1.5,       # OBV is rising
-
-            # --- New Breakout Strategy Conditions (some are now mandatory) ---
-            # 'breakout_bb_upper': 3.0, # Now a mandatory condition
-            'rsi_filter_breakout': 1.5, # RSI filter for breakout (optional)
-            'macd_filter_breakout': 1.5 # MACD histogram positive filter for breakout (optional)
-            # ----------------------------------------
-        }
-        # =====================================================================
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
-        # Added 'above_vwma' as a mandatory condition
+        # شروط الدخول الإلزامية (يجب تحقيقها جميعاً)
         # =====================================================================
+        # Note: BTC Trend and Minimum Volume are checked in the main loop as filters
         self.essential_conditions = [
-            'ema_cross_bullish',
-            'supertrend_up',
-            'macd_positive_or_cross',
-            'adx_trending_bullish',
-            'breakout_bb_upper', # Breakout condition added as mandatory
-            'above_vwma' # VWMA condition added as mandatory
+            'overall_bullish_trend', # EMA cross, SuperTrend trend & price above ST
+            'adx_trending_bullish',  # ADX > 20 and DI+ > DI-
+            'pullback_to_vwma_or_bblower', # Price touches/near VWMA or Lower BB
+            'price_below_bb_middle', # Price is in the lower half of BB range (during pullback)
+            'macd_positive_or_cross', # MACD momentum confirmation
+            'rsi_filtered',           # RSI above 50, below 65
         ]
         # =====================================================================
 
+        # =====================================================================
+        # --- Scoring System (Weights) for Optional Conditions ---
+        # نظام النقاط (الأوزان) للشروط الاختيارية (تساهم في قوة الإشارة)
+        # =====================================================================
+        self.condition_weights = {
+            'rsi_mid_range': 1.5,         # RSI between 55 and 65 (stronger momentum confirmation for pullback)
+            'bullish_candle_at_pullback': 1.5, # Bullish pattern (Hammer/Engulfing) near VWMA/BB Lower
+            'obv_rising': 1.0,             # OBV is rising
+            'price_touches_bb_lower': 1.0, # Price explicitly touches/closes very near Lower BB
+            'price_bounces_from_vwma': 1.0, # Price shows bounce sign after touching VWMA
+            'macd_hist_positive_score': 0.8, # MACD histogram is positive (score, not mandatory filter)
+            # 'above_vwap_optional': 0.5,   # Price above Daily VWAP (can be an optional point) - Keep or remove
+        }
+        # =====================================================================
 
         # Calculate total possible score for *optional* conditions
         self.total_possible_score = sum(self.condition_weights.values())
 
-        # Required signal score threshold for *optional* conditions (as a percentage)
-        # You might need to adjust this threshold based on the new weights and strategy performance
-        self.min_score_threshold_pct = 0.50 # Example: 50% of optional points (adjustable)
-        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
+        # Required signal score threshold for *optional* conditions (as a fixed value or percentage)
+        # تم اختيار قيمة ثابتة كنقطة بداية
+        self.min_signal_score = 3.5 # مثال: الحد الأدنى المطلوب 3.5 نقطة من النقاط الاختيارية
 
+        # ATR Multipliers for Initial TP and SL (Specific to THIS strategy)
+        self.initial_tp_multiplier = 2.5 # ATR multiplier for Take Profit
+        self.initial_sl_multiplier = 1.8 # ATR multiplier for Stop Loss (تم تعديله ليكون أضيق)
+        self.vwma_bb_tolerance_pct = 0.003 # Tolerance for price being "near" VWMA/BB bands (0.3%)
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating indicators...")
         # Update minimum required rows based on the largest period of used indicators
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5 # Add a small buffer
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 10 # Add a buffer
+
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df)} < {min_len_required}) to calculate indicators.")
@@ -1267,29 +1326,36 @@ class ConservativeTradingStrategy:
 
         try:
             df_calc = df.copy()
+            # Ensure essential OHLCV columns are numeric before calculations
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                 df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
+
+
             # ATR is required for SuperTrend and Stop Loss/Target
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
             # SuperTrend needs ATR calculated with its own period
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
 
             # --- EMA Calculation ---
-            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD) # Add EMA 13
-            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD) # Add EMA 34
+            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
+            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
             # ----------------------
 
             # --- VWMA Calculation ---
-            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD) # Calculate VWMA
+            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
             # ----------------------
 
             # Rest of the indicators
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
             df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL) # Ensure macd_hist is calculated here
+            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
             adx_df = calculate_adx(df_calc, ADX_PERIOD)
-            df_calc = df_calc.join(adx_df)
-            df_calc = calculate_vwap(df_calc) # Note: VWAP resets daily, VWMA is a rolling average
+            # Ensure index alignment when joining
+            df_calc = df_calc.join(adx_df[['adx', 'di_plus', 'di_minus']], how='left')
+
+            df_calc = calculate_vwap(df_calc)
             df_calc = calculate_obv(df_calc)
-            df_calc = detect_candlestick_patterns(df_calc)
+            df_calc = detect_candlestick_patterns(df_calc) # Adds BullishCandleSignal, Hammer, BullishEngulfing
 
             # Check for required columns after calculation
             missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
@@ -1298,20 +1364,20 @@ class ConservativeTradingStrategy:
                  logger.debug(f"Columns present: {df_calc.columns.tolist()}")
                  return None
 
-            # Handle NaNs after indicator calculation
+            # Handle NaNs after indicator calculation - drop rows where essential columns are NaN
             initial_len = len(df_calc)
-            # Use required_cols_indicators which contains all calculated columns
-            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
+            # Use required_cols_buy_signal which contains indicators + OHLC needed for signal
+            df_cleaned = df_calc.dropna(subset=self.required_cols_buy_signal).copy()
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
-                 logger.debug(f"ℹ️ [Strategy {self.symbol}] Dropped {dropped_count} rows due to NaN in indicators.")
-            if df_cleaned.empty:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty after removing indicator NaNs.")
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] Dropped {dropped_count} rows due to NaN in essential signal data/indicators.")
+            if df_cleaned.empty or len(df_cleaned) < 2:
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<2) after removing NaNs.")
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest Close: {latest.get('close', np.nan):.4f}, EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, BB Lower: {latest.get('bb_lower', np.nan):.4f}, BB Middle: {latest.get('bb_middle', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, RSI: {latest.get('rsi', np.nan):.1f}, ADX: {latest.get('adx', np.nan):.1f}, ST Trend: {latest.get('supertrend_trend', 0)}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1324,46 +1390,48 @@ class ConservativeTradingStrategy:
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
+        Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system
+        for the Momentum Pullback strategy.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
         # Check DataFrame and columns
+        # Ensure df_processed has at least 2 rows to compare current and previous
         if df_processed is None or df_processed.empty or len(df_processed) < 2:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<2), cannot generate signal.")
             return None
-        # Add required columns for breakout if not already present
-        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist', 'vwma'])) # Added 'vwma'
-        missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
+
+        missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
         if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}. Cannot generate signal.")
             return None
 
-        # Check Bitcoin trend (still a mandatory filter)
+        # Check Bitcoin trend (still a mandatory filter from the main loop, but log here)
         btc_trend = get_btc_trend_4h()
-        # Allow signal even if Bitcoin trend is neutral or unknown, but not bearish
+        # Allow signal even if Bitcoin trend is neutral, volatile, or unknown, but not bearish
         if "هبوط" in btc_trend: # Downtrend
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Trading paused due to bearish Bitcoin trend ({btc_trend}).")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] Trading paused due to bearish Bitcoin trend ({btc_trend}).")
             return None
         # Do not reject if "N/A" or "استقرار" (Sideways) or "تذبذب" (Volatile)
-        elif "N/A" in btc_trend:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Cannot determine Bitcoin trend, this condition will be ignored.")
+        elif "N/A" in btc_trend or "استقرار" in btc_trend or "تذبذب" in btc_trend:
+             logger.debug(f"ℹ️ [Strategy {self.symbol}] Bitcoin trend is {btc_trend}. Proceeding with signal check.") # Log if not rejecting
 
 
         # Extract latest and previous candle data
         last_row = df_processed.iloc[-1]
         prev_row = df_processed.iloc[-2]
 
-        # Check for NaN in essential columns required for the signal
-        last_row_check = last_row[required_cols_with_breakout]
-        if last_row_check.isnull().any():
-            nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
+        # Check for NaN in essential columns required for the signal on the last row
+        last_row_essential_check = last_row[self.required_cols_buy_signal]
+        if last_row_essential_check.isnull().any():
+            nan_cols = last_row_essential_check[last_row_essential_check.isnull()].index.tolist()
             logger.warning(f"⚠️ [Strategy {self.symbol}] Last row contains NaN in required signal columns: {nan_cols}. Cannot generate signal.")
             return None
-        # Check previous OBV separately
-        if pd.isna(prev_row['obv']):
-           logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN. Cannot check OBV direction.")
-           # Can continue but OBV points won't be added
+
+        # Also check previous row for OBV and close/open for candle/bounce logic
+        if pd.isna(prev_row.get('obv')) or pd.isna(prev_row.get('close')) or pd.isna(prev_row.get('open')) or pd.isna(prev_row.get('low')):
+             logger.debug(f"ℹ️ [Strategy {self.symbol}] Previous row contains NaN in OBV/close/open/low. Some optional conditions might not be met.")
+             # Continue, but some optional conditions might evaluate to False due to NaN
 
         # =====================================================================
         # --- Check Mandatory Conditions First ---
@@ -1372,40 +1440,25 @@ class ConservativeTradingStrategy:
         essential_passed = True
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
+        current_price = last_row['close']
 
-        # Positive EMA Cross condition
-        if not (last_row['ema_13'] > last_row['ema_34']):
+
+        # 1. Overall Bullish Trend
+        # Combine EMA cross, SuperTrend trend, and price above ST line
+        ema_crossed_up = last_row['ema_13'] > last_row['ema_34']
+        st_is_up_and_price_above = pd.notna(last_row['supertrend']) and last_row['supertrend_trend'] == 1 and last_row['close'] > last_row['supertrend']
+
+        if not (ema_crossed_up and st_is_up_and_price_above):
             essential_passed = False
-            failed_essential_conditions.append('EMA Cross (Bullish)')
-            signal_details['EMA_Cross'] = f'Failed: EMA(13) <= EMA(34)'
+            failed_essential_conditions.append('Overall Bullish Trend (EMA/ST)')
+            detail_trend = f'EMA13>EMA34: {ema_crossed_up}, ST Up/PriceAbove: {st_is_up_and_price_above}'
+            signal_details['Overall_Bullish_Trend'] = f'Failed: {detail_trend}'
         else:
-             signal_details['EMA_Cross'] = f'Passed: EMA(13) > EMA(34)'
-
-        # SuperTrend condition: Price closes above SuperTrend and SuperTrend trend is up
-        if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-             essential_passed = False
-             failed_essential_conditions.append('SuperTrend (Up Trend & Price Above)')
-             detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-             signal_details['SuperTrend'] = f'Failed: Not Up Trend or Price Not Above ({detail_st})'
-        else:
-            signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
+             signal_details['Overall_Bullish_Trend'] = 'Passed'
 
 
-        # MACD condition (Positive histogram or bullish cross)
-        if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']):
-             essential_passed = False
-             failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
-             detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'Failed: Hist Not Positive AND No Bullish Cross ({detail_macd})'
-        else:
-             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
-             detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
-             signal_details['MACD'] = f'Passed: {detail_macd}'
-
-
-        # Strong ADX and DI+ above DI- condition
-        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']):
+        # 2. ADX and DI+ > DI- (Trending Bullish)
+        if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
              failed_essential_conditions.append('ADX/DI (Trending Bullish)')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
@@ -1413,23 +1466,56 @@ class ConservativeTradingStrategy:
         else:
              signal_details['ADX/DI'] = f'Passed: Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
-        # Breakout condition: Price closes above the upper Bollinger Band
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']):
-             essential_passed = False
-             failed_essential_conditions.append('Breakout (Closed Above BB Upper)')
-             detail_bb = f'Close:{last_row.get("close", np.nan):.4f}, BB Upper:{last_row.get("bb_upper", np.nan):.4f}'
-             signal_details['Breakout_BB'] = f'Failed: Not Closed Above BB Upper ({detail_bb})'
-        else:
-             signal_details['Breakout_BB'] = f'Passed: Closed Above BB Upper'
 
-        # VWMA condition: Price closes above the VWMA
-        if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']):
+        # 3. Pullback to VWMA or BB Lower Band
+        # Price is near VWMA OR Price is near/touches BB Lower Band
+        vwma_tolerance = last_row['vwma'] * self.vwma_bb_tolerance_pct
+        bb_lower_tolerance = last_row['bb_lower'] * self.vwma_bb_tolerance_pct
+
+        price_near_vwma = pd.notna(last_row['vwma']) and abs(current_price - last_row['vwma']) <= vwma_tolerance
+        price_near_bb_lower = pd.notna(last_row['bb_lower']) and (current_price <= last_row['bb_lower'] * (1 + self.vwma_bb_tolerance_pct) and current_price >= last_row['bb_lower'] * (1 - self.vwma_bb_tolerance_pct))
+
+
+        if not (price_near_vwma or price_near_bb_lower):
              essential_passed = False
-             failed_essential_conditions.append('Above VWMA')
-             detail_vwma = f'Close:{last_row.get("close", np.nan):.4f}, VWMA:{last_row.get("vwma", np.nan):.4f}'
-             signal_details['VWMA_Mandatory'] = f'Failed: Not Closed Above VWMA ({detail_vwma})'
+             failed_essential_conditions.append('Pullback (Near VWMA or BB Lower)')
+             detail_pullback = f'NearVWMA: {price_near_vwma}, NearBBLower: {price_near_bb_lower}'
+             signal_details['Pullback_Zone'] = f'Failed: Not Near VWMA or BB Lower ({detail_pullback})'
         else:
-             signal_details['VWMA_Mandatory'] = f'Passed: Closed Above VWMA'
+             signal_details['Pullback_Zone'] = f'Passed: Near VWMA ({price_near_vwma}) or BB Lower ({price_near_bb_lower})'
+
+
+        # 4. Price Below Middle Bollinger Band (Confirms it's in the pullback portion of the band)
+        if not (pd.notna(last_row['bb_middle']) and current_price < last_row['bb_middle']):
+             essential_passed = False
+             failed_essential_conditions.append('Price Below BB Middle')
+             detail_bb_mid = f'Close:{current_price:.4f}, BB Middle:{last_row.get("bb_middle", np.nan):.4f}'
+             signal_details['Below_BB_Middle'] = f'Failed: Not Below BB Middle ({detail_bb_mid})'
+        else:
+             signal_details['Below_BB_Middle'] = 'Passed'
+
+
+        # 5. MACD Momentum Confirmation (Hist positive OR bullish cross)
+        macd_hist_positive = pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0
+        macd_bullish_cross = pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and last_row['macd'] > last_row['macd_signal']
+
+        if not (macd_hist_positive or macd_bullish_cross):
+             essential_passed = False
+             failed_essential_conditions.append('MACD (Momentum)')
+             detail_macd = f'Hist Pos: {macd_hist_positive}, Bullish Cross: {macd_bullish_cross}'
+             signal_details['MACD_Momentum'] = f'Failed: No Positive Hist OR Bullish Cross ({detail_macd})'
+        else:
+             signal_details['MACD_Momentum'] = 'Passed'
+
+
+        # 6. RSI Filtered (Above 50 but below 65 - indicates bullish bias without being overextended)
+        if not (pd.notna(last_row['rsi']) and last_row['rsi'] > 50 and last_row['rsi'] < 65):
+             essential_passed = False
+             failed_essential_conditions.append('RSI Filter (50-65)')
+             detail_rsi = f'RSI:{last_row.get("rsi", np.nan):.1f}'
+             signal_details['RSI_Filtered'] = f'Failed: Not in 50-65 Range ({detail_rsi})'
+        else:
+             signal_details['RSI_Filtered'] = f'Passed: In 50-65 Range (RSI:{last_row["rsi"]:.1f})'
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1442,138 +1528,170 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Calculate Score for Optional Conditions (if mandatory passed) ---
+        # حساب نقاط الشروط الاختيارية
         # =====================================================================
         current_score = 0.0
+        signal_details['Optional_Scores'] = {} # To log scores from optional conditions
 
-        # Price above VWAP (Original VWAP, daily reset) - Still optional
-        if last_row['close'] > last_row['vwap']:
-            current_score += self.condition_weights.get('above_vwap', 0) # Use .get with default 0 in case weight was removed
-            signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap", 0)})'
+
+        # RSI between 55 and 65 (Already checked as mandatory, but can still contribute points if desired, or adjust range)
+        # Let's refine: if RSI is between 55 and 65, add points. If it's >65 but <70 (still acceptable but less ideal for pullback), add fewer points?
+        # Keeping the simpler check: if RSI is in the tighter range (55-65) add the score.
+        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 65:
+             score_val = self.condition_weights.get('rsi_mid_range', 0)
+             current_score += score_val
+             signal_details['Optional_Scores']['RSI_Mid_Range'] = f'RSI ({last_row["rsi"]:.1f}) in 55-65 Range (+{score_val})'
         else:
-             signal_details['VWAP_Daily'] = f'Below Daily VWAP (0)'
+             signal_details['Optional_Scores']['RSI_Mid_Range'] = f'RSI ({last_row["rsi"]:.1f}) Not in 55-65 Range (0)'
 
 
-        # RSI in acceptable zone (not extreme overbought)
-        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
-            current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
+        # Bullish candlestick pattern present at or near pullback zone
+        # Check if BullishCandleSignal is True AND the candle low is near VWMA or BB Lower
+        candle_low_near_vwma = pd.notna(last_row['low']) and pd.notna(last_row['vwma']) and abs(last_row['low'] - last_row['vwma']) <= vwma_tolerance
+        candle_low_near_bb_lower = pd.notna(last_row['low']) and pd.notna(last_row['bb_lower']) and abs(last_row['low'] - last_row['bb_lower']) <= bb_lower_tolerance
+
+        if last_row['BullishCandleSignal'] and (candle_low_near_vwma or candle_low_near_bb_lower):
+             score_val = self.condition_weights.get('bullish_candle_at_pullback', 0)
+             current_score += score_val
+             signal_details['Optional_Scores']['Bullish_Candle_at_Pullback'] = f'Bullish Pattern Present Near Pullback Zone (+{score_val})'
         else:
-             signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
+             signal_details['Optional_Scores']['Bullish_Candle_at_Pullback'] = 'No Bullish Pattern or Not Near Pullback Zone (0)'
 
 
-        # Bullish engulfing or hammer candle present
-        if last_row['BullishCandleSignal'] == 1:
-            current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
+        # OBV is rising (current OBV > previous OBV)
+        if pd.notna(last_row['obv']) and pd.notna(prev_row.get('obv')) and last_row['obv'] > prev_row.get('obv'):
+            score_val = self.condition_weights.get('obv_rising', 0)
+            current_score += score_val
+            signal_details['Optional_Scores']['OBV_Rising'] = f'Rising (+{score_val})'
         else:
-             signal_details['Candle'] = f'No Bullish Pattern (0)'
+             signal_details['Optional_Scores']['OBV_Rising'] = 'Not Rising (0)'
 
 
-        # Price not at upper Bollinger Band (this condition might conflict with breakout, hence lower weight)
-        # This condition is only applied if there wasn't a clear breakout above the upper band (this is no longer mandatory)
-        if last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
-             current_score += self.condition_weights.get('not_bb_extreme', 0)
-             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
+        # Price explicitly touches/closes very near Lower BB
+        if pd.notna(last_row['bb_lower']) and current_price <= last_row['bb_lower'] * (1 + self.vwma_bb_tolerance_pct) and current_price >= last_row['bb_lower'] * (1 - self.vwma_bb_tolerance_pct):
+             score_val = self.condition_weights.get('price_touches_bb_lower', 0)
+             current_score += score_val
+             signal_details['Optional_Scores']['Price_Touches_BB_Lower'] = f'Touches BB Lower (+{score_val})'
         else:
-             signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
+             signal_details['Optional_Scores']['Price_Touches_BB_Lower'] = 'Does Not Touch BB Lower (0)'
 
 
-        # OBV is rising
-        # Check OBV only if the previous value is valid
-        if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']:
-            current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
+        # Price shows bounce sign from VWMA
+        # Check if price touched VWMA and the current candle closed higher than its low
+        price_touched_vwma = pd.notna(last_row['vwma']) and last_row['low'] <= last_row['vwma'] * (1 + self.vwma_bb_tolerance_pct) and last_row['high'] >= last_row['vwma'] * (1 - self.vwma_bb_tolerance_pct) # Did any part of the candle touch VWMA zone
+        closed_above_low = pd.notna(last_row['close']) and pd.notna(last_row['low']) and last_row['close'] > last_row['low']
+
+        if price_touched_vwma and closed_above_low:
+             score_val = self.condition_weights.get('price_bounces_from_vwma', 0)
+             current_score += score_val
+             signal_details['Optional_Scores']['Price_Bounces_from_VWMA'] = f'Touched VWMA and Closed Above Low (+{score_val})'
         else:
-             signal_details['OBV'] = f'Not Rising (0)'
+             signal_details['Optional_Scores']['Price_Bounces_from_VWMA'] = 'No Bounce Sign from VWMA (0)'
 
 
-        # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
-             current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
-        else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
-
-
-        # MACD filter for breakout (optional): MACD histogram is positive
+        # MACD histogram is positive (score, if not already covered by mandatory or wants more points)
+        # We already have a mandatory check for positive or cross. This adds points specifically for positive hist.
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
-             current_score += self.condition_weights.get('macd_filter_breakout', 0)
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
+             score_val = self.condition_weights.get('macd_hist_positive_score', 0)
+             current_score += score_val
+             signal_details['Optional_Scores']['MACD_Hist_Positive'] = f'MACD Hist Positive (+{score_val})'
         else:
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
+             signal_details['Optional_Scores']['MACD_Hist_Positive'] = 'MACD Hist Not Positive (0)'
+
+
+        # Optional: Price above Daily VWAP
+        # if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
+        #      score_val = self.condition_weights.get('above_vwap_optional', 0)
+        #      current_score += score_val
+        #      signal_details['Optional_Scores']['Above_Daily_VWAP'] = f'Above Daily VWAP (+{score_val})'
+        # else:
+        #      signal_details['Optional_Scores']['Above_Daily_VWAP'] = 'Not Above Daily VWAP (0)'
+
 
         # ------------------------------------------
 
         # Final buy decision based on the score of optional conditions
         if current_score < self.min_signal_score:
             logger.debug(f"ℹ️ [Strategy {self.symbol}] Required signal score from optional conditions not met (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}). Signal rejected.")
+            signal_details['Score_Met'] = f'Failed (Score: {current_score:.2f} < Threshold: {self.min_signal_score:.2f})'
             return None
+        else:
+             signal_details['Score_Met'] = f'Passed (Score: {current_score:.2f} >= Threshold: {self.min_signal_score:.2f})'
+
 
         # Check trading volume (liquidity) - still a mandatory filter
         volume_recent = fetch_recent_volume(self.symbol)
         if volume_recent < MIN_VOLUME_15M_USDT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) is below the minimum threshold ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected.")
+            signal_details['Volume_Check'] = f'Failed (Volume: {volume_recent:,.0f} < Min: {MIN_VOLUME_15M_USDT:,.0f})'
             return None
+        else:
+             signal_details['Volume_Check'] = f'Passed (Volume: {volume_recent:,.0f} >= Min: {MIN_VOLUME_15M_USDT:,.0f})'
 
-        # Calculate initial target and stop loss based on ATR
-        current_price = last_row['close']
+
+        # Calculate initial target and stop loss based on ATR and the strategy's specific multipliers
         current_atr = last_row.get('atr')
 
         # Ensure ATR is not NaN before using it
         if pd.isna(current_atr) or current_atr <= 0:
              logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR value ({current_atr}) for calculating target and stop loss.")
+             signal_details['ATR_Check'] = 'Failed (Invalid ATR)'
              return None
+        else:
+             signal_details['ATR_Check'] = f'Passed (ATR: {current_atr:.6f})'
 
-        # These multipliers can be adjusted based on ADX or other factors for a more dynamic strategy if desired
-        target_multiplier = ENTRY_ATR_MULTIPLIER
-        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
 
-        initial_target = current_price + (target_multiplier * current_atr)
-        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
+        initial_target = current_price + (self.initial_tp_multiplier * current_atr)
+        initial_stop_loss = current_price - (self.initial_sl_multiplier * current_atr)
+
 
         # Ensure stop loss is not zero or negative and is below the entry price
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
             # Use a percentage as a minimum stop loss if the initial calculation is invalid
             # Example: 1.5% below current price as a minimum
             min_sl_price_pct = current_price * (1 - 0.015) # Example: 1.5% below entry
-            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # Ensure it's not too close to zero
+            initial_stop_loss = max(min_sl_price_pct, current_price * 0.0001) # Ensure it's not too close to zero
             logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is invalid or above entry price. Adjusted to {initial_stop_loss:.8f}")
-            signal_details['Warning'] = f'Initial SL adjusted (was <= 0 or >= entry, set to {initial_stop_loss:.8f})'
+            signal_details['SL_Adjustment'] = f'Initial SL adjusted (was <= 0 or >= entry, set to {initial_stop_loss:.8f})'
         else:
-             # Ensure the initial stop loss is not too wide (optional)
-             max_allowed_loss_pct = 0.10 # Example: Initial loss should not exceed 10%
+             # Ensure the initial stop loss is not too wide (optional filter)
+             # Example: Initial loss should not exceed 10% (or adjust based on strategy testing)
+             max_allowed_loss_pct = 0.10
              max_sl_price = current_price * (1 - max_allowed_loss_pct)
              if initial_stop_loss < max_sl_price:
                   logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is too wide. Adjusted to {max_sl_price:.8f}")
                   initial_stop_loss = max_sl_price
-                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # Use the new value here
+                  signal_details['SL_Adjustment'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # Use the new value here
 
 
         # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
+            signal_details['Min_Profit_Margin_Check'] = f'Failed ({profit_margin_pct:.2f}% < Min: {MIN_PROFIT_MARGIN_PCT:.2f}%)'
             return None
+        else:
+             signal_details['Min_Profit_Margin_Check'] = f'Passed ({profit_margin_pct:.2f}% >= Min: {MIN_PROFIT_MARGIN_PCT:.2f}%)'
+
 
         # Compile final signal data
         signal_output = {
             'symbol': self.symbol,
-            'entry_price': float(f"{current_price:.8g}"),
+            'entry_price': float(f"{current_price:.8g}"), # Use g format for precision display
             'initial_target': float(f"{initial_target:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"),
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"), # Current starts as initial
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Current starts as initial
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Breakout_Filtered_Strict_VWMA', # Change strategy name to reflect modification
+            'strategy_name': self.strategy_name,
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
+        logger.info(f"✨ [Strategy {self.symbol}] Confirmed buy signal ({self.strategy_name}). Price: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
         return signal_output
-
 
 
 # ---------------------- Telegram Functions ----------------------
@@ -1626,50 +1744,65 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         stop_loss_price = float(signal_data['initial_stop_loss'])
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
-        signal_score = signal_data.get('r2_score', 0.0) # Weighted score for optional conditions
-        total_possible_score = signal_data.get('total_possible_score', 10.0) # Total points for optional conditions
+        signal_score = signal_data.get('r2_score', 0.0) # Weighted score of optional conditions
+        total_possible_score = signal_data.get('total_possible_score', 0.0) # Total points for optional conditions
         volume_15m = signal_data.get('volume_15m', 0.0)
         trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
-        signal_details = signal_data.get('signal_details', {})
+        signal_details = signal_data.get('signal_details', {}) # Details dictionary
 
+        # Calculate profit/loss percentages and USDT values
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         profit_usdt = trade_value_signal * (profit_pct / 100)
         loss_usdt = abs(trade_value_signal * (loss_pct / 100))
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Escape special characters for Markdown
-        safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+        # Escape special characters for Markdown v2 (Telegram default)
+        # Characters needing escaping: _, *, [, ], (, ), ~, `, >, #, +, -, =, |, {, }, ., !
+        def escape_markdown_v2(text: str) -> str:
+             if not isinstance(text, str):
+                 return str(text) # Convert non-strings to string
+             escape_chars = '_*[]()~`>#+-=|{}.!'
+             return ''.join('\\' + char if char in escape_chars else char for char in text)
+
+        safe_symbol = escape_markdown_v2(symbol)
+        safe_strategy_name = escape_markdown_v2(strategy_name.replace('_', ' ').title())
 
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
-        # Build the message in Arabic with weighted score and condition details
+        # Build the message in Arabic with score and condition details
         message = (
-            f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
-            f"——————————————\n"
+            f"💡 *إشارة تداول جديدة ({safe_strategy_name})* 💡\n"
+            f"—————————————————\n" # Adjusted line length
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (طويل)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            # --- Modification to display score ---
-            f"📊 **قوة الإشارة (النقاط - اختيارية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
-            f"——————————————\n"
+            # --- Display Mandatory Condition Summary ---
+            f"✅ *الشروط الإلزامية:*\n"
+            f"  - الاتجاه الصاعد العام (EMA/ST): {signal_details.get('Overall_Bullish_Trend', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - مؤشر الاتجاه (ADX/DI): {signal_details.get('ADX/DI', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - منطقة الارتداد (VWMA/BB): {signal_details.get('Pullback_Zone', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - السعر تحت الحد الأوسط لبولينجر: {signal_details.get('Below_BB_Middle', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - زخم MACD: {signal_details.get('MACD_Momentum', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - فلتر RSI (50-65): {signal_details.get('RSI_Filtered', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - فحص السيولة (15 دقيقة): {signal_details.get('Volume_Check', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+            f"  - الحد الأدنى للربح: {signal_details.get('Min_Profit_Margin_Check', 'N/A').replace('Passed', 'متحقق ✅').replace('Failed', 'غير متحقق ❌')}\n"
+
+            # --- Display Optional Condition Score ---
+            f"📊 **قوة الإشارة (نقاط إضافية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
+            # Optionally list which optional conditions contributed points
+            # if signal_details.get('Optional_Scores'):
+            #      optional_score_details = ", ".join([f"{k}: {v}" for k, v in signal_details['Optional_Scores'].items()])
+            #      message += f"  _تفاصيل النقاط:_ {optional_score_details}\n"
+            f"—————————————————\n" # Adjusted line length
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
-            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
-            f"——————————————\n"
-            f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - تقاطع المتوسطات الأسيّة: {'تم ✅' if 'Passed' in signal_details.get('EMA_Cross', '') else 'فشل ❌'}\n"
-            f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
-            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
-            f"  - الاختراق: {'إغلاق فوق الحد العلوي لبولينجر ✅' if 'Passed' in signal_details.get('Breakout_BB', '') else 'لم يغلق فوق الحد العلوي ❌'}\n"
-            f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n" # Added VWMA mandatory check
-            f"——————————————\n"
+            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_loss:.2f})\n" # Use loss_usdt variable
+            f"—————————————————\n" # Adjusted line length
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
-            f"——————————————\n"
+            f"—————————————————\n" # Adjusted line length
             f"⏰ {timestamp_str}"
         )
 
@@ -1679,12 +1812,17 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             ]
         }
 
-        send_telegram_message(CHAT_ID, message, reply_markup=reply_markup, parse_mode='Markdown')
+        send_telegram_message(CHAT_ID, message, reply_markup=reply_markup, parse_mode='MarkdownV2') # Use MarkdownV2
 
     except KeyError as ke:
         logger.error(f"❌ [Telegram Alert] Signal data incomplete for symbol {signal_data.get('symbol', 'N/A')}: Missing key {ke}", exc_info=True)
+        # Fallback: send a basic error message
+        send_telegram_message(CHAT_ID, f"❌ خطأ في تنسيق إشارة التداول لـ {signal_data.get('symbol', 'N/A')}. التفاصيل مفقودة: {ke}")
     except Exception as e:
         logger.error(f"❌ [Telegram Alert] Failed to send signal alert for symbol {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
+        # Fallback: send a basic error message
+        send_telegram_message(CHAT_ID, f"❌ حدث خطأ أثناء إرسال إشارة التداول لـ {signal_data.get('symbol', 'N/A')}.")
+
 
 def send_tracking_notification(details: Dict[str, Any]) -> None:
     """Formats and sends enhanced Telegram notifications for tracking events in Arabic."""
@@ -1692,60 +1830,75 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     signal_id = details.get('id', 'N/A')
     notification_type = details.get('type', 'unknown')
     message = ""
-    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+    # Escape special characters for Markdown v2
+    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`').replace(']', '\\]').replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('>', '\\>').replace('#', '\\#').replace('+', '\\+').replace('-', '\\-').replace('=', '\\=').replace('|', '\\|').replace('{', '\\{').replace('}', '\\}').replace('.', '\\.').replace('!', '\\!')
+
+
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
     atr_value = details.get('atr_value', 0.0)
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
+    strategy_name = details.get('strategy_name', 'N/A') # Get strategy name for notification
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
+    # Format numeric values using 'g' or fixed point as appropriate
+    closing_price_str = f"{closing_price:,.8g}" if closing_price else "N/A"
+    profit_pct_str = f"{profit_pct:+.2f}%" if profit_pct is not None else "N/A"
+    current_price_str = f"{current_price:,.8g}" if current_price else "N/A"
+    atr_value_str = f"{atr_value:,.8g}" if atr_value else "N/A"
+    new_stop_loss_str = f"{new_stop_loss:,.8g}" if new_stop_loss else "N/A"
+    old_stop_loss_str = f"{old_stop_loss:,.8g}" if old_stop_loss else "N/A"
+
+
     if notification_type == 'target_hit':
         message = (
-            f"✅ *تم الوصول إلى الهدف (ID: {signal_id})*\n"
-            f"——————————————\n"
+            f"✅ *تم الوصول إلى الهدف ({escape_markdown_v2(strategy_name)})*\n"
+            f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
-            f"💰 **الربح المحقق:** {profit_pct:+.2f}%"
+            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price_str}`\n"
+            f"💰 **الربح المحقق:** {profit_pct_str}"
         )
     elif notification_type == 'stop_loss_hit':
         sl_type_msg_ar = "بربح ✅" if details.get('profitable_sl', False) else "بخسارة ❌" # Use profitable_sl flag
         message = (
-            f"🛑 *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
-            f"——————————————\n"
+            f"🛑 *تم ضرب وقف الخسارة ({escape_markdown_v2(strategy_name)})*\n"
+            f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
-            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})"
+            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price_str}`\n"
+            f"📉 **النتيجة:** {profit_pct_str} ({sl_type_msg_ar})"
         )
     elif notification_type == 'trailing_activated':
         activation_profit_pct = details.get('activation_profit_pct', TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100)
         message = (
-            f"⬆️ *تم تفعيل وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
+            f"⬆️ *تم تفعيل وقف الخسارة المتحرك ({escape_markdown_v2(strategy_name)})*\n"
+            f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (الربح > {activation_profit_pct:.1f}%)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+            f"📈 **السعر الحالي (عند التفعيل):** `${current_price_str}` (الربح \> {activation_profit_pct:.1f}%)\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value_str}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
         )
     elif notification_type == 'trailing_updated':
         trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
         message = (
-            f"➡️ *تم تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
+            f"➡️ *تم تحديث وقف الخسارة المتحرك ({escape_markdown_v2(strategy_name)})*\n"
+            f"—————————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
-            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price_str}` (\{}+{:,.1f}% منذ آخر تحديث)\n".format('\\' if TRAILING_STOP_MOVE_INCREMENT_PCT * 100 > 0 else '', TRAILING_STOP_MOVE_INCREMENT_PCT * 100) # Handle '+' escaping
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value_str}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🔒 **الوقف السابق:** `${old_stop_loss_str}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss_str}`"
         )
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
         return # Don't send anything if type is unknown
 
     if message:
-        send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
+        # Use chat_id from details if available, otherwise use global CHAT_ID
+        target_chat = details.get('chat_id', CHAT_ID)
+        send_telegram_message(target_chat, message, parse_mode='MarkdownV2') # Use MarkdownV2
 
 # ---------------------- Database Functions (Insert and Update) ----------------------
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
@@ -1757,6 +1910,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     symbol = signal.get('symbol', 'N/A')
     logger.debug(f"ℹ️ [DB Insert] Attempting to insert signal for {symbol}...")
     try:
+        # Convert signal data to a format suitable for DB (Python native types)
         signal_prepared = convert_np_values(signal)
         # Convert signal details to JSON (ensure it doesn't contain numpy types)
         signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
@@ -1765,24 +1919,28 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
-                 r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                 r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m, total_possible_score)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id; -- Return the new signal ID
             """)
             cur_ins.execute(insert_query, (
-                signal_prepared['symbol'],
-                signal_prepared['entry_price'],
-                signal_prepared['initial_target'],
-                signal_prepared['initial_stop_loss'],
-                signal_prepared['current_target'],
-                signal_prepared['current_stop_loss'],
-                signal_prepared.get('r2_score'), # Weighted score
+                signal_prepared.get('symbol'),
+                signal_prepared.get('entry_price'),
+                signal_prepared.get('initial_target'),
+                signal_prepared.get('initial_stop_loss'),
+                signal_prepared.get('current_target'),
+                signal_prepared.get('current_stop_loss'),
+                signal_prepared.get('r2_score'),
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price
-                signal_prepared.get('volume_15m')
+                signal_prepared.get('last_trailing_update_price'), # Should be None initially
+                signal_prepared.get('volume_15m'),
+                signal_prepared.get('total_possible_score') # Insert total possible score
             ))
+            # Fetch the ID of the newly inserted row
+            signal_id = cur_ins.fetchone()['id']
         conn.commit()
-        logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (Score: {signal_prepared.get('r2_score')}).")
+        logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (ID: {signal_id}, Strategy: {signal_prepared.get('strategy_name')}, Score: {signal_prepared.get('r2_score')}).")
         return True
     except psycopg2.Error as db_err:
         logger.error(f"❌ [DB Insert] Database error inserting signal for {symbol}: {db_err}")
@@ -1814,7 +1972,7 @@ def track_signals() -> None:
             with conn.cursor() as track_cur: # Uses RealDictCursor
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
-                           is_trailing_active, last_trailing_update_price
+                           is_trailing_active, last_trailing_update_price, strategy_name
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
                 """)
@@ -1822,7 +1980,7 @@ def track_signals() -> None:
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] No open signals to track.")
-                time.sleep(10) # Wait less if no signals
+                time.sleep(5) # Wait less if no signals
                 continue
 
             logger.debug(f"ℹ️ [Tracker] Tracking {len(open_signals)} open signals...")
@@ -1830,6 +1988,7 @@ def track_signals() -> None:
             for signal_row in open_signals:
                 signal_id = signal_row['id']
                 symbol = signal_row['symbol']
+                strategy_name = signal_row['strategy_name'] # Get strategy name
                 processed_in_cycle += 1
                 update_executed = False # To track if this signal was updated in the current cycle
 
@@ -1840,22 +1999,24 @@ def track_signals() -> None:
                     current_target = float(signal_row['current_target'])
                     current_stop_loss = float(signal_row['current_stop_loss'])
                     is_trailing_active = signal_row['is_trailing_active']
-                    last_update_px = signal_row['last_trailing_update_price']
+                    last_update_px = signal_row.get('last_trailing_update_price') # Use .get for safety
                     last_trailing_update_price = float(last_update_px) if last_update_px is not None else None
 
                     # Get current price from WebSocket Ticker data
                     current_price = ticker_data.get(symbol)
 
                     if current_price is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in Ticker data.")
-                         continue # Skip this signal in this cycle
+                         # logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in Ticker data. Skipping for this cycle.")
+                         continue # Skip this signal in this cycle if price is missing
 
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} Trail={'On' if is_trailing_active else 'Off'}")
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id}
+                    # Include strategy_name in notification details
+                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'strategy_name': strategy_name}
+
 
                     # --- Check and Update Logic ---
                     # 1. Check for Target Hit
@@ -1863,7 +2024,7 @@ def track_signals() -> None:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
                         update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;")
                         update_params = (current_target, profit_pct, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%)."
+                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%)."
                         notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct})
                         update_executed = True
 
@@ -1874,7 +2035,7 @@ def track_signals() -> None:
                         sl_type_msg = "at a profit ✅" if profitable_sl else "at a loss ❌"
                         update_query = sql.SQL("UPDATE signals SET hit_stop_loss = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s, profitable_stop_loss = %s WHERE id = %s;")
                         update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
-                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
+                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
                         update_executed = True
 
@@ -1883,7 +2044,7 @@ def track_signals() -> None:
                         activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
                         # a. Activate Trailing Stop
                         if not is_trailing_active and current_price >= activation_threshold_price:
-                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing activation threshold ({activation_threshold_price:.8g}). Fetching ATR...")
+                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Price {current_price:.8g} reached trailing activation threshold ({activation_threshold_price:.8g}). Fetching ATR...")
                             # Use the specified tracking timeframe
                             df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                             if df_atr is not None and not df_atr.empty:
@@ -1892,45 +2053,52 @@ def track_signals() -> None:
                                 if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
+                                         # New trailing stop is Current Price - (ATR Multiplier * ATR Value)
+                                         # Ensure the new stop is not below the initial stop loss
+                                         # Ensure the new stop is not below entry price * 1.001 (a tiny profit)
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
+                                         new_stop_loss = max(new_stop_loss_calc, initial_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep initial stop if higher
 
-                                         if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
+
+                                         if new_stop_loss > current_stop_loss: # Only update if the new stop is actually higher than the current stop
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                             update_params = (new_stop_loss, current_price, signal_id)
-                                            log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. New Stop: {new_stop_loss:.8g}"
+                                            log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Trailing stop activated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. New Stop: {new_stop_loss:.8g}"
                                             notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
                                             update_executed = True
                                          else:
-                                            logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
-                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val}) for trailing stop activation.")
-                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for trailing stop activation.")
-                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for trailing stop activation.")
+                                            logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
+                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Invalid ATR value ({current_atr_val}) for trailing stop activation.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Cannot calculate ATR for trailing stop activation.")
+                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Cannot fetch data to calculate ATR for trailing stop activation.")
 
-                        # b. Update Trailing Stop
+                        # b. Update Trailing Stop (if active)
                         elif is_trailing_active and last_trailing_update_price is not None:
+                            # Calculate the threshold price for updating the trailing stop
                             update_threshold_price = last_trailing_update_price * (1 + TRAILING_STOP_MOVE_INCREMENT_PCT)
                             if current_price >= update_threshold_price:
-                                logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing update threshold ({update_threshold_price:.8g}). Fetching ATR...")
+                                logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Price {current_price:.8g} reached trailing update threshold ({update_threshold_price:.8g}). Fetching ATR...")
                                 df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                                 if df_recent is not None and not df_recent.empty:
                                     df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD)
                                     if not df_recent.empty and 'atr' in df_recent.columns and pd.notna(df_recent['atr'].iloc[-1]):
                                          current_atr_val_update = df_recent['atr'].iloc[-1]
                                          if current_atr_val_update > 0:
+                                             # Calculate potential new stop loss
                                              potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
+                                             # The new stop loss must be higher than the current stop loss
                                              if potential_new_stop_loss > current_stop_loss:
                                                 new_stop_loss_update = potential_new_stop_loss
                                                 update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
                                                 update_params = (new_stop_loss_update, current_price, signal_id)
-                                                log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val_update:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
+                                                log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val_update:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
                                                 notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100})
                                                 update_executed = True
                                              else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
-                                         else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val_update}) for update.")
-                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for update.")
-                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for update.")
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
+                                         else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Invalid ATR value ({current_atr_val_update}) for update.")
+                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Cannot calculate ATR for update.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Cannot fetch data to calculate ATR for update.")
 
                     # --- Execute Database Update and Send Notification ---
                     if update_executed and update_query:
@@ -1942,23 +2110,23 @@ def track_signals() -> None:
                              if notification_details.get('type'):
                                 send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error during update: {db_err}")
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): DB error during update: {db_err}")
                             if conn: conn.rollback()
                         except Exception as exec_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error during update execution/notification: {exec_err}", exc_info=True)
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Unexpected error during update execution/notification: {exec_err}", exc_info=True)
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
-                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error converting initial signal values: {convert_err}")
+                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Error converting initial signal values: {convert_err}")
                     continue
                 except Exception as inner_loop_err:
-                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error processing signal: {inner_loop_err}", exc_info=True)
+                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id},{strategy_name}): Unexpected error processing signal: {inner_loop_err}", exc_info=True)
                      continue
 
             if active_signals_summary:
                 logger.debug(f"ℹ️ [Tracker] End of cycle status ({processed_in_cycle} processed): {'; '.join(active_signals_summary)}")
 
-            time.sleep(3) # Wait between tracking cycles
+            time.sleep(5) # Wait between tracking cycles (Adjust if needed)
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
@@ -1979,8 +2147,18 @@ def home() -> Response:
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
     tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
-    status = "running" if ws_alive and tracker_alive else "partially running"
-    return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
+    flask_alive = flask_thread.is_alive() if 'flask_thread' in globals() and flask_thread else False
+
+    status_parts = []
+    status_parts.append(f"Trading Bot: {'Running ✅' if (ws_alive and tracker_alive and (not WEBHOOK_URL or flask_alive)) else 'Partial/Down ❌'}")
+    status_parts.append(f"WebSocket: {'Active ✅' if ws_alive else 'Inactive ❌'}")
+    status_parts.append(f"Signal Tracker: {'Active ✅' if tracker_alive else 'Inactive ❌'}")
+    if WEBHOOK_URL:
+         status_parts.append(f"Webhook Listener: {'Active ✅' if flask_alive else 'Inactive ❌'}")
+
+    status_text = " | ".join(status_parts)
+
+    return Response(f"📈 Crypto Signal Bot Status: {status_text} - Last Check: {now}", status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
 def favicon() -> Response:
@@ -1996,7 +2174,7 @@ def webhook() -> Tuple[str, int]:
 
     try:
         data = request.get_json()
-        logger.debug(f"ℹ️ [Flask] Received webhook data: {json.dumps(data)[:200]}...") # Log only part of the data
+        # logger.debug(f"ℹ️ [Flask] Received webhook data: {json.dumps(data)[:200]}...") # Log only part of the data, can be noisy
 
         # Handle Callback Queries (Button Responses)
         if 'callback_query' in data:
@@ -2007,6 +2185,7 @@ def webhook() -> Tuple[str, int]:
             if not message_info or not callback_data:
                  logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing message or data.")
                  try:
+                     # Acknowledge the callback query even if it's invalid
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
                  except Exception as ack_err:
@@ -2017,12 +2196,12 @@ def webhook() -> Tuple[str, int]:
             if not chat_id_callback:
                  logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing chat ID.")
                  try:
+                     # Acknowledge the callback query even if chat_id is missing
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
                  except Exception as ack_err:
                      logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
                  return "OK", 200
-
 
             message_id = message_info['message_id']
             user_info = callback_query.get('from', {})
@@ -2040,7 +2219,8 @@ def webhook() -> Tuple[str, int]:
 
             # Process received button data
             if callback_data == "get_report":
-                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown'))
+                # Run report generation in a separate thread to avoid blocking webhook response
+                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown')) # Report uses Markdown
                 report_thread.start()
             else:
                 logger.warning(f"⚠️ [Flask] Received unhandled callback data: '{callback_data}'")
@@ -2065,25 +2245,30 @@ def webhook() -> Tuple[str, int]:
 
             # Process known commands
             if text_msg.lower() == '/report':
-                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
+                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown')) # Report uses Markdown
                  report_thread.start()
             elif text_msg.lower() == '/status':
                  status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
                  status_thread.start()
+            # Add other commands here if needed
 
         else:
-            logger.debug("ℹ️ [Flask] Received webhook data without 'callback_query' or 'message'.")
+            # logger.debug("ℹ️ [Flask] Received webhook data without 'callback_query' or 'message'.") # Can be noisy
+            pass # Ignore messages that are not text or callback_query
 
         return "OK", 200
     except Exception as e:
          logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
+         # Optionally send an error message back to the user if chat_id is known and it's a message
+         # if 'message' in data and data['message'].get('chat', {}).get('id'):
+         #     send_telegram_message(data['message']['chat']['id'], "❌ حدث خطأ داخلي أثناء معالجة طلبك.")
          return "Internal Server Error", 500
 
 def handle_status_command(chat_id_msg: int) -> None:
     """Separate function to handle /status command to avoid blocking the Webhook."""
     logger.info(f"ℹ️ [Flask Status] Handling /status command for chat {chat_id_msg}")
     status_msg = "⏳ جلب الحالة..."
-    msg_sent = send_telegram_message(chat_id_msg, status_msg)
+    msg_sent = send_telegram_message(chat_id_msg, status_msg, parse_mode='Markdown') # Send initial message using Markdown
     if not (msg_sent and msg_sent.get('ok')):
          logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
          return
@@ -2096,23 +2281,31 @@ def handle_status_command(chat_id_msg: int) -> None:
                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
-        # Check if variables exist before accessing them
-        ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
-        tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
+        # Check if threads exist before accessing them
+        ws_alive = 'ws_thread' in globals() and ws_thread and ws_thread.is_alive()
+        tracker_alive = 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive()
+        flask_alive = 'flask_thread' in globals() and flask_thread and flask_thread.is_alive()
+
+        ws_status = 'نشط ✅' if ws_alive else 'غير نشط ❌'
+        tracker_status = 'نشط ✅' if tracker_alive else 'غير نشط ❌'
+        flask_status = 'نشط ✅' if (WEBHOOK_URL and flask_alive) else ('غير مفعل ℹ️' if not WEBHOOK_URL else 'غير نشط ❌')
+
+
         final_status_msg = (
             f"🤖 *حالة البوت:*\n"
             f"- تتبع الأسعار (WS): {ws_status}\n"
             f"- تتبع الإشارات: {tracker_status}\n"
+            f"- الويب هوك/الخادم: {flask_status}\n"
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S UTC')}" # Use UTC time for clarity
         )
-        # Edit the original message
+        # Edit the original message using MarkdownV2
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
             'chat_id': chat_id_msg,
              'message_id': message_id_to_edit,
             'text': final_status_msg,
-            'parse_mode': 'Markdown'
+            'parse_mode': 'MarkdownV2' # Use MarkdownV2 for editing
         }
         response = requests.post(edit_url, json=edit_payload, timeout=10)
         response.raise_for_status()
@@ -2120,7 +2313,8 @@ def handle_status_command(chat_id_msg: int) -> None:
 
     except Exception as status_err:
         logger.error(f"❌ [Flask Status] Error getting/editing status details for chat {chat_id_msg}: {status_err}", exc_info=True)
-        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
+        # Attempt to send a new error message if editing failed
+        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.", parse_mode='Markdown')
 
 
 def run_flask() -> None:
@@ -2135,11 +2329,13 @@ def run_flask() -> None:
     try:
         from waitress import serve
         logger.info("✅ [Flask] Using 'waitress' server.")
-        serve(app, host=host, port=port, threads=6)
+        # Use threads for handling requests concurrently
+        serve(app, host=host, port=port, threads=8) # Increased threads slightly
     except ImportError:
          logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (NOT recommended for production).")
          try:
-             app.run(host=host, port=port)
+             # Disable debug mode for potentially clearer logging in production fallback
+             app.run(host=host, port=port, debug=False)
          except Exception as flask_run_err:
               logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
     except Exception as serve_err:
@@ -2151,16 +2347,18 @@ def main_loop() -> None:
     symbols_to_scan = get_crypto_symbols()
     if not symbols_to_scan:
         logger.critical("❌ [Main] No valid symbols loaded or validated. Cannot proceed.")
+        # Optionally send a Telegram alert here
+        send_telegram_message(CHAT_ID, "❌ البوت توقف عن العمل: لم يتم تحميل رموز عملات صالحة للفحص.")
         return
 
     logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning.")
-    last_full_scan_time = time.time()
+    # last_full_scan_time = time.time() # Not strictly needed for the current logic
 
     while True:
         try:
             scan_start_time = time.time()
             logger.info("+" + "-"*60 + "+")
-            logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}") # Use UTC
             logger.info("+" + "-"*60 + "+")
 
             if not check_db_connection() or not conn:
@@ -2182,8 +2380,8 @@ def main_loop() -> None:
 
             logger.info(f"ℹ️ [Main] Currently Open Signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"⚠️ [Main] Maximum number of open signals reached. Waiting...")
-                time.sleep(60)
+                logger.info(f"⚠️ [Main] Maximum number of open signals reached ({MAX_OPEN_TRADES}). Waiting for signals to close...")
+                time.sleep(60) # Wait longer if max trades are open
                 continue
 
             # 2. Iterate through the list of symbols and scan them
@@ -2197,31 +2395,36 @@ def main_loop() -> None:
                       break
 
                  processed_in_loop += 1
-                 logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
+                 # logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...") # Can be noisy
 
                  try:
                     # a. Check if there is already an open signal for this symbol
                     with conn.cursor() as symbol_cur:
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone():
+                            # logger.debug(f"ℹ️ [Main] Skipping {symbol}: Already has an open signal.") # Can be noisy
                             continue
 
                     # b. Fetch historical data
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
+                        # logger.debug(f"ℹ️ [Main] Skipping {symbol}: Failed to fetch historical data.") # Can be noisy
                         continue
 
                     # c. Apply the strategy and generate signal
-                    strategy = ConservativeTradingStrategy(symbol) # Use the modified strategy
+                    # Use the NEW strategy class
+                    strategy = MomentumPullbackStrategy(symbol)
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
+                        # logger.debug(f"ℹ️ [Main] Skipping {symbol}: Failed to populate indicators.") # Can be noisy
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
                     # d. Insert signal and send alert
                     if potential_signal:
-                        logger.info(f"✨ [Main] Potential signal found for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}) Final check and insertion...")
+                        logger.info(f"✨ [Main] Potential signal found for {symbol} ({strategy.strategy_name})! Score: {potential_signal.get('r2_score', 0):.2f}. Final check and insertion...")
+                        # Re-check open signal count just before inserting to avoid exceeding limit
                         with conn.cursor() as final_check_cur:
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
@@ -2231,12 +2434,12 @@ def main_loop() -> None:
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1
                                      slots_available -= 1
-                                     time.sleep(2)
+                                     time.sleep(2) # Small delay after sending alert
                                  else:
                                      logger.error(f"❌ [Main] Failed to insert signal for {symbol} into database.")
                              else:
                                  logger.warning(f"⚠️ [Main] Maximum limit ({final_open_count}) reached before inserting signal for {symbol}. Signal ignored.")
-                                 break
+                                 break # Stop scanning symbols in this cycle
 
                  except psycopg2.Error as db_loop_err:
                       logger.error(f"❌ [Main] DB error processing symbol {symbol}: {db_loop_err}. Moving to next...")
@@ -2246,11 +2449,13 @@ def main_loop() -> None:
                       logger.error(f"❌ [Main] General error processing symbol {symbol}: {symbol_proc_err}", exc_info=True)
                       continue
 
-                 time.sleep(0.3)
+                 # Small delay between processing symbols to avoid hitting API limits rapidly
+                 time.sleep(0.2) # Adjusted from 0.3
 
             # 3. Wait before starting the next cycle
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] Scan cycle finished. Signals generated: {signals_generated_in_loop}. Scan duration: {scan_duration:.2f} seconds.")
+            # Wait until the next full minute or a minimum time
             wait_time = max(60, 300 - scan_duration) # Wait 5 minutes total or at least 1 minute
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f} seconds for the next cycle...")
             time.sleep(wait_time)
@@ -2266,10 +2471,14 @@ def main_loop() -> None:
                  init_db()
              except Exception as recon_err:
                  logger.critical(f"❌ [Main] Failed to reconnect to database: {recon_err}. Exiting...")
+                 # Send a critical alert via Telegram
+                 send_telegram_message(CHAT_ID, f"❌ خطأ فادح في قاعدة البيانات. فشل إعادة الاتصال. البوت سيتوقف: {recon_err}")
                  break
         except Exception as main_err:
             logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
             logger.info("ℹ️ [Main] Waiting 120 seconds before retrying...")
+            # Send a general error alert via Telegram
+            send_telegram_message(CHAT_ID, f"⚠️ حدث خطأ غير متوقع في حلقة الفحص الرئيسية: {main_err}")
             time.sleep(120)
 
 def cleanup_resources() -> None:
@@ -2282,6 +2491,10 @@ def cleanup_resources() -> None:
             logger.info("✅ [DB] Database connection closed.")
         except Exception as close_err:
             logger.error(f"⚠️ [DB] Error closing database connection: {close_err}")
+    # Ensure WebSocket manager thread is stopped if it's still running
+    # (This might require adding a stop method to the manager thread or making twm global)
+    # For now, rely on daemon=True to terminate with the main process
+
     logger.info("✅ [Cleanup] Resource cleanup complete.")
 
 
@@ -2307,6 +2520,8 @@ if __name__ == "__main__":
         time.sleep(5)
         if not ticker_data:
              logger.warning("⚠️ [Main] No initial data received from WebSocket after 5 seconds.")
+             # Decide if this is critical enough to exit or just warn
+             # For now, it's a warning, bot might still get data later
         else:
              logger.info(f"✅ [Main] Received initial data from WebSocket for {len(ticker_data)} symbols.")
 
@@ -2318,20 +2533,25 @@ if __name__ == "__main__":
 
         # 4. Start Flask Server (if Webhook configured)
         if WEBHOOK_URL:
+            # Note: Flask's default server is not suitable for production.
+            # Using waitress if available, otherwise fallbacks.
             flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
             flask_thread.start()
             logger.info("✅ [Main] Flask Webhook thread started.")
         else:
              logger.info("ℹ️ [Main] Webhook URL not configured, Flask server will not start.")
 
-        # 5. Start the main loop
+        # 5. Start the main loop (signal generation)
         main_loop()
 
     except Exception as startup_err:
         logger.critical(f"❌ [Main] A fatal error occurred during startup or in the main loop: {startup_err}", exc_info=True)
+        # Send a critical error alert via Telegram
+        send_telegram_message(CHAT_ID, f"❌ خطأ فادح أثناء بدء تشغيل البوت أو في الحلقة الرئيسية: {startup_err}. البوت سيتوقف.")
     finally:
         logger.info("🛑 [Main] Program is shutting down...")
-        # send_telegram_message(CHAT_ID, "⚠️ Alert: Trading bot is shutting down now.") # Uncomment to send alert on shutdown
+        # send_telegram_message(CHAT_ID, "⚠️ Alert: Trading bot is shutting down now.") # Uncomment to send alert on graceful shutdown
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
-        os._exit(0)
+        # Use os._exit(0) to ensure all threads (especially daemon ones) are terminated
+        os._exit(0) # Exit cleanly
