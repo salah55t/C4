@@ -62,7 +62,7 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for 
 # =============================================================================
 RSI_PERIOD: int = 14          # RSI Period (Original: 14)
 RSI_OVERSOLD: int = 30        # Oversold threshold (Original: 30) - Slightly increased
-RSI_OVERBOUGHT: int = 70      # Overbought threshold (Original: 70) - Slightly decreased
+RSI_OVERBOUGHT: int = 65      # Overbought threshold (Original: 70) - Slightly decreased
 # EMA_PERIOD: int = 26          # EMA Period for trend (Commented out)
 EMA_SHORT_PERIOD: int = 13      # Short EMA period (New)
 EMA_LONG_PERIOD: int = 34       # Long EMA period (New)
@@ -84,7 +84,7 @@ SUPERTREND_PERIOD: int = 10     # SuperTrend Period
 SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
 
 # Trailing Stop Loss
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # Profit percentage to activate trailing stop (1.5%)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.02 # Profit percentage to activate trailing stop (1.5%)
 TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # ATR Multiplier for trailing stop (Original: 2.5) - Reduced multiplier for tighter stop
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to move trailing stop (0.1%)
 
@@ -1893,7 +1893,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.01)) # Ensure a very small profit or keep current stop
 
                                          if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
