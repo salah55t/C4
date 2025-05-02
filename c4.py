@@ -73,7 +73,7 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry
-ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
+ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -90,7 +90,7 @@ TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to 
 
 # Additional Signal Conditions
 MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage
-MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
+MIN_VOLUME_15M_USDT: float = 10000.0 # Minimum liquidity in the last 15 minutes in USDT
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -2159,9 +2159,9 @@ def main_loop() -> None:
     while True:
         try:
             scan_start_time = time.time()
-            logger.info("+" + "-"*60 + "+")
+            logger.info("+" + "-"*30 + "+")
             logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info("+" + "-"*60 + "+")
+            logger.info("+" + "-"*30 + "+")
 
             if not check_db_connection() or not conn:
                 logger.error("❌ [Main] Skipping scan cycle due to database connection failure.")
