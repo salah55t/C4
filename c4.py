@@ -2159,9 +2159,9 @@ def main_loop() -> None:
     while True:
         try:
             scan_start_time = time.time()
-            logger.info("+" + "-"*30 + "+")
+            logger.info("+" + "-"*60 + "+")
             logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info("+" + "-"*30 + "+")
+            logger.info("+" + "-"*60 + "+")
 
             if not check_db_connection() or not conn:
                 logger.error("❌ [Main] Skipping scan cycle due to database connection failure.")
