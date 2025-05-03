@@ -253,7 +253,7 @@ def get_btc_trend_4h() -> str:
         df.dropna(subset=['close'], inplace=True)
         if len(df) < 50:
              logger.warning("⚠️ [Indicators] Insufficient BTC/USDT 4H data after removing NaNs.")
-             return "N/A (Insufficient Data)"
+             return "N/A (Insufficient Data)")
 
         ema20 = calculate_ema(df['close'], 20).iloc[-1] # Still uses 20 here
         ema50 = calculate_ema(df['close'], 50).iloc[-1] # Still uses 50 here
@@ -920,7 +920,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
 # ---------------------- Candlestick Patterns ----------------------
 
 def is_hammer(row: pd.Series) -> int:
-    """Checks for Hammer pattern (bullish signal)."""
+    """Checks for Hammer pattern (bullish signal) based on current candle shape."""
     o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
     if pd.isna([o, h, l, c]).any(): return 0
     body = abs(c - o)
@@ -928,25 +928,20 @@ def is_hammer(row: pd.Series) -> int:
     if candle_range == 0: return 0
     lower_shadow = min(o, c) - l
     upper_shadow = h - max(o, c)
-    is_small_body = body < (candle_range * 0.35) # Slightly larger tolerance for body
+
+    # Check for small body, long lower shadow, small upper shadow
+    is_small_body = body < (candle_range * 0.35)
     is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
     is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
-    # Added condition: Hammer should ideally appear after a downtrend (check previous close vs open)
-    # This is a simple check, a more robust check would involve looking at multiple previous candles
-    is_after_downtrend = row.name > 0 and row.name - 1 < len(row.index) and pd.notna(row.index[row.name - 1]) and row.get('close') < row.get('open') # Simple check: current closes below open
-    # A better check might be: prev_close < prev_open
-    prev_close = row.get('close', np.nan) if row.name == 0 else df.iloc[row.name - 1].get('close', np.nan) # Need access to full df for this
-    # For simplicity within apply, let's stick to current candle properties or a basic check
-    # A more proper way is to calculate this outside apply or pass the full df
-    # Let's add a simple check that the close is in the upper part of the range
+    # Check that close is in the upper part of the range (confirms bullish pressure)
     close_in_upper_half = c >= l + (candle_range * 0.5)
 
-    # Refined Hammer check: small body, long lower shadow, small upper shadow, and close in upper half
+    # Return 100 if all conditions for a Hammer shape are met
     return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow and close_in_upper_half else 0
 
 
 def is_shooting_star(row: pd.Series) -> int:
-    """Checks for Shooting Star pattern (bearish signal)."""
+    """Checks for Shooting Star pattern (bearish signal) based on current candle shape."""
     o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
     if pd.isna([o, h, l, c]).any(): return 0
     body = abs(c - o)
@@ -954,17 +949,17 @@ def is_shooting_star(row: pd.Series) -> int:
     if candle_range == 0: return 0
     lower_shadow = min(o, c) - l
     upper_shadow = h - max(o, c)
+
+    # Check for small body, long upper shadow, small lower shadow
     is_small_body = body < (candle_range * 0.35)
     is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
     is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
-     # Added condition: Shooting Star should ideally appear after an uptrend (check previous close vs open)
-    # Simple check: current closes above open
-    # is_after_uptrend = row.name > 0 and row.name - 1 < len(row.index) and pd.notna(row.index[row.name - 1]) and row.get('close') > row.get('open') # Simple check: current closes above open
-    # Let's add a simple check that the close is in the lower part of the range
+    # Check that close is in the lower part of the range (confirms bearish pressure)
     close_in_lower_half = c <= l + (candle_range * 0.5)
 
-    # Refined Shooting Star check: small body, long upper shadow, small lower shadow, and close in lower half
+    # Return -100 if all conditions for a Shooting Star shape are met
     return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow and close_in_lower_half else 0 # Negative signal
+
 
 def is_doji(row: pd.Series) -> int:
     """Checks for Doji pattern (uncertainty)."""
@@ -999,6 +994,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     logger.debug("ℹ️ [Indicators] Detecting candlestick patterns...")
     # Apply single-row patterns
+    # Removed the problematic index check from is_hammer and is_shooting_star
     df['Hammer'] = df.apply(is_hammer, axis=1)
     df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
     df['Doji'] = df.apply(is_doji, axis=1)
@@ -2457,4 +2453,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف تشغيل بوت إشارات التداول.")
         os._exit(0)
-
