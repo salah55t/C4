@@ -1202,15 +1202,16 @@ class BottomFishingStrategy:
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
         # Adjusted weights and conditions for bottom fishing
+        # Removed 'rsi_bouncing_up' from optional as it's mandatory
+        # Increased weights for MACD momentum shift, ADX/DI cross, and OBV rising
         # =====================================================================
         self.condition_weights = {
-            'rsi_bouncing_up': 2.5,       # RSI rising from oversold (High importance)
             'price_near_bb_lower': 2.0,   # Price touching or below lower Bollinger Band (High importance)
-            'macd_bullish_momentum_shift': 2.0, # MACD showing upward momentum shift
+            'macd_bullish_momentum_shift': 2.5, # MACD showing upward momentum shift (Increased importance)
             'price_crossing_vwma_up': 1.5, # Price crosses above VWMA
-            'adx_low_and_di_cross': 1.0,  # Low ADX and DI+ crossing above DI-
+            'adx_low_and_di_cross': 1.5,  # Low ADX and DI+ crossing above DI- (Increased importance)
             'price_crossing_ema10_up': 1.0, # Price crosses above faster EMA
-            'obv_rising': 1.0,            # OBV is rising
+            'obv_rising': 1.5,            # OBV is rising (Increased importance)
 
             # Removed conditions that conflict with bottom fishing or breakout
             # 'ema_cross_bullish': 0,
@@ -1219,7 +1220,7 @@ class BottomFishingStrategy:
             # 'macd_positive_or_cross': 0, # Looking for shift from below zero
             # 'adx_trending_bullish': 0, # Looking for low ADX turning
             # 'breakout_bb_upper': 0,
-            # 'rsi_ok': 0, # Replaced by rsi_bouncing_up
+            # 'rsi_ok': 0, # Replaced by rsi_oversold_or_bouncing (mandatory)
             # 'not_bb_extreme': 0, # Replaced by price_near_bb_lower
             # 'rsi_filter_breakout': 0,
             # 'macd_filter_breakout': 0
@@ -1229,21 +1230,21 @@ class BottomFishingStrategy:
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met for bottom fishing) ---
         # Focused on oversold state and bullish reversal candle
+        # Kept 'rsi_oversold_or_bouncing' as mandatory only
         # =====================================================================
         self.essential_conditions = [
             'rsi_oversold_or_bouncing', # RSI is oversold OR just bounced from oversold
             'bullish_reversal_candle', # Presence of a bullish reversal candle
-            # Add others as deemed essential, e.g., price near BB lower
             'price_has_dropped_recently' # Add a simple check for recent price drop (needs implementation)
         ]
         # =====================================================================
 
 
-        # Calculate total possible score for *optional* conditions
+        # Calculate total possible score for *optional* conditions based on the new weights
         self.total_possible_score = sum(self.condition_weights.values())
 
         # Required signal score threshold for *optional* conditions (as a percentage)
-        # Adjust this threshold based on testing
+        # Adjusted based on the new total possible score
         self.min_score_threshold_pct = 0.40 # Example: 40% of optional points (adjustable)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
@@ -1427,15 +1428,7 @@ class BottomFishingStrategy:
         # =====================================================================
         current_score = 0.0
 
-        # Optional Condition 1: RSI bouncing up from oversold (already checked in mandatory, but add score if applicable)
-        if bounced_from_oversold:
-             current_score += self.condition_weights.get('rsi_bouncing_up', 0)
-             signal_details['RSI_Bounce_Score'] = f'يرتد من البيع المفرط (+{self.condition_weights.get("rsi_bouncing_up", 0)})'
-        else:
-             signal_details['RSI_Bounce_Score'] = f'لا يرتد من البيع المفرط (0)'
-
-
-        # Optional Condition 2: Price near or below lower Bollinger Band
+        # Optional Condition 1: Price near or below lower Bollinger Band
         if pd.notna(last_row.get('bb_lower')) and last_row['close'] <= last_row['bb_lower'] * 1.005: # Within 0.5% of lower band or below
              current_score += self.condition_weights.get('price_near_bb_lower', 0)
              signal_details['BB_Lower_Score'] = f'السعر قريب أو تحت الحد السفلي لبولينجر (+{self.condition_weights.get("price_near_bb_lower", 0)})'
@@ -1443,7 +1436,7 @@ class BottomFishingStrategy:
              signal_details['BB_Lower_Score'] = f'السعر ليس قريبا من الحد السفلي لبولينجر (0)'
 
 
-        # Optional Condition 3: MACD bullish momentum shift (hist turning positive or bullish cross from below zero)
+        # Optional Condition 2: MACD bullish momentum shift (hist turning positive or bullish cross from below zero)
         if len(df_processed) >= 2 and pd.notna(prev_row.get('macd_hist')) and pd.notna(last_row.get('macd_hist')) and pd.notna(prev_row.get('macd')) and pd.notna(last_row.get('macd_signal')):
             macd_hist_turning_up = last_row['macd_hist'] > prev_row['macd_hist']
             macd_cross_from_below_zero = (last_row['macd'] > last_row['macd_signal'] and
@@ -1462,7 +1455,7 @@ class BottomFishingStrategy:
              signal_details['MACD_Score'] = f'بيانات MACD غير كافية أو NaN (0)'
 
 
-        # Optional Condition 4: Price crosses above VWMA
+        # Optional Condition 3: Price crosses above VWMA
         if len(df_processed) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('vwma')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('vwma')):
             if last_row['close'] > last_row['vwma'] and prev_row['close'] <= prev_row['vwma']:
                  current_score += self.condition_weights.get('price_crossing_vwma_up', 0)
@@ -1473,7 +1466,7 @@ class BottomFishingStrategy:
              signal_details['VWMA_Cross_Score'] = f'بيانات VWMA غير كافية أو NaN (0)'
 
 
-        # Optional Condition 5: Low ADX and DI+ crossing above DI-
+        # Optional Condition 4: Low ADX and DI+ crossing above DI-
         if len(df_processed) >= 2 and pd.notna(last_row.get('adx')) and pd.notna(last_row.get('di_plus')) and pd.notna(last_row.get('di_minus')) and pd.notna(prev_row.get('di_plus')) and pd.notna(prev_row.get('di_minus')):
              if last_row['adx'] < 25 and last_row['di_plus'] > last_row['di_minus'] and prev_row['di_plus'] <= prev_row['di_minus']: # Slightly increased low ADX threshold
                  current_score += self.condition_weights.get('adx_low_and_di_cross', 0)
@@ -1484,7 +1477,7 @@ class BottomFishingStrategy:
              signal_details['ADX_DI_Score'] = f'بيانات ADX/DI غير كافية أو NaN (0)'
 
 
-        # Optional Condition 6: Price crosses above EMA10
+        # Optional Condition 5: Price crosses above EMA10
         if len(df_processed) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('ema_10')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('ema_10')):
             if last_row['close'] > last_row['ema_10'] and prev_row['close'] <= prev_row['ema_10']:
                  current_score += self.condition_weights.get('price_crossing_ema10_up', 0)
@@ -1494,7 +1487,7 @@ class BottomFishingStrategy:
         else:
              signal_details['EMA10_Cross_Score'] = f'بيانات EMA10 غير كافية أو NaN (0)'
 
-        # Optional Condition 7: OBV is rising
+        # Optional Condition 6: OBV is rising
         if len(df_processed) >= 2 and pd.notna(last_row.get('obv')) and pd.notna(prev_row.get('obv')):
             if last_row['obv'] > prev_row['obv']:
                  current_score += self.condition_weights.get('obv_rising', 0)
@@ -1694,7 +1687,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - انخفاض أخير في السعر: {signal_details.get('Recent_Drop_Mandatory', 'N/A')}\n"
             f"——————————————\n"
             f"⭐ *نقاط الشروط الاختيارية:*\n" # قسم جديد لتفاصيل النقاط الاختيارية
-            f"  - ارتداد RSI: {signal_details.get('RSI_Bounce_Score', 'N/A')}\n"
+            # Removed RSI_Bounce_Score from optional section as it's now only mandatory
             f"  - السعر قرب BB السفلي: {signal_details.get('BB_Lower_Score', 'N/A')}\n"
             f"  - تحول زخم MACD: {signal_details.get('MACD_Score', 'N/A')}\n"
             f"  - تقاطع السعر فوق VWMA: {signal_details.get('VWMA_Cross_Score', 'N/A')}\n"
