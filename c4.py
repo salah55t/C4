@@ -247,13 +247,13 @@ def get_btc_trend_4h() -> str:
         df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10) # Request a bit more days
         if df is None or df.empty or len(df) < 50 + 1: # Ensure enough data for EMA50
             logger.warning("⚠️ [Indicators] Insufficient BTC/USDT 4H data to calculate trend.")
-            return "N/A (Insufficient Data)"
+            return "N/A (Insufficient Data)" # Corrected syntax here
 
         df['close'] = pd.to_numeric(df['close'], errors='coerce')
         df.dropna(subset=['close'], inplace=True)
         if len(df) < 50:
              logger.warning("⚠️ [Indicators] Insufficient BTC/USDT 4H data after removing NaNs.")
-             return "N/A (Insufficient Data)")
+             return "N/A (Insufficient Data)"
 
         ema20 = calculate_ema(df['close'], 20).iloc[-1] # Still uses 20 here
         ema50 = calculate_ema(df['close'], 50).iloc[-1] # Still uses 50 here
