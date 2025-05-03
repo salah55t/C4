@@ -89,7 +89,7 @@ TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # Price increase percentage to 
 
 # Additional Signal Conditions
 MIN_PROFIT_MARGIN_PCT: float = 1.5 # Minimum required profit margin percentage (Reduced for potential faster trades)
-MIN_VOLUME_15M_USDT: float = 200000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly)
+MIN_VOLUME_15M_USDT: float = 50000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly)
 MAX_TRADE_DURATION_HOURS: int = 72 # Maximum time to keep a trade open (72 hours = 3 days)
 # =============================================================================
 # --- End Indicator Parameters ---
