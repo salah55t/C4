@@ -52,7 +52,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation (كما طلب المستخدم، سنستخدمها للتوليد)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Historical data lookback in days for signal generation (زيادة الأيام لالتقاط المزيد من القيعان المحتملة)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # Historical data lookback in days for signal generation (زيادة الأيام لالتقاط المزيد من القيعان المحتملة)
 SIGNAL_TRACKING_TIMEFRAME: str = '1m' # Timeframe for signal tracking and stop loss updates (إطار زمني أصغر لتتبع أكثر آنية)
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 2   # Historical data lookback in days for signal tracking (أيام أقل للتتبع)
 
@@ -61,8 +61,8 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 2   # Historical data lookback in days for 
 # Adjusted parameters for bottom fishing strategy
 # =============================================================================
 RSI_PERIOD: int = 14          # RSI Period
-RSI_OVERSOLD: int = 35        # Increased Oversold threshold slightly to catch earlier signs
-RSI_OVERBOUGHT: int = 65      # Decreased Overbought threshold
+RSI_OVERSOLD: int = 30        # Adjusted Oversold threshold back to 30 for stronger signal
+RSI_OVERBOUGHT: int = 70      # Adjusted Overbought threshold back to 70
 EMA_SHORT_PERIOD: int = 10      # Short EMA period (faster)
 EMA_LONG_PERIOD: int = 20       # Long EMA period (faster)
 VWMA_PERIOD: int = 20           # VWMA Period
@@ -72,7 +72,7 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # قد تكون أقل أ
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry/tracking
-ENTRY_ATR_MULTIPLIER: float = 2.0 # Reduced ATR Multiplier for initial target/stop (أكثر تحفظًا في الهدف الأولي)
+ENTRY_ATR_MULTIPLIER: float = 2.0 # Multiplier for initial target/stop
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -83,14 +83,17 @@ SUPERTREND_PERIOD: int = 10     # SuperTrend Period (قد يكون أقل أهم
 SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (أقل شراسة)
 
 # Trailing Stop Loss (Adjusted for tighter stops)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.01 # Profit percentage to activate trailing stop (1%)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # Profit percentage to activate trailing stop (1.5%) - Slightly increased
 TRAILING_STOP_ATR_MULTIPLIER: float = 1.5        # Reduced ATR Multiplier for tighter trailing stop
-TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.002  # Price increase percentage to move trailing stop (0.2%) - Increased slightly for less frequent updates
+TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.003  # Price increase percentage to move trailing stop (0.3%) - Increased slightly for less frequent updates
 
 # Additional Signal Conditions
 MIN_PROFIT_MARGIN_PCT: float = 1.5 # Minimum required profit margin percentage (Reduced for potential faster trades)
-MIN_VOLUME_15M_USDT: float = 50000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly)
-MAX_TRADE_DURATION_HOURS: int = 72 # Maximum time to keep a trade open (72 hours = 3 days)
+MIN_VOLUME_15M_USDT: float = 75000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased for better liquidity)
+MAX_TRADE_DURATION_HOURS: int = 96 # Maximum time to keep a trade open (96 hours = 4 days) - Increased slightly
+
+# Added Minimum Stop Loss Percentage
+MIN_STOP_LOSS_PCT: float = 0.015 # Minimum stop loss percentage below entry price (1.5%)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -928,7 +931,19 @@ def is_hammer(row: pd.Series) -> int:
     is_small_body = body < (candle_range * 0.35) # Slightly larger tolerance for body
     is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
     is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
-    return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow else 0
+    # Added condition: Hammer should ideally appear after a downtrend (check previous close vs open)
+    # This is a simple check, a more robust check would involve looking at multiple previous candles
+    is_after_downtrend = row.name > 0 and row.name - 1 < len(row.index) and pd.notna(row.index[row.name - 1]) and row.get('close') < row.get('open') # Simple check: current closes below open
+    # A better check might be: prev_close < prev_open
+    prev_close = row.get('close', np.nan) if row.name == 0 else df.iloc[row.name - 1].get('close', np.nan) # Need access to full df for this
+    # For simplicity within apply, let's stick to current candle properties or a basic check
+    # A more proper way is to calculate this outside apply or pass the full df
+    # Let's add a simple check that the close is in the upper part of the range
+    close_in_upper_half = c >= l + (candle_range * 0.5)
+
+    # Refined Hammer check: small body, long lower shadow, small upper shadow, and close in upper half
+    return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow and close_in_upper_half else 0
+
 
 def is_shooting_star(row: pd.Series) -> int:
     """Checks for Shooting Star pattern (bearish signal)."""
@@ -942,7 +957,14 @@ def is_shooting_star(row: pd.Series) -> int:
     is_small_body = body < (candle_range * 0.35)
     is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
     is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
-    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0 # Negative signal
+     # Added condition: Shooting Star should ideally appear after an uptrend (check previous close vs open)
+    # Simple check: current closes above open
+    # is_after_uptrend = row.name > 0 and row.name - 1 < len(row.index) and pd.notna(row.index[row.name - 1]) and row.get('close') > row.get('open') # Simple check: current closes above open
+    # Let's add a simple check that the close is in the lower part of the range
+    close_in_lower_half = c <= l + (candle_range * 0.5)
+
+    # Refined Shooting Star check: small body, long upper shadow, small lower shadow, and close in lower half
+    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow and close_in_lower_half else 0 # Negative signal
 
 def is_doji(row: pd.Series) -> int:
     """Checks for Doji pattern (uncertainty)."""
@@ -1187,31 +1209,32 @@ class BottomFishingStrategy:
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
             'vwap', 'obv', 'supertrend', 'supertrend_trend',
+            'Hammer', 'ShootingStar', 'Engulfing', # Keep individual patterns for refined checks
             'BullishCandleSignal', 'BearishCandleSignal'
         ]
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
-            'close',
+            'close', 'open', 'high', 'low', # Added open, high, low for candle checks
             'ema_10', 'ema_20', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_lower', # Changed bb_upper to bb_lower
+            'Hammer', 'Engulfing', # Keep individual bullish patterns
             'BullishCandleSignal', 'obv'
         ]
 
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
         # Adjusted weights and conditions for bottom fishing
-        # Removed 'rsi_bouncing_up' from optional as it's mandatory
         # Increased weights for MACD momentum shift, ADX/DI cross, and OBV rising
         # =====================================================================
         self.condition_weights = {
-            'price_near_bb_lower': 2.0,   # Price touching or below lower Bollinger Band (High importance)
-            'macd_bullish_momentum_shift': 2.5, # MACD showing upward momentum shift (Increased importance)
-            'price_crossing_vwma_up': 1.5, # Price crosses above VWMA
-            'adx_low_and_di_cross': 1.5,  # Low ADX and DI+ crossing above DI- (Increased importance)
-            'price_crossing_ema10_up': 1.0, # Price crosses above faster EMA
-            'obv_rising': 1.5,            # OBV is rising (Increased importance)
+            'price_near_bb_lower': 2.5,   # Price touching or below lower Bollinger Band (Increased importance)
+            'macd_bullish_momentum_shift': 3.0, # MACD showing upward momentum shift (Increased importance)
+            'price_crossing_vwma_up': 2.0, # Price crosses above VWMA (Increased importance)
+            'adx_low_and_di_cross': 2.5,  # Low ADX and DI+ crossing above DI- (Increased importance)
+            'price_crossing_ema10_up': 1.5, # Price crosses above faster EMA (Increased importance)
+            'obv_rising': 2.5,            # OBV is rising (Increased importance)
 
             # Removed conditions that conflict with bottom fishing or breakout
             # 'ema_cross_bullish': 0,
@@ -1233,9 +1256,9 @@ class BottomFishingStrategy:
         # Kept 'rsi_oversold_or_bouncing' as mandatory only
         # =====================================================================
         self.essential_conditions = [
-            'rsi_oversold_or_bouncing', # RSI is oversold OR just bounced from oversold
-            'bullish_reversal_candle', # Presence of a bullish reversal candle
-            'price_has_dropped_recently' # Add a simple check for recent price drop (needs implementation)
+            'rsi_bouncing_up_from_oversold', # RSI is bouncing UP from oversold (More specific)
+            'bullish_reversal_candle_confirmed', # Presence of a bullish reversal candle with price confirmation
+            'significant_recent_price_drop' # Add a simple check for recent price drop (needs implementation)
         ]
         # =====================================================================
 
@@ -1245,7 +1268,7 @@ class BottomFishingStrategy:
 
         # Required signal score threshold for *optional* conditions (as a percentage)
         # Adjusted based on the new total possible score
-        self.min_score_threshold_pct = 0.40 # Example: 40% of optional points (adjustable)
+        self.min_score_threshold_pct = 0.50 # Increased threshold to 50% of optional points (adjustable)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
 
@@ -1283,7 +1306,7 @@ class BottomFishingStrategy:
             df_calc = df_calc.join(adx_df)
             df_calc = calculate_vwap(df_calc) # Note: VWAP resets daily, VWMA is a rolling average
             df_calc = calculate_obv(df_calc)
-            df_calc = detect_candlestick_patterns(df_calc)
+            df_calc = detect_candlestick_patterns(df_calc) # Keep individual pattern columns here
 
             # Check for required columns after calculation
             missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
@@ -1324,7 +1347,7 @@ class BottomFishingStrategy:
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة شراء (صيد القيعان)...")
 
         # Check DataFrame and columns
-        if df_processed is None or df_processed.empty or len(df_processed) < max(2, MACD_SLOW + 1): # Need at least 2 for diff, and enough for indicators
+        if df_processed is None or df_processed.empty or len(df_processed) < max(2, MACD_SLOW + 1, EMA_LONG_PERIOD + 1): # Need at least 2 for diff, enough for indicators and recent drop check
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا، لا يمكن توليد الإشارة.")
             return None
         # Add required columns for signal if not already present
@@ -1368,50 +1391,61 @@ class BottomFishingStrategy:
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
-        # Mandatory Condition 1: RSI Oversold or Bouncing Up from Oversold
-        # Check if RSI is currently oversold OR (was oversold and is now higher)
-        is_oversold = last_row['rsi'] <= RSI_OVERSOLD
-        bounced_from_oversold = (len(df_processed) >= 2 and
-                                   pd.notna(prev_row.get('rsi')) and
-                                   prev_row['rsi'] <= RSI_OVERSOLD and
-                                   last_row['rsi'] > prev_row['rsi'])
+        # Mandatory Condition 1: RSI Bouncing Up from Oversold
+        # Check if RSI was oversold in the previous candle and is higher in the current candle
+        rsi_bouncing_up = (len(df_processed) >= 2 and
+                           pd.notna(prev_row.get('rsi')) and
+                           pd.notna(last_row.get('rsi')) and
+                           prev_row['rsi'] <= RSI_OVERSOLD and
+                           last_row['rsi'] > prev_row['rsi'])
 
-        if not (is_oversold or bounced_from_oversold):
+        if not rsi_bouncing_up:
             essential_passed = False
-            failed_essential_conditions.append('RSI Oversold or Bouncing')
-            signal_details['RSI_Mandatory'] = f'فشل: RSI={last_row["rsi"]:.1f} (ليس في منطقة البيع المفرط أو لم يرتد)'
+            failed_essential_conditions.append('RSI Bouncing Up from Oversold')
+            signal_details['RSI_Mandatory'] = f'فشل: RSI={last_row["rsi"]:.1f} (لم يرتد صعودا من منطقة البيع المفرط)'
         else:
-             signal_details['RSI_Mandatory'] = f'نجاح: RSI={last_row["rsi"]:.1f} (في منطقة البيع المفرط أو يرتد)'
+             signal_details['RSI_Mandatory'] = f'نجاح: RSI={last_row["rsi"]:.1f} (يرتد صعودا من منطقة البيع المفرط)'
 
 
-        # Mandatory Condition 2: Bullish Reversal Candlestick Pattern
-        if last_row['BullishCandleSignal'] != 1:
+        # Mandatory Condition 2: Bullish Reversal Candlestick Pattern with Confirmation
+        # Check for Hammer or Bullish Engulfing AND price closes above the high of the pattern candle (or a significant level)
+        is_bullish_pattern = last_row['Hammer'] == 100 or last_row['Engulfing'] == 100
+        # Confirmation: Close price is above the high of the pattern candle (simple confirmation)
+        # Or, close is above the open of the pattern candle for stronger confirmation after a drop
+        confirmation_price = last_row.get('high', last_row['close']) # Use high as confirmation target
+        # If it's an engulfing pattern, confirmation could be closing above the previous candle's open
+        if last_row['Engulfing'] == 100 and len(df_processed) >= 2 and pd.notna(prev_row.get('open')):
+             confirmation_price = prev_row['open'] # For engulfing, confirmation is closing above prev open
+
+        price_confirmation = is_bullish_pattern and last_row['close'] > confirmation_price
+
+        if not price_confirmation:
             essential_passed = False
-            failed_essential_conditions.append('Bullish Reversal Candle')
-            signal_details['Candle_Mandatory'] = 'فشل: لا يوجد نموذج شموع انعكاسي صعودي'
+            failed_essential_conditions.append('Bullish Reversal Candle Confirmed')
+            signal_details['Candle_Mandatory'] = 'فشل: لا يوجد نموذج شموع انعكاسي صعودي مؤكد بالسعر'
         else:
-             signal_details['Candle_Mandatory'] = 'نجاح: يوجد نموذج شموع انعكاسي صعودي'
+             signal_details['Candle_Mandatory'] = f'نجاح: يوجد نموذج شموع انعكاسي صعودي مؤكد بالسعر (إغلاق فوق {confirmation_price:.4f})'
 
-        # Mandatory Condition 3: Simple check for recent price drop (e.g., price is below EMA20 from a few bars ago)
-        # This is a simplified way to check if the price was higher recently
-        if len(df_processed) < EMA_LONG_PERIOD: # Need enough data for this check
-             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية للشمعات السابقة للتحقق من انخفاض السعر.")
-             # This mandatory condition will be considered failed if we don't have enough history
+
+        # Mandatory Condition 3: Significant Recent Price Drop
+        # Check if the current price is significantly lower than the price N bars ago
+        lookback_bars_for_drop = EMA_LONG_PERIOD # Use EMA_LONG_PERIOD as lookback for recent drop
+        if len(df_processed) < lookback_bars_for_drop + 1:
+             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية للشمعات السابقة ({len(df_processed)} < {lookback_bars_for_drop + 1}) للتحقق من انخفاض السعر.")
              essential_passed = False
-             failed_essential_conditions.append('Recent Price Drop (Insufficient Data)')
+             failed_essential_conditions.append('Significant Recent Price Drop (Insufficient Data)')
              signal_details['Recent_Drop_Mandatory'] = 'فشل: بيانات غير كافية للتحقق من انخفاض السعر الأخير'
-
         else:
-            # Check if the current price is significantly lower than the price 'n' bars ago (e.g., EMA_LONG_PERIOD bars ago)
-            price_n_bars_ago = df_processed['close'].iloc[-EMA_LONG_PERIOD]
-            price_drop_threshold = price_n_bars_ago * 0.97 # Example: at least a 3% drop from n bars ago
+            price_n_bars_ago = df_processed['close'].iloc[-lookback_bars_for_drop - 1] # Price 'lookback_bars_for_drop' bars ago
+            price_drop_threshold_pct = 0.03 # Require at least a 3% drop from N bars ago
+            price_drop_threshold_price = price_n_bars_ago * (1 - price_drop_threshold_pct)
 
-            if not (last_row['close'] < price_drop_threshold):
+            if not (last_row['close'] < price_drop_threshold_price):
                  essential_passed = False
-                 failed_essential_conditions.append('Recent Price Drop')
-                 signal_details['Recent_Drop_Mandatory'] = f'فشل: السعر الحالي ({last_row["close"]:.4f}) ليس أقل بكثير من سعر {EMA_LONG_PERIOD} شمعة سابقة ({price_n_bars_ago:.4f})'
+                 failed_essential_conditions.append('Significant Recent Price Drop')
+                 signal_details['Recent_Drop_Mandatory'] = f'فشل: السعر الحالي ({last_row["close"]:.4f}) ليس أقل بشكل ملحوظ ({price_drop_threshold_pct*100:.1f}%) من سعر {lookback_bars_for_drop} شمعة سابقة ({price_n_bars_ago:.4f})'
             else:
-                 signal_details['Recent_Drop_Mandatory'] = f'نجاح: السعر الحالي ({last_row["close"]:.4f}) أقل بشكل ملحوظ من سعر {EMA_LONG_PERIOD} شمعة سابقة ({price_n_bars_ago:.4f})'
+                 signal_details['Recent_Drop_Mandatory'] = f'نجاح: السعر الحالي ({last_row["close"]:.4f}) أقل بشكل ملحوظ ({price_drop_threshold_pct*100:.1f}%) من سعر {lookback_bars_for_drop} شمعة سابقة ({price_n_bars_ago:.4f})'
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1439,9 +1473,10 @@ class BottomFishingStrategy:
         # Optional Condition 2: MACD bullish momentum shift (hist turning positive or bullish cross from below zero)
         if len(df_processed) >= 2 and pd.notna(prev_row.get('macd_hist')) and pd.notna(last_row.get('macd_hist')) and pd.notna(prev_row.get('macd')) and pd.notna(last_row.get('macd_signal')):
             macd_hist_turning_up = last_row['macd_hist'] > prev_row['macd_hist']
+            # Bullish cross from below zero: MACD crosses Signal AND both are below zero OR MACD just crossed zero
             macd_cross_from_below_zero = (last_row['macd'] > last_row['macd_signal'] and
                                             prev_row['macd'] <= prev_row['macd_signal'] and
-                                            last_row['macd'] < 0) # Added condition that MACD is still below zero or just crossed
+                                            (last_row['macd'] < 0 or prev_row['macd'] < 0)) # Cross happened below or at zero
 
             if macd_hist_turning_up or macd_cross_from_below_zero:
                  current_score += self.condition_weights.get('macd_bullish_momentum_shift', 0)
@@ -1487,7 +1522,7 @@ class BottomFishingStrategy:
         else:
              signal_details['EMA10_Cross_Score'] = f'بيانات EMA10 غير كافية أو NaN (0)'
 
-        # Optional Condition 6: OBV is rising
+        # Optional Condition 6: OBV is rising (check last 2 bars)
         if len(df_processed) >= 2 and pd.notna(last_row.get('obv')) and pd.notna(prev_row.get('obv')):
             if last_row['obv'] > prev_row['obv']:
                  current_score += self.condition_weights.get('obv_rising', 0)
@@ -1545,23 +1580,27 @@ class BottomFishingStrategy:
         stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
 
         initial_target = current_price + (target_multiplier * current_atr)
-        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
+        calculated_stop_loss = current_price - (stop_loss_multiplier * current_atr)
 
         # Ensure stop loss is not zero or negative and is below the entry price
-        if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
-            # Use a percentage as a minimum stop loss if the initial calculation is invalid
-            min_sl_price_pct = current_price * (1 - 0.015) # Example: 1.5% below entry
-            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # Ensure it's not too close to zero
-            logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss:.8g}) غير صالح أو أعلى من سعر الدخول. تم تعديله إلى {initial_stop_loss:.8f}")
-            signal_details['Warning'] = f'تم تعديل وقف الخسارة الأولي (كان <= 0 أو >= الدخول، تم تعيينه إلى {initial_stop_loss:.8f})'
-        else:
-             # Ensure the initial stop loss is not too wide (optional)
-             max_allowed_loss_pct = 0.10 # Example: Initial loss should not exceed 10%
-             max_sl_price = current_price * (1 - max_allowed_loss_pct)
-             if initial_stop_loss < max_sl_price:
-                  logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({initial_stop_loss:.8g}) واسع جدًا. تم تعديله إلى {max_sl_price:.8f}")
-                  initial_stop_loss = max_sl_price
-                  signal_details['Warning'] = f'تم تعديل وقف الخسارة الأولي (كان واسعًا جدًا، تم تعيينه إلى {initial_stop_loss:.8f})' # Use the new value here
+        # Also apply the minimum percentage stop loss
+        min_sl_price_pct = current_price * (1 - MIN_STOP_LOSS_PCT) # Calculate price based on min percentage
+        initial_stop_loss = max(calculated_stop_loss, min_sl_price_pct) # Use the higher of calculated or min percentage
+        # Ensure it's still below entry price and not too close to zero
+        initial_stop_loss = min(initial_stop_loss, current_price * (1 - 0.0001)) # Ensure it's slightly below entry
+        initial_stop_loss = max(initial_stop_loss, current_price * 0.0001) # Ensure it's not too close to zero
+
+
+        if initial_stop_loss >= current_price:
+             # This should ideally not happen after the above logic, but as a fallback
+             fallback_sl_price = current_price * (1 - MIN_STOP_LOSS_PCT)
+             initial_stop_loss = max(fallback_sl_price, current_price * 0.001)
+             logger.warning(f"⚠️ [Strategy {self.symbol}] وقف الخسارة المحسوب ({calculated_stop_loss:.8g}) غير صالح أو أعلى من سعر الدخول. تم تعديله إلى {initial_stop_loss:.8f}")
+             signal_details['Warning'] = f'تم تعديل وقف الخسارة الأولي (كان >= الدخول، تم تعيينه إلى {initial_stop_loss:.8f})'
+        elif initial_stop_loss < calculated_stop_loss:
+             # This means the minimum percentage stop loss was applied
+             logger.debug(f"ℹ️ [Strategy {self.symbol}] تم تطبيق الحد الأدنى لوقف الخسارة المئوي ({MIN_STOP_LOSS_PCT*100:.1f}%) على وقف الخسارة الأولي ({calculated_stop_loss:.8g}). الوقف الجديد: {initial_stop_loss:.8f}")
+             signal_details['Info'] = f'تم تطبيق الحد الأدنى لوقف الخسارة المئوي ({MIN_STOP_LOSS_PCT*100:.1f}%)'
 
 
         # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
@@ -1587,14 +1626,14 @@ class BottomFishingStrategy:
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Bottom_Fishing_Filtered', # اسم الاستراتيجية الجديد
+            'strategy_name': 'Bottom_Fishing_Filtered_V2', # اسم الاستراتيجية الجديد (الإصدار الثاني)
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (صيد القيعان). السعر: {current_price:.6f}, النقاط (اختيارية): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, السيولة: {volume_recent:,.0f}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (صيد القيعان V2). السعر: {current_price:.6f}, النقاط (اختيارية): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, السيولة: {volume_recent:,.0f}")
         return signal_output
 
 
