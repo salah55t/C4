@@ -52,7 +52,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation (كما طلب المستخدم، سنستخدمها للتوليد)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # Historical data lookback in days for signal generation (زيادة الأيام لالتقاط المزيد من القيعان المحتملة)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30 # Historical data lookback in days for signal generation (زيادة الأيام لالتقاط المزيد من القيعان المحتملة ونقاط التأرجح لفي بوناتشي)
 SIGNAL_TRACKING_TIMEFRAME: str = '1m' # Timeframe for signal tracking and stop loss updates (إطار زمني أصغر لتتبع أكثر آنية)
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 2   # Historical data lookback in days for signal tracking (أيام أقل للتتبع)
 
@@ -67,10 +67,11 @@ EMA_SHORT_PERIOD: int = 10      # Short EMA period (faster)
 EMA_LONG_PERIOD: int = 20       # Long EMA period (faster)
 VWMA_PERIOD: int = 20           # VWMA Period
 SWING_ORDER: int = 5          # Order for swing point detection (for Elliott, etc.)
-# ... (Other constants remain the same) ...
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # قد تكون أقل أهمية لاستراتيجية القيعان البسيطة
-FIB_TOLERANCE: float = 0.007
-LOOKBACK_FOR_SWINGS: int = 100
+# --- Fibonacci Parameters ---
+FIB_LEVELS_TO_CHECK: List[float] = [0.236, 0.382, 0.5, 0.618, 0.786] # مستويات فيبوناتشي القياسية
+FIB_PRICE_TOLERANCE_PCT: float = 0.005 # التسامح المئوي (0.5%) للسعر ليكون "قريبًا" من مستوى فيبوناتشي
+FIB_LOOKBACK_BARS: int = 100 # عدد الشمعات للبحث عن نقاط التأرجح لحساب فيبوناتشي
+# ----------------------------
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry/tracking
 ENTRY_ATR_MULTIPLIER: float = 2.0 # Multiplier for initial target/stop
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
@@ -155,10 +156,12 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
         logger.error("❌ [Data] Binance client not initialized for data fetching.")
         return None
     try:
-        start_dt = datetime.utcnow() - timedelta(days=days + 1) # Add an extra day as buffer
+        # Request data for a slightly longer period to ensure enough data for indicators and swings
+        start_dt = datetime.utcnow() - timedelta(days=days + 5) # Add extra days as buffer
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} since {start_str} (limit 1000 candles)...")
 
+        # Fetch up to 1000 candles, which is the max limit for get_historical_klines
         klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
 
         if not klines:
@@ -337,8 +340,43 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if missing_columns:
                 logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
                 # (Original code to add columns was fine, can keep or improve here if needed)
-                # ... (ALTER TABLE code can be added here if you anticipate future changes) ...
-                logger.warning("⚠️ [DB] Automatic addition of missing columns is not implemented in this enhanced version. Please check manually if needed.")
+                # Add 'signal_details' column if missing (example)
+                if 'signal_details' in missing_columns:
+                    try:
+                        cur.execute("ALTER TABLE signals ADD COLUMN signal_details JSONB;")
+                        conn.commit()
+                        logger.info("✅ [DB] Added 'signal_details' column to 'signals' table.")
+                        missing_columns.remove('signal_details') # Remove from missing list if added
+                    except Exception as add_col_err:
+                        logger.error(f"❌ [DB] Failed to add 'signal_details' column: {add_col_err}")
+                        if conn: conn.rollback() # Rollback if ALTER fails
+                # Add 'last_trailing_update_price' column if missing (example)
+                if 'last_trailing_update_price' in missing_columns:
+                    try:
+                        cur.execute("ALTER TABLE signals ADD COLUMN last_trailing_update_price DOUBLE PRECISION;")
+                        conn.commit()
+                        logger.info("✅ [DB] Added 'last_trailing_update_price' column to 'signals' table.")
+                        missing_columns.remove('last_trailing_update_price') # Remove from missing list if added
+                    except Exception as add_col_err:
+                        logger.error(f"❌ [DB] Failed to add 'last_trailing_update_price' column: {add_col_err}")
+                        if conn: conn.rollback() # Rollback if ALTER fails
+                # Add 'volume_15m' column if missing (example)
+                if 'volume_15m' in missing_columns:
+                    try:
+                        cur.execute("ALTER TABLE signals ADD COLUMN volume_15m DOUBLE PRECISION;")
+                        conn.commit()
+                        logger.info("✅ [DB] Added 'volume_15m' column to 'signals' table.")
+                        missing_columns.remove('volume_15m') # Remove from missing list if added
+                    except Exception as add_col_err:
+                        logger.error(f"❌ [DB] Failed to add 'volume_15m' column: {add_col_err}")
+                        if conn: conn.rollback() # Rollback if ALTER fails
+
+
+                if missing_columns:
+                     logger.warning(f"⚠️ [DB] Some required columns are still missing after attempted additions: {missing_columns}. Please check manually.")
+                else:
+                     logger.info("✅ [DB] All required columns exist in 'signals' table after checking/adding.")
+
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
 
@@ -1014,7 +1052,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     logger.debug("✅ [Indicators] Candlestick patterns detected.")
     return df
 
-# ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
+# ---------------------- Other Helper Functions (Elliott, Swings, Volume, Fibonacci) ----------------------
 def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
@@ -1039,10 +1077,12 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
 
         if is_unique_max:
             # Ensure no peak is too close (within 'order' distance)
+            # Check if the current index is far enough from the last added maximum index
             if not maxima_indices or i > maxima_indices[-1] + order:
                  maxima_indices.append(i)
         elif is_unique_min:
             # Ensure no trough is too close
+            # Check if the current index is far enough from the last added minimum index
             if not minima_indices or i > minima_indices[-1] + order:
                 minima_indices.append(i)
 
@@ -1050,43 +1090,71 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
     minima = [(idx, prices[idx]) for idx in minima_indices]
     return maxima, minima
 
-def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dict[str, Any]]:
-    """Simple attempt to identify Elliott Waves based on MACD histogram swings."""
-    if 'macd_hist' not in df.columns or df['macd_hist'].isnull().all():
-        logger.warning("⚠️ [Elliott] 'macd_hist' column missing or empty for Elliott Wave calculation.")
-        return []
+def calculate_fibonacci_levels(df: pd.DataFrame, lookback_bars: int = FIB_LOOKBACK_BARS) -> Optional[Dict[float, float]]:
+    """
+    Calculates Fibonacci retracement levels based on a recent significant uptrend
+    (from a swing low to a subsequent swing high) within the lookback period.
+    Returns a dictionary of {level: price} or None if no suitable swing points are found.
+    """
+    if df is None or df.empty or len(df) < lookback_bars + SWING_ORDER * 2 + 2: # Ensure enough data for swings and lookback
+        logger.debug(f"ℹ️ [Fibonacci] بيانات غير كافية ({len(df)}) لحساب مستويات فيبوناتشي.")
+        return None
 
-    # Use only non-null values
-    macd_values = df['macd_hist'].dropna().values
-    if len(macd_values) < 2 * order + 1:
-         logger.warning("⚠️ [Elliott] Insufficient MACD hist data after removing NaNs.")
-         return []
+    # Consider only the last 'lookback_bars' for finding the swing points
+    df_recent = df.iloc[-lookback_bars:].copy()
+    prices = df_recent['close'].values
 
-    maxima, minima = detect_swings(macd_values, order=order)
+    # Detect swings within this recent period
+    maxima, minima = detect_swings(prices, order=SWING_ORDER)
 
-    # Merge and sort all swing points by original index
-    # (Need to link back to original index from df after dropping NaNs)
-    df_nonan_macd = df['macd_hist'].dropna()
-    all_swings = sorted(
-        [(df_nonan_macd.index[idx], val, 'max') for idx, val in maxima] +
-        [(df_nonan_macd.index[idx], val, 'min') for idx, val in minima],
-        key=lambda x: x[0] # Sort by time (original index)
-    )
+    if not maxima or not minima:
+        logger.debug("ℹ️ [Fibonacci] لم يتم العثور على نقاط تأرجح كافية في الفترة الأخيرة لحساب فيبوناتشي.")
+        return None
 
-    waves = []
-    wave_number = 1
-    for timestamp, val, typ in all_swings:
-        # Very basic classification, may not strictly follow Elliott rules
-        wave_type = "Impulse" if (typ == 'max' and val > 0) or (typ == 'min' and val >= 0) else "Correction"
-        waves.append({
-            "wave": wave_number,
-            "timestamp": str(timestamp),
-            "macd_hist_value": float(val),
-            "swing_type": typ,
-            "classified_type": wave_type
-        })
-        wave_number += 1
-    return waves
+    # Find the most recent swing low and the subsequent swing high
+    # Sort swings by index (time)
+    all_swings = sorted(minima + maxima, key=lambda x: x[0])
+
+    # Iterate through swings to find a recent low followed by a high
+    fib_low_idx = -1
+    fib_high_idx = -1
+
+    for i in range(len(all_swings) - 1):
+        current_swing_idx, current_swing_price, current_swing_type = all_swings[i]
+        next_swing_idx, next_swing_price, next_swing_type = all_swings[i+1]
+
+        # Look for a Low followed by a High
+        if current_swing_type == 'min' and next_swing_type == 'max':
+            # We want the MOST RECENT such pair, so keep updating
+            fib_low_idx = current_swing_idx
+            fib_high_idx = next_swing_idx
+
+    # Check if a suitable pair was found
+    if fib_low_idx == -1 or fib_high_idx == -1 or fib_low_idx >= fib_high_idx:
+        logger.debug("ℹ️ [Fibonacci] لم يتم العثور على زوج 'قاع يتبعه قمة' حديث ومناسب لحساب فيبوناتشي.")
+        return None
+
+    # Get the actual price values from the original DataFrame using the indices relative to df_recent
+    # Need to map back the indices from df_recent to the original df
+    original_low_index = df_recent.index[fib_low_idx]
+    original_high_index = df_recent.index[fib_high_idx]
+    low_price = df.loc[original_low_index, 'close']
+    high_price = df.loc[original_high_index, 'close']
+
+    # Ensure prices are valid and high is greater than low
+    if pd.isna(low_price) or pd.isna(high_price) or high_price <= low_price:
+        logger.warning(f"⚠️ [Fibonacci] قيم نقاط التأرجح غير صالحة (Low: {low_price}, High: {high_price}). لا يمكن حساب فيبوناتشي.")
+        return None
+
+    fib_range = high_price - low_price
+    fib_levels = {}
+    for level in FIB_LEVELS_TO_CHECK:
+        # Retracement levels from an uptrend (from High down to Low)
+        fib_price = high_price - (fib_range * level)
+        fib_levels[level] = fib_price
+
+    logger.debug(f"✅ [Fibonacci] تم حساب مستويات فيبوناتشي من {low_price:.4f} إلى {high_price:.4f}: {fib_levels}")
+    return fib_levels
 
 
 def fetch_recent_volume(symbol: str) -> float:
@@ -1223,6 +1291,7 @@ class BottomFishingStrategy:
         # --- Scoring System (Weights) for Optional Conditions ---
         # Adjusted weights and conditions for bottom fishing
         # Increased weights for MACD momentum shift, ADX/DI cross, and OBV rising
+        # Added weight for Fibonacci
         # =====================================================================
         self.condition_weights = {
             'price_near_bb_lower': 2.5,   # Price touching or below lower Bollinger Band (Increased importance)
@@ -1231,6 +1300,7 @@ class BottomFishingStrategy:
             'adx_low_and_di_cross': 2.5,  # Low ADX and DI+ crossing above DI- (Increased importance)
             'price_crossing_ema10_up': 1.5, # Price crosses above faster EMA (Increased importance)
             'obv_rising': 2.5,            # OBV is rising (Increased importance)
+            'price_near_fib_level': 3.0,  # Price is near a key Fibonacci retracement level (Added)
 
             # Removed conditions that conflict with bottom fishing or breakout
             # 'ema_cross_bullish': 0,
@@ -1271,8 +1341,8 @@ class BottomFishingStrategy:
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
-        # Update minimum required rows based on the largest period of used indicators
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5 # Add a small buffer
+        # Update minimum required rows based on the largest period of used indicators, including Fibonacci lookback
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, FIB_LOOKBACK_BARS + SWING_ORDER * 2 + 2) + 5 # Add a small buffer
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -1314,18 +1384,20 @@ class BottomFishingStrategy:
             # Handle NaNs after indicator calculation
             initial_len = len(df_calc)
             # Use required_cols_indicators which contains all calculated columns
-            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
-            dropped_count = initial_len - len(df_cleaned)
+            # Keep all rows for Fibonacci calculation, drop NaNs later for signal generation
+            # df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy() # Moved NaN handling later
 
-            if dropped_count > 0:
-                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب قيم NaN في المؤشرات.")
-            if df_cleaned.empty:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة قيم NaN للمؤشرات.")
-                return None
+            # Dropped count calculation should be done before returning
+            # dropped_count = initial_len - len(df_cleaned)
+            # if dropped_count > 0:
+            #      logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صف بسبب قيم NaN في المؤشرات.")
+            # if df_cleaned.empty:
+            #     logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة قيم NaN للمؤشرات.")
+            #     return None
 
-            latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. آخر قيم - EMA10: {latest.get('ema_10', np.nan):.4f}, EMA20: {latest.get('ema_20', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, RSI: {latest.get('rsi', np.nan):.1f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
-            return df_cleaned
+            # Return the DataFrame with calculated indicators (may contain NaNs in early rows)
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. حجم البيانات: {len(df_calc)}")
+            return df_calc
 
         except KeyError as ke:
              logger.error(f"❌ [Strategy {self.symbol}] خطأ: العمود المطلوب غير موجود أثناء حساب المؤشر: {ke}", exc_info=True)
@@ -1343,15 +1415,22 @@ class BottomFishingStrategy:
         logger.debug(f"ℹ️ [Strategy {self.symbol}] توليد إشارة شراء (صيد القيعان)...")
 
         # Check DataFrame and columns
-        if df_processed is None or df_processed.empty or len(df_processed) < max(2, MACD_SLOW + 1, EMA_LONG_PERIOD + 1): # Need at least 2 for diff, enough for indicators and recent drop check
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا، لا يمكن توليد الإشارة.")
+        min_data_needed = max(2, MACD_SLOW + 1, EMA_LONG_PERIOD + 1, FIB_LOOKBACK_BARS + SWING_ORDER * 2 + 2) # Minimum data for indicators and Fib
+        if df_processed is None or df_processed.empty or len(df_processed) < min_data_needed:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا ({len(df_processed)} < {min_data_needed})، لا يمكن توليد الإشارة.")
             return None
-        # Add required columns for signal if not already present
-        required_cols_for_signal = list(set(self.required_cols_buy_signal))
-        missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
-        if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد الأعمدة المطلوبة للإشارة: {missing_cols}.")
-            return None
+
+        # Drop rows with NaN in essential columns for signal generation
+        df_cleaned = df_processed.dropna(subset=self.required_cols_buy_signal).copy()
+
+        if df_cleaned.empty or len(df_cleaned) < 2: # Need at least 2 rows after cleaning for diffs and previous values
+             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا بعد إزالة قيم NaN ({len(df_cleaned)} < 2)، لا يمكن توليد الإشارة.")
+             return None
+
+        # Extract latest and previous candle data from the cleaned DataFrame
+        last_row = df_cleaned.iloc[-1]
+        prev_row = df_cleaned.iloc[-2]
+
 
         # Check Bitcoin trend (still a mandatory filter)
         btc_trend = get_btc_trend_4h()
@@ -1364,21 +1443,6 @@ class BottomFishingStrategy:
              logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد اتجاه البيتكوين، سيتم تجاهل هذا الشرط.")
 
 
-        # Extract latest and previous candle data
-        last_row = df_processed.iloc[-1]
-        prev_row = df_processed.iloc[-2] if len(df_processed) >= 2 else pd.Series() # Handle case with only one row
-
-        # Check for NaN in essential columns required for the signal (only last row needs full check)
-        last_row_check = last_row[required_cols_for_signal]
-        if last_row_check.isnull().any():
-            nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
-            logger.warning(f"⚠️ [Strategy {self.symbol}] الصف الأخير يحتوي على قيم NaN في أعمدة الإشارة المطلوبة: {nan_cols}. لا يمكن توليد الإشارة.")
-            return None
-        # Check previous values needed for conditions
-        if len(df_processed) < 2:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية (أقل من شمعتين) للتحقق من الشروط التي تتطلب البيانات السابقة.")
-             # Some conditions below might fail due to missing prev_row, they will contribute 0 points.
-
         # =====================================================================
         # --- Check Mandatory Bottom-Fishing Conditions First ---
         # If any mandatory condition fails, the signal is rejected immediately
@@ -1389,8 +1453,7 @@ class BottomFishingStrategy:
 
         # Mandatory Condition 1: RSI Bouncing Up from Oversold
         # Check if RSI was oversold in the previous candle and is higher in the current candle
-        rsi_bouncing_up = (len(df_processed) >= 2 and
-                           pd.notna(prev_row.get('rsi')) and
+        rsi_bouncing_up = (pd.notna(prev_row.get('rsi')) and
                            pd.notna(last_row.get('rsi')) and
                            prev_row['rsi'] <= RSI_OVERSOLD and
                            last_row['rsi'] > prev_row['rsi'])
@@ -1410,7 +1473,7 @@ class BottomFishingStrategy:
         # Or, close is above the open of the pattern candle for stronger confirmation after a drop
         confirmation_price = last_row.get('high', last_row['close']) # Use high as confirmation target
         # If it's an engulfing pattern, confirmation could be closing above the previous candle's open
-        if last_row['Engulfing'] == 100 and len(df_processed) >= 2 and pd.notna(prev_row.get('open')):
+        if last_row['Engulfing'] == 100 and pd.notna(prev_row.get('open')):
              confirmation_price = prev_row['open'] # For engulfing, confirmation is closing above prev open
 
         price_confirmation = is_bullish_pattern and last_row['close'] > confirmation_price
@@ -1426,13 +1489,13 @@ class BottomFishingStrategy:
         # Mandatory Condition 3: Significant Recent Price Drop
         # Check if the current price is significantly lower than the price N bars ago
         lookback_bars_for_drop = EMA_LONG_PERIOD # Use EMA_LONG_PERIOD as lookback for recent drop
-        if len(df_processed) < lookback_bars_for_drop + 1:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية للشمعات السابقة ({len(df_processed)} < {lookback_bars_for_drop + 1}) للتحقق من انخفاض السعر.")
+        if len(df_cleaned) < lookback_bars_for_drop + 1:
+             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات غير كافية للشمعات السابقة ({len(df_cleaned)} < {lookback_bars_for_drop + 1}) للتحقق من انخفاض السعر.")
              essential_passed = False
              failed_essential_conditions.append('Significant Recent Price Drop (Insufficient Data)')
              signal_details['Recent_Drop_Mandatory'] = 'فشل: بيانات غير كافية للتحقق من انخفاض السعر الأخير'
         else:
-            price_n_bars_ago = df_processed['close'].iloc[-lookback_bars_for_drop - 1] # Price 'lookback_bars_for_drop' bars ago
+            price_n_bars_ago = df_cleaned['close'].iloc[-lookback_bars_for_drop - 1] # Price 'lookback_bars_for_drop' bars ago
             price_drop_threshold_pct = 0.03 # Require at least a 3% drop from N bars ago
             price_drop_threshold_price = price_n_bars_ago * (1 - price_drop_threshold_pct)
 
@@ -1459,7 +1522,7 @@ class BottomFishingStrategy:
         current_score = 0.0
 
         # Optional Condition 1: Price near or below lower Bollinger Band
-        if pd.notna(last_row.get('bb_lower')) and last_row['close'] <= last_row['bb_lower'] * 1.005: # Within 0.5% of lower band or below
+        if pd.notna(last_row.get('bb_lower')) and last_row['close'] <= last_row['bb_lower'] * (1 + FIB_PRICE_TOLERANCE_PCT): # Within tolerance of lower band or below
              current_score += self.condition_weights.get('price_near_bb_lower', 0)
              signal_details['BB_Lower_Score'] = f'السعر قريب أو تحت الحد السفلي لبولينجر (+{self.condition_weights.get("price_near_bb_lower", 0)})'
         else:
@@ -1467,7 +1530,7 @@ class BottomFishingStrategy:
 
 
         # Optional Condition 2: MACD bullish momentum shift (hist turning positive or bullish cross from below zero)
-        if len(df_processed) >= 2 and pd.notna(prev_row.get('macd_hist')) and pd.notna(last_row.get('macd_hist')) and pd.notna(prev_row.get('macd')) and pd.notna(last_row.get('macd_signal')):
+        if len(df_cleaned) >= 2 and pd.notna(prev_row.get('macd_hist')) and pd.notna(last_row.get('macd_hist')) and pd.notna(prev_row.get('macd')) and pd.notna(last_row.get('macd_signal')):
             macd_hist_turning_up = last_row['macd_hist'] > prev_row['macd_hist']
             # Bullish cross from below zero: MACD crosses Signal AND both are below zero OR MACD just crossed zero
             macd_cross_from_below_zero = (last_row['macd'] > last_row['macd_signal'] and
@@ -1487,7 +1550,7 @@ class BottomFishingStrategy:
 
 
         # Optional Condition 3: Price crosses above VWMA
-        if len(df_processed) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('vwma')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('vwma')):
+        if len(df_cleaned) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('vwma')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('vwma')):
             if last_row['close'] > last_row['vwma'] and prev_row['close'] <= prev_row['vwma']:
                  current_score += self.condition_weights.get('price_crossing_vwma_up', 0)
                  signal_details['VWMA_Cross_Score'] = f'السعر يتقاطع فوق VWMA (+{self.condition_weights.get("price_crossing_vwma_up", 0)})'
@@ -1498,7 +1561,7 @@ class BottomFishingStrategy:
 
 
         # Optional Condition 4: Low ADX and DI+ crossing above DI-
-        if len(df_processed) >= 2 and pd.notna(last_row.get('adx')) and pd.notna(last_row.get('di_plus')) and pd.notna(last_row.get('di_minus')) and pd.notna(prev_row.get('di_plus')) and pd.notna(prev_row.get('di_minus')):
+        if len(df_cleaned) >= 2 and pd.notna(last_row.get('adx')) and pd.notna(last_row.get('di_plus')) and pd.notna(last_row.get('di_minus')) and pd.notna(prev_row.get('di_plus')) and pd.notna(prev_row.get('di_minus')):
              if last_row['adx'] < 25 and last_row['di_plus'] > last_row['di_minus'] and prev_row['di_plus'] <= prev_row['di_minus']: # Slightly increased low ADX threshold
                  current_score += self.condition_weights.get('adx_low_and_di_cross', 0)
                  signal_details['ADX_DI_Score'] = f'ADX منخفض وتقاطع DI+ (+{self.condition_weights.get("adx_low_and_di_cross", 0)})'
@@ -1509,7 +1572,7 @@ class BottomFishingStrategy:
 
 
         # Optional Condition 5: Price crosses above EMA10
-        if len(df_processed) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('ema_10')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('ema_10')):
+        if len(df_cleaned) >= 2 and pd.notna(last_row.get('close')) and pd.notna(last_row.get('ema_10')) and pd.notna(prev_row.get('close')) and pd.notna(prev_row.get('ema_10')):
             if last_row['close'] > last_row['ema_10'] and prev_row['close'] <= prev_row['ema_10']:
                  current_score += self.condition_weights.get('price_crossing_ema10_up', 0)
                  signal_details['EMA10_Cross_Score'] = f'السعر يتقاطع فوق EMA10 (+{self.condition_weights.get("price_crossing_ema10_up", 0)})'
@@ -1519,7 +1582,7 @@ class BottomFishingStrategy:
              signal_details['EMA10_Cross_Score'] = f'بيانات EMA10 غير كافية أو NaN (0)'
 
         # Optional Condition 6: OBV is rising (check last 2 bars)
-        if len(df_processed) >= 2 and pd.notna(last_row.get('obv')) and pd.notna(prev_row.get('obv')):
+        if len(df_cleaned) >= 2 and pd.notna(last_row.get('obv')) and pd.notna(prev_row.get('obv')):
             if last_row['obv'] > prev_row['obv']:
                  current_score += self.condition_weights.get('obv_rising', 0)
                  signal_details['OBV_Score'] = f'OBV يرتفع (+{self.condition_weights.get("obv_rising", 0)})'
@@ -1527,6 +1590,33 @@ class BottomFishingStrategy:
                  signal_details['OBV_Score'] = f'OBV لا يرتفع (0)'
         else:
              signal_details['OBV_Score'] = f'بيانات OBV غير كافية أو NaN (0)'
+
+        # Optional Condition 7: Price is near a key Fibonacci retracement level
+        fib_levels = calculate_fibonacci_levels(df_processed, lookback_bars=FIB_LOOKBACK_BARS) # Use original df_processed for swing detection
+        fib_score_added = False
+        fib_level_hit = None
+
+        if fib_levels:
+            current_price = last_row['close']
+            for level, fib_price in fib_levels.items():
+                # Check if current price is within the tolerance band around the Fibonacci level
+                if abs(current_price - fib_price) <= fib_price * FIB_PRICE_TOLERANCE_PCT:
+                    # Focus on deeper retracement levels for bottom fishing bounce signals
+                    if level in [0.5, 0.618, 0.786]: # Check specifically for 50%, 61.8%, 78.6%
+                         current_score += self.condition_weights.get('price_near_fib_level', 0)
+                         fib_score_added = True
+                         fib_level_hit = level # Store the level that was hit
+                         break # Add score only once even if near multiple levels (unlikely)
+
+            if fib_score_added:
+                 signal_details['Fibonacci_Score'] = f'السعر قريب من مستوى فيبوناتشي {fib_level_hit*100:.1f}% (+{self.condition_weights.get("price_near_fib_level", 0)})'
+            else:
+                 signal_details['Fibonacci_Score'] = f'السعر ليس قريبا من مستويات فيبوناتشي الرئيسية (0)'
+            signal_details['Calculated_Fib_Levels'] = {f'{k*100:.1f}%': float(f'{v:.8g}') for k, v in fib_levels.items()} # Store calculated levels
+        else:
+            signal_details['Fibonacci_Score'] = f'لم يتم حساب مستويات فيبوناتشي (0)'
+            signal_details['Calculated_Fib_Levels'] = 'N/A'
+
 
         # ------------------------------------------
 
@@ -1622,14 +1712,14 @@ class BottomFishingStrategy:
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Bottom_Fishing_Filtered_V2', # اسم الاستراتيجية الجديد (الإصدار الثاني)
+            'strategy_name': 'Bottom_Fishing_Filtered_V3', # اسم الاستراتيجية الجديد (الإصدار الثالث مع فيبوناتشي)
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (صيد القيعان V2). السعر: {current_price:.6f}, النقاط (اختيارية): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, السيولة: {volume_recent:,.0f}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (صيد القيعان V3). السعر: {current_price:.6f}, النقاط (اختيارية): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, السيولة: {volume_recent:,.0f}")
         return signal_output
 
 
@@ -1701,6 +1791,17 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
+        # Format Fibonacci levels details for the message
+        fib_details_msg = "  - فيبوناتشي: "
+        fib_score_detail = signal_details.get('Fibonacci_Score', 'لم يتم حسابه')
+        fib_details_msg += fib_score_detail
+
+        calculated_fib_levels = signal_details.get('Calculated_Fib_Levels')
+        if isinstance(calculated_fib_levels, dict):
+            fib_levels_str = ", ".join([f"{level}: ${price:,.8g}" for level, price in calculated_fib_levels.items()])
+            fib_details_msg += f" (المستويات المحسوبة: {fib_levels_str})"
+
+
         # Build the message in Arabic with weighted score and condition details
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name})* 💡\n"
@@ -1729,6 +1830,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - ADX منخفض وتقاطع DI: {signal_details.get('ADX_DI_Score', 'N/A')}\n"
             f"  - تقاطع السعر فوق EMA10: {signal_details.get('EMA10_Cross_Score', 'N/A')}\n"
             f"  - OBV يرتفع: {signal_details.get('OBV_Score', 'N/A')}\n"
+            f"{fib_details_msg}\n" # Add Fibonacci details here
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -1886,7 +1988,7 @@ def track_signals() -> None:
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] لا توجد إشارات مفتوحة لتتبعها.")
-                time.sleep(10) # Wait less if no signals
+                time.sleep(3) # Wait less if no signals
                 continue
 
             logger.debug(f"ℹ️ [Tracker] تتبع {len(open_signals)} إشارة مفتوحة...")
@@ -2085,7 +2187,8 @@ def home() -> Response:
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
     tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
-    status = "running" if ws_alive and tracker_alive else "partially running"
+    flask_alive = flask_thread.is_alive() if 'flask_thread' in globals() and flask_thread else False # Check Flask thread
+    status = "running" if ws_alive and tracker_alive and (not WEBHOOK_URL or flask_alive) else "partially running" # Check Flask if webhook is configured
     return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
@@ -2205,10 +2308,15 @@ def handle_status_command(chat_id_msg: int) -> None:
         # Check if variables exist before accessing them
         ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
         tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
+        flask_status_text = 'غير مفعل ⚪'
+        if WEBHOOK_URL:
+             flask_status_text = 'نشط ✅' if 'flask_thread' in globals() and flask_thread and flask_thread.is_alive() else 'غير نشط ❌'
+
         final_status_msg = (
             f"🤖 *حالة البوت:*\n"
             f"- تتبع الأسعار (WS): {ws_status}\n"
             f"- تتبع الإشارات: {tracker_status}\n"
+            f"- خادم Webhook: {flask_status_text}\n" # Added Flask status
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
             f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
         )
@@ -2245,7 +2353,8 @@ def run_flask() -> None:
     except ImportError:
          logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (NOT recommended for production).")
          try:
-             app.run(host=host, port=port)
+             # Use debug=False for production-like environment even with dev server
+             app.run(host=host, port=port, debug=False)
          except Exception as flask_run_err:
               logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
     except Exception as serve_err:
@@ -2315,6 +2424,7 @@ def main_loop() -> None:
                             continue
 
                     # b. Fetch historical data (using SIGNAL_GENERATION_TIMEFRAME)
+                    # Fetch enough data for Fibonacci lookback and other indicators
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
                         logger.debug(f"ℹ️ [Main] لا تتوفر بيانات تاريخية كافية للزوج {symbol}.")
@@ -2328,6 +2438,8 @@ def main_loop() -> None:
                         logger.debug(f"ℹ️ [Main] فشل حساب المؤشرات للزوج {symbol}.")
                         continue
 
+                    # Pass the df with all indicators (potentially with NaNs in early rows)
+                    # The generate_buy_signal function will handle necessary NaN checks
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
                     # d. Insert signal and send alert
@@ -2453,3 +2565,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف تشغيل بوت إشارات التداول.")
         os._exit(0)
+
