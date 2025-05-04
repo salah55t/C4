@@ -1970,7 +1970,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.005)) # Ensure a very small profit or keep current stop
 
                                          if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
