@@ -284,7 +284,7 @@ def get_btc_trend_4h() -> str:
 
 # ---------------------- Database Connection Setup ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    """Initializes database connection and creates/updates tables if they don't exist."""
+    """ Initializes database connection and creates/updates tables if they don't exist. """
     global conn, cur
     logger.info("[DB] Starting database initialization...")
     for attempt in range(retries):
@@ -692,7 +692,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
+    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
     df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
     df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
@@ -1651,7 +1651,7 @@ def track_signals() -> None:
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
              if conn: conn.rollback()
-             time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
+             time.sleep(TRACKING_CYCLE_SLEVE_SECONDS * 2) # Wait longer after DB error
              check_db_connection() # Try to re-init
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
@@ -1778,7 +1778,12 @@ def main_loop() -> None:
                  with conn.cursor() as cur_check:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE hit_stop_loss = FALSE;") # Count non-closed signals
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
-            except psycopg2.Error as db_err: logger.error(f"❌ [Main] DB error checking open count: {db_err}. Skipping."); if conn: conn.rollback(); time.sleep(60); continue
+            except psycopg2.Error as db_err:
+                logger.error(f"❌ [Main] DB error checking open count: {db_err}. Skipping.")
+                if conn:
+                    conn.rollback()
+                time.sleep(60)
+                continue
 
             logger.info(f"ℹ️ [Main] Currently Open Signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES: logger.info(f"⚠️ [Main] Max open signals reached. Waiting..."); time.sleep(60); continue
