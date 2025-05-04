@@ -1651,7 +1651,7 @@ def track_signals() -> None:
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
              if conn: conn.rollback()
-             time.sleep(TRACKING_CYCLE_SLEVE_SECONDS * 2) # Wait longer after DB error
+             time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
              check_db_connection() # Try to re-init
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
@@ -1820,7 +1820,11 @@ def main_loop() -> None:
                                      time.sleep(2) # Small delay after sending alert
                                  else: logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
                              else: logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored."); break
-                 except psycopg2.Error as db_loop_err: logger.error(f"❌ [Main] DB error processing {symbol}: {db_loop_err}. Moving next..."); if conn: conn.rollback(); continue
+                 except psycopg2.Error as db_loop_err:
+                     logger.error(f"❌ [Main] DB error processing {symbol}: {db_loop_err}. Moving next...")
+                     if conn:
+                         conn.rollback()
+                     continue
                  except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_err}", exc_info=True); continue
                  time.sleep(0.3) # Small delay between symbols
 
