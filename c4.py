@@ -51,9 +51,9 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
-SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Timeframe for signal generation
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # Historical data lookback in days for signal generation (Increased again)
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates
+SIGNAL_TRACKING_TIMEFRAME: str = '10m' # Timeframe for signal tracking and stop loss updates
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 3   # Historical data lookback in days for signal tracking
 
 # =============================================================================
