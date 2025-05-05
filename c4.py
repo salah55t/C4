@@ -52,8 +52,8 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Historical data lookback in days for signal generation (Increased for more data)
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates (Reduced for faster updates)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # Historical data lookback in days for signal generation (Increased again)
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 3   # Historical data lookback in days for signal tracking
 
 # =============================================================================
@@ -1404,8 +1404,9 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
         # 3. MACD condition (Bullish Cross OR Positive histogram)
         # Enhanced: Check for a bullish cross in the last candle
-        macd_bullish_cross = (prev_row['macd'] <= prev_row['macd_signal'] and last_row['macd'] > last_row['macd_signal'])
-        macd_hist_positive = last_row['macd_hist'] > 0
+        macd_bullish_cross = (pd.notna(prev_row['macd']) and pd.notna(prev_row['macd_signal']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and
+                              prev_row['macd'] <= prev_row['macd_signal'] and last_row['macd'] > last_row['macd_signal'])
+        macd_hist_positive = pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0
 
         if not (macd_bullish_cross or macd_hist_positive):
              essential_passed = False
@@ -1421,7 +1422,8 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
         # 4. Strong ADX and DI+ above DI- condition
         # Enhanced: ADX must be above a specific threshold (ADX_TREND_THRESHOLD)
-        if not (last_row['adx'] > ADX_TREND_THRESHOLD and last_row['di_plus'] > last_row['di_minus']):
+        if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and
+                last_row['adx'] > ADX_TREND_THRESHOLD and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
              failed_essential_conditions.append('ADX/DI (Trending Bullish)')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}, Threshold:{ADX_TREND_THRESHOLD}'
@@ -1480,15 +1482,15 @@ class EnhancedTradingStrategy: # Renamed the strategy class
         current_score = 0.0
 
         # RSI in acceptable zone (not extreme overbought)
-        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
+        if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights.get('rsi_ok', 0)
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
-             signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
+             signal_details['RSI_Basic'] = f'Not OK ({last_row.get("rsi", np.nan):.1f}) (0)'
 
 
         # Bullish engulfing or hammer candle present
-        if last_row['BullishCandleSignal'] == 1:
+        if last_row.get('BullishCandleSignal') == 1:
             current_score += self.condition_weights.get('bullish_candle', 0)
             signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
         else:
@@ -1506,7 +1508,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
         # OBV is rising
         # Check OBV only if the previous value is valid
-        if pd.notna(prev_row['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > prev_row['obv']:
+        if pd.notna(prev_row.get('obv')) and pd.notna(last_row.get('obv')) and last_row['obv'] > prev_row['obv']:
             current_score += self.condition_weights.get('obv_rising', 0)
             signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
         else:
@@ -1514,19 +1516,19 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
+        if pd.notna(last_row.get('rsi')) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
              current_score += self.condition_weights.get('rsi_filter_breakout', 0)
              signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
+             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) Not in Bullish Range (0)'
 
 
         # MACD filter for breakout (optional): MACD histogram is positive
-        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
+        if pd.notna(last_row.get('macd_hist')) and last_row['macd_hist'] > 0:
              current_score += self.condition_weights.get('macd_filter_breakout', 0)
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else:
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
+             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive ({last_row.get("macd_hist", np.nan):.4f}) (0)'
 
         # ------------------------------------------
 
@@ -2275,7 +2277,7 @@ def main_loop() -> None:
                     strategy = EnhancedTradingStrategy(symbol) # Use the enhanced strategy
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
-                        logger.debug(f"ℹ️ [Main] {symbol}: Indicator calculation failed or insufficient data after cleanup.")
+                        # The warning "DataFrame is empty after removing indicator NaNs" is logged inside populate_indicators
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
@@ -2398,4 +2400,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0) # Use os._exit(0) for clean exit with threads
-
