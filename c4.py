@@ -53,10 +53,10 @@ TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 
 # --- Timeframe and Lookback (Modified for 4-hour) ---
-SIGNAL_GENERATION_TIMEFRAME: str = '4h' # Timeframe for signal generation (Changed to 4h)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 60 # Historical data lookback in days (Increased for 4h)
-SIGNAL_TRACKING_TIMEFRAME: str = '4h' # Timeframe for signal tracking and stop loss updates (Changed to 4h)
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 60   # Historical data lookback in days for tracking (Increased for 4h)
+SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation (Changed to 4h)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Historical data lookback in days (Increased for 4h)
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates (Changed to 4h)
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 10   # Historical data lookback in days for tracking (Increased for 4h)
 
 # =============================================================================
 # --- Indicator Parameters ---
