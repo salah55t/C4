@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union # لإضافة Type H
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # يمكنك تغيير هذا إلى logging.DEBUG لرؤية المزيد من التفاصيل
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # إضافة اسم المسجل
     handlers=[
         logging.FileHandler('crypto_bot_dynamic_tracking.log', encoding='utf-8'), # Changed log file name
@@ -685,17 +685,27 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
+
+    # Corrected line: Use df_calc['up_move'] instead of df_move['up_move']
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    df_calc['-dm'] = np.where((df_calc['down_move'] > df_move['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
+    df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
+
     alpha = 1 / period
     df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
+
+    # Ensure tr_smooth is not zero before division
     df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
     df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
+
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
+    # Ensure di_sum is not zero before division
     df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
+
     df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
+
+    # Select and return only the calculated indicator columns
     return df_calc[['adx', 'di_plus', 'di_minus']]
 
 def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
@@ -1106,105 +1116,36 @@ class ConservativeTradingStrategy:
         if missing_cols: logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns: {missing_cols}."); return None
 
         btc_trend = get_btc_trend_4h()
-        if "هبوط" in btc_trend:
-             logger.info(f"ℹ️ [Strategy {self.symbol}] Trading paused due to bearish Bitcoin trend ({btc_trend}). Signal rejected.")
-             return None
-        elif "N/A" in btc_trend:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Cannot determine Bitcoin trend, ignoring condition.")
+        if "هبوط" in btc_trend: logger.info(f"ℹ️ [Strategy {self.symbol}] Trading paused due to bearish Bitcoin trend ({btc_trend})."); return None
+        elif "N/A" in btc_trend: logger.warning(f"⚠️ [Strategy {self.symbol}] Cannot determine Bitcoin trend, ignoring condition.")
 
         last_row = df_processed.iloc[-1]
         prev_row = df_processed.iloc[-2]
         last_row_check = last_row[required_cols_with_breakout]
-        if last_row_check.isnull().any():
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Last row contains NaN in required signal columns: {last_row_check[last_row_check.isnull()].index.tolist()}. Signal rejected.")
-            return None
-        if pd.isna(prev_row['obv']):
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN. Cannot check OBV condition.")
-
+        if last_row_check.isnull().any(): logger.warning(f"⚠️ [Strategy {self.symbol}] Last row contains NaN in required signal columns: {last_row_check[last_row_check.isnull()].index.tolist()}."); return None
+        if pd.isna(prev_row['obv']): logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN.")
 
         # --- Check Mandatory Conditions ---
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Checking mandatory conditions...")
         essential_passed = True
         failed_essential_conditions = []
         signal_details = {}
+        if not (last_row['ema_13'] > last_row['ema_34']): essential_passed = False; failed_essential_conditions.append('EMA Cross'); signal_details['EMA_Cross'] = 'Failed'
+        else: signal_details['EMA_Cross'] = 'Passed'
+        if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1): essential_passed = False; failed_essential_conditions.append('SuperTrend'); signal_details['SuperTrend'] = 'Failed'
+        else: signal_details['SuperTrend'] = 'Passed'
+        if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']): essential_passed = False; failed_essential_conditions.append('MACD'); signal_details['MACD'] = 'Failed'
+        else: signal_details['MACD'] = 'Passed'
+        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']): essential_passed = False; failed_essential_conditions.append('ADX/DI'); signal_details['ADX/DI'] = 'Failed'
+        else: signal_details['ADX/DI'] = 'Passed'
+        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']): essential_passed = False; failed_essential_conditions.append('Breakout BB'); signal_details['Breakout_BB'] = 'Failed'
+        else: signal_details['Breakout_BB'] = 'Passed'
+        if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']): essential_passed = False; failed_essential_conditions.append('Above VWMA'); signal_details['VWMA_Mandatory'] = 'Failed'
+        else: signal_details['VWMA_Mandatory'] = 'Passed'
 
-        # EMA Cross Bullish
-        ema_cross_bullish = last_row['ema_13'] > last_row['ema_34']
-        if not ema_cross_bullish:
-            essential_passed = False
-            failed_essential_conditions.append('EMA Cross Bullish')
-            signal_details['Mandatory_EMA_Cross'] = f'Failed (EMA13={last_row["ema_13"]:.4f}, EMA34={last_row["ema_34"]:.4f})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory EMA Cross Bullish failed.")
-        else:
-            signal_details['Mandatory_EMA_Cross'] = f'Passed (EMA13={last_row["ema_13"]:.4f}, EMA34={last_row["ema_34"]:.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory EMA Cross Bullish passed.")
-
-        # SuperTrend Up
-        supertrend_up = pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1
-        if not supertrend_up:
-            essential_passed = False
-            failed_essential_conditions.append('SuperTrend Up')
-            signal_details['Mandatory_SuperTrend'] = f'Failed (Close={last_row["close"]:.4f}, ST={last_row.get("supertrend", "N/A"):.4f}, Trend={last_row.get("supertrend_trend", "N/A")})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory SuperTrend Up failed.")
-        else:
-            signal_details['Mandatory_SuperTrend'] = f'Passed (Close={last_row["close"]:.4f}, ST={last_row.get("supertrend", "N/A"):.4f}, Trend={last_row.get("supertrend_trend", "N/A")})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory SuperTrend Up passed.")
-
-        # MACD Positive or Cross
-        macd_condition = last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']
-        if not macd_condition:
-            essential_passed = False
-            failed_essential_conditions.append('MACD Positive/Cross')
-            signal_details['Mandatory_MACD'] = f'Failed (Hist={last_row["macd_hist"]:.4f}, MACD={last_row["macd"]:.4f}, Signal={last_row["macd_signal"]:.4f})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory MACD Positive/Cross failed.")
-        else:
-            signal_details['Mandatory_MACD'] = f'Passed (Hist={last_row["macd_hist"]:.4f}, MACD={last_row["macd"]:.4f}, Signal={last_row["macd_signal"]:.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory MACD Positive/Cross passed.")
-
-        # ADX Trending Bullish
-        adx_condition = last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']
-        if not adx_condition:
-            essential_passed = False
-            failed_essential_conditions.append('ADX Trending Bullish')
-            signal_details['Mandatory_ADX_DI'] = f'Failed (ADX={last_row.get("adx", "N/A"):.4f}, DI+={last_row.get("di_plus", "N/A"):.4f}, DI-={last_row.get("di_minus", "N/A"):.4f})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory ADX Trending Bullish failed.")
-        else:
-            signal_details['Mandatory_ADX_DI'] = f'Passed (ADX={last_row.get("adx", "N/A"):.4f}, DI+={last_row.get("di_plus", "N/A"):.4f}, DI-={last_row.get("di_minus", "N/A"):.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory ADX Trending Bullish passed.")
-
-        # Breakout BB Upper
-        bb_breakout_condition = pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']
-        if not bb_breakout_condition:
-            essential_passed = False
-            failed_essential_conditions.append('Breakout BB Upper')
-            signal_details['Mandatory_Breakout_BB'] = f'Failed (Close={last_row["close"]:.4f}, BB Upper={last_row.get("bb_upper", "N/A"):.4f})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory Breakout BB Upper failed.")
-        else:
-            signal_details['Mandatory_Breakout_BB'] = f'Passed (Close={last_row["close"]:.4f}, BB Upper={last_row.get("bb_upper", "N/A"):.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory Breakout BB Upper passed.")
-
-        # Above VWMA
-        above_vwma_condition = pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']
-        if not above_vwma_condition:
-            essential_passed = False
-            failed_essential_conditions.append('Above VWMA')
-            signal_details['Mandatory_VWMA'] = f'Failed (Close={last_row["close"]:.4f}, VWMA={last_row.get("vwma", "N/A"):.4f})'
-            logger.debug(f"❌ [Strategy {self.symbol}] Mandatory Above VWMA failed.")
-        else:
-            signal_details['Mandatory_VWMA'] = f'Passed (Close={last_row["close"]:.4f}, VWMA={last_row.get("vwma", "N/A"):.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Mandatory Above VWMA passed.")
-
-
-        if not essential_passed:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Mandatory conditions failed: {', '.join(failed_essential_conditions)}. Signal rejected.")
-            return None
-
-        logger.debug(f"✅ [Strategy {self.symbol}] All mandatory conditions passed.")
+        if not essential_passed: logger.debug(f"ℹ️ [Strategy {self.symbol}] Mandatory conditions failed: {', '.join(failed_essential_conditions)}. Signal rejected."); return None
 
         # --- Calculate Score for Optional Conditions ---
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Checking optional conditions and calculating score...")
         current_score = 0.0
-
         # Fibonacci Check
         fib_level_found = None
         try:
@@ -1213,157 +1154,60 @@ class ConservativeTradingStrategy:
             if last_swing_low and last_swing_high and last_swing_low[0] < last_swing_high[0]:
                  fib_levels = calculate_fibonacci_retracements(last_swing_low[1], last_swing_high[1])
                  current_price_fib = last_row['close']
-                 near_fib = False
                  for level_pct, level_price in fib_levels.items():
                      if level_price * (1 - FIB_TOLERANCE) <= current_price_fib <= level_price * (1 + FIB_TOLERANCE):
                          fib_level_found = level_pct
                          current_score += self.condition_weights.get('near_fib_level', 0)
-                         signal_details['Optional_Fibonacci'] = f'Near {fib_level_found*100:.1f}% ({level_price:.4f}) (+{self.condition_weights.get("near_fib_level", 0)})'
-                         logger.debug(f"✅ [Strategy {self.symbol}] Optional Fibonacci: Price {current_price_fib:.4f} near Fib {fib_level_found*100:.1f}% level ({level_price:.4f}). Score added: {self.condition_weights.get('near_fib_level', 0)}")
-                         near_fib = True
+                         signal_details['Fibonacci'] = f'Near {fib_level_found*100:.1f}% ({level_price:.4f}) (+{self.condition_weights.get("near_fib_level", 0)})'
+                         logger.debug(f"ℹ️ [Strategy {self.symbol}] Price {current_price_fib:.4f} near Fib {fib_level_found*100:.1f}% level ({level_price:.4f}).")
                          break
-                 if not near_fib:
-                     signal_details['Optional_Fibonacci'] = 'Not Near Key Levels (0)'
-                     logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional Fibonacci: Price {current_price_fib:.4f} not near key levels.")
-            else:
-                signal_details['Optional_Fibonacci'] = 'No Valid Swing Found (0)'
-                logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional Fibonacci: No valid swing found for calculation.")
-        except Exception as fib_err:
-            logger.error(f"❌ [Strategy {self.symbol}] Error during Fibonacci calc: {fib_err}", exc_info=True)
-            signal_details['Optional_Fibonacci'] = 'Error (0)'
-            logger.error(f"❌ [Strategy {self.symbol}] Optional Fibonacci: Error during calculation.")
+                 if not fib_level_found: signal_details['Fibonacci'] = 'Not Near Key Levels (0)'
+            else: signal_details['Fibonacci'] = 'No Valid Swing Found (0)'
+        except Exception as fib_err: logger.error(f"❌ [Strategy {self.symbol}] Error during Fibonacci calc: {fib_err}", exc_info=True); signal_details['Fibonacci'] = 'Error (0)'
 
+        # Other Optional Conditions
+        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD: current_score += self.condition_weights.get('rsi_ok', 0); signal_details['RSI_Basic'] = f'OK (+{self.condition_weights.get("rsi_ok", 0)})'
+        else: signal_details['RSI_Basic'] = 'Not OK (0)'
+        if last_row['BullishCandleSignal'] == 1: current_score += self.condition_weights.get('bullish_candle', 0); signal_details['Candle'] = f'Bullish (+{self.condition_weights.get("bullish_candle", 0)})'
+        else: signal_details['Candle'] = 'Neutral (0)'
+        if last_row['close'] < last_row['bb_upper'] * 0.995: current_score += self.condition_weights.get('not_bb_extreme', 0); signal_details['Bollinger_Basic'] = f'Not Extreme (+{self.condition_weights.get("not_bb_extreme", 0)})'
+        else: signal_details['Bollinger_Basic'] = 'Extreme (0)'
+        if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']: current_score += self.condition_weights.get('obv_rising', 0); signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
+        else: signal_details['OBV'] = 'Not Rising (0)'
+        if pd.notna(last_row['rsi']) and 55 <= last_row['rsi'] <= 75: current_score += self.condition_weights.get('rsi_filter_breakout', 0); signal_details['RSI_Filter_Breakout'] = f'OK (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
+        else: signal_details['RSI_Filter_Breakout'] = 'Not OK (0)'
+        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0: current_score += self.condition_weights.get('macd_filter_breakout', 0); signal_details['MACD_Filter_Breakout'] = f'Positive (+{self.condition_weights.get("macd_filter_breakout", 0)})'
+        else: signal_details['MACD_Filter_Breakout'] = 'Negative (0)'
 
-        # RSI OK
-        rsi_ok = last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD
-        if rsi_ok:
-            current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['Optional_RSI_Basic'] = f'OK ({last_row["rsi"]:.2f}) (+{self.condition_weights.get("rsi_ok", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional RSI Basic passed ({last_row['rsi']:.2f}). Score added: {self.condition_weights.get('rsi_ok', 0)}")
-        else:
-            signal_details['Optional_RSI_Basic'] = f'Not OK ({last_row["rsi"]:.2f}) (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional RSI Basic failed ({last_row['rsi']:.2f}).")
+        # Final Decision
+        if current_score < self.min_signal_score: logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional score not met (Score: {current_score:.2f}/{self.total_possible_score:.2f}). Signal rejected."); return None
 
-        # Bullish Candle
-        bullish_candle = last_row['BullishCandleSignal'] == 1
-        if bullish_candle:
-            current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Optional_Candle'] = f'Bullish (+{self.condition_weights.get("bullish_candle", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional Bullish Candle passed. Score added: {self.condition_weights.get('bullish_candle', 0)}")
-        else:
-            signal_details['Optional_Candle'] = 'Neutral (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional Bullish Candle failed.")
-
-        # Not BB Extreme
-        not_bb_extreme = pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995
-        if not_bb_extreme:
-            current_score += self.condition_weights.get('not_bb_extreme', 0)
-            signal_details['Optional_Bollinger_Basic'] = f'Not Extreme (+{self.condition_weights.get("not_bb_extreme", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional Bollinger Basic passed. Score added: {self.condition_weights.get('not_bb_extreme', 0)}")
-        else:
-            signal_details['Optional_Bollinger_Basic'] = 'Extreme (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional Bollinger Basic failed (Price near BB Upper).")
-
-        # OBV Rising
-        obv_rising = pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']
-        if obv_rising:
-            current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['Optional_OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional OBV Rising passed. Score added: {self.condition_weights.get('obv_rising', 0)}")
-        else:
-            signal_details['Optional_OBV'] = 'Not Rising (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional OBV Rising failed.")
-
-        # RSI Filter Breakout
-        rsi_filter_breakout = pd.notna(last_row['rsi']) and 55 <= last_row['rsi'] <= 75
-        if rsi_filter_breakout:
-            current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-            signal_details['Optional_RSI_Filter_Breakout'] = f'OK ({last_row["rsi"]:.2f}) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional RSI Filter Breakout passed ({last_row['rsi']:.2f}). Score added: {self.condition_weights.get('rsi_filter_breakout', 0)}")
-        else:
-            signal_details['Optional_RSI_Filter_Breakout'] = f'Not OK ({last_row["rsi"]:.2f}) (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional RSI Filter Breakout failed ({last_row['rsi']:.2f}).")
-
-        # MACD Filter Breakout
-        macd_filter_breakout = pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0
-        if macd_filter_breakout:
-            current_score += self.condition_weights.get('macd_filter_breakout', 0)
-            signal_details['Optional_MACD_Filter_Breakout'] = f'Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Optional MACD Filter Breakout passed ({last_row['macd_hist']:.4f}). Score added: {self.condition_weights.get('macd_filter_breakout', 0)}")
-        else:
-            signal_details['Optional_MACD_Filter_Breakout'] = f'Negative ({last_row["macd_hist"]:.4f}) (0)'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional MACD Filter Breakout failed ({last_row['macd_hist']:.4f}).")
-
-
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Total optional score: {current_score:.2f}/{self.total_possible_score:.2f}. Minimum required score: {self.min_signal_score:.2f}")
-
-        # Final Decision based on Score
-        if current_score < self.min_signal_score:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Optional score not met (Score: {current_score:.2f}/{self.total_possible_score:.2f}). Signal rejected.")
-            signal_details['Final_Score_Check'] = f'Failed (Score {current_score:.2f} < Min {self.min_signal_score:.2f})'
-            return None
-        else:
-             signal_details['Final_Score_Check'] = f'Passed (Score {current_score:.2f} >= Min {self.min_signal_score:.2f})'
-             logger.debug(f"✅ [Strategy {self.symbol}] Optional score met.")
-
-
-        # Liquidity Check
         volume_recent = fetch_recent_volume(self.symbol)
-        if volume_recent < MIN_VOLUME_15M_USDT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) below threshold ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected.")
-            signal_details['Liquidity_Check'] = f'Failed ({volume_recent:,.0f} < {MIN_VOLUME_15M_USDT:,.0f})'
-            return None
-        else:
-            signal_details['Liquidity_Check'] = f'Passed ({volume_recent:,.0f} >= {MIN_VOLUME_15M_USDT:,.0f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] Liquidity check passed ({volume_recent:,.0f} USDT).")
-
+        if volume_recent < MIN_VOLUME_15M_USDT: logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f}) below threshold. Signal rejected."); return None
 
         current_price = last_row['close']
         current_atr = last_row.get('atr')
-        if pd.isna(current_atr) or current_atr <= 0:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR ({current_atr}) for SL/TP calc. Signal rejected.")
-            signal_details['ATR_Check'] = f'Failed (Invalid ATR: {current_atr})'
-            return None
-        else:
-            signal_details['ATR_Check'] = f'Passed (ATR: {current_atr:.4f})'
-            logger.debug(f"✅ [Strategy {self.symbol}] ATR check passed.")
-
+        if pd.isna(current_atr) or current_atr <= 0: logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR ({current_atr}) for SL/TP calc."); return None
 
         initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
         initial_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
         tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr) # Calculate TP1 for break-even
 
         # --- SL/TP Validation ---
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Validating calculated SL/TP...")
-        sl_validation_status = "Passed"
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
-            min_sl_price_pct = current_price * (1 - 0.015) # Ensure at least 1.5% loss
-            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # Prevent SL too close to 0
+            min_sl_price_pct = current_price * (1 - 0.015)
+            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001)
             logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL invalid. Adjusted to {initial_stop_loss:.8f}")
-            signal_details['Warning_SL'] = f'Initial SL invalid/too high. Adjusted to {initial_stop_loss:.8f}'
-            sl_validation_status = "Adjusted (Invalid/Too High)"
+            signal_details['Warning_SL'] = f'Initial SL adjusted to {initial_stop_loss:.8f}'
         else: # Check max loss
-            max_sl_price = current_price * (1 - 0.10) # Max 10% loss
+            max_sl_price = current_price * (1 - 0.10)
             if initial_stop_loss < max_sl_price:
                  logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL too wide. Adjusted to {max_sl_price:.8f}")
                  initial_stop_loss = max_sl_price
-                 signal_details['Warning_SL'] = f'Initial SL too wide. Adjusted to {max_sl_price:.8f}'
-                 sl_validation_status = "Adjusted (Too Wide)"
-
-        signal_details['SL_Validation'] = sl_validation_status
-        logger.debug(f"✅ [Strategy {self.symbol}] SL Validation status: {sl_validation_status}. Final SL: {initial_stop_loss:.8f}")
-
+                 signal_details['Warning_SL'] = f'Initial SL adjusted (wide) to {initial_stop_loss:.8f}'
 
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculated Profit Margin: {profit_margin_pct:.2f}%. Minimum required: {MIN_PROFIT_MARGIN_PCT:.2f}%")
-        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) below minimum ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
-            signal_details['Profit_Margin_Check'] = f'Failed ({profit_margin_pct:.2f}% < {MIN_PROFIT_MARGIN_PCT:.2f}%)'
-            return None
-        else:
-             signal_details['Profit_Margin_Check'] = f'Passed ({profit_margin_pct:.2f}% >= {MIN_PROFIT_MARGIN_PCT:.2f}%)'
-             logger.debug(f"✅ [Strategy {self.symbol}] Profit margin check passed.")
-
+        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT: logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) below minimum. Signal rejected."); return None
 
         # --- Compile Signal ---
         signal_output = {
@@ -1434,53 +1278,6 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
 
-        # Prepare mandatory and optional details for message
-        mandatory_details_msg = "✅ شروط إلزامية محققة:\n"
-        optional_details_msg = "➕ شروط اختيارية محققة:\n"
-        failed_mandatory_msg = "❌ شروط إلزامية فاشلة:\n"
-        failed_optional_msg = "❌ شروط اختيارية فاشلة:\n"
-
-        mandatory_passed_list = []
-        mandatory_failed_list = []
-        optional_passed_list = []
-        optional_failed_list = []
-
-        # Categorize details based on keys and pass/fail status
-        for key, value in signal_details.items():
-            if key.startswith('Mandatory_'):
-                condition_name = key.replace('Mandatory_', '').replace('_', ' ')
-                if 'Passed' in value:
-                    mandatory_passed_list.append(f"- {condition_name}: {value}")
-                else:
-                    mandatory_failed_list.append(f"- {condition_name}: {value}")
-            elif key.startswith('Optional_'):
-                 condition_name = key.replace('Optional_', '').replace('_', ' ')
-                 if '(0)' not in value:
-                    optional_passed_list.append(f"- {condition_name}: {value}")
-                 else:
-                    optional_failed_list.append(f"- {condition_name}: {value}")
-            # Add other checks like Final_Score_Check, Liquidity_Check, ATR_Check, Profit_Margin_Check
-            elif key in ['Final_Score_Check', 'Liquidity_Check', 'ATR_Check', 'Profit_Margin_Check', 'SL_Validation']:
-                 if 'Passed' in value:
-                    optional_passed_list.append(f"- {key.replace('_', ' ')}: {value}")
-                 else:
-                    optional_failed_list.append(f"- {key.replace('_', ' ')}: {value}")
-            elif key == 'Warning_SL':
-                 optional_failed_list.append(f"- {key.replace('_', ' ')}: {value}") # Treat warnings as something to note
-
-        if mandatory_passed_list: mandatory_details_msg += "\n".join(mandatory_passed_list)
-        else: mandatory_details_msg = "✅ لا توجد شروط إلزامية محددة في التفاصيل." # Should not happen if logic is correct
-
-        if mandatory_failed_list: failed_mandatory_msg += "\n".join(mandatory_failed_list)
-        else: failed_mandatory_msg = "✅ لا توجد شروط إلزامية فاشلة في التفاصيل."
-
-        if optional_passed_list: optional_details_msg += "\n".join(optional_passed_list)
-        else: optional_details_msg = "➕ لا توجد شروط اختيارية محققة."
-
-        if optional_failed_list: failed_optional_msg += "\n".join(optional_failed_list)
-        else: failed_optional_msg = "❌ لا توجد شروط اختيارية فاشلة في التفاصيل."
-
-
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
             f"——————————————\n"
@@ -1495,11 +1292,13 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"🛡️ **الهدف الأول (للتعادل):** `${tp1_price:,.8g}`\n" # Show TP1
             f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
-            f"*تفاصيل الشروط:*\n"
-            f"{mandatory_details_msg}\n"
-            # f"{failed_mandatory_msg}\n" # Optionally show failed mandatory in alert if needed
-            f"{optional_details_msg}\n"
-            f"{failed_optional_msg}\n" # Show failed optional in alert
+            f"✅ *الشروط الإلزامية:* {' '.join(k for k, v in signal_details.items() if v == 'Passed' and k not in ['Fibonacci', 'RSI_Basic', 'Candle', 'Bollinger_Basic', 'OBV', 'RSI_Filter_Breakout', 'MACD_Filter_Breakout'])}\n" # Show mandatory passes
+            f"➕ *الشروط الاختيارية المحققة:*\n"
+            f"  - فيبوناتشي: {signal_details.get('Fibonacci', 'N/A')}\n"
+            f"  - RSI: {signal_details.get('RSI_Basic', 'N/A')}\n"
+            f"  - شمعة: {signal_details.get('Candle', 'N/A')}\n"
+            f"  - OBV: {signal_details.get('OBV', 'N/A')}\n"
+            # Add other optional checks if needed
             f"——————————————\n"
             f"😨/🤑 **الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4H):** {btc_trend}\n"
@@ -1861,13 +1660,22 @@ def track_signals() -> None:
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
-             if conn: conn.rollback()
-             time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
-             check_db_connection() # Try to re-init
+             if conn: conn.rollback(); time.sleep(60)
+             try: init_db()
+             except Exception as recon_err: logger.critical(f"❌ [Tracker] Failed to reconnect DB: {recon_err}. Exiting..."); break
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
-            time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after unexpected error
+            logger.info("ℹ️ [Tracker] Waiting 120s before retrying...")
+            time.sleep(120)
 
+def cleanup_resources() -> None:
+    """Closes used resources."""
+    global conn
+    logger.info("ℹ️ [Cleanup] Closing resources...")
+    if conn:
+        try: conn.close(); logger.info("✅ [DB] Database connection closed.")
+        except Exception as close_err: logger.error(f"⚠️ [DB] Error closing DB connection: {close_err}")
+    logger.info("✅ [Cleanup] Resource cleanup complete.")
 
 # ---------------------- Flask Service (Optional for Webhook) ----------------------
 # (No changes needed here)
@@ -2008,20 +1816,14 @@ def main_loop() -> None:
                  try:
                     with conn.cursor() as symbol_cur: # Check if already open
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
-                        if symbol_cur.fetchone():
-                            logger.debug(f"ℹ️ [Main] {symbol} already has an open signal. Skipping.")
-                            continue
+                        if symbol_cur.fetchone(): continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty:
-                        logger.debug(f"ℹ️ [Main] No sufficient historical data for {symbol}. Skipping.")
-                        continue
+                    if df_hist is None or df_hist.empty: continue
 
                     strategy = ConservativeTradingStrategy(symbol)
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None:
-                        logger.debug(f"ℹ️ [Main] Failed to populate indicators for {symbol}. Skipping.")
-                        continue
+                    if df_indicators is None: continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
@@ -2034,12 +1836,9 @@ def main_loop() -> None:
                                  if insert_signal_into_db(potential_signal):
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1; slots_available -= 1
-                                     logger.info(f"✅ [Main] Signal for {symbol} successfully generated and inserted.")
                                      time.sleep(2) # Small delay after sending alert
                                  else: logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
-                             else:
-                                 logger.warning(f"⚠️ [Main] Max limit reached ({MAX_OPEN_TRADES}) before inserting {symbol}. Ignored.")
-                                 break # Stop scanning if limit reached during the loop
+                             else: logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored."); break
                  except psycopg2.Error as db_loop_err:
                      logger.error(f"❌ [Main] DB error processing {symbol}: {db_loop_err}. Moving next...")
                      if conn:
@@ -2114,3 +1913,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0) # Force exit if threads are stuck
+
