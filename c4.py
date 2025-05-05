@@ -51,9 +51,9 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
-SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Timeframe for signal generation
+SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # Historical data lookback in days for signal generation (Increased again)
-SIGNAL_TRACKING_TIMEFRAME: str = '10m' # Timeframe for signal tracking and stop loss updates
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 3   # Historical data lookback in days for signal tracking
 
 # =============================================================================
@@ -199,6 +199,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return df
 
     except BinanceAPIException as api_err:
+         # This catches the "Invalid interval" error specifically
          logger.error(f"❌ [Data] Binance API error fetching data for {symbol}: {api_err}")
          return None
     except BinanceRequestException as req_err:
@@ -1314,6 +1315,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
             if dropped_count > 0:
                  logger.debug(f"ℹ️ [Strategy {self.symbol}] Dropped {dropped_count} rows due to NaN in indicators.")
             if df_cleaned.empty:
+                # This is the warning you are seeing
                 logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty after removing indicator NaNs.")
                 return None
 
@@ -1338,6 +1340,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
         # Check DataFrame and columns
         if df_processed is None or df_processed.empty or len(df_processed) < 2:
+            # This check handles the case where populate_indicators returned None or an empty DataFrame
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<2), cannot generate signal.")
             return None
         # Add required columns for signal if not already present
@@ -1369,9 +1372,10 @@ class EnhancedTradingStrategy: # Renamed the strategy class
             return None
         # Check previous values needed for comparisons
         prev_row_check_cols = ['close', 'open', 'macd', 'macd_signal', 'obv'] # Add other cols if needed for prev comparison
-        if prev_row[prev_row_check_cols].isnull().any():
-             nan_cols_prev = prev_row[prev_row_check_cols].isnull().index.tolist()
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Previous row contains NaN in required columns for comparison: {nan_cols_prev}. Some conditions might be affected.")
+        # Added check for pd.notna inside the MACD bullish cross condition itself
+        # if prev_row[prev_row_check_cols].isnull().any():
+        #      nan_cols_prev = prev_row[prev_row_check_cols].isnull().index.tolist()
+        #      logger.warning(f"⚠️ [Strategy {self.symbol}] Previous row contains NaN in required columns for comparison: {nan_cols_prev}. Some conditions might be affected.")
              # Can choose to return None here if previous data is critical
 
 
@@ -1385,7 +1389,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
         # 1. Positive EMA Cross condition (EMA13 > EMA34)
-        if not (last_row['ema_13'] > last_row['ema_34']):
+        if not (pd.notna(last_row['ema_13']) and pd.notna(last_row['ema_34']) and last_row['ema_13'] > last_row['ema_34']):
             essential_passed = False
             failed_essential_conditions.append('EMA Cross (Bullish)')
             signal_details['EMA_Cross'] = f'Failed: EMA(13) <= EMA(34)'
@@ -1403,10 +1407,11 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
 
         # 3. MACD condition (Bullish Cross OR Positive histogram)
-        # Enhanced: Check for a bullish cross in the last candle
-        macd_bullish_cross = (pd.notna(prev_row['macd']) and pd.notna(prev_row['macd_signal']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and
+        # Enhanced: Check for a bullish cross in the last candle, ensure previous values are not NaN
+        macd_bullish_cross = (pd.notna(prev_row.get('macd')) and pd.notna(prev_row.get('macd_signal')) and
+                              pd.notna(last_row.get('macd')) and pd.notna(last_row.get('macd_signal')) and
                               prev_row['macd'] <= prev_row['macd_signal'] and last_row['macd'] > last_row['macd_signal'])
-        macd_hist_positive = pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0
+        macd_hist_positive = pd.notna(last_row.get('macd_hist')) and last_row['macd_hist'] > 0
 
         if not (macd_bullish_cross or macd_hist_positive):
              essential_passed = False
@@ -1421,8 +1426,8 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
 
         # 4. Strong ADX and DI+ above DI- condition
-        # Enhanced: ADX must be above a specific threshold (ADX_TREND_THRESHOLD)
-        if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and
+        # Enhanced: ADX must be above a specific threshold (ADX_TREND_THRESHOLD), ensure values are not NaN
+        if not (pd.notna(last_row.get('adx')) and pd.notna(last_row.get('di_plus')) and pd.notna(last_row.get('di_minus')) and
                 last_row['adx'] > ADX_TREND_THRESHOLD and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
              failed_essential_conditions.append('ADX/DI (Trending Bullish)')
@@ -1432,7 +1437,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
              signal_details['ADX/DI'] = f'Passed: Trending Bullish (ADX:{last_row["adx"]:.1f} > {ADX_TREND_THRESHOLD}, DI+>DI-)'
 
         # 5. Breakout condition: Price closes above the upper Bollinger Band
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']):
+        if not (pd.notna(last_row.get('bb_upper')) and last_row['close'] > last_row['bb_upper']):
              essential_passed = False
              failed_essential_conditions.append('Breakout (Closed Above BB Upper)')
              detail_bb = f'Close:{last_row.get("close", np.nan):.4f}, BB Upper:{last_row.get("bb_upper", np.nan):.4f}'
@@ -1441,7 +1446,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
              signal_details['Breakout_BB'] = f'Passed: Closed Above BB Upper'
 
         # 6. VWMA condition: Price closes above the VWMA
-        if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']):
+        if not (pd.notna(last_row.get('vwma')) and last_row['close'] > last_row['vwma']):
              essential_passed = False
              failed_essential_conditions.append('Above VWMA')
              detail_vwma = f'Close:{last_row.get("close", np.nan):.4f}, VWMA:{last_row.get("vwma", np.nan):.4f}'
@@ -1450,8 +1455,8 @@ class EnhancedTradingStrategy: # Renamed the strategy class
              signal_details['VWMA_Mandatory'] = f'Passed: Closed Above VWMA'
 
         # 7. Volume confirmation for Breakout
-        # Check if current volume is significantly higher than average volume
-        if pd.notna(last_row['volume']) and pd.notna(last_row['volume_ma']):
+        # Check if current volume is significantly higher than average volume, ensure values are not NaN
+        if pd.notna(last_row.get('volume')) and pd.notna(last_row.get('volume_ma')):
              is_volume_confirmed = last_row['volume'] > (last_row['volume_ma'] * VOLUME_BREAKOUT_MULTIPLIER)
              if not is_volume_confirmed:
                  essential_passed = False
@@ -1482,7 +1487,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
         current_score = 0.0
 
         # RSI in acceptable zone (not extreme overbought)
-        if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
+        if pd.notna(last_row.get('rsi')) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights.get('rsi_ok', 0)
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
@@ -1499,7 +1504,7 @@ class EnhancedTradingStrategy: # Renamed the strategy class
 
         # Price not at upper Bollinger Band (this condition might conflict with breakout, hence lower weight)
         # Check if price is not *too* far above the upper band (e.g., within 1% above)
-        if pd.notna(last_row['bb_upper']) and last_row['bb_upper'] > 0 and last_row['close'] < last_row['bb_upper'] * 1.01: # Within 1% above BB Upper
+        if pd.notna(last_row.get('bb_upper')) and last_row.get('bb_upper', 0) > 0 and last_row['close'] < last_row['bb_upper'] * 1.01: # Within 1% above BB Upper
              current_score += self.condition_weights.get('not_bb_extreme', 0)
              signal_details['Bollinger_Basic'] = f'Not excessively above Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
@@ -1919,14 +1924,17 @@ def track_signals() -> None:
                         # Fetch ATR value for tracking timeframe if not cached
                         current_atr_val = atr_data_cache.get(symbol)
                         if current_atr_val is None:
+                            # Use the interval for tracking here
                             df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                             if df_atr is not None and not df_atr.empty:
                                 df_atr = calculate_atr_indicator(df_atr, period=ENTRY_ATR_PERIOD) # Use ENTRY_ATR_PERIOD for consistency
                                 if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     atr_data_cache[symbol] = current_atr_val # Cache the value
-                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for trailing stop.")
-                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for trailing stop.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for trailing stop (ATR calculation failed).")
+                            else:
+                                # This warning is triggered by the "Invalid interval" error or other fetch issues
+                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for trailing stop.")
 
                         # Proceed only if a valid ATR value is available
                         if current_atr_val is not None and current_atr_val > 0:
@@ -2270,7 +2278,7 @@ def main_loop() -> None:
                     # b. Fetch historical data for signal generation timeframe
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
-                        logger.debug(f"ℹ️ [Main] {symbol}: No sufficient historical data for signal generation.")
+                        # fetch_historical_data already logs errors/warnings, just continue
                         continue
 
                     # c. Apply the strategy and generate signal
