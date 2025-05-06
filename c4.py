@@ -51,12 +51,10 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
-
-# --- Timeframe and Lookback (Modified for 4-hour) ---
-SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation (Changed to 4h)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Historical data lookback in days (Increased for 4h)
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates (Changed to 4h)
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 10   # Historical data lookback in days for tracking (Increased for 4h)
+SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # Historical data lookback in days for signal generation
+SIGNAL_TRACKING_TIMEFRAME: str = '30m' # Timeframe for signal tracking and stop loss updates
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for signal tracking
 
 # =============================================================================
 # --- Indicator Parameters ---
@@ -65,14 +63,16 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 10   # Historical data lookback in days for
 RSI_PERIOD: int = 14          # RSI Period (Original: 14)
 RSI_OVERSOLD: int = 30        # Oversold threshold (Original: 30) - Slightly increased
 RSI_OVERBOUGHT: int = 70      # Overbought threshold (Original: 70) - Slightly decreased
+# EMA_PERIOD: int = 26          # EMA Period for trend (Commented out)
 EMA_SHORT_PERIOD: int = 13      # Short EMA period (New)
 EMA_LONG_PERIOD: int = 34       # Long EMA period (New)
 VWMA_PERIOD: int = 20           # VWMA Period (New)
 SWING_ORDER: int = 5          # Order for swing point detection
+# ... (Rest of the constants remain the same) ...
 FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
-ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial target/stop
+ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and trailing stop calculation
 ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
@@ -83,17 +83,13 @@ ADX_PERIOD: int = 14            # ADX Period
 SUPERTREND_PERIOD: int = 10     # SuperTrend Period
 SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
 
-# Trailing Stop Loss
+# Trailing Stop Loss Parameters (Modified for dynamic movement)
 TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # Profit percentage to activate trailing stop (1.5%)
-TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # ATR Multiplier for trailing stop (Original: 2.5) - Reduced multiplier for tighter stop
-TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to move trailing stop (0.1%)
-
-# --- Dynamic Target Parameters (New) ---
-# Multiplier for ATR to calculate the dynamic target level relative to the current price
-DYNAMIC_TARGET_TRAIL_ATR_MULTIPLIER: float = 1.5 # Example: Target trails 1.5 * ATR above current price
-# Minimum percentage price increase from the last target update price to trigger a new target update
-DYNAMIC_TARGET_MOVE_INCREMENT_PCT: float = 0.005 # Example: Update target if price moves up by 0.5%
-# ----------------------------------------
+# TRAILING_STOP_ATR_MULTIPLIER: float = 2.5 # ATR Multiplier for trailing stop (Original: 2.5) - Reduced multiplier for tighter stop
+# TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001 # Price increase percentage to move trailing stop (0.1%)
+# Note: TRAILING_STOP_ATR_MULTIPLIER is now ENTRY_ATR_MULTIPLIER for consistency, or can be a separate parameter.
+# We will use ENTRY_ATR_MULTIPLIER for trailing stop calculation for simplicity.
+# The move trigger is now dynamic based on price exceeding the last update price and the new calculated stop being higher.
 
 # Additional Signal Conditions
 MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage
@@ -248,8 +244,7 @@ def get_btc_trend_4h() -> str:
     # Note: This function still uses EMA20 and EMA50 internally, you might want to unify it with the general EMA_PERIOD if desired
     logger.debug("ℹ️ [Indicators] Calculating Bitcoin 4-hour trend...")
     try:
-        # Use the 4-hour interval and sufficient lookback days
-        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10) # Request a bit more days
         if df is None or df.empty or len(df) < 50 + 1: # Ensure enough data for EMA50
             logger.warning("⚠️ [Indicators] Insufficient BTC/USDT 4H data to calculate trend.")
             return "N/A (Insufficient Data)"
@@ -321,22 +316,19 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     is_trailing_active BOOLEAN DEFAULT FALSE,
                     strategy_name TEXT,
                     signal_details JSONB,
-                    last_trailing_update_price DOUBLE PRECISION,
-                    -- New column to track the price at which the target was last updated dynamically
-                    last_target_update_price DOUBLE PRECISION
+                    last_trailing_update_price DOUBLE PRECISION -- لتخزين السعر عند آخر تحديث لوقف الخسارة المتحرك
                 );""")
             conn.commit()
             logger.info("✅ [DB] 'signals' table exists or was created.")
 
             # --- Check and add missing columns (if necessary) ---
-            # Added 'last_target_update_price' to required columns
             required_columns = {
                 "symbol", "entry_price", "initial_target", "initial_stop_loss",
                 "current_target", "current_stop_loss", "r2_score", "volume_15m",
                 "achieved_target", "hit_stop_loss", "closing_price", "closed_at",
                 "sent_at", "profit_percentage", "profitable_stop_loss",
                 "is_trailing_active", "strategy_name", "signal_details",
-                "last_trailing_update_price", "last_target_update_price"
+                "last_trailing_update_price" # Ensure this is included
             }
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
@@ -344,21 +336,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
 
             if missing_columns:
                 logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
-                # Add ALTER TABLE statements for missing columns
-                for col in missing_columns:
-                    col_type = "DOUBLE PRECISION" if col in ["last_target_update_price"] else "TEXT" # Define type based on column name
+                # (Original code to add columns was fine, can keep or improve here if needed)
+                # Example of adding 'last_trailing_update_price' if missing:
+                if 'last_trailing_update_price' in missing_columns:
                     try:
-                        alter_table_sql = sql.SQL("ALTER TABLE signals ADD COLUMN IF NOT EXISTS {} {};").format(
-                            sql.Identifier(col),
-                            sql.SQL(col_type)
-                        )
-                        cur.execute(alter_table_sql)
+                        cur.execute("ALTER TABLE signals ADD COLUMN last_trailing_update_price DOUBLE PRECISION;")
                         conn.commit()
-                        logger.info(f"✅ [DB] Added missing column '{col}' to 'signals' table.")
+                        logger.info("✅ [DB] Added 'last_trailing_update_price' column to 'signals' table.")
                     except Exception as alter_err:
-                         logger.error(f"❌ [DB] Failed to add column '{col}': {alter_err}")
-                         if conn: conn.rollback() # Rollback if adding a column fails
+                        logger.error(f"❌ [DB] Failed to add 'last_trailing_update_price' column: {alter_err}")
+                        if conn: conn.rollback() # Rollback if ALTER fails
 
+                logger.warning("⚠️ [DB] Please check manually if other missing columns need to be added.")
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
 
@@ -920,24 +909,18 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
              elif close[i] < final_lb[i]: # Start of downtrend
                   st[i] = final_ub[i]
                   st_trend[i] = -1
-             else: # If price is between bands initially (rare) or previous trend was 0
-                  # Try to infer trend from current price vs bands if previous was 0
-                  if close[i] > basic_ub[i]:
-                      st[i] = basic_lb[i]
-                      st_trend[i] = 1
-                  elif close[i] < basic_lb[i]:
-                      st[i] = basic_ub[i]
-                      st_trend[i] = -1
-                  else: # Still between bands
-                      st[i] = np.nan # Or can use previous value if available
-                      st_trend[i] = 0
+             else: # Still between bands
+                  st[i] = np.nan # Or can use previous value if available
+                  st_trend[i] = 0
 
 
     # Assign calculated values back to DataFrame
+    df_st['final_ub'] = final_ub
+    df_st['final_lb'] = final_lb
     df_st['supertrend'] = st
     df_st['supertrend_trend'] = st_trend
 
-    # Remove helper columns (basic_ub, basic_lb, final_ub, final_lb are no longer needed)
+    # Remove helper columns
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
 
     return df_st
@@ -1002,7 +985,7 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     return 0
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """Adds candlestick pattern detection signals to the DataFrame."""
+    """Applies candlestick pattern detection functions to the DataFrame."""
     df = df.copy()
     logger.debug("ℹ️ [Indicators] Detecting candlestick patterns...")
     # Apply single-row patterns
@@ -1211,7 +1194,7 @@ class ConservativeTradingStrategy:
         # Required columns for indicator calculation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume',
-            'ema_13', 'ema_34', 'vwma',
+            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
@@ -1221,7 +1204,7 @@ class ConservativeTradingStrategy:
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
             'close',
-            'ema_13', 'ema_34', 'vwma',
+            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
@@ -1231,14 +1214,21 @@ class ConservativeTradingStrategy:
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
         # (These conditions contribute to the score but are not mandatory)
+        # Removed 'above_vwap' as VWMA is now mandatory
         # =====================================================================
         self.condition_weights = {
+            # 'ema_cross_bullish': 2.0, # Now a mandatory condition
+            # 'supertrend_up': 2.0,   # Now a mandatory condition
+            # 'above_vwap': 1.5,      # Price above VWAP (Removed - VWMA is mandatory)
+            # 'macd_positive_or_cross': 1.5, # Now a mandatory condition
+            # 'adx_trending_bullish': 1.0, # Now a mandatory condition
             'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
             'bullish_candle': 1.0,  # Bullish engulfing or hammer candle present
             'not_bb_extreme': 0.5,  # Price not at upper Bollinger Band (still useful for some strategies, but lower weight for breakout)
             'obv_rising': 1.5,       # OBV is rising
 
             # --- New Breakout Strategy Conditions (some are now mandatory) ---
+            # 'breakout_bb_upper': 3.0, # Now a mandatory condition
             'rsi_filter_breakout': 1.5, # RSI filter for breakout (optional)
             'macd_filter_breakout': 1.5 # MACD histogram positive filter for breakout (optional)
             # ----------------------------------------
@@ -1247,6 +1237,7 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
+        # Added 'above_vwma' as a mandatory condition
         # =====================================================================
         self.essential_conditions = [
             'ema_cross_bullish',
@@ -1539,7 +1530,7 @@ class ConservativeTradingStrategy:
 
         # These multipliers can be adjusted based on ADX or other factors for a more dynamic strategy if desired
         target_multiplier = ENTRY_ATR_MULTIPLIER
-        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
+        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # Use the same multiplier for initial stop loss
 
         initial_target = current_price + (target_multiplier * current_atr)
         initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
@@ -1574,14 +1565,15 @@ class ConservativeTradingStrategy:
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial target
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Current stop starts as initial
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
             'strategy_name': 'Breakout_Filtered_Strict_VWMA', # Change strategy name to reflect modification
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
+            # last_trailing_update_price will be None initially, set on activation
         }
 
         logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
@@ -1635,7 +1627,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     logger.debug(f"ℹ️ [Telegram Alert] Formatting and sending alert for signal: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
-        target_price = float(signal_data['initial_target']) # Display initial target in alert
+        target_price = float(signal_data['initial_target'])
         stop_loss_price = float(signal_data['initial_stop_loss'])
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
@@ -1669,7 +1661,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
-            f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n" # Display initial target
+            f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
             f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
@@ -1712,9 +1704,6 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     atr_value = details.get('atr_value', 0.0)
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
-    new_target = details.get('new_target', 0.0) # Added for dynamic target
-    old_target = details.get('old_target', 0.0) # Added for dynamic target
-
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
@@ -1742,32 +1731,20 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (الربح > {activation_profit_pct:.1f}%)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {ENTRY_ATR_MULTIPLIER})\n" # Use ENTRY_ATR_MULTIPLIER
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
     elif notification_type == 'trailing_updated':
-        trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
+        # No longer triggered by fixed percentage, triggered by price exceeding last update price
         message = (
             f"➡️ *تم تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}`\n" # No longer mentions fixed percentage increase
+            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {ENTRY_ATR_MULTIPLIER})\n" # Use ENTRY_ATR_MULTIPLIER
             f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
-    # --- New Notification Type for Dynamic Target Update ---
-    elif notification_type == 'target_updated_dynamic':
-        message = (
-            f"⬆️ *تم تحديث الهدف المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {DYNAMIC_TARGET_TRAIL_ATR_MULTIPLIER})\n"
-            f"🎯 **الهدف السابق:** `${old_target:,.8g}`\n"
-            f"🎯 **الهدف الجديد:** `${new_target:,.8g}`"
-        )
-    # -----------------------------------------------------
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
         return # Don't send anything if type is unknown
@@ -1793,8 +1770,8 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
-                 r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m, last_target_update_price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                 r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
@@ -1806,9 +1783,8 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared.get('r2_score'), # Weighted score
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price starts as None
-                signal_prepared.get('volume_15m'),
-                signal_prepared['entry_price'] # Initialize last_target_update_price with entry price
+                None, # last_trailing_update_price is None initially
+                signal_prepared.get('volume_15m')
             ))
         conn.commit()
         logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (Score: {signal_prepared.get('r2_score')}).")
@@ -1828,7 +1804,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
-    """Tracks open signals, checks targets and stop losses, and applies trailing stop and dynamic target."""
+    """Tracks open signals, checks targets and stop losses, and applies trailing stop dynamically."""
     logger.info("ℹ️ [Tracker] Starting open signal tracking process...")
     while True:
         active_signals_summary: List[str] = []
@@ -1841,10 +1817,9 @@ def track_signals() -> None:
 
             # Use a cursor with context manager to fetch open signals
             with conn.cursor() as track_cur: # Uses RealDictCursor
-                 # Fetch the new 'last_target_update_price' column
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
-                           is_trailing_active, last_trailing_update_price, last_target_update_price
+                           is_trailing_active, last_trailing_update_price
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
                 """)
@@ -1866,14 +1841,13 @@ def track_signals() -> None:
                 try:
                     # Extract and safely convert numeric data
                     entry_price = float(signal_row['entry_price'])
-                    initial_stop_loss = float(signal_row['initial_stop_loss'])
+                    # initial_stop_loss = float(signal_row['initial_stop_loss']) # Not needed for tracking logic
                     current_target = float(signal_row['current_target'])
                     current_stop_loss = float(signal_row['current_stop_loss'])
                     is_trailing_active = signal_row['is_trailing_active']
                     last_update_px = signal_row['last_trailing_update_price']
+                    # Convert last_trailing_update_price safely, None if DB value is None
                     last_trailing_update_price = float(last_update_px) if last_update_px is not None else None
-                    last_target_px = signal_row['last_target_update_price']
-                    last_target_update_price = float(last_target_px) if last_target_px is not None else entry_price # Default to entry if null
 
 
                     # Get current price from WebSocket Ticker data
@@ -1891,19 +1865,6 @@ def track_signals() -> None:
                     notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id}
 
                     # --- Check and Update Logic ---
-                    # Fetch historical data for ATR calculation (needed for both trailing stop and dynamic target)
-                    df_tracking = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
-                    current_atr_val = None
-                    if df_tracking is not None and not df_tracking.empty:
-                         df_tracking = calculate_atr_indicator(df_tracking, period=ENTRY_ATR_PERIOD)
-                         if not df_tracking.empty and 'atr' in df_tracking.columns and pd.notna(df_tracking['atr'].iloc[-1]):
-                              current_atr_val = df_tracking['atr'].iloc[-1]
-
-                    if current_atr_val is None or current_atr_val <= 0:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val}) for tracking updates.")
-                         # Can still check target/SL hits if ATR is not needed for that specific check
-                         # but trailing stop/dynamic target updates will be skipped.
-
                     # 1. Check for Target Hit
                     if current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -1925,101 +1886,71 @@ def track_signals() -> None:
                         update_executed = True
 
                     # 3. Check for Trailing Stop Activation or Update (Only if Target or SL not hit)
-                    # 4. Check for Dynamic Target Update (Only if Target or SL not hit)
-                    else: # Signal is still open
-                        # --- Trailing Stop Logic ---
-                        if current_atr_val is not None: # Only proceed if ATR is valid
-                             # a. Activate Trailing Stop
-                             activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
-                             if not is_trailing_active and current_price >= activation_threshold_price:
-                                 logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing activation threshold ({activation_threshold_price:.8g}). Calculating new stop...")
-                                 new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                 # Ensure new stop is not below initial stop loss or entry price (with a small buffer)
-                                 new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
+                    else:
+                        activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
+                        # a. Activate Trailing Stop
+                        if not is_trailing_active and current_price >= activation_threshold_price:
+                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing activation threshold ({activation_threshold_price:.8g}). Fetching ATR...")
+                            # Use the specified tracking timeframe
+                            df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
+                            if df_atr is not None and not df_atr.empty:
+                                # Use the ATR period designated for entry/tracking
+                                df_atr = calculate_atr_indicator(df_atr, period=ENTRY_ATR_PERIOD)
+                                if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
+                                    current_atr_val = df_atr['atr'].iloc[-1]
+                                    if current_atr_val > 0:
+                                         # Calculate the new stop loss based on current price and ATR
+                                         new_stop_loss_calc = current_price - (ENTRY_ATR_MULTIPLIER * current_atr_val)
+                                         # Ensure the new stop loss is higher than the current stop loss
+                                         # and also slightly above the entry price to lock in minimal profit
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
 
-                                 if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
-                                    update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                    update_params = (new_stop_loss, current_price, signal_id)
-                                    log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. New Stop: {new_stop_loss:.8g}"
-                                    notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
-                                    update_executed = True
-                                 else:
-                                    logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
+                                         if new_stop_loss > current_stop_loss: # Only update if the new stop is actually higher
+                                            update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                            update_params = (new_stop_loss, current_price, signal_id) # Set last_trailing_update_price to current_price on activation
+                                            log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. New Stop: {new_stop_loss:.8g}"
+                                            notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
+                                            update_executed = True
+                                         else:
+                                            logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
+                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val}) for trailing stop activation.")
+                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for trailing stop activation.")
+                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for trailing stop activation.")
 
-
-                             # b. Update Trailing Stop (if active)
-                             elif is_trailing_active and last_trailing_update_price is not None:
-                                 update_threshold_price = last_trailing_update_price * (1 + TRAILING_STOP_MOVE_INCREMENT_PCT)
-                                 if current_price >= update_threshold_price:
-                                     logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing update threshold ({update_threshold_price:.8g}). Calculating new stop...")
-                                     # Calculate potential new stop loss based on current price and ATR
-                                     potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                     if potential_new_stop_loss > current_stop_loss: # Only update if the new stop is higher
-                                        new_stop_loss_update = potential_new_stop_loss
-                                        update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                        update_params = (new_stop_loss_update, current_price, signal_id)
-                                        log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
-                                        notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100})
-                                        update_executed = True
-                                     else:
-                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
-                                 # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} below trailing update threshold ({update_threshold_price:.8g}).")
-
-
-                        # --- Dynamic Target Logic (Only if ATR is valid and signal is open) ---
-                        if current_atr_val is not None:
-                             # Calculate potential new target based on current price and ATR
-                             potential_new_target = current_price + (DYNAMIC_TARGET_TRAIL_ATR_MULTIPLIER * current_atr_val)
-
-                             # Check if the potential new target is significantly higher than the current target
-                             # Use a small percentage buffer to avoid frequent tiny updates
-                             target_update_threshold = current_target * (1 + DYNAMIC_TARGET_MOVE_INCREMENT_PCT)
-
-                             if potential_new_target > target_update_threshold:
-                                 logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} triggered dynamic target update. Old Target={current_target:.8g}, Potential New Target={potential_new_target:.8g}")
-
-                                 # Update the current target in the database
-                                 # If an update query for Trailing Stop was already set, combine the updates
-                                 if update_query and 'UPDATE signals SET' in str(update_query):
-                                     # Append target update to the existing query
-                                     update_query = sql.SQL("UPDATE signals SET current_target = %s, last_target_update_price = %s, is_trailing_active = %s, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;") # Include all possible fields
-                                     # Need to ensure update_params has all values in the correct order
-                                     # This requires careful handling based on which update was triggered first (TS or DT)
-                                     # A simpler approach is to execute updates separately or rebuild params
-                                     # Let's execute separately for clarity, even if less efficient for rare cases
-                                     logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Executing previous update query first...")
-                                     try:
-                                         with conn.cursor() as temp_cur:
-                                             temp_cur.execute(update_query, update_params)
-                                         conn.commit()
-                                         if log_message: logger.info(f"ℹ️ [Tracker] Executed previous update: {log_message}")
-                                         if notification_details.get('type'):
-                                              # Send previous notification if it was set
-                                              send_tracking_notification(notification_details)
-                                     except psycopg2.Error as temp_db_err:
-                                         logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error executing previous update: {temp_db_err}")
-                                         if conn: conn.rollback()
-                                     except Exception as temp_exec_err:
-                                         logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error executing previous update/notification: {temp_exec_err}", exc_info=True)
-
-
-                                     # Now set the target update query
-                                     update_query = sql.SQL("UPDATE signals SET current_target = %s, last_target_update_price = %s WHERE id = %s;")
-                                     update_params = (potential_new_target, current_price, signal_id)
-                                     log_message = f"➡️🎯 [Tracker] {symbol}(ID:{signal_id}): Dynamic Target updated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. Old={current_target:.8g}, New: {potential_new_target:.8g}"
-                                     notification_details = {'symbol': symbol, 'id': signal_id, 'type': 'target_updated_dynamic', 'current_price': current_price, 'atr_value': current_atr_val, 'old_target': current_target, 'new_target': potential_new_target}
-                                     update_executed = True # Mark as executed for the target update
-
-                                 else:
-                                     # No previous update query, set this one
-                                     update_query = sql.SQL("UPDATE signals SET current_target = %s, last_target_update_price = %s WHERE id = %s;")
-                                     update_params = (potential_new_target, current_price, signal_id)
-                                     log_message = f"➡️🎯 [Tracker] {symbol}(ID:{signal_id}): Dynamic Target updated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. Old={current_target:.8g}, New: {potential_new_target:.8g}"
-                                     notification_details.update({'type': 'target_updated_dynamic', 'current_price': current_price, 'atr_value': current_atr_val, 'old_target': current_target, 'new_target': potential_new_target})
-                                     update_executed = True
-
-                             # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Potential new target ({potential_new_target:.8g}) not significantly higher than current ({current_target:.8g}).")
-                        # else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for dynamic target update.")
+                        # b. Update Trailing Stop (Dynamic Update Logic)
+                        # Trigger update if trailing is active AND current price is higher than the price at the last update
+                        elif is_trailing_active and last_trailing_update_price is not None and current_price > last_trailing_update_price:
+                             logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} is higher than last update price ({last_trailing_update_price:.8g}). Checking for trailing stop update...")
+                             df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
+                             if df_recent is not None and not df_recent.empty:
+                                 df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD) # Use ENTRY_ATR_PERIOD for tracking ATR
+                                 if not df_recent.empty and 'atr' in df_recent.columns and pd.notna(df_recent['atr'].iloc[-1]):
+                                      current_atr_val_update = df_recent['atr'].iloc[-1]
+                                      if current_atr_val_update > 0:
+                                          # Calculate the potential new stop loss based on current price and ATR
+                                          potential_new_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr_val_update) # Use ENTRY_ATR_MULTIPLIER
+                                          # Only update if the potential new stop loss is higher than the current stop loss
+                                          if potential_new_stop_loss > current_stop_loss:
+                                             new_stop_loss_update = potential_new_stop_loss
+                                             update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                             update_params = (new_stop_loss_update, current_price, signal_id) # Update last_trailing_update_price to the new current price
+                                             log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val_update:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
+                                             notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update}) # Removed trigger_price_increase_pct
+                                             update_executed = True
+                                          else:
+                                              logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
+                                      else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val_update}) for update.")
+                                 else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for update.")
+                             else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for update.")
+                        elif is_trailing_active and last_trailing_update_price is None:
+                             # This case handles signals activated before the last_trailing_update_price column was added or initialized.
+                             # Set last_trailing_update_price to current_price if trailing is active but the value is None.
+                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Trailing active but last_trailing_update_price is NULL. Initializing it to current price ({current_price:.8g}).")
+                             update_query = sql.SQL("UPDATE signals SET last_trailing_update_price = %s WHERE id = %s;")
+                             update_params = (current_price, signal_id)
+                             log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Initialized last_trailing_update_price for active trailing stop."
+                             # No notification needed for this internal update
+                             update_executed = True
 
 
                     # --- Execute Database Update and Send Notification ---
@@ -2029,13 +1960,15 @@ def track_signals() -> None:
                                   update_cur.execute(update_query, update_params)
                              conn.commit()
                              if log_message: logger.info(log_message)
-                             if notification_details.get('type'):
+                             # Only send notification if the type is explicitly set (i.e., not the internal initialization case)
+                             if notification_details.get('type') and notification_details.get('type') != 'initial_trailing_update':
                                 send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
                             logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error during update: {db_err}")
                             if conn: conn.rollback()
                         except Exception as exec_err:
                             logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error during update execution/notification: {exec_err}", exc_info=True)
+                            if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error converting initial signal values: {convert_err}")
@@ -2295,7 +2228,7 @@ def main_loop() -> None:
                         if symbol_cur.fetchone():
                             continue
 
-                    # b. Fetch historical data using the specified generation timeframe (4h)
+                    # b. Fetch historical data
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
                         continue
@@ -2320,7 +2253,7 @@ def main_loop() -> None:
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1
                                      slots_available -= 1
-                                     time.sleep(2) # Small delay after sending alert
+                                     time.sleep(2)
                                  else:
                                      logger.error(f"❌ [Main] Failed to insert signal for {symbol} into database.")
                              else:
@@ -2335,21 +2268,14 @@ def main_loop() -> None:
                       logger.error(f"❌ [Main] General error processing symbol {symbol}: {symbol_proc_err}", exc_info=True)
                       continue
 
-                 time.sleep(0.3) # Small delay between symbols
+                 time.sleep(0.3)
 
             # 3. Wait before starting the next cycle
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] Scan cycle finished. Signals generated: {signals_generated_in_loop}. Scan duration: {scan_duration:.2f} seconds.")
-            # Calculate wait time based on the 4-hour timeframe (4 hours = 14400 seconds)
-            # We want to scan roughly every 4 hours, but avoid scanning too frequently.
-            # Let's aim for a scan cycle that finishes well within 4 hours, maybe every 1-2 hours.
-            # A simple approach: wait for a fixed duration (e.g., 1 hour = 3600 seconds) minus the scan duration.
-            # Ensure minimum wait time to avoid excessive API calls.
-            target_cycle_duration = 3600 # Aim for a cycle every 1 hour
-            wait_time = max(60, target_cycle_duration - scan_duration) # Wait at least 60 seconds
+            wait_time = max(60, 300 - scan_duration) # Wait 5 minutes total or at least 1 minute
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f} seconds for the next cycle...")
             time.sleep(wait_time)
-
 
         except KeyboardInterrupt:
              logger.info("🛑 [Main] Stop requested (KeyboardInterrupt). Shutting down...")
@@ -2392,7 +2318,7 @@ if __name__ == "__main__":
     flask_thread: Optional[Thread] = None
 
     try:
-        # 1. Initialize the database first (will add missing columns like last_target_update_price)
+        # 1. Initialize the database first
         init_db()
 
         # 2. Start WebSocket Ticker
@@ -2430,5 +2356,4 @@ if __name__ == "__main__":
         # send_telegram_message(CHAT_ID, "⚠️ Alert: Trading bot is shutting down now.") # Uncomment to send alert on shutdown
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
-        os._exit(0) # Use os._exit(0) for a clean exit with threads
-
+        os._exit(0)
