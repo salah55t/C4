@@ -686,13 +686,15 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    df_calc['-dm'] = np.where((df_calc['down_move'] > df_move['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0) # Fixed typo here
+    # Corrected typo: df_move should be df_calc
+    df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
     alpha = 1 / period
     df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
+    # Corrected typo: df_move should be df_calc
     df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0) # Fixed typo here
+    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
     df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
     df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
@@ -2106,4 +2108,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0) # Force exit if threads are stuck
-
