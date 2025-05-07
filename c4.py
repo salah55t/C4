@@ -89,7 +89,7 @@ SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0
 # ------------------------------------------------------
 
 # Additional Signal Conditions
-MIN_PROFIT_MARGIN_PCT: float = 1.3# Minimum required profit margin percentage for initial TP (based on initial_target)
+MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on initial_target)
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
 MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
 # =============================================================================
@@ -469,77 +469,35 @@ def convert_np_values(obj: Any) -> Any:
     else:
         return obj
 
-# ---------------------- Reading and Validating Symbols List ----------------------
-def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+# ---------------------- Fetching and Validating Symbols from Binance ----------------------
+def get_crypto_symbols_from_binance() -> List[str]:
     """
-    Reads the list of currency symbols from a text file, then validates them
-    as valid USDT pairs available for Spot trading on Binance.
+    Fetches all valid USDT Spot trading pairs directly from Binance API.
+    Replaces reading from a local file.
     """
-    raw_symbols: List[str] = []
-    logger.info(f"ℹ️ [Data] Reading symbols list from file '{filename}'...")
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(script_dir, filename)
-
-        if not os.path.exists(file_path):
-            file_path = os.path.abspath(filename) # Try current path if not next to script
-            if not os.path.exists(file_path):
-                 logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
-                 return [] # Return empty list if file not found
-            else:
-                 logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
-
-        with open(file_path, 'r', encoding='utf-8') as f:
-            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
-                           for line in f if line.strip() and not line.startswith('#')]
-        raw_symbols = sorted(list(set(raw_symbols))) # Remove duplicates and sort
-        logger.info(f"ℹ️ [Data] Read {len(raw_symbols)} initial symbols from '{file_path}'.")
-
-    except FileNotFoundError:
-         logger.error(f"❌ [Data] File '{filename}' not found.")
-         return []
-    except Exception as e:
-        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
-        return []
-
-    if not raw_symbols:
-         logger.warning("⚠️ [Data] Initial symbols list is empty.")
-         return []
-
     if not client:
-        logger.error("❌ [Data Validation] Binance client not initialized. Cannot validate symbols.")
-        return raw_symbols
+        logger.error("❌ [Data] Binance client not initialized. Cannot fetch symbols from API.")
+        return [] # Return empty list if client is not available
 
+    logger.info("ℹ️ [Data] Fetching valid USDT Spot trading symbols from Binance API...")
     try:
-        logger.info("ℹ️ [Data Validation] Validating symbols and trading status from Binance API...")
         exchange_info = client.get_exchange_info()
-        valid_trading_usdt_symbols = {
+        valid_trading_usdt_symbols = sorted([
             s['symbol'] for s in exchange_info['symbols']
             if s.get('quoteAsset') == 'USDT' and
                s.get('status') == 'TRADING' and
                s.get('isSpotTradingAllowed') is True
-        }
-        logger.info(f"ℹ️ [Data Validation] Found {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs on Binance.")
+        ])
 
-        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
-
-        removed_count = len(raw_symbols) - len(validated_symbols)
-        if removed_count > 0:
-            removed_symbols = set(raw_symbols) - set(validated_symbols)
-            logger.warning(f"⚠️ [Data Validation] Removed {removed_count} invalid or unavailable USDT Spot trading symbols from the list: {', '.join(removed_symbols)}")
-
-        logger.info(f"✅ [Data Validation] Symbols validated. Using {len(validated_symbols)} valid symbols.")
-        return validated_symbols
+        logger.info(f"✅ [Data] Fetched {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs from Binance.")
+        return valid_trading_usdt_symbols
 
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Validation] Binance API or network error while validating symbols: {binance_err}")
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
-         return raw_symbols
+         logger.error(f"❌ [Data] Binance API or network error while fetching symbols: {binance_err}")
+         return []
     except Exception as api_err:
-         logger.error(f"❌ [Data Validation] Unexpected error while validating Binance symbols: {api_err}", exc_info=True)
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
-         return raw_symbols
-
+         logger.error(f"❌ [Data] Unexpected error while fetching Binance symbols: {api_err}", exc_info=True)
+         return []
 
 # ---------------------- WebSocket Management for Ticker Prices ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
@@ -601,7 +559,6 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int) -> pd.DataFrame: # Ad
         logger.warning(f"⚠️ [Indicator ATR period={period}] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
         df['atr'] = np.nan
         return df
-
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
@@ -1173,12 +1130,12 @@ class ConservativeTradingStrategy:
         else: signal_details['MACD'] = 'Passed'
 
         # ADX Trending Bullish (ADX > 20 and DI+ > DI-)
-        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']): essential_passed = False; failed_essential_conditions.append('ADX/DI'); signal_details['ADX/DI'] = 'Failed'
-        else: signal_details['ADX/DI'] = 'Passed'
+        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']): essential_passed = False; failed_essential_conditions.append('ADX/DI'); signal_details['ADX/DI'] = 'Passed'
+        else: signal_details['ADX/DI'] = 'Failed'
 
         # Breakout above Bollinger Upper Band
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']): essential_passed = False; failed_essential_conditions.append('Breakout BB'); signal_details['Breakout_BB'] = 'Failed'
-        else: signal_details['Breakout_BB'] = 'Passed'
+        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']): essential_passed = False; failed_essential_conditions.append('Breakout BB'); signal_details['Breakout_BB'] = 'Passed'
+        else: signal_details['Breakout_BB'] = 'Failed'
 
         # Above VWMA
         if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']): essential_passed = False; failed_essential_conditions.append('Above VWMA'); signal_details['VWMA_Mandatory'] = 'Failed'
@@ -1963,9 +1920,10 @@ def run_flask() -> None:
 # ---------------------- Main Loop and Check Function ----------------------
 def main_loop() -> None:
     """Main loop to scan pairs and generate signals."""
-    symbols_to_scan = get_crypto_symbols()
-    if not symbols_to_scan: logger.critical("❌ [Main] No valid symbols loaded. Cannot proceed."); return
-    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning.")
+    # Call the new function to get symbols directly from Binance
+    symbols_to_scan = get_crypto_symbols_from_binance()
+    if not symbols_to_scan: logger.critical("❌ [Main] No valid symbols loaded from Binance. Cannot proceed."); return
+    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning from Binance.")
 
     while True:
         try:
@@ -2108,3 +2066,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0) # Force exit if threads are stuck
+
