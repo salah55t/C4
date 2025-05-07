@@ -71,7 +71,8 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Fibonacci levels for en
 FIB_TOLERANCE: float = 0.007 # Tolerance for checking price near Fib level (0.7%)
 LOOKBACK_FOR_SWINGS: int = 100 # How many candles back to look for swing points for Fib calculation
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial SL/TP
-ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop
+# Adjusted ENTRY_ATR_MULTIPLIER to potentially reduce "SL too wide" rejections
+ENTRY_ATR_MULTIPLIER: float = 3.0 # Reduced from 3.5
 
 # Adjusted TP Multipliers to potentially meet R:R >= 1.5
 # Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
@@ -97,6 +98,7 @@ SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0
 MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on TP1)
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
 MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
+MAX_INITIAL_LOSS_PCT: float = 10.0 # Maximum allowed initial loss percentage based on initial SL (New)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -1152,6 +1154,7 @@ class ConservativeTradingStrategy:
         lookback_data_for_sl = df_processed.iloc[:-1].tail(LOOKBACK_FOR_SWINGS + SWING_ORDER * 2) # Data before current candle
         last_swing_low_for_sl, _ = find_relevant_swing_points(lookback_data_for_sl, df_processed.index[-2]) # Swings before the last candle
 
+        # Use the adjusted ENTRY_ATR_MULTIPLIER
         atr_based_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
         swing_based_stop_loss = None
 
@@ -1186,12 +1189,11 @@ class ConservativeTradingStrategy:
              # essential_passed = False; failed_essential_conditions.append('Valid SL Price') # Make this mandatory? Or just reject? Reject seems safer.
              return None # Reject signal if initial SL is invalid
 
-        # Check max loss percentage
-        max_allowed_loss_pct = 0.10 # Example: 10% max loss
-        max_sl_price = current_price * (1 - max_allowed_loss_pct)
-        if initial_stop_loss < max_sl_price:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL ({initial_stop_loss:.8g}) is too wide (>{max_allowed_loss_pct*100}% loss). Signal rejected.")
-             signal_details['Warning_SL'] = f'Initial SL too wide (> {max_allowed_loss_pct*100}%)'
+        # Check max loss percentage (using the new MAX_INITIAL_LOSS_PCT constant)
+        loss_pct_initial_sl = ((initial_stop_loss / current_price) - 1) * 100 if current_price > 0 else 0
+        if abs(loss_pct_initial_sl) > MAX_INITIAL_LOSS_PCT:
+             logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL ({initial_stop_loss:.8g}) is too wide (>{MAX_INITIAL_LOSS_PCT}% loss). Signal rejected.")
+             signal_details['Warning_SL'] = f'Initial SL too wide (> {MAX_INITIAL_LOSS_PCT}%)'
              return None # Reject signal if SL is too wide
 
         # Check minimum profit margin for TP1 (using the adjusted TP1 multiplier)
