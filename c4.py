@@ -89,7 +89,7 @@ SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0
 # ------------------------------------------------------
 
 # Additional Signal Conditions
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on initial_target)
+MIN_PROFIT_MARGIN_PCT: float = 1.3# Minimum required profit margin percentage for initial TP (based on initial_target)
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
 MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
 # =============================================================================
