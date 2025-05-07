@@ -72,9 +72,12 @@ FIB_TOLERANCE: float = 0.007 # Tolerance for checking price near Fib level (0.7%
 LOOKBACK_FOR_SWINGS: int = 100 # How many candles back to look for swing points for Fib calculation
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial SL/TP
 ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop
-TP1_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for the first Take Profit level (for Break-Even trigger)
-TP2_ATR_MULTIPLIER: float = 2.5 # ATR Multiplier for the second Take Profit level
-TP3_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for the third Take Profit level
+
+# Adjusted TP Multipliers to potentially meet R:R >= 1.5
+TP1_ATR_MULTIPLIER: float = 3.0 # Increased from 1.5 - Used for R:R calc and BE trigger
+TP2_ATR_MULTIPLIER: float = 4.5 # Increased from 2.5
+TP3_ATR_MULTIPLIER: float = 6.0 # Increased from 3.5
+
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -89,7 +92,8 @@ SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0
 # ------------------------------------------------------
 
 # Additional Signal Conditions
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on initial_target)
+# MIN_PROFIT_MARGIN_PCT check will now use TP1 price (calculated with TP1_ATR_MULTIPLIER)
+MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on TP1)
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
 MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
 # =============================================================================
@@ -304,8 +308,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
-                    initial_target DOUBLE PRECISION NOT NULL, -- Original target based on entry ATR
-                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- Original SL based on entry ATR
+                    initial_target DOUBLE PRECISION NOT NULL, -- Original target based on entry ATR (Kept for historical compatibility, but TP1 is now primary)
+                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- Original SL based on entry ATR or Swing
                     current_target DOUBLE PRECISION NOT NULL, -- Might become dynamic or less relevant
                     current_stop_loss DOUBLE PRECISION NOT NULL, -- This will be updated dynamically
                     r2_score DOUBLE PRECISION, -- Weighted signal score
@@ -364,7 +368,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 # ALTER TABLE signals ADD COLUMN tp1_price DOUBLE PRECISION;
                 # ALTER TABLE signals ADD COLUMN tp1_hit BOOLEAN DEFAULT FALSE;
                 # ALTER TABLE signals ADD COLUMN tp2_price DOUBLE PRECISION;
-                # ALTER TABLE signals ADD COLUMN tp2_hit BOOLEAN DEFAULT FALSE;
+                # ALTER TABLE signals ADD COLUMN tp2_hit BOOLEISION DEFAULT FALSE;
                 # ALTER TABLE signals ADD COLUMN tp3_price DOUBLE PRECISION;
                 # ALTER TABLE signals ADD COLUMN tp3_hit BOOLEAN DEFAULT FALSE;
                 # ALTER TABLE signals ADD COLUMN stop_loss_at_breakeven BOOLEAN DEFAULT FALSE;
@@ -1165,11 +1169,12 @@ class ConservativeTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] No relevant swing low found for initial SL. Using ATR based SL: {initial_stop_loss:.8g}")
 
 
-        # --- Calculate Take Profit Levels ---
+        # --- Calculate Take Profit Levels (Adjusted Multipliers) ---
         tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr)
         tp2_price_calc = current_price + (TP2_ATR_MULTIPLIER * current_atr) # New TP2
         tp3_price_calc = current_price + (TP3_ATR_MULTIPLIER * current_atr) # New TP3
-        initial_target_atr = current_price + (ENTRY_ATR_MULTIPLIER * current_atr) # Keep original ATR target for reference/display
+        # initial_target_atr = current_price + (ENTRY_ATR_MULTIPLIER * current_atr) # Keep original ATR target for reference/display - Removed as TP1 is now the primary target
+
 
         # --- SL/TP Validation & R:R Check ---
         # Ensure SL is not zero or above entry
@@ -1187,8 +1192,9 @@ class ConservativeTradingStrategy:
              signal_details['Warning_SL'] = f'Initial SL too wide (> {max_allowed_loss_pct*100}%)'
              return None # Reject signal if SL is too wide
 
-        # Check minimum profit margin for the initial target
-        profit_margin_pct = ((initial_target_atr / current_price) - 1) * 100 if current_price > 0 else 0
+        # Check minimum profit margin for TP1 (using the adjusted TP1 multiplier)
+        # Now using tp1_price_calc for this check
+        profit_margin_pct = ((tp1_price_calc / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Initial Profit margin ({profit_margin_pct:.2f}%) below minimum ({MIN_PROFIT_MARGIN_PCT}%). Signal rejected.")
             signal_details['Warning_ProfitMargin'] = f'Profit margin ({profit_margin_pct:.2f}%) below min ({MIN_PROFIT_MARGIN_PCT}%)'
@@ -1275,9 +1281,9 @@ class ConservativeTradingStrategy:
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
-            'initial_target': float(f"{initial_target_atr:.8g}"), # Keep initial ATR target for display
+            'initial_target': float(f"{tp1_price_calc:.8g}"), # Use TP1 as the initial target for display/reference
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"), # This is the chosen initial SL (Min of ATR/Swing)
-            'current_target': float(f"{initial_target_atr:.8g}"), # Keep initial target for now, dynamic TPs handled in tracking
+            'current_target': float(f"{tp1_price_calc:.8g}"), # Keep initial target for now, dynamic TPs handled in tracking
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Initial current SL is the chosen initial SL
             'r2_score': float(f"{current_score:.2f}"),
             'strategy_name': 'Breakout_Fib_VWMA_Dynamic', # Updated name
@@ -1323,7 +1329,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     logger.debug(f"ℹ️ [Telegram Alert] Formatting alert for signal: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
-        initial_target_price = float(signal_data['initial_target']) # Use initial ATR target for display
+        # Use tp1_price for the initial target display as it's now the primary first target
+        initial_target_price_display = float(signal_data['tp1_price'])
         stop_loss_price = float(signal_data['initial_stop_loss'])
         tp1_price = signal_data.get('tp1_price', 0.0)
         tp2_price = signal_data.get('tp2_price', 0.0) # New
@@ -1338,7 +1345,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         signal_details = signal_data.get('signal_details', {})
 
         # Calculate percentages relative to entry price
-        profit_pct_initial_target = ((initial_target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+        # Calculate profit percentage for the displayed initial target (TP1)
+        profit_pct_initial_target_display = ((initial_target_price_display / entry_price) - 1) * 100 if entry_price > 0 else 0
         loss_pct_sl = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         profit_pct_tp1 = ((tp1_price / entry_price) - 1) * 100 if entry_price > 0 and tp1_price else 0
         profit_pct_tp2 = ((tp2_price / entry_price) - 1) * 100 if entry_price > 0 and tp2_price else 0 # New
@@ -1363,7 +1371,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🛡️ **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct_sl:.2f}% / ≈ ${loss_usdt:.2f})\n"
-            f"🎯 **الهدف الأول (للتعادل):** `${tp1_price:,.8g}` ({profit_pct_tp1:+.2f}%)\n" # Show TP1
+            # Display TP1 as the primary target with its calculated price and percentage
+            f"🎯 **الهدف الأول (للتعادل):** `${tp1_price:,.8g}` ({profit_pct_tp1:+.2f}%)\n"
             f"🎯 **الهدف الثاني (جزئي):** `${tp2_price:,.8g}` ({profit_pct_tp2:+.2f}%)\n" # Show TP2 (New)
             f"🎯 **الهدف الثالث (جزئي):** `${tp3_price:,.8g}` ({profit_pct_tp3:+.2f}%)\n" # Show TP3 (New)
             f"——————————————\n"
@@ -1490,9 +1499,10 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
                 signal_prepared['entry_price'],
-                signal_prepared['initial_target'],
+                # Use tp1_price as initial_target in DB for consistency with display/checks
+                signal_prepared['tp1_price'],
                 signal_prepared['initial_stop_loss'],
-                signal_prepared['current_target'], # Keep initial target for now
+                signal_prepared['tp1_price'], # Keep initial target for now, dynamic TPs handled in tracking
                 signal_prepared['current_stop_loss'],
                 signal_prepared.get('r2_score'),
                 signal_prepared.get('strategy_name', 'unknown'),
@@ -1997,7 +2007,7 @@ def main_loop() -> None:
                      if conn:
                          conn.rollback()
                      continue
-                 except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_err}", exc_info=True); continue
+                 except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_proc_err}", exc_info=True); continue
                  time.sleep(0.3) # Small delay between symbols
 
             scan_duration = time.time() - scan_start_time
