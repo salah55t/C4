@@ -74,9 +74,10 @@ ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial SL/TP
 ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop
 
 # Adjusted TP Multipliers to potentially meet R:R >= 1.5
-TP1_ATR_MULTIPLIER: float = 3.0 # Increased from 1.5 - Used for R:R calc and BE trigger
-TP2_ATR_MULTIPLIER: float = 4.5 # Increased from 2.5
-TP3_ATR_MULTIPLIER: float = 6.0 # Increased from 3.5
+# Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
+TP1_ATR_MULTIPLIER: float = 6.0 # Increased from 3.0 - Used for R:R calc and BE trigger
+TP2_ATR_MULTIPLIER: float = 9.0 # Increased from 4.5
+TP3_ATR_MULTIPLIER: float = 12.0 # Increased from 6.0
 
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
@@ -1170,6 +1171,7 @@ class ConservativeTradingStrategy:
 
 
         # --- Calculate Take Profit Levels (Adjusted Multipliers) ---
+        # Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
         tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr)
         tp2_price_calc = current_price + (TP2_ATR_MULTIPLIER * current_atr) # New TP2
         tp3_price_calc = current_price + (TP3_ATR_MULTIPLIER * current_atr) # New TP3
@@ -1281,7 +1283,8 @@ class ConservativeTradingStrategy:
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
-            'initial_target': float(f"{tp1_price_calc:.8g}"), # Use TP1 as the initial target for display/reference
+            # Use tp1_price for the initial target display as it's now the primary first target
+            'initial_target': float(f"{tp1_price_calc:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"), # This is the chosen initial SL (Min of ATR/Swing)
             'current_target': float(f"{tp1_price_calc:.8g}"), # Keep initial target for now, dynamic TPs handled in tracking
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Initial current SL is the chosen initial SL
@@ -2007,7 +2010,7 @@ def main_loop() -> None:
                      if conn:
                          conn.rollback()
                      continue
-                 except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_proc_err}", exc_info=True); continue
+                 except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_err}", exc_info=True); continue
                  time.sleep(0.3) # Small delay between symbols
 
             scan_duration = time.time() - scan_start_time
