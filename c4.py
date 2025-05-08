@@ -1610,45 +1610,43 @@ def track_signals() -> None:
                     current_stop_loss_db = signal_row.get('current_stop_loss')
                     current_stop_loss = float(current_stop_loss_db) if current_stop_loss_db is not None else None # Handle None here
 
-                    if current_stop_loss is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): current_stop_loss is None from DB. Skipping signal tracking for this cycle.")
-                         continue # Skip processing this signal if SL is None
-
-                    is_trailing_active = signal_row['is_trailing_active']
-                    last_sl_swing_low_price = signal_row.get('last_swing_low_price') # Price of swing low defining current SL
-                    last_activation_swing_high_price = signal_row.get('last_swing_high_price') # Price of swing high used for initial activation
-                    tp1_price = signal_row.get('tp1_price')
-                    tp1_hit = signal_row.get('tp1_hit', False)
-                    tp2_price = signal_row.get('tp2_price') # New
-                    tp2_hit = signal_row.get('tp2_hit', False) # New
-                    tp3_price = signal_row.get('tp3_price') # New
-                    tp3_hit = signal_row.get('tp3_hit', False) # New
-                    stop_loss_at_breakeven = signal_row.get('stop_loss_at_breakeven', False)
-
                     # Get current price
                     current_price = ticker_data.get(symbol)
-                    if current_price is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price unavailable.")
-                         continue
+                    # Safely handle potential None for current_price
+                    current_price_val = float(current_price) if current_price is not None else None
 
-                    # Format prices safely for the summary string
-                    # Using conditional formatting within the f-string
-                    current_price_str = f"{current_price:.4f}" if current_price is not None else "N/A"
+                    # Format prices safely for the summary string using conditional expressions
+                    current_price_str = f"{current_price_val:.4f}" if current_price_val is not None else "N/A"
                     current_stop_loss_str = f"{current_stop_loss:.4f}" if current_stop_loss is not None else "N/A"
 
+                    # Ensure boolean flags are handled safely in the f-string
+                    tp1_hit = signal_row.get('tp1_hit', False)
+                    tp2_hit = signal_row.get('tp2_hit', False)
+                    tp3_hit = signal_row.get('tp3_hit', False)
+                    stop_loss_at_breakeven = signal_row.get('stop_loss_at_breakeven', False)
+                    # Use .get() for is_trailing_active as well for consistency and safety
+                    is_trailing_active = signal_row.get('is_trailing_active', False)
+
+
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price_str} SL={current_stop_loss_str} TP1={'✅' if tp1_hit else '❌'} TP2={'✅' if tp2_hit else '❌'} TP3={'✅' if tp3_hit else '❌'} BE={'✅' if stop_loss_at_breakeven else '❌'} Trail={'On' if is_trailing_active else 'Off'}")
+
+                    # Continue processing only if current price and stop loss are available
+                    if current_price_val is None or current_stop_loss is None:
+                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price or stop loss unavailable ({current_price_val}, {current_stop_loss}). Skipping signal tracking logic for this cycle.")
+                         continue # Skip the rest of the loop for this signal
+
 
                     # --- Define DB Update variables ---
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'entry_price': entry_price, 'current_price': current_price}
+                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'entry_price': entry_price, 'current_price': current_price_val}
 
                     # ======================================
                     # 1. Check for Stop Loss Hit FIRST
                     # ======================================
                     # Now that current_stop_loss is guaranteed not None here
-                    if current_price <= current_stop_loss:
+                    if current_price_val <= current_stop_loss:
                         loss_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
                         profitable_sl = current_stop_loss > entry_price
                         sl_type_msg = "at a profit ✅" if profitable_sl else "at a loss ❌"
@@ -1671,21 +1669,24 @@ def track_signals() -> None:
                     # ==================================================
                     else: # Only check TPs if SL is not hit
                         # Check TP3 first (highest target)
-                        if not tp3_hit and tp3_price is not None and current_price >= tp3_price:
+                        tp3_price = signal_row.get('tp3_price') # Re-fetch locally for checks
+                        if not tp3_hit and tp3_price is not None and current_price_val >= tp3_price:
                             update_query = sql.SQL("UPDATE signals SET tp3_hit = TRUE WHERE id = %s;")
                             update_params = (signal_id,)
-                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP3 hit at {current_price:.8g} (>= {tp3_price:.8g})."
+                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP3 hit at {current_price_val:.8g} (>= {tp3_price:.8g})."
                             notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثالث', 'target_price': tp3_price})
                             update_executed = True
                         # Check TP2
-                        elif not tp2_hit and tp2_price is not None and current_price >= tp2_price:
+                        tp2_price = signal_row.get('tp2_price') # Re-fetch locally for checks
+                        elif not tp2_hit and tp2_price is not None and current_price_val >= tp2_price:
                             update_query = sql.SQL("UPDATE signals SET tp2_hit = TRUE WHERE id = %s;")
                             update_params = (signal_id,)
-                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP2 hit at {current_price:.8g} (>= {tp2_price:.8g})."
+                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP2 hit at {current_price_val:.8g} (>= {tp2_price:.8g})."
                             notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثاني', 'target_price': tp2_price})
                             update_executed = True
                         # Check TP1 (triggers Break-Even)
-                        elif not tp1_hit and tp1_price is not None and current_price >= tp1_price:
+                        tp1_price = signal_row.get('tp1_price') # Re-fetch locally for checks
+                        elif not tp1_hit and tp1_price is not None and current_price_val >= tp1_price:
                             new_stop_loss_be = entry_price # Move SL to entry
                             # Only update SL if the new BE SL is higher than the current one
                             if new_stop_loss_be > current_stop_loss:
@@ -1695,7 +1696,7 @@ def track_signals() -> None:
                                     WHERE id = %s;
                                 """)
                                 update_params = (new_stop_loss_be, signal_id)
-                                log_message = f"🛡️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price:.8g} (>= {tp1_price:.8g}). Moving SL to Break-Even ({new_stop_loss_be:.8g})."
+                                log_message = f"🛡️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g} (>= {tp1_price:.8g}). Moving SL to Break-Even ({new_stop_loss_be:.8g})."
                                 notification_details.update({'type': 'tp1_hit_breakeven', 'target_price': tp1_price, 'new_stop_loss': new_stop_loss_be})
                                 update_executed = True
                             else:
@@ -1703,7 +1704,7 @@ def track_signals() -> None:
                                  # Still mark TP1 as hit, but don't change SL yet
                                  update_query = sql.SQL("UPDATE signals SET tp1_hit = TRUE WHERE id = %s;")
                                  update_params = (signal_id,)
-                                 log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price:.8g}, but BE SL not higher. Marked TP1 hit."
+                                 log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g}, but BE SL not higher. Marked TP1 hit."
                                  # No notification needed if SL didn't move
                                  update_executed = True
 
@@ -1779,7 +1780,7 @@ def track_signals() -> None:
                             elif not is_trailing_active and not stop_loss_at_breakeven and last_swing_high_point is not None:
                                 last_swing_high_price = last_swing_high_point[1]
                                 # Check if current price broke the last swing high AND this high is above entry
-                                if current_price > last_swing_high_price and last_swing_high_price > entry_price and \
+                                if current_price_val > last_swing_high_price and last_swing_high_price > entry_price and \
                                    (last_activation_swing_high_price is None or not np.isclose(last_swing_high_price, last_activation_swing_high_price)):
 
                                     # Find the swing low that formed *before* this broken high
@@ -1798,8 +1799,8 @@ def track_signals() -> None:
                                                 WHERE id = %s;
                                             """)
                                             update_params = (potential_new_sl_swing_activation, activating_swing_low_price, last_swing_high_price, signal_id)
-                                            log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (Swing High Break). Price={current_price:.8g} > High={last_swing_high_price:.8g}. New SL={potential_new_sl_swing_activation:.8g} (Below Low={activating_swing_low_price:.8g})"
-                                            notification_details.update({'type': 'trailing_activated_swing', 'current_price': current_price, 'swing_price': last_swing_high_price, 'new_stop_loss': potential_new_sl_swing_activation}) # Notify Activation
+                                            log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (Swing High Break). Price={current_price_val:.8g} > High={last_swing_high_price:.8g}. New SL={potential_new_sl_swing_activation:.8g} (Below Low={activating_swing_low_price:.8g})"
+                                            notification_details.update({'type': 'trailing_activated_swing', 'current_price': current_price_val, 'swing_price': last_swing_high_price, 'new_stop_loss': potential_new_sl_swing_activation}) # Notify Activation
                                             update_executed = True
                                         else:
                                              logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Swing High Break detected, but new SL ({potential_new_sl_swing_activation:.8g}) based on preceding low ({activating_swing_low_price:.8g}) is not higher than current SL ({current_stop_loss:.8g}). Not activating yet.")
