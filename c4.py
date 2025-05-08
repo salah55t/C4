@@ -100,10 +100,10 @@ SWING_SL_BUFFER_PCT: float = 0.001 # Percentage buffer below swing low for SL (0
 
 # Additional Signal Conditions
 # MIN_PROFIT_MARGIN_PCT check will now use TP1 price (calculated with TP1_ATR_MULTIPLIER)
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on TP1)
+MIN_PROFIT_MARGIN_PCT: float = 1 # Minimum required profit margin percentage for initial TP (based on TP1)
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
 MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
-MAX_INITIAL_LOSS_PCT: float = 10.0 # Maximum allowed initial loss percentage based on initial SL (New)
+MAX_INITIAL_LOSS_PCT: float = 5.0 # Maximum allowed initial loss percentage based on initial SL (New)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
