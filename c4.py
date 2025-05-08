@@ -1536,7 +1536,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared.get('volume_15m'),
                 signal_prepared.get('tp1_price'), # Insert TP1 price
                 signal_prepared.get('tp2_price'), # Insert TP2 price (New)
-                signal_prepared.get('tp2_price'), # Insert TP2 price (New) - FIX: Should be tp3_price
+                signal_prepared.get('tp3_price'), # Insert TP3 price (New) - Corrected from tp2_price
                 signal_prepared.get('initial_atr'), # Insert initial ATR
                 signal_prepared.get('risk_reward_ratio') # Insert R:R Ratio (New)
             ))
@@ -1573,7 +1573,7 @@ def track_signals() -> None:
         try:
             if not check_db_connection() or not conn:
                 logger.warning("⚠️ [Tracker] Skipping tracking cycle due to DB connection issue.")
-                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS)
+                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS) # Corrected typo here
                 continue
 
             # Fetch open signals with necessary columns for dynamic tracking
@@ -1592,7 +1592,7 @@ def track_signals() -> None:
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] No open signals to track.")
-                time.sleep(TRACKING_CYCLE_SLEVE_SECONDS // 2) # Wait less if no signals
+                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS // 2) # Corrected typo here
                 continue
 
             logger.debug(f"ℹ️ [Tracker] Tracking {len(open_signals)} open signals...")
