@@ -209,7 +209,7 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce') # coerce invalid values to NaN
-        
+
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
 
@@ -750,7 +750,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
             else: st[i] = final_ub[i]; st_trend[i] = -1
         else:
              if close[i] > final_ub[i]: st[i] = basic_lb[i]; st_trend[i] = 1
-             elif close[i] < final_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
+             elif close[i] < basic_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
              else: st[i] = np.nan; st_trend[i] = 0
     df_st['final_ub'] = final_ub; df_st['final_lb'] = final_lb; df_st['supertrend'] = st; df_st['supertrend_trend'] = st_trend
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
@@ -1430,49 +1430,67 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 
     if notification_type == 'stop_loss_hit':
         sl_type_msg_ar = "بربح ✅" if details.get('profitable_sl', False) else "بخسارة ❌"
+        # Safely format closing_price
+        closing_price_str = f"${closing_price:,.8g}" if closing_price is not None else "N/A"
         message = (
             f"🛑 *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
-            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})"
+            f"🚫 **سعر الإغلاق (الوقف):** `{closing_price_str}`\n"
+            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})" # profit_pct should always be calculated before sending
         )
     elif notification_type == 'tp1_hit_breakeven':
+        # Safely format prices
+        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
+        target_price_str = f"${target_price:,.8g}" if target_price is not None else "N/A"
+        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"🛡️ *تم الوصول للهدف الأول ونقل الوقف للتعادل (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند الهدف 1):** `${current_price:,.8g}`\n"
-            f"🎯 **سعر الهدف الأول:** `${target_price:,.8g}`\n" # Use target_price
-            f"➡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}` (نقطة الدخول)" # Use new_stop_loss (which is entry)
+            f"📈 **السعر الحالي (عند الهدف 1):** `{current_price_str}`\n"
+            f"🎯 **سعر الهدف الأول:** `{target_price_str}`\n" # Use target_price
+            f"➡️ **وقف الخسارة الجديد:** `{new_stop_loss_str}` (نقطة الدخول)" # Use new_stop_loss (which is entry)
         )
     elif notification_type == 'tp_hit': # Generic for TP2, TP3
         target_level = details.get('target_level', 'هدف')
+        # Safely format prices
+        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
+        target_price_str = f"${target_price:,.8g}" if target_price is not None else "N/A"
         message = (
             f"🎯 *تم الوصول إلى {target_level} (ID: {signal_id})*\n" # e.g., الهدف الثاني
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"🎯 **سعر {target_level}:** `${target_price:,.8g}`" # Use target_price
+            f"📈 **السعر الحالي:** `{current_price_str}`\n"
+            f"🎯 **سعر {target_level}:** `{target_price_str}`" # Use target_price
         )
     elif notification_type == 'trailing_activated_swing':
+        # Safely format prices
+        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
+        swing_price_str = f"${swing_price:,.8g}" if swing_price is not None else "N/A"
+        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"⬆️ *تم تفعيل الوقف المتحرك (كسر قمة) (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند الكسر):** `${current_price:,.8g}`\n"
-            f"⛰️ **القمة المكسورة:** `${swing_price:,.8g}`\n"
-            f"🛡️ **وقف الخسارة المبدئي (تحت القاع):** `${new_stop_loss:,.8g}`"
+            f"📈 **السعر الحالي (عند الكسر):** `{current_price_str}`\n"
+            f"⛰️ **القمة المكسورة:** `{swing_price_str}`\n"
+            f"🛡️ **وقف الخسارة المبدئي (تحت القاع):** `{new_stop_loss_str}`"
         )
     elif notification_type == 'trailing_updated_swing':
+        # Safely format prices
+        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
+        swing_price_str = f"${swing_price:,.8g}" if swing_price is not None else "N/A"
+        old_stop_loss_str = f"${old_stop_loss:,.8g}" if old_stop_loss is not None else "N/A"
+        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"➡️ *تم تحديث الوقف المتحرك (قاع أعلى) (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"⚓ **القاع الجديد:** `${swing_price:,.8g}`\n"
-            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+            f"📈 **السعر الحالي:** `{current_price_str}`\n"
+            f"⚓ **القاع الجديد:** `{swing_price_str}`\n"
+            f"🔒 **الوقف السابق:** `{old_stop_loss_str}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `{new_stop_loss_str}`"
         )
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
@@ -1518,7 +1536,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared.get('volume_15m'),
                 signal_prepared.get('tp1_price'), # Insert TP1 price
                 signal_prepared.get('tp2_price'), # Insert TP2 price (New)
-                signal_prepared.get('tp3_price'), # Insert TP3 price (New)
+                signal_prepared.get('tp2_price'), # Insert TP2 price (New) - FIX: Should be tp3_price
                 signal_prepared.get('initial_atr'), # Insert initial ATR
                 signal_prepared.get('risk_reward_ratio') # Insert R:R Ratio (New)
             ))
@@ -1574,7 +1592,7 @@ def track_signals() -> None:
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] No open signals to track.")
-                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS // 2) # Wait less if no signals
+                time.sleep(TRACKING_CYCLE_SLEVE_SECONDS // 2) # Wait less if no signals
                 continue
 
             logger.debug(f"ℹ️ [Tracker] Tracking {len(open_signals)} open signals...")
@@ -1588,7 +1606,14 @@ def track_signals() -> None:
                 try:
                     # Safely extract data from the row
                     entry_price = float(signal_row['entry_price'])
-                    current_stop_loss = float(signal_row['current_stop_loss'])
+                    # Safely handle potential None from DB for current_stop_loss before converting to float
+                    current_stop_loss_db = signal_row.get('current_stop_loss')
+                    current_stop_loss = float(current_stop_loss_db) if current_stop_loss_db is not None else None # Handle None here
+
+                    if current_stop_loss is None:
+                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): current_stop_loss is None from DB. Skipping signal tracking for this cycle.")
+                         continue # Skip processing this signal if SL is None
+
                     is_trailing_active = signal_row['is_trailing_active']
                     last_sl_swing_low_price = signal_row.get('last_swing_low_price') # Price of swing low defining current SL
                     last_activation_swing_high_price = signal_row.get('last_swing_high_price') # Price of swing high used for initial activation
@@ -1606,7 +1631,11 @@ def track_signals() -> None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price unavailable.")
                          continue
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} SL={current_stop_loss:.4f} TP1={'✅' if tp1_hit else '❌'} TP2={'✅' if tp2_hit else '❌'} TP3={'✅' if tp3_hit else '❌'} BE={'✅' if stop_loss_at_breakeven else '❌'} Trail={'On' if is_trailing_active else 'Off'}")
+                    # Format prices safely for the summary string
+                    current_price_str = f"{current_price:.4f}" if current_price is not None else "N/A"
+                    current_stop_loss_str = f"{current_stop_loss:.4f}" if current_stop_loss is not None else "N/A"
+
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price_str} SL={current_stop_loss_str} TP1={'✅' if tp1_hit else '❌'} TP2={'✅' if tp2_hit else '❌'} TP3={'✅' if tp3_hit else '❌'} BE={'✅' if stop_loss_at_breakeven else '❌'} Trail={'On' if is_trailing_active else 'Off'}")
 
                     # --- Define DB Update variables ---
                     update_query: Optional[sql.SQL] = None
@@ -1617,6 +1646,7 @@ def track_signals() -> None:
                     # ======================================
                     # 1. Check for Stop Loss Hit FIRST
                     # ======================================
+                    # Now that current_stop_loss is guaranteed not None here
                     if current_price <= current_stop_loss:
                         loss_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
                         profitable_sl = current_stop_loss > entry_price
@@ -1802,6 +1832,7 @@ def track_signals() -> None:
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
+                    # Added more specific logging for conversion errors
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error converting signal values: {convert_err} - Row: {signal_row}")
                     continue # Skip this signal
                 except Exception as inner_loop_err:
@@ -1821,7 +1852,7 @@ def track_signals() -> None:
              except Exception as recon_err: logger.critical(f"❌ [Tracker] Failed to reconnect DB: {recon_err}. Exiting..."); break
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
-            logger.info("ℹ️ [Tracker] Waiting 120s before retrying tracking cycle...")
+            logger.info("ℹ️ [Tracker] Waiting 120s before retrying...")
             time.sleep(120)
 
 
