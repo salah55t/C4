@@ -71,14 +71,18 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Fibonacci levels for en
 FIB_TOLERANCE: float = 0.007 # Tolerance for checking price near Fib level (0.7%)
 LOOKBACK_FOR_SWINGS: int = 100 # How many candles back to look for swing points for Fib calculation
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial SL/TP
-# Adjusted ENTRY_ATR_MULTIPLIER to potentially reduce "SL too wide" rejections
-ENTRY_ATR_MULTIPLIER: float = 3.0 # Reduced from 3.5
 
-# Adjusted TP Multipliers to potentially meet R:R >= 1.5
+# --- Adjusted ATR Multipliers for Scalping ---
+# تم تعديل مضاعفات ATR لجعل وقف الخسارة والأهداف أقرب لسعر الدخول، مناسب للسكالبينج
+# Reduced from 3.0 -> 1.5 (مثال: تقليل المخاطرة الأولية)
+ENTRY_ATR_MULTIPLIER: float = 1.5
 # Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
-TP1_ATR_MULTIPLIER: float = 6.0 # Increased from 3.0 - Used for R:R calc and BE trigger
-TP2_ATR_MULTIPLIER: float = 9.0 # Increased from 4.5
-TP3_ATR_MULTIPLIER: float = 12.0 # Increased from 6.0
+# Adjusted for tighter range. Ensure TP1_ATR_MULTIPLIER / ENTRY_ATR_MULTIPLIER >= MIN_RR_RATIO
+# Example: 2.5 / 1.5 = 1.67 (أكبر من 1.5)
+TP1_ATR_MULTIPLIER: float = 2.5 # Increased from 3.0 - Used for R:R calc and BE trigger
+TP2_ATR_MULTIPLIER: float = 4.0 # Increased from 4.5
+TP3_ATR_MULTIPLIER: float = 5.5 # Increased from 6.0
+# ---------------------------------------------
 
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
@@ -90,7 +94,8 @@ SUPERTREND_PERIOD: int = 10     # SuperTrend Period
 SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
 
 # --- Dynamic Trailing Stop (Market Structure Based) ---
-SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0.2%)
+# تم تقليل الهامش تحت القاع لجعله أكثر إحكاماً للسكالبينج
+SWING_SL_BUFFER_PCT: float = 0.001 # Percentage buffer below swing low for SL (0.1%) - Reduced from 0.2%
 # ------------------------------------------------------
 
 # Additional Signal Conditions
@@ -204,7 +209,7 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce') # coerce invalid values to NaN
-
+        
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
 
@@ -744,12 +749,9 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
             if close[i] >= final_lb[i]: st[i] = final_lb[i]; st_trend[i] = 1
             else: st[i] = final_ub[i]; st_trend[i] = -1
         else:
-             if close[i] > final_ub[i]: st[i] = final_lb[i]; st_trend[i] = 1
-             elif close[i] < final_lb[i]: st[i] = final_ub[i]; st_trend[i] = -1
-             else:
-                  if close[i] > basic_ub[i]: st[i] = basic_lb[i]; st_trend[i] = 1
-                  elif close[i] < basic_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
-                  else: st[i] = np.nan; st_trend[i] = 0
+             if close[i] > final_ub[i]: st[i] = basic_lb[i]; st_trend[i] = 1
+             elif close[i] < final_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
+             else: st[i] = np.nan; st_trend[i] = 0
     df_st['final_ub'] = final_ub; df_st['final_lb'] = final_lb; df_st['supertrend'] = st; df_st['supertrend_trend'] = st_trend
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
     return df_st
@@ -915,7 +917,7 @@ def fetch_recent_volume(symbol: str) -> float:
         logger.debug(f"✅ [Data Volume] Last 15 minutes liquidity for {symbol}: {volume_usdt:,.2f} USDT")
         return volume_usdt
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Volume] Binance API or network error fetching volume for {symbol}: {binance_err}")
+         logger.error(f"❌ [Data Volume] Binance API or network error while fetching volume for {symbol}: {binance_err}")
          return 0.0
     except Exception as e:
         logger.error(f"❌ [Data Volume] Unexpected error fetching volume for {symbol}: {e}", exc_info=True)
@@ -1154,12 +1156,12 @@ class ConservativeTradingStrategy:
         lookback_data_for_sl = df_processed.iloc[:-1].tail(LOOKBACK_FOR_SWINGS + SWING_ORDER * 2) # Data before current candle
         last_swing_low_for_sl, _ = find_relevant_swing_points(lookback_data_for_sl, df_processed.index[-2]) # Swings before the last candle
 
-        # Use the adjusted ENTRY_ATR_MULTIPLIER
+        # Use the adjusted ENTRY_ATR_MULTIPLIER (Tighter for Scalping)
         atr_based_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
         swing_based_stop_loss = None
 
         if last_swing_low_for_sl is not None:
-            swing_based_stop_loss = last_swing_low_for_sl[1] * (1 - SWING_SL_BUFFER_PCT)
+            swing_based_stop_loss = last_swing_low_for_sl[1] * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
             signal_details['Initial_SL_Basis'] = f'Swing Low ({last_swing_low_for_sl[1]:.8g})'
             # Choose the lower (safer) stop loss between ATR and Swing
             initial_stop_loss = min(atr_based_stop_loss, swing_based_stop_loss)
@@ -1173,8 +1175,9 @@ class ConservativeTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] No relevant swing low found for initial SL. Using ATR based SL: {initial_stop_loss:.8g}")
 
 
-        # --- Calculate Take Profit Levels (Adjusted Multipliers) ---
+        # --- Calculate Take Profit Levels (Adjusted Multipliers for Scalping) ---
         # Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
+        # Adjusted for tighter range suitable for scalping
         tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr)
         tp2_price_calc = current_price + (TP2_ATR_MULTIPLIER * current_atr) # New TP2
         tp3_price_calc = current_price + (TP3_ATR_MULTIPLIER * current_atr) # New TP3
@@ -1696,7 +1699,7 @@ def track_signals() -> None:
                             if last_swing_low_point is not None:
                                 last_swing_low_price = last_swing_low_point[1]
                                 # Calculate potential new SL based on the latest swing low
-                                potential_new_sl_from_swing = last_swing_low_price * (1 - SWING_SL_BUFFER_PCT)
+                                potential_new_sl_from_swing = last_swing_low_price * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
 
                                 # Only consider this new swing-based SL if it's higher than the PREVIOUSLY recorded swing low price
                                 # and also higher than the current stop loss. This prevents unnecessary updates on the same swing.
@@ -1753,7 +1756,7 @@ def track_signals() -> None:
                                     if lows_before_break:
                                         activating_swing_low = max(lows_before_break, key=lambda item: item[0])
                                         activating_swing_low_price = activating_swing_low[1]
-                                        potential_new_sl_swing_activation = activating_swing_low_price * (1 - SWING_SL_BUFFER_PCT)
+                                        potential_new_sl_swing_activation = activating_swing_low_price * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
 
                                         # Only activate if the new SL is higher than the current one (which is likely initial_stop_loss here)
                                         if potential_new_sl_swing_activation > current_stop_loss:
@@ -1813,9 +1816,9 @@ def track_signals() -> None:
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
-             if conn: conn.rollback()
-             time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
-             check_db_connection() # Try to re-init
+             if conn: conn.rollback(); time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
+             try: init_db()
+             except Exception as recon_err: logger.critical(f"❌ [Tracker] Failed to reconnect DB: {recon_err}. Exiting..."); break
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
             logger.info("ℹ️ [Tracker] Waiting 120s before retrying tracking cycle...")
