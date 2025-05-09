@@ -48,56 +48,56 @@ logger.info(f"Telegram Chat ID: {CHAT_ID}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-TRADE_VALUE: float = 10.0         # Default trade value in USDT
-MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
-SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Increased historical data lookback for better indicator calculation
-SIGNAL_TRACKING_TIMEFRAME: str = '30m' # Timeframe for signal tracking and stop loss updates
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for signal tracking
+# ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للسكالبينج على إطار 5 دقائق) ----------------------
+TRADE_VALUE: float = 10.0         # Default trade value in USDT (Keep small for testing)
+MAX_OPEN_TRADES: int = 5          # Maximum number of open trades simultaneously (Increased slightly for scalping)
+SIGNAL_GENERATION_TIMEFRAME: str = '5m' # Timeframe for signal generation (Changed to 5m)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Reduced historical data lookback for shorter timeframe
+SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and stop loss updates (Changed to 5m)
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1   # Reduced historical data lookback in days for signal tracking
 
 # =============================================================================
-# --- Indicator Parameters ---
+# --- Indicator Parameters (Adjusted for 5m Scalping) ---
 # You can adjust these values to better suit your strategy
 # =============================================================================
-RSI_PERIOD: int = 14          # RSI Period (Original: 14)
-RSI_OVERSOLD: int = 30        # Oversold threshold (Original: 30) - Slightly increased
-RSI_OVERBOUGHT: int = 70      # Overbought threshold (Original: 70) - Slightly decreased
-EMA_SHORT_PERIOD: int = 13      # Short EMA period (New)
-EMA_LONG_PERIOD: int = 34       # Long EMA period (New)
-VWMA_PERIOD: int = 20           # VWMA Period (New)
-SWING_ORDER: int = 5          # Order for swing point detection
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
-FIB_TOLERANCE: float = 0.007
-LOOKBACK_FOR_SWINGS: int = 100
-ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry
-ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop (Original: 1.2) - Increased multiplier
-BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
-BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
-MACD_FAST: int = 12            # MACD Fast Period
-MACD_SLOW: int = 26            # MACD Slow Period
-MACD_SIGNAL: int = 9             # MACD Signal Line Period
-ADX_PERIOD: int = 14            # ADX Period
-SUPERTREND_PERIOD: int = 10     # SuperTrend Period
-SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
+RSI_PERIOD: int = 9          # RSI Period (Reduced for faster reaction)
+RSI_OVERSOLD: int = 30        # Oversold threshold (Keep)
+RSI_OVERBOUGHT: int = 70      # Overbought threshold (Keep)
+EMA_SHORT_PERIOD: int = 8      # Short EMA period (Reduced)
+EMA_LONG_PERIOD: int = 21       # Long EMA period (Reduced)
+VWMA_PERIOD: int = 15           # VWMA Period (Reduced)
+SWING_ORDER: int = 3          # Order for swing point detection (Reduced)
+FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Keep Fib levels, but less relevant for pure scalping
+FIB_TOLERANCE: float = 0.005 # Keep tolerance
+LOOKBACK_FOR_SWINGS: int = 50 # Reduced lookback for swings
+ENTRY_ATR_PERIOD: int = 10     # ATR Period for entry (Reduced)
+ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target/stop (SIGNIFICANTLY REDUCED for tighter levels)
+BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window (Keep 20, standard)
+BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation (Keep 2)
+MACD_FAST: int = 9            # MACD Fast Period (Reduced)
+MACD_SLOW: int = 18            # MACD Slow Period (Reduced)
+MACD_SIGNAL: int = 9             # MACD Signal Line Period (Keep 9)
+ADX_PERIOD: int = 10            # ADX Period (Reduced)
+SUPERTREND_PERIOD: int = 10     # SuperTrend Period (Keep 10, standard)
+SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or keep 3.0)
 
-# Trailing Stop Loss
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # Profit percentage to activate trailing stop (1.5%)
-TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # ATR Multiplier for trailing stop (Original: 2.5) - Reduced multiplier for tighter stop
-TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to move trailing stop (0.1%)
+# Trailing Stop Loss (Adjusted for Scalping)
+TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
+TRAILING_STOP_ATR_MULTIPLIER: float = 1.8        # ATR Multiplier for trailing stop (Reduced for tighter stop)
+TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.0005 # Price increase percentage to move trailing stop (0.05% - Reduced)
 
-# Additional Signal Conditions
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage
-MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
+# Additional Signal Conditions (Adjusted)
+MIN_PROFIT_MARGIN_PCT: float = 0.8 # Minimum required profit margin percentage (SIGNIFICANTLY REDUCED)
+MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
-# --- New/Adjusted Parameters for Entry Logic ---
-RECENT_EMA_CROSS_LOOKBACK: int = 3 # Check for EMA cross within the last X candles
-MIN_ADX_TREND_STRENGTH: int = 25 # Increased minimum ADX for stronger trend confirmation
-MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles
-OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candles
+# --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
+RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
+MIN_ADX_TREND_STRENGTH: int = 20 # Increased minimum ADX for stronger trend confirmation (Slightly reduced threshold for 5m)
+MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles (Keep or Reduce)
+OBV_INCREASE_CANDLES: int = 2 # Check if OBV is increasing over the last X candles (Reduced)
 
-# --- New Parameter for Dynamic Target/SL Update ---
-TARGET_APPROACH_THRESHOLD_PCT: float = 0.02 # Percentage threshold to consider price "approaching" target (2%)
+# --- New Parameter for Dynamic Target/SL Update (Adjusted for 5m) ---
+TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Percentage threshold to consider price "approaching" target (1% - Reduced)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -153,7 +153,7 @@ def get_fear_greed_index() -> str:
         logger.error(f"❌ [Indicators] Unexpected error fetching Fear & Greed Index: {e}", exc_info=True)
         return "N/A (Unknown Error)"
 
-def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, days: int = SIGNAL_GENERATION_LOOKBACK_DAYS) -> Optional[pd.DataFrame]:
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     """Fetches historical candlestick data from Binance."""
     if not client:
         logger.error("❌ [Data] Binance client not initialized for data fetching.")
@@ -988,7 +988,7 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     return 0
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """Applies candlestick pattern detection functions to the DataFrame."""
+    """Adds candlestick pattern signals to the DataFrame."""
     df = df.copy()
     logger.debug("ℹ️ [Indicators] Detecting candlestick patterns...")
     # Apply single-row patterns
@@ -1187,17 +1187,17 @@ def generate_performance_report() -> str:
         logger.error(f"❌ [Report] Unexpected error generating performance report: {e}", exc_info=True)
         return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
 
-# ---------------------- Trading Strategy (Modified for EMA Cross and Breakout) -------------------
+# ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
 
-class ConservativeTradingStrategy:
-    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions."""
+class ScalpingTradingStrategy: # Renamed strategy for clarity
+    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions, adjusted for Scalping."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
         # Required columns for indicator calculation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume',
-            'ema_13', 'ema_34', 'vwma',
+            'ema_8', 'ema_21', 'vwma', # Adjusted EMA names
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
@@ -1207,7 +1207,7 @@ class ConservativeTradingStrategy:
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
             'close',
-            'ema_13', 'ema_34', 'vwma',
+            'ema_8', 'ema_21', 'vwma', # Adjusted EMA names
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
@@ -1216,7 +1216,7 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
-        # Weights adjusted to reflect importance in capturing momentum/early entry
+        # Weights adjusted to reflect importance in capturing momentum/early entry for Scalping
         # =====================================================================
         self.condition_weights = {
             'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
@@ -1225,23 +1225,21 @@ class ConservativeTradingStrategy:
             'obv_rising': 2.0,       # Increased weight for OBV is rising (momentum confirmation)
             'rsi_filter_breakout': 1.0, # RSI filter for breakout (optional)
             'macd_filter_breakout': 1.0, # MACD histogram positive filter for breakout (optional)
-            'macd_hist_increasing': 2.5, # New: MACD histogram is increasing (strong momentum sign)
-            'obv_increasing_recent': 2.0 # New: OBV is increasing over the last few candles
+            'macd_hist_increasing': 2.5, # MACD histogram is increasing (strong momentum sign)
+            'obv_increasing_recent': 2.0 # OBV is increasing over the last few candles
         }
         # =====================================================================
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
-        # Adjusted mandatory conditions for stricter entry
+        # Adjusted mandatory conditions for Scalping
         # =====================================================================
         self.essential_conditions = [
-            'ema_cross_bullish_recent', # Modified: EMA cross must be recent
+            'ema_cross_bullish_recent', # EMA cross must be recent (Adjusted lookback)
             'supertrend_up',
             'macd_positive_or_cross',
-            'adx_trending_bullish_strong', # Modified: ADX must be stronger
+            'adx_trending_bullish_strong', # ADX must be stronger (Adjusted threshold)
             'above_vwma' # VWMA condition remains mandatory
-            # Removed 'breakout_bb_upper' as a mandatory condition to allow entries before breakout,
-            # but it can still contribute to the optional score or be a separate strategy.
         ]
         # =====================================================================
 
@@ -1250,8 +1248,8 @@ class ConservativeTradingStrategy:
         self.total_possible_score = sum(self.condition_weights.values())
 
         # Required signal score threshold for *optional* conditions (as a percentage)
-        # Adjust this threshold based on the new weights and desired strictness
-        self.min_score_threshold_pct = 0.60 # Example: 60% of optional points (adjustable)
+        # Adjusted threshold for Scalping to potentially get more signals
+        self.min_score_threshold_pct = 0.55 # Example: 55% of optional points (Adjusted)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
 
@@ -1273,8 +1271,9 @@ class ConservativeTradingStrategy:
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
 
             # --- EMA Calculation ---
-            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
-            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
+            # Use the adjusted EMA periods
+            df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
+            df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
             # ----------------------
 
             # --- VWMA Calculation ---
@@ -1292,7 +1291,17 @@ class ConservativeTradingStrategy:
             df_calc = detect_candlestick_patterns(df_calc)
 
             # Check for required columns after calculation
-            missing_cols = [col for col in self.required_cols_indicators if col not in df_calc.columns]
+            # Adjust required columns list based on the new EMA names
+            required_cols_indicators_adjusted = [
+                'open', 'high', 'low', 'close', 'volume',
+                f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+                'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+                'macd', 'macd_signal', 'macd_hist',
+                'adx', 'di_plus', 'di_minus',
+                'vwap', 'obv', 'supertrend', 'supertrend_trend',
+                'BullishCandleSignal', 'BearishCandleSignal'
+            ]
+            missing_cols = [col for col in required_cols_indicators_adjusted if col not in df_calc.columns]
             if missing_cols:
                  logger.error(f"❌ [Strategy {self.symbol}] Required indicator columns missing after calculation: {missing_cols}")
                  logger.debug(f"Columns present: {df_calc.columns.tolist()}")
@@ -1300,8 +1309,8 @@ class ConservativeTradingStrategy:
 
             # Handle NaNs after indicator calculation
             initial_len = len(df_calc)
-            # Use required_cols_indicators which contains all calculated columns
-            df_cleaned = df_calc.dropna(subset=self.required_cols_indicators).copy()
+            # Use adjusted required_cols_indicators which contains all calculated columns
+            df_cleaned = df_calc.dropna(subset=required_cols_indicators_adjusted).copy()
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
@@ -1311,7 +1320,7 @@ class ConservativeTradingStrategy:
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA13: {latest.get('ema_13', np.nan):.4f}, EMA34: {latest.get('ema_34', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1325,7 +1334,7 @@ class ConservativeTradingStrategy:
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
-        Modified to focus on capturing early momentum and confirming bullish strength.
+        Adjusted for Scalping.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
@@ -1336,7 +1345,16 @@ class ConservativeTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<{min_signal_data_len}), cannot generate signal.")
             return None
 
-        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
+        # Adjust required columns list based on the new EMA names
+        required_cols_buy_signal_adjusted = [
+            'close',
+            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+            'rsi', 'atr',
+            'macd', 'macd_signal', 'macd_hist',
+            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'BullishCandleSignal', 'obv'
+        ]
+        required_cols_with_breakout = list(set(required_cols_buy_signal_adjusted + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
         missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
         if missing_cols:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}.")
@@ -1373,17 +1391,17 @@ class ConservativeTradingStrategy:
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
         # Positive EMA Cross condition (Must be recent)
-        # Check if EMA13 was below EMA34 and is now above within the lookback period
+        # Check if EMA_SHORT_PERIOD was below EMA_LONG_PERIOD and is now above within the lookback period
         ema_cross_bullish_recent = False
         if len(recent_df) >= RECENT_EMA_CROSS_LOOKBACK + 1:
-             # Check for a bullish cross (ema13 crossing above ema34) in the last RECENT_EMA_CROSS_LOOKBACK candles
+             # Check for a bullish cross (ema_short crossing above ema_long) in the last RECENT_EMA_CROSS_LOOKBACK candles
              # Ensure no NaN in the relevant slice before checking
-             ema13_slice = recent_df['ema_13'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
-             ema34_slice = recent_df['ema_34'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
+             ema_short_slice = recent_df[f'ema_{EMA_SHORT_PERIOD}'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
+             ema_long_slice = recent_df[f'ema_{EMA_LONG_PERIOD}'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
 
-             if not ema13_slice.isnull().any() and not ema34_slice.isnull().any():
+             if not ema_short_slice.isnull().any() and not ema_long_slice.isnull().any():
                 for i in range(1, RECENT_EMA_CROSS_LOOKBACK + 1):
-                     if ema13_slice.iloc[-i] > ema34_slice.iloc[-i] and ema13_slice.iloc[-i-1] <= ema34_slice.iloc[-i-1]:
+                     if ema_short_slice.iloc[-i] > ema_long_slice.iloc[-i] and ema_short_slice.iloc[-i-1] <= ema_long_slice.iloc[-i-1]:
                           ema_cross_bullish_recent = True
                           break # Found a recent cross, no need to check further back
              else:
@@ -1495,9 +1513,9 @@ class ConservativeTradingStrategy:
              signal_details['OBV_Last'] = f'Not Rising on last candle (0)'
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
+        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80: # Adjusted range slightly for scalping
              current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (55-75) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
+             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else:
              signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
 
@@ -1509,7 +1527,7 @@ class ConservativeTradingStrategy:
         else:
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
 
-        # New: MACD histogram is increasing over the last X candles (strong momentum)
+        # MACD histogram is increasing over the last X candles (strong momentum)
         macd_hist_increasing = False
         if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
              # Check if the last MACD_HIST_INCREASE_CANDLES histogram values are strictly increasing
@@ -1527,7 +1545,7 @@ class ConservativeTradingStrategy:
              signal_details['MACD_Hist_Increasing'] = f'MACD Hist not increasing over last {MACD_HIST_INCREASE_CANDLES} candles (0)'
 
 
-        # New: OBV is increasing over the last X candles (volume confirmation of momentum)
+        # OBV is increasing over the last X candles (volume confirmation of momentum)
         obv_increasing_recent = False
         if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
              # Check if the last OBV_INCREASE_CANDLES values are strictly increasing
@@ -1576,14 +1594,14 @@ class ConservativeTradingStrategy:
         # Ensure stop loss is not zero or negative and is below the entry price
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
             # Use a percentage as a minimum stop loss if the initial calculation is invalid
-            # Example: 1.5% below current price as a minimum
-            min_sl_price_pct = current_price * (1 - 0.015) # Example: 1.5% below entry
-            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001) # Ensure it's not too close to zero
+            # Adjusted minimum stop loss percentage for scalping
+            min_sl_price_pct = current_price * (1 - 0.008) # Example: 0.8% below entry as a minimum
+            initial_stop_loss = max(min_sl_price_pct, current_price * 0.0005) # Ensure it's not too close to zero
             logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is invalid or above entry price. Adjusted to {initial_stop_loss:.8f}")
             signal_details['Warning'] = f'Initial SL adjusted (was <= 0 or >= entry, set to {initial_stop_loss:.8f})'
         else:
              # Ensure the initial stop loss is not too wide (optional)
-             max_allowed_loss_pct = 0.10 # Example: Initial loss should not exceed 10%
+             max_allowed_loss_pct = 0.03 # Example: Initial loss should not exceed 3% for scalping
              max_sl_price = current_price * (1 - max_allowed_loss_pct)
              if initial_stop_loss < max_sl_price:
                   logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is too wide. Adjusted to {max_sl_price:.8f}")
@@ -1606,7 +1624,7 @@ class ConservativeTradingStrategy:
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Momentum_Breakout_Filtered', # Changed strategy name
+            'strategy_name': 'Scalping_Momentum', # Changed strategy name
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
@@ -1949,16 +1967,18 @@ def track_signals() -> None:
                     elif current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
                          logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} approaching target {current_target:.8g} (within {TARGET_APPROACH_THRESHOLD_PCT*100:.1f}%). Analyzing for potential update...")
 
-                         # Fetch recent data for re-analysis
+                         # Fetch recent data for re-analysis using the TRACKING timeframe
                          df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
 
                          if df_recent is not None and not df_recent.empty:
                               # Calculate indicators on recent data
-                              strategy_tracker = ConservativeTradingStrategy(symbol)
+                              # Use the ScalpingTradingStrategy for re-analysis
+                              strategy_tracker = ScalpingTradingStrategy(symbol)
                               df_indicators_recent = strategy_tracker.populate_indicators(df_recent)
 
                               if df_indicators_recent is not None:
                                    # Attempt to generate a new signal based on recent conditions
+                                   # Note: This will use the Scalping strategy's buy signal logic and thresholds
                                    potential_new_signal = strategy_tracker.generate_buy_signal(df_indicators_recent)
 
                                    if potential_new_signal:
@@ -1967,9 +1987,9 @@ def track_signals() -> None:
                                         current_atr_recent = df_indicators_recent['atr'].iloc[-1]
 
                                         if pd.notna(current_atr_recent) and current_atr_recent > 0:
-                                             new_target_calc = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_recent)
-                                             # Use TRAILING_STOP_ATR_MULTIPLIER for the new stop loss calculation
-                                             new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent)
+                                             # Use the Scalping strategy's ATR multipliers for the new levels
+                                             new_target_calc = current_price + (strategy_tracker.ENTRY_ATR_MULTIPLIER * current_atr_recent)
+                                             new_stop_loss_calc = current_price - (strategy_tracker.TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent) # Use trailing stop multiplier for new SL
 
                                              # Only update if the new target is higher and new stop loss is higher
                                              if new_target_calc > current_target and new_stop_loss_calc > current_stop_loss:
@@ -1982,6 +2002,7 @@ def track_signals() -> None:
                                                            is_trailing_active = TRUE, last_trailing_update_price = %s
                                                        WHERE id = %s;
                                                   """)
+                                                  # Use the current price as the last trailing update price upon dynamic target update
                                                   update_params = (new_target_update, new_stop_loss_update, current_price, signal_id)
 
                                                   log_message = f"🔄✅ [Tracker] {symbol}(ID:{signal_id}): Target/SL updated based on new signal. Price={current_price:.8g}, Old T={current_target:.8g}, New T={new_target_update:.8g}, Old SL={current_stop_loss:.8g}, New SL={new_stop_loss_update:.8g}"
@@ -2022,7 +2043,7 @@ def track_signals() -> None:
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.001)) # Ensure a very small profit or keep current stop
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.0005)) # Ensure a very small profit or keep current stop
 
                                          if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
@@ -2336,13 +2357,13 @@ def main_loop() -> None:
                         if symbol_cur.fetchone():
                             continue
 
-                    # b. Fetch historical data
+                    # b. Fetch historical data using the SCALPING timeframe and lookback
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty:
                         continue
 
-                    # c. Apply the strategy and generate signal
-                    strategy = ConservativeTradingStrategy(symbol) # Use the modified strategy
+                    # c. Apply the SCALPING strategy and generate signal
+                    strategy = ScalpingTradingStrategy(symbol) # Use the Scalping strategy
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
                         continue
@@ -2381,7 +2402,8 @@ def main_loop() -> None:
             # 3. Wait before starting the next cycle
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] Scan cycle finished. Signals generated: {signals_generated_in_loop}. Scan duration: {scan_duration:.2f} seconds.")
-            wait_time = max(60, 300 - scan_duration) # Wait 5 minutes total or at least 1 minute
+            # Adjust wait time for scalping (e.g., scan every minute or two)
+            wait_time = max(15, 120 - scan_duration) # Wait 2 minutes total or at least 15 seconds
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f} seconds for the next cycle...")
             time.sleep(wait_time)
 
