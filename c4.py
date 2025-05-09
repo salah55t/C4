@@ -95,6 +95,9 @@ RECENT_EMA_CROSS_LOOKBACK: int = 3 # Check for EMA cross within the last X candl
 MIN_ADX_TREND_STRENGTH: int = 25 # Increased minimum ADX for stronger trend confirmation
 MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles
 OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candles
+
+# --- New Parameter for Dynamic Target/SL Update ---
+TARGET_APPROACH_THRESHOLD_PCT: float = 0.02 # Percentage threshold to consider price "approaching" target (2%)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -1350,7 +1353,7 @@ class ConservativeTradingStrategy:
              logger.warning(f"⚠️ [Strategy {self.symbol}] Cannot determine Bitcoin trend, this condition will be ignored.")
 
 
-        # Extract latest and previous candle data
+        # Extract latest and recent candle data
         last_row = df_processed.iloc[-1]
         # Get the required number of recent rows for momentum checks
         recent_df = df_processed.iloc[-min_signal_data_len:]
@@ -1374,10 +1377,18 @@ class ConservativeTradingStrategy:
         ema_cross_bullish_recent = False
         if len(recent_df) >= RECENT_EMA_CROSS_LOOKBACK + 1:
              # Check for a bullish cross (ema13 crossing above ema34) in the last RECENT_EMA_CROSS_LOOKBACK candles
-             for i in range(1, RECENT_EMA_CROSS_LOOKBACK + 1):
-                  if recent_df['ema_13'].iloc[-i] > recent_df['ema_34'].iloc[-i] and recent_df['ema_13'].iloc[-i-1] <= recent_df['ema_34'].iloc[-i-1]:
-                       ema_cross_bullish_recent = True
-                       break # Found a recent cross, no need to check further back
+             # Ensure no NaN in the relevant slice before checking
+             ema13_slice = recent_df['ema_13'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
+             ema34_slice = recent_df['ema_34'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
+
+             if not ema13_slice.isnull().any() and not ema34_slice.isnull().any():
+                for i in range(1, RECENT_EMA_CROSS_LOOKBACK + 1):
+                     if ema13_slice.iloc[-i] > ema34_slice.iloc[-i] and ema13_slice.iloc[-i-1] <= ema34_slice.iloc[-i-1]:
+                          ema_cross_bullish_recent = True
+                          break # Found a recent cross, no need to check further back
+             else:
+                 logger.debug(f"⚠️ [Strategy {self.symbol}] NaN values in EMA slices for recent cross check.")
+
 
         if not ema_cross_bullish_recent:
             essential_passed = False
@@ -1398,11 +1409,11 @@ class ConservativeTradingStrategy:
 
 
         # MACD condition (Positive histogram or bullish cross) - Remains mandatory
-        if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']):
+        if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
              essential_passed = False
              failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
              detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'Failed: Hist Not Positive AND No Bullish Cross ({detail_macd})'
+             signal_details['MACD'] = f'Failed: Not Positive Hist AND No Bullish Cross ({detail_macd})'
         else:
              detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
              detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
@@ -1411,7 +1422,7 @@ class ConservativeTradingStrategy:
 
 
         # Stronger ADX and DI+ above DI- condition (ADX threshold increased)
-        if not (last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
+        if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
              failed_essential_conditions.append(f'ADX/DI (Strong Trending Bullish, ADX > {MIN_ADX_TREND_STRENGTH})')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
@@ -1502,8 +1513,12 @@ class ConservativeTradingStrategy:
         macd_hist_increasing = False
         if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
              # Check if the last MACD_HIST_INCREASE_CANDLES histogram values are strictly increasing
-             if np.all(np.diff(recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]) > 0):
+             macd_hist_slice = recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]
+             if not macd_hist_slice.isnull().any() and np.all(np.diff(macd_hist_slice) > 0):
                   macd_hist_increasing = True
+             else:
+                 logger.debug(f"⚠️ [Strategy {self.symbol}] NaN values in MACD hist slice for increasing check.")
+
 
         if macd_hist_increasing:
              current_score += self.condition_weights.get('macd_hist_increasing', 0)
@@ -1516,8 +1531,12 @@ class ConservativeTradingStrategy:
         obv_increasing_recent = False
         if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
              # Check if the last OBV_INCREASE_CANDLES values are strictly increasing
-             if np.all(np.diff(recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]) > 0):
+             obv_slice = recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]
+             if not obv_slice.isnull().any() and np.all(np.diff(obv_slice) > 0):
                   obv_increasing_recent = True
+             else:
+                 logger.debug(f"⚠️ [Strategy {self.symbol}] NaN values in OBV slice for increasing check.")
+
 
         if obv_increasing_recent:
              current_score += self.condition_weights.get('obv_increasing_recent', 0)
@@ -1732,6 +1751,9 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     atr_value = details.get('atr_value', 0.0)
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
+    new_target = details.get('new_target', 0.0) # Added for new notification type
+    old_target = details.get('old_target', 0.0) # Added for new notification type
+
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
@@ -1770,6 +1792,17 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
             f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+        )
+    elif notification_type == 'target_and_sl_updated': # New notification type
+        message = (
+            f"🔄 *تم تحديث الهدف ووقف الخسارة بناءً على تحليل جديد (ID: {signal_id})*\n"
+            f"——————————————\n"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
+            f"🎯 **الهدف السابق:** `${old_target:,.8g}`\n"
+            f"🎯 **الهدف الجديد:** `${new_target:,.8g}`\n"
             f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
         )
@@ -1846,7 +1879,7 @@ def track_signals() -> None:
             # Use a cursor with context manager to fetch open signals
             with conn.cursor() as track_cur: # Uses RealDictCursor
                  track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
+                    SELECT id, symbol, entry_price, initial_target, current_target, current_stop_loss,
                            is_trailing_active, last_trailing_update_price
                     FROM signals
                     WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
@@ -1869,7 +1902,7 @@ def track_signals() -> None:
                 try:
                     # Extract and safely convert numeric data
                     entry_price = float(signal_row['entry_price'])
-                    initial_stop_loss = float(signal_row['initial_stop_loss'])
+                    initial_target = float(signal_row['initial_target']) # Keep initial target for reference
                     current_target = float(signal_row['current_target'])
                     current_stop_loss = float(signal_row['current_stop_loss'])
                     is_trailing_active = signal_row['is_trailing_active']
@@ -1888,7 +1921,8 @@ def track_signals() -> None:
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id}
+                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'current_price': current_price}
+
 
                     # --- Check and Update Logic ---
                     # 1. Check for Target Hit
@@ -1911,8 +1945,70 @@ def track_signals() -> None:
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
                         update_executed = True
 
-                    # 3. Check for Trailing Stop Activation or Update (Only if Target or SL not hit)
-                    else:
+                    # 3. Check for Dynamic Target/SL Update (If price is approaching target and not closed yet)
+                    elif current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
+                         logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} approaching target {current_target:.8g} (within {TARGET_APPROACH_THRESHOLD_PCT*100:.1f}%). Analyzing for potential update...")
+
+                         # Fetch recent data for re-analysis
+                         df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
+
+                         if df_recent is not None and not df_recent.empty:
+                              # Calculate indicators on recent data
+                              strategy_tracker = ConservativeTradingStrategy(symbol)
+                              df_indicators_recent = strategy_tracker.populate_indicators(df_recent)
+
+                              if df_indicators_recent is not None:
+                                   # Attempt to generate a new signal based on recent conditions
+                                   potential_new_signal = strategy_tracker.generate_buy_signal(df_indicators_recent)
+
+                                   if potential_new_signal:
+                                        logger.info(f"✨ [Tracker] {symbol}(ID:{signal_id}): New bullish signal detected near target. Calculating new levels...")
+                                        # Calculate new target and stop loss based on current price and ATR from recent data
+                                        current_atr_recent = df_indicators_recent['atr'].iloc[-1]
+
+                                        if pd.notna(current_atr_recent) and current_atr_recent > 0:
+                                             new_target_calc = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_recent)
+                                             # Use TRAILING_STOP_ATR_MULTIPLIER for the new stop loss calculation
+                                             new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent)
+
+                                             # Only update if the new target is higher and new stop loss is higher
+                                             if new_target_calc > current_target and new_stop_loss_calc > current_stop_loss:
+                                                  new_target_update = float(f"{new_target_calc:.8g}")
+                                                  new_stop_loss_update = float(f"{new_stop_loss_calc:.8g}")
+
+                                                  update_query = sql.SQL("""
+                                                       UPDATE signals
+                                                       SET current_target = %s, current_stop_loss = %s,
+                                                           is_trailing_active = TRUE, last_trailing_update_price = %s
+                                                       WHERE id = %s;
+                                                  """)
+                                                  update_params = (new_target_update, new_stop_loss_update, current_price, signal_id)
+
+                                                  log_message = f"🔄✅ [Tracker] {symbol}(ID:{signal_id}): Target/SL updated based on new signal. Price={current_price:.8g}, Old T={current_target:.8g}, New T={new_target_update:.8g}, Old SL={current_stop_loss:.8g}, New SL={new_stop_loss_update:.8g}"
+                                                  notification_details.update({
+                                                      'type': 'target_and_sl_updated',
+                                                      'old_target': current_target,
+                                                      'new_target': new_target_update,
+                                                      'old_stop_loss': current_stop_loss,
+                                                      'new_stop_loss': new_stop_loss_update
+                                                  })
+                                                  update_executed = True
+                                             else:
+                                                  logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated new target ({new_target_calc:.8g}) or stop loss ({new_stop_loss_calc:.8g}) not higher than current levels. No update.")
+                                        else:
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR ({current_atr_recent}) from recent data for update calculation.")
+                                   else:
+                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): No new bullish signal generated from recent data. No target/SL update.")
+                              else:
+                                   logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to populate indicators on recent data for update analysis.")
+                         else:
+                              logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to fetch recent data for update analysis.")
+
+
+                    # 4. Check for Trailing Stop Activation or Update (Only if Target, SL, or Dynamic Update not hit/executed)
+                    # This section remains largely the same, but now runs *after* the dynamic update check.
+                    # It will handle trailing stop movement based on the *current* (potentially updated) stop loss.
+                    if not update_executed: # Only check trailing stop if no other update happened
                         activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
                         # a. Activate Trailing Stop
                         if not is_trailing_active and current_price >= activation_threshold_price:
@@ -1964,6 +2060,7 @@ def track_signals() -> None:
                                          else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val_update}) for update.")
                                     else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for update.")
                                 else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for update.")
+
 
                     # --- Execute Database Update and Send Notification ---
                     if update_executed and update_query:
@@ -2368,4 +2465,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0)
-
