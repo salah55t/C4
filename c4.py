@@ -1658,6 +1658,7 @@ def track_signals() -> None:
                             WHERE id = %s;
                         """)
                         update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
+                        # Safely format variables in log message
                         log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl})
                         update_executed = True
@@ -1673,6 +1674,7 @@ def track_signals() -> None:
                         if not tp3_hit and tp3_price is not None and current_price_val >= tp3_price:
                             update_query = sql.SQL("UPDATE signals SET tp3_hit = TRUE WHERE id = %s;")
                             update_params = (signal_id,)
+                            # Safely format variables in log message
                             log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP3 hit at {current_price_val:.8g} (>= {tp3_price:.8g})."
                             notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثالث', 'target_price': tp3_price})
                             update_executed = True
@@ -1681,6 +1683,7 @@ def track_signals() -> None:
                         elif not tp2_hit and tp2_price is not None and current_price_val >= tp2_price:
                             update_query = sql.SQL("UPDATE signals SET tp2_hit = TRUE WHERE id = %s;")
                             update_params = (signal_id,)
+                            # Safely format variables in log message
                             log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP2 hit at {current_price_val:.8g} (>= {tp2_price:.8g})."
                             notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثاني', 'target_price': tp2_price})
                             update_executed = True
@@ -1696,6 +1699,7 @@ def track_signals() -> None:
                                     WHERE id = %s;
                                 """)
                                 update_params = (new_stop_loss_be, signal_id)
+                                # Safely format variables in log message
                                 log_message = f"🛡️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g} (>= {tp1_price:.8g}). Moving SL to Break-Even ({new_stop_loss_be:.8g})."
                                 notification_details.update({'type': 'tp1_hit_breakeven', 'target_price': tp1_price, 'new_stop_loss': new_stop_loss_be})
                                 update_executed = True
@@ -1704,6 +1708,7 @@ def track_signals() -> None:
                                  # Still mark TP1 as hit, but don't change SL yet
                                  update_query = sql.SQL("UPDATE signals SET tp1_hit = TRUE WHERE id = %s;")
                                  update_params = (signal_id,)
+                                 # Safely format variables in log message
                                  log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g}, but BE SL not higher. Marked TP1 hit."
                                  # No notification needed if SL didn't move
                                  update_executed = True
@@ -1765,10 +1770,12 @@ def track_signals() -> None:
                                 update_params = (new_stop_loss, swing_low_price_to_store, signal_id)
 
                                 if not is_trailing_active:
-                                     log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (SL moved up). New SL={new_stop_loss:.8g}. Old SL={current_stop_loss:.8g}"
+                                     # Safely format variables in log message
+                                     log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (SL moved up). New SL={new_stop_loss:.8g} (Old SL={current_stop_loss:.8g})."
                                      notification_details.update({'type': 'trailing_activated_swing', 'new_stop_loss': new_stop_loss, 'old_stop_loss': current_stop_loss, 'swing_price': swing_low_price_to_store}) # Notify Activation
                                 else:
-                                    log_message = f"➡️ [Tracker] {symbol}(ID:{signal_id}): Trailing Stop Updated (SL moved up). New SL={new_stop_loss:.8g}. Old SL={current_stop_loss:.8g}"
+                                    # Safely format variables in log message
+                                    log_message = f"➡️ [Tracker] {symbol}(ID:{signal_id}): Trailing Stop Updated (SL moved up). New SL={new_stop_loss:.8g} (Old SL={current_stop_loss:.8g})."
                                     notification_details.update({'type': 'trailing_updated_swing', 'new_stop_loss': new_stop_loss, 'old_stop_loss': current_stop_loss, 'swing_price': swing_low_price_to_store}) # Notify Update
 
                                 update_executed = True
@@ -1799,6 +1806,7 @@ def track_signals() -> None:
                                                 WHERE id = %s;
                                             """)
                                             update_params = (potential_new_sl_swing_activation, activating_swing_low_price, last_swing_high_price, signal_id)
+                                            # Safely format variables in log message
                                             log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (Swing High Break). Price={current_price_val:.8g} > High={last_swing_high_price:.8g}. New SL={potential_new_sl_swing_activation:.8g} (Below Low={activating_swing_low_price:.8g})"
                                             notification_details.update({'type': 'trailing_activated_swing', 'current_price': current_price_val, 'swing_price': last_swing_high_price, 'new_stop_loss': potential_new_sl_swing_activation}) # Notify Activation
                                             update_executed = True
@@ -2116,5 +2124,5 @@ if __name__ == "__main__":
         # send_telegram_message(CHAT_ID, "⚠️ Alert: Trading bot is shutting down now.")
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
-        os._exit(0) # Force exit if threads are stuck
+        os._exit(0) # Force exit if threads is stuck
 
