@@ -52,7 +52,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5 # Historical data lookback in days for signal generation
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Increased historical data lookback for better indicator calculation
 SIGNAL_TRACKING_TIMEFRAME: str = '30m' # Timeframe for signal tracking and stop loss updates
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for signal tracking
 
@@ -63,12 +63,10 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 5   # Historical data lookback in days for 
 RSI_PERIOD: int = 14          # RSI Period (Original: 14)
 RSI_OVERSOLD: int = 30        # Oversold threshold (Original: 30) - Slightly increased
 RSI_OVERBOUGHT: int = 70      # Overbought threshold (Original: 70) - Slightly decreased
-# EMA_PERIOD: int = 26          # EMA Period for trend (Commented out)
 EMA_SHORT_PERIOD: int = 13      # Short EMA period (New)
 EMA_LONG_PERIOD: int = 34       # Long EMA period (New)
 VWMA_PERIOD: int = 20           # VWMA Period (New)
 SWING_ORDER: int = 5          # Order for swing point detection
-# ... (Rest of the constants remain the same) ...
 FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.007
 LOOKBACK_FOR_SWINGS: int = 100
@@ -91,6 +89,12 @@ TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # Price increase percentage to 
 # Additional Signal Conditions
 MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
+
+# --- New/Adjusted Parameters for Entry Logic ---
+RECENT_EMA_CROSS_LOOKBACK: int = 3 # Check for EMA cross within the last X candles
+MIN_ADX_TREND_STRENGTH: int = 25 # Increased minimum ADX for stronger trend confirmation
+MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles
+OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candles
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -1190,7 +1194,7 @@ class ConservativeTradingStrategy:
         # Required columns for indicator calculation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume',
-            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
+            'ema_13', 'ema_34', 'vwma',
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
@@ -1200,7 +1204,7 @@ class ConservativeTradingStrategy:
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
             'close',
-            'ema_13', 'ema_34', 'vwma', # Added 'vwma'
+            'ema_13', 'ema_34', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
@@ -1209,39 +1213,32 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
-        # (These conditions contribute to the score but are not mandatory)
-        # Removed 'above_vwap' as VWMA is now mandatory
+        # Weights adjusted to reflect importance in capturing momentum/early entry
         # =====================================================================
         self.condition_weights = {
-            # 'ema_cross_bullish': 2.0, # Now a mandatory condition
-            # 'supertrend_up': 2.0,   # Now a mandatory condition
-            # 'above_vwap': 1.5,      # Price above VWAP (Removed - VWMA is mandatory)
-            # 'macd_positive_or_cross': 1.5, # Now a mandatory condition
-            # 'adx_trending_bullish': 1.0, # Now a mandatory condition
             'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
-            'bullish_candle': 1.0,  # Bullish engulfing or hammer candle present
-            'not_bb_extreme': 0.5,  # Price not at upper Bollinger Band (still useful for some strategies, but lower weight for breakout)
-            'obv_rising': 1.5,       # OBV is rising
-
-            # --- New Breakout Strategy Conditions (some are now mandatory) ---
-            # 'breakout_bb_upper': 3.0, # Now a mandatory condition
-            'rsi_filter_breakout': 1.5, # RSI filter for breakout (optional)
-            'macd_filter_breakout': 1.5 # MACD histogram positive filter for breakout (optional)
-            # ----------------------------------------
+            'bullish_candle': 1.5,  # Increased weight for bullish engulfing or hammer candle
+            'not_bb_extreme': 0.5,  # Price not at upper Bollinger Band
+            'obv_rising': 2.0,       # Increased weight for OBV is rising (momentum confirmation)
+            'rsi_filter_breakout': 1.0, # RSI filter for breakout (optional)
+            'macd_filter_breakout': 1.0, # MACD histogram positive filter for breakout (optional)
+            'macd_hist_increasing': 2.5, # New: MACD histogram is increasing (strong momentum sign)
+            'obv_increasing_recent': 2.0 # New: OBV is increasing over the last few candles
         }
         # =====================================================================
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
-        # Added 'above_vwma' as a mandatory condition
+        # Adjusted mandatory conditions for stricter entry
         # =====================================================================
         self.essential_conditions = [
-            'ema_cross_bullish',
+            'ema_cross_bullish_recent', # Modified: EMA cross must be recent
             'supertrend_up',
             'macd_positive_or_cross',
-            'adx_trending_bullish',
-            'breakout_bb_upper', # Breakout condition added as mandatory
-            'above_vwma' # VWMA condition added as mandatory
+            'adx_trending_bullish_strong', # Modified: ADX must be stronger
+            'above_vwma' # VWMA condition remains mandatory
+            # Removed 'breakout_bb_upper' as a mandatory condition to allow entries before breakout,
+            # but it can still contribute to the optional score or be a separate strategy.
         ]
         # =====================================================================
 
@@ -1250,8 +1247,8 @@ class ConservativeTradingStrategy:
         self.total_possible_score = sum(self.condition_weights.values())
 
         # Required signal score threshold for *optional* conditions (as a percentage)
-        # You might need to adjust this threshold based on the new weights and strategy performance
-        self.min_score_threshold_pct = 0.50 # Example: 50% of optional points (adjustable)
+        # Adjust this threshold based on the new weights and desired strictness
+        self.min_score_threshold_pct = 0.60 # Example: 60% of optional points (adjustable)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
 
@@ -1259,7 +1256,7 @@ class ConservativeTradingStrategy:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating indicators...")
         # Update minimum required rows based on the largest period of used indicators
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5 # Add a small buffer
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 5 # Add a small buffer
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df)} < {min_len_required}) to calculate indicators.")
@@ -1273,12 +1270,12 @@ class ConservativeTradingStrategy:
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
 
             # --- EMA Calculation ---
-            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD) # Add EMA 13
-            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD) # Add EMA 34
+            df_calc['ema_13'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
+            df_calc['ema_34'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
             # ----------------------
 
             # --- VWMA Calculation ---
-            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD) # Calculate VWMA
+            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
             # ----------------------
 
             # Rest of the indicators
@@ -1325,15 +1322,18 @@ class ConservativeTradingStrategy:
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
+        Modified to focus on capturing early momentum and confirming bullish strength.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
         # Check DataFrame and columns
-        if df_processed is None or df_processed.empty or len(df_processed) < 2:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<2), cannot generate signal.")
+        # Ensure enough data for lookback periods for momentum checks
+        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 1
+        if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<{min_signal_data_len}), cannot generate signal.")
             return None
-        # Add required columns for breakout if not already present
-        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist', 'vwma'])) # Added 'vwma'
+
+        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
         missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
         if missing_cols:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}.")
@@ -1352,18 +1352,14 @@ class ConservativeTradingStrategy:
 
         # Extract latest and previous candle data
         last_row = df_processed.iloc[-1]
-        prev_row = df_processed.iloc[-2]
+        # Get the required number of recent rows for momentum checks
+        recent_df = df_processed.iloc[-min_signal_data_len:]
 
-        # Check for NaN in essential columns required for the signal
-        last_row_check = last_row[required_cols_with_breakout]
-        if last_row_check.isnull().any():
-            nan_cols = last_row_check[last_row_check.isnull()].index.tolist()
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Last row contains NaN in required signal columns: {nan_cols}. Cannot generate signal.")
-            return None
-        # Check previous OBV separately
-        if pd.isna(prev_row['obv']):
-           logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN. Cannot check OBV direction.")
-           # Can continue but OBV points won't be added
+        # Check for NaN in essential columns required for the signal in recent data
+        if recent_df[required_cols_with_breakout].isnull().values.any():
+             logger.warning(f"⚠️ [Strategy {self.symbol}] Recent data contains NaN in required signal columns. Cannot generate signal.")
+             return None
+
 
         # =====================================================================
         # --- Check Mandatory Conditions First ---
@@ -1373,13 +1369,23 @@ class ConservativeTradingStrategy:
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
-        # Positive EMA Cross condition
-        if not (last_row['ema_13'] > last_row['ema_34']):
+        # Positive EMA Cross condition (Must be recent)
+        # Check if EMA13 was below EMA34 and is now above within the lookback period
+        ema_cross_bullish_recent = False
+        if len(recent_df) >= RECENT_EMA_CROSS_LOOKBACK + 1:
+             # Check for a bullish cross (ema13 crossing above ema34) in the last RECENT_EMA_CROSS_LOOKBACK candles
+             for i in range(1, RECENT_EMA_CROSS_LOOKBACK + 1):
+                  if recent_df['ema_13'].iloc[-i] > recent_df['ema_34'].iloc[-i] and recent_df['ema_13'].iloc[-i-1] <= recent_df['ema_34'].iloc[-i-1]:
+                       ema_cross_bullish_recent = True
+                       break # Found a recent cross, no need to check further back
+
+        if not ema_cross_bullish_recent:
             essential_passed = False
-            failed_essential_conditions.append('EMA Cross (Bullish)')
-            signal_details['EMA_Cross'] = f'Failed: EMA(13) <= EMA(34)'
+            failed_essential_conditions.append(f'Recent EMA Cross (Bullish) in last {RECENT_EMA_CROSS_LOOKBACK} candles')
+            signal_details['EMA_Cross'] = f'Failed: No recent bullish cross in last {RECENT_EMA_CROSS_LOOKBACK} candles'
         else:
-             signal_details['EMA_Cross'] = f'Passed: EMA(13) > EMA(34)'
+             signal_details['EMA_Cross'] = f'Passed: Recent bullish cross detected'
+
 
         # SuperTrend condition: Price closes above SuperTrend and SuperTrend trend is up
         if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
@@ -1391,7 +1397,7 @@ class ConservativeTradingStrategy:
             signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
 
 
-        # MACD condition (Positive histogram or bullish cross)
+        # MACD condition (Positive histogram or bullish cross) - Remains mandatory
         if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']):
              essential_passed = False
              failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
@@ -1404,25 +1410,16 @@ class ConservativeTradingStrategy:
              signal_details['MACD'] = f'Passed: {detail_macd}'
 
 
-        # Strong ADX and DI+ above DI- condition
-        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']):
+        # Stronger ADX and DI+ above DI- condition (ADX threshold increased)
+        if not (last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
-             failed_essential_conditions.append('ADX/DI (Trending Bullish)')
+             failed_essential_conditions.append(f'ADX/DI (Strong Trending Bullish, ADX > {MIN_ADX_TREND_STRENGTH})')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-             signal_details['ADX/DI'] = f'Failed: Not Trending Bullish (ADX <= 20 or DI+ <= DI-) ({detail_adx})'
+             signal_details['ADX/DI'] = f'Failed: Not Strong Trending Bullish (ADX <= {MIN_ADX_TREND_STRENGTH} or DI+ <= DI-) ({detail_adx})'
         else:
-             signal_details['ADX/DI'] = f'Passed: Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
+             signal_details['ADX/DI'] = f'Passed: Strong Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
-        # Breakout condition: Price closes above the upper Bollinger Band
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']):
-             essential_passed = False
-             failed_essential_conditions.append('Breakout (Closed Above BB Upper)')
-             detail_bb = f'Close:{last_row.get("close", np.nan):.4f}, BB Upper:{last_row.get("bb_upper", np.nan):.4f}'
-             signal_details['Breakout_BB'] = f'Failed: Not Closed Above BB Upper ({detail_bb})'
-        else:
-             signal_details['Breakout_BB'] = f'Passed: Closed Above BB Upper'
-
-        # VWMA condition: Price closes above the VWMA
+        # VWMA condition: Price closes above the VWMA - Remains mandatory
         if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']):
              essential_passed = False
              failed_essential_conditions.append('Above VWMA')
@@ -1442,50 +1439,49 @@ class ConservativeTradingStrategy:
 
         # =====================================================================
         # --- Calculate Score for Optional Conditions (if mandatory passed) ---
+        # These conditions add points to confirm momentum and refine entry
         # =====================================================================
         current_score = 0.0
 
         # Price above VWAP (Original VWAP, daily reset) - Still optional
-        if last_row['close'] > last_row['vwap']:
-            current_score += self.condition_weights.get('above_vwap', 0) # Use .get with default 0 in case weight was removed
+        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
+            current_score += self.condition_weights.get('above_vwap', 0)
             signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap", 0)})'
         else:
              signal_details['VWAP_Daily'] = f'Below Daily VWAP (0)'
 
 
         # RSI in acceptable zone (not extreme overbought)
-        if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
+        if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights.get('rsi_ok', 0)
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
              signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
 
 
-        # Bullish engulfing or hammer candle present
-        if last_row['BullishCandleSignal'] == 1:
+        # Bullish engulfing or hammer candle present (Increased weight)
+        if last_row.get('BullishCandleSignal', 0) == 1:
             current_score += self.condition_weights.get('bullish_candle', 0)
             signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
         else:
              signal_details['Candle'] = f'No Bullish Pattern (0)'
 
 
-        # Price not at upper Bollinger Band (this condition might conflict with breakout, hence lower weight)
-        # This condition is only applied if there wasn't a clear breakout above the upper band (this is no longer mandatory)
-        if last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
+        # Price not at upper Bollinger Band (still useful for some strategies)
+        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
              current_score += self.condition_weights.get('not_bb_extreme', 0)
              signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
              signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
 
 
-        # OBV is rising
+        # OBV is rising (Increased weight)
         # Check OBV only if the previous value is valid
-        if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']:
+        if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']:
             current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
+            signal_details['OBV_Last'] = f'Rising on last candle (+{self.condition_weights.get("obv_rising", 0)})'
         else:
-             signal_details['OBV'] = f'Not Rising (0)'
-
+             signal_details['OBV_Last'] = f'Not Rising on last candle (0)'
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
         if pd.notna(last_row['rsi']) and last_row['rsi'] >= 55 and last_row['rsi'] <= 75:
@@ -1501,6 +1497,33 @@ class ConservativeTradingStrategy:
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else:
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
+
+        # New: MACD histogram is increasing over the last X candles (strong momentum)
+        macd_hist_increasing = False
+        if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
+             # Check if the last MACD_HIST_INCREASE_CANDLES histogram values are strictly increasing
+             if np.all(np.diff(recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]) > 0):
+                  macd_hist_increasing = True
+
+        if macd_hist_increasing:
+             current_score += self.condition_weights.get('macd_hist_increasing', 0)
+             signal_details['MACD_Hist_Increasing'] = f'MACD Hist increasing over last {MACD_HIST_INCREASE_CANDLES} candles (+{self.condition_weights.get("macd_hist_increasing", 0)})'
+        else:
+             signal_details['MACD_Hist_Increasing'] = f'MACD Hist not increasing over last {MACD_HIST_INCREASE_CANDLES} candles (0)'
+
+
+        # New: OBV is increasing over the last X candles (volume confirmation of momentum)
+        obv_increasing_recent = False
+        if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
+             # Check if the last OBV_INCREASE_CANDLES values are strictly increasing
+             if np.all(np.diff(recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]) > 0):
+                  obv_increasing_recent = True
+
+        if obv_increasing_recent:
+             current_score += self.condition_weights.get('obv_increasing_recent', 0)
+             signal_details['OBV_Increasing_Recent'] = f'OBV increasing over last {OBV_INCREASE_CANDLES} candles (+{self.condition_weights.get("obv_increasing_recent", 0)})'
+        else:
+             signal_details['OBV_Increasing_Recent'] = f'OBV not increasing over last {OBV_INCREASE_CANDLES} candles (0)'
 
         # ------------------------------------------
 
@@ -1564,7 +1587,7 @@ class ConservativeTradingStrategy:
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Breakout_Filtered_Strict_VWMA', # Change strategy name to reflect modification
+            'strategy_name': 'Momentum_Breakout_Filtered', # Changed strategy name
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
@@ -1660,12 +1683,22 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - تقاطع المتوسطات الأسيّة: {'تم ✅' if 'Passed' in signal_details.get('EMA_Cross', '') else 'فشل ❌'}\n"
+            f"  - تقاطع المتوسطات الأسيّة (حديث): {'تم ✅' if 'Passed: Recent' in signal_details.get('EMA_Cross', '') else 'فشل ❌'}\n" # Updated text
             f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
             f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
             f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
-            f"  - الاختراق: {'إغلاق فوق الحد العلوي لبولينجر ✅' if 'Passed' in signal_details.get('Breakout_BB', '') else 'لم يغلق فوق الحد العلوي ❌'}\n"
-            f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n" # Added VWMA mandatory check
+             f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n"
+            f"——————————————\n"
+            f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
+            f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
+            f"  - مؤشر القوة النسبية (RSI): {signal_details.get('RSI_Basic', 'N/A')}\n"
+            f"  - نمط شمعة صعودي: {signal_details.get('Candle', 'N/A')}\n"
+            f"  - ليس عند الحد العلوي لبولينجر: {signal_details.get('Bollinger_Basic', 'N/A')}\n"
+            f"  - حجم التوازن (OBV) يرتفع: {signal_details.get('OBV_Last', 'N/A')}\n"
+            f"  - فلتر RSI للاختراق: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
+            f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
+            f"  - هيستوجرام MACD يتزايد: {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n" # Added
+            f"  - حجم التوازن (OBV) يتزايد مؤخراً: {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n" # Added
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -2335,3 +2368,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0)
+
