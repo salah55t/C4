@@ -6,41 +6,41 @@ import requests
 import numpy as np
 import pandas as pd
 import psycopg2
-from psycopg2 import sql, OperationalError, InterfaceError # For safe queries and specific errors
-from psycopg2.extras import RealDictCursor # To get results as dictionaries
+from psycopg2 import sql, OperationalError, InterfaceError # لاستخدام استعلامات آمنة وأخطاء محددة
+from psycopg2.extras import RealDictCursor # للحصول على النتائج كقواميس
 from binance.client import Client
 from binance import ThreadedWebsocketManager
-from binance.exceptions import BinanceAPIException, BinanceRequestException # Specific Binance errors
+from binance.exceptions import BinanceAPIException, BinanceRequestException # أخطاء Binance المحددة
 from flask import Flask, request, Response
 from threading import Thread
 from datetime import datetime, timedelta
 from decouple import config
-from typing import List, Dict, Optional, Tuple, Any, Union # For Type Hinting
+from typing import List, Dict, Optional, Tuple, Any, Union # لإضافة Type Hinting
 
-# ---------------------- Logging Setup ----------------------
+# ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Add logger name
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # إضافة اسم المسجل
     handlers=[
         logging.FileHandler('crypto_bot_dynamic_tracking.log', encoding='utf-8'), # Changed log file name
         logging.StreamHandler()
     ]
 )
-# Use a specific logger name instead of the root
+# استخدام اسم محدد للمسجل بدلاً من الجذر
 logger = logging.getLogger('CryptoBotDynamic') # Changed logger name slightly
 
-# ---------------------- Load Environment Variables ----------------------
+# ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
-    # Use a default value of None if the variable is not set
+    # استخدام قيمة افتراضية None إذا لم يكن المتغير موجودًا
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
      logger.critical(f"❌ Failed to load essential environment variables: {e}")
-     exit(1) # Use a non-zero exit code to indicate an error
+     exit(1) # استخدام رمز خروج غير صفري للإشارة إلى خطأ
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
 logger.info(f"Telegram Token: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
@@ -48,7 +48,7 @@ logger.info(f"Telegram Chat ID: {CHAT_ID}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 
-# ---------------------- Constants and Global Variables ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT
 MAX_OPEN_TRADES: int = 4          # Maximum number of open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '30m' # Timeframe for signal generation
@@ -71,19 +71,8 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Fibonacci levels for en
 FIB_TOLERANCE: float = 0.007 # Tolerance for checking price near Fib level (0.7%)
 LOOKBACK_FOR_SWINGS: int = 100 # How many candles back to look for swing points for Fib calculation
 ENTRY_ATR_PERIOD: int = 14     # ATR Period for entry and initial SL/TP
-
-# --- Adjusted ATR Multipliers for Scalping ---
-# تم تعديل مضاعفات ATR لجعل وقف الخسارة والأهداف أقرب لسعر الدخول، مناسب للسكالبينج
-# Reduced from 3.0 -> 1.5 (مثال: تقليل المخاطرة الأولية)
-ENTRY_ATR_MULTIPLIER: float = 1.5
-# Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
-# Adjusted for tighter range. Ensure TP1_ATR_MULTIPLIER / ENTRY_ATR_MULTIPLIER >= MIN_RR_RATIO
-# Example: 2.5 / 1.5 = 1.67 (أكبر من 1.5)
-TP1_ATR_MULTIPLIER: float = 2.5 # Increased from 3.0 - Used for R:R calc and BE trigger
-TP2_ATR_MULTIPLIER: float = 4.0 # Increased from 4.5
-TP3_ATR_MULTIPLIER: float = 5.5 # Increased from 6.0
-# ---------------------------------------------
-
+ENTRY_ATR_MULTIPLIER: float = 3.5 # ATR Multiplier for initial target/stop
+TP1_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for the first Take Profit level (for Break-Even trigger)
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation
 MACD_FAST: int = 12            # MACD Fast Period
@@ -94,16 +83,15 @@ SUPERTREND_PERIOD: int = 10     # SuperTrend Period
 SUPERTREND_MULTIPLIER: float = 3.0 # SuperTrend Multiplier
 
 # --- Dynamic Trailing Stop (Market Structure Based) ---
-# تم تقليل الهامش تحت القاع لجعله أكثر إحكاماً للسكالبينج
-SWING_SL_BUFFER_PCT: float = 0.001 # Percentage buffer below swing low for SL (0.1%) - Reduced from 0.2%
+# TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.015 # (Commented out - using swing high break)
+# TRAILING_STOP_ATR_MULTIPLIER: float = 2.5        # (Commented out - using swing low)
+# TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.001  # (Commented out - using swing low update)
+SWING_SL_BUFFER_PCT: float = 0.002 # Percentage buffer below swing low for SL (0.2%)
 # ------------------------------------------------------
 
 # Additional Signal Conditions
-# MIN_PROFIT_MARGIN_PCT check will now use TP1 price (calculated with TP1_ATR_MULTIPLIER)
-MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP (based on TP1)
+MIN_PROFIT_MARGIN_PCT: float = 2 # Minimum required profit margin percentage for initial TP
 MIN_VOLUME_15M_USDT: float = 180000.0 # Minimum liquidity in the last 15 minutes in USDT
-MIN_RR_RATIO: float = 1.5 # Minimum Risk:Reward ratio required for a signal (New)
-MAX_INITIAL_LOSS_PCT: float = 10.0 # Maximum allowed initial loss percentage based on initial SL (New)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -115,6 +103,7 @@ client: Optional[Client] = None
 ticker_data: Dict[str, float] = {} # Dictionary to store the latest closing prices for symbols
 
 # ---------------------- Binance Client Setup ----------------------
+# (No changes needed here)
 try:
     logger.info("ℹ️ [Binance] Initializing Binance client...")
     client = Client(API_KEY, API_SECRET)
@@ -132,6 +121,7 @@ except Exception as e:
     exit(1)
 
 # ---------------------- Additional Indicator Functions ----------------------
+# (No changes needed in get_fear_greed_index, fetch_historical_data, calculate_ema, calculate_vwma, get_btc_trend_4h)
 def get_fear_greed_index() -> str:
     """Fetches the Fear & Greed Index from alternative.me and translates classification to Arabic."""
     classification_translation_ar = {
@@ -174,7 +164,7 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
                 '1d': 1440, '3d': 4320, '1w': 10080, '1M': 43200 # Approximate
             }.get(interval, 60)
             start_dt = datetime.utcnow() - timedelta(minutes=(limit * interval_duration_minutes * 1.1)) # Add 10% buffer
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} (Limit Override: {limit})...")
         else:
             # Calculate start time based on days and interval (approximate number of candles)
@@ -187,10 +177,10 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
             # Calculate approximate number of candles needed, add buffer
             candles_needed = int((days * 24 * 60) / interval_duration_minutes)
             # Ensure enough for swings, max 1000 unless overridden
-            limit = min(max(candles_needed + 50, LOOKBACK_FOR_SWINGS + SWING_ORDER * 2 + 50), 1000) # Ensure enough for swing detection
+            limit = min(max(candles_needed + 50, LOOKBACK_FOR_SWINGS + 50), 1000)
 
             start_dt = datetime.utcnow() - timedelta(minutes=(limit * interval_duration_minutes))
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} since {start_str} (limit {limit} candles)...")
 
 
@@ -225,9 +215,6 @@ def fetch_historical_data(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRA
         if df.empty:
             logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after removing essential NaNs.")
             return None
-
-        # Ensure index is sorted chronologically
-        df = df.sort_index()
 
         logger.debug(f"✅ [Data] Fetched and processed {len(df)} historical candles ({interval}) for {symbol}.")
         return df
@@ -297,7 +284,7 @@ def get_btc_trend_4h() -> str:
 
 # ---------------------- Database Connection Setup ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    """ Initializes database connection and creates/updates tables if they don't exist. """
+    """Initializes database connection and creates/updates tables if they don't exist."""
     global conn, cur
     logger.info("[DB] Starting database initialization...")
     for attempt in range(retries):
@@ -310,19 +297,20 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
 
             # --- Create or update signals table ---
             logger.info("[DB] Checking/Creating 'signals' table...")
-            # Added columns for TP2, TP3, and R:R ratio
+            # Note: Added placeholders for new columns needed for dynamic tracking.
+            #       These columns should be added manually to the database.
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
-                    initial_target DOUBLE PRECISION NOT NULL, -- Original target based on entry ATR (Kept for historical compatibility, but TP1 is now primary)
-                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- Original SL based on entry ATR or Swing
+                    initial_target DOUBLE PRECISION NOT NULL, -- Original target based on entry ATR
+                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- Original SL based on entry ATR
                     current_target DOUBLE PRECISION NOT NULL, -- Might become dynamic or less relevant
                     current_stop_loss DOUBLE PRECISION NOT NULL, -- This will be updated dynamically
                     r2_score DOUBLE PRECISION, -- Weighted signal score
                     volume_15m DOUBLE PRECISION,
-                    achieved_target BOOLEAN DEFAULT FALSE, -- Flag if the primary target (e.g., TP1) was hit - Renamed to tp1_hit
+                    achieved_target BOOLEAN DEFAULT FALSE, -- Flag if the primary target (e.g., TP1) was hit
                     hit_stop_loss BOOLEAN DEFAULT FALSE, -- Flag if the final stop loss was hit
                     closing_price DOUBLE PRECISION, -- Price at which the trade was fully closed
                     closed_at TIMESTAMP, -- Timestamp when the trade was fully closed
@@ -334,19 +322,21 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     signal_details JSONB,
                     last_trailing_update_price DOUBLE PRECISION, -- Price when SL was last updated (used for ATR trailing, less relevant for swing)
 
-                    -- === COLUMNS FOR DYNAMIC TRACKING & PARTIAL PROFITS ===
+                    -- === NEW COLUMNS FOR DYNAMIC TRACKING (ADD MANUALLY TO DB) ===
+                    -- ALTER TABLE signals ADD COLUMN tp1_price DOUBLE PRECISION;
+                    -- ALTER TABLE signals ADD COLUMN tp1_hit BOOLEAN DEFAULT FALSE;
+                    -- ALTER TABLE signals ADD COLUMN stop_loss_at_breakeven BOOLEAN DEFAULT FALSE;
+                    -- ALTER TABLE signals ADD COLUMN last_swing_low_price DOUBLE PRECISION; -- Stores the price of the swing low defining the current SL
+                    -- ALTER TABLE signals ADD COLUMN last_swing_high_price DOUBLE PRECISION; -- Stores the price of the swing high used for activation/last update
+                    -- ALTER TABLE signals ADD COLUMN initial_atr DOUBLE PRECISION; -- Store ATR at entry for reference
+                    -- ============================================================
+
                     tp1_price DOUBLE PRECISION, -- Price for the first take profit (triggers break-even)
                     tp1_hit BOOLEAN DEFAULT FALSE,
-                    tp2_price DOUBLE PRECISION, -- Price for the second take profit
-                    tp2_hit BOOLEAN DEFAULT FALSE,
-                    tp3_price DOUBLE PRECISION, -- Price for the third take profit
-                    tp3_hit BOOLEAN DEFAULT FALSE,
                     stop_loss_at_breakeven BOOLEAN DEFAULT FALSE,
-                    last_swing_low_price DOUBLE PRECISION, -- Stores the price of the swing low defining the current SL
-                    last_swing_high_price DOUBLE PRECISION, -- Stores the price of the swing high used for initial activation
-                    initial_atr DOUBLE PRECISION, -- Store ATR at entry for reference
-                    risk_reward_ratio DOUBLE PRECISION -- Store R:R ratio (New)
-                    -- ============================================================
+                    last_swing_low_price DOUBLE PRECISION,
+                    last_swing_high_price DOUBLE PRECISION,
+                    initial_atr DOUBLE PRECISION
                 );""")
             conn.commit()
             logger.info("✅ [DB] 'signals' table exists or was created.")
@@ -356,15 +346,13 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             required_columns = {
                 "symbol", "entry_price", "initial_target", "initial_stop_loss",
                 "current_target", "current_stop_loss", "r2_score", "volume_15m",
-                # "achieved_target", # Replaced by tp1_hit
-                "hit_stop_loss", "closing_price", "closed_at",
+                "achieved_target", "hit_stop_loss", "closing_price", "closed_at",
                 "sent_at", "profit_percentage", "profitable_stop_loss",
                 "is_trailing_active", "strategy_name", "signal_details",
                 "last_trailing_update_price",
                 # Add new columns here for the check
-                "tp1_price", "tp1_hit", "tp2_price", "tp2_hit", "tp3_price", "tp3_hit",
-                "stop_loss_at_breakeven", "last_swing_low_price",
-                "last_swing_high_price", "initial_atr", "risk_reward_ratio"
+                "tp1_price", "tp1_hit", "stop_loss_at_breakeven", "last_swing_low_price",
+                "last_swing_high_price", "initial_atr"
             }
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
@@ -375,17 +363,12 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 # Example commands (execute these manually via psql or a DB tool):
                 # ALTER TABLE signals ADD COLUMN tp1_price DOUBLE PRECISION;
                 # ALTER TABLE signals ADD COLUMN tp1_hit BOOLEAN DEFAULT FALSE;
-                # ALTER TABLE signals ADD COLUMN tp2_price DOUBLE PRECISION;
-                # ALTER TABLE signals ADD COLUMN tp2_hit BOOLEISION DEFAULT FALSE;
-                # ALTER TABLE signals ADD COLUMN tp3_price DOUBLE PRECISION;
-                # ALTER TABLE signals ADD COLUMN tp3_hit BOOLEAN DEFAULT FALSE;
                 # ALTER TABLE signals ADD COLUMN stop_loss_at_breakeven BOOLEAN DEFAULT FALSE;
                 # ALTER TABLE signals ADD COLUMN last_swing_low_price DOUBLE PRECISION;
                 # ALTER TABLE signals ADD COLUMN last_swing_high_price DOUBLE PRECISION;
                 # ALTER TABLE signals ADD COLUMN initial_atr DOUBLE PRECISION;
-                # ALTER TABLE signals ADD COLUMN risk_reward_ratio DOUBLE PRECISION;
             else:
-                logger.info("✅ [DB] All required columns (including dynamic tracking and partial profits) exist in 'signals' table.")
+                logger.info("✅ [DB] All required columns (including dynamic tracking) exist in 'signals' table.")
 
             # --- Create market_dominance table (if it doesn't exist) ---
             logger.info("[DB] Checking/Creating 'market_dominance' table...")
@@ -481,37 +464,81 @@ def convert_np_values(obj: Any) -> Any:
     else:
         return obj
 
-# ---------------------- Fetching and Validating Symbols from Binance ----------------------
-def get_crypto_symbols_from_binance() -> List[str]:
+# ---------------------- Reading and Validating Symbols List ----------------------
+# (No changes needed here)
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     """
-    Fetches all valid USDT Spot trading pairs directly from Binance API.
-    Replaces reading from a local file.
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
     """
-    if not client:
-        logger.error("❌ [Data] Binance client not initialized. Cannot fetch symbols from API.")
-        return [] # Return empty list if client is not available
-
-    logger.info("ℹ️ [Data] Fetching valid USDT Spot trading symbols from Binance API...")
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] Reading symbols list from file '{filename}'...")
     try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename) # Try current path if not next to script
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
+                 return [] # Return empty list if file not found
+            else:
+                 logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols))) # Remove duplicates and sort
+        logger.info(f"ℹ️ [Data] Read {len(raw_symbols)} initial symbols from '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] File '{filename}' not found.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] Initial symbols list is empty.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] Binance client not initialized. Cannot validate symbols.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] Validating symbols and trading status from Binance API...")
         exchange_info = client.get_exchange_info()
-        valid_trading_usdt_symbols = sorted([
+        valid_trading_usdt_symbols = {
             s['symbol'] for s in exchange_info['symbols']
             if s.get('quoteAsset') == 'USDT' and
                s.get('status') == 'TRADING' and
                s.get('isSpotTradingAllowed') is True
-        ])
+        }
+        logger.info(f"ℹ️ [Data Validation] Found {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs on Binance.")
 
-        logger.info(f"✅ [Data] Fetched {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs from Binance.")
-        return valid_trading_usdt_symbols
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] Removed {removed_count} invalid or unavailable USDT Spot trading symbols from the list: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] Symbols validated. Using {len(validated_symbols)} valid symbols.")
+        return validated_symbols
 
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data] Binance API or network error while fetching symbols: {binance_err}")
-         return []
+         logger.error(f"❌ [Data Validation] Binance API or network error while validating symbols: {binance_err}")
+         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
+         return raw_symbols
     except Exception as api_err:
-         logger.error(f"❌ [Data] Unexpected error while fetching Binance symbols: {api_err}", exc_info=True)
-         return []
+         logger.error(f"❌ [Data Validation] Unexpected error while validating Binance symbols: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
+         return raw_symbols
+
 
 # ---------------------- WebSocket Management for Ticker Prices ----------------------
+# (No changes needed here)
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     """Handles incoming WebSocket messages for mini-ticker prices."""
     global ticker_data
@@ -559,6 +586,8 @@ def run_ticker_socket_manager() -> None:
         time.sleep(15)
 
 # ---------------------- Technical Indicator Functions ----------------------
+# (No changes needed in most indicator functions: RSI, ATR, BB, MACD, ADX, VWAP, OBV, SuperTrend, Candlesticks)
+# --- Make sure `calculate_atr_indicator` uses the correct period ---
 def calculate_atr_indicator(df: pd.DataFrame, period: int) -> pd.DataFrame: # Added period parameter type hint
     """Calculates Average True Range (ATR). Uses the provided period."""
     df = df.copy()
@@ -571,6 +600,7 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int) -> pd.DataFrame: # Ad
         logger.warning(f"⚠️ [Indicator ATR period={period}] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
         df['atr'] = np.nan
         return df
+
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
@@ -579,6 +609,7 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int) -> pd.DataFrame: # Ad
     df['atr'] = tr.ewm(span=period, adjust=False).mean()
     return df
 
+# (Other indicator functions remain the same as in the previous version)
 def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
     """Calculates Relative Strength Index (RSI)."""
     df = df.copy()
@@ -655,12 +686,10 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
     df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    # Corrected typo: df_move should be df_calc
     df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
     alpha = 1 / period
     df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
-    # Corrected typo: df_move should be df_calc
     df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
     df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
@@ -719,8 +748,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     if not all(col in df_st.columns for col in required_cols) or df_st[required_cols].isnull().all().any():
         logger.warning("⚠️ [Indicator SuperTrend] Required columns missing or empty.")
         df_st['supertrend'] = np.nan; df_st['supertrend_trend'] = 0; return df_st
-    # Ensure ATR is calculated for the SuperTrend period
-    if 'atr' not in df_st.columns or df_st['atr'].isnull().all() or calculate_atr_indicator(df_st, period)['atr'].isnull().all():
+    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
         logger.debug(f"ℹ️ [Indicator SuperTrend] Calculating ATR (period={period}) for SuperTrend...")
         df_st = calculate_atr_indicator(df_st, period=period) # Use the correct ATR period
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
@@ -749,14 +777,17 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
             if close[i] >= final_lb[i]: st[i] = final_lb[i]; st_trend[i] = 1
             else: st[i] = final_ub[i]; st_trend[i] = -1
         else:
-             if close[i] > final_ub[i]: st[i] = basic_lb[i]; st_trend[i] = 1
-             elif close[i] < basic_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
-             else: st[i] = np.nan; st_trend[i] = 0
+             if close[i] > final_ub[i]: st[i] = final_lb[i]; st_trend[i] = 1
+             elif close[i] < final_lb[i]: st[i] = final_ub[i]; st_trend[i] = -1
+             else:
+                  if close[i] > basic_ub[i]: st[i] = basic_lb[i]; st_trend[i] = 1
+                  elif close[i] < basic_lb[i]: st[i] = basic_ub[i]; st_trend[i] = -1
+                  else: st[i] = np.nan; st_trend[i] = 0
     df_st['final_ub'] = final_ub; df_st['final_lb'] = final_lb; df_st['supertrend'] = st; df_st['supertrend_trend'] = st_trend
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
     return df_st
 
-# --- Candlestick Pattern Functions ---
+# --- Candlestick Pattern Functions (No changes needed) ---
 def is_hammer(row: pd.Series) -> int:
     o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
     if pd.isna([o, h, l, c]).any(): return 0
@@ -817,7 +848,6 @@ def detect_swings(prices: pd.Series, order: int = SWING_ORDER) -> List[Tuple[Any
     Handles potential NaNs.
     """
     n = len(prices)
-    # Need at least order candles before and after the center candle
     if n < 2 * order + 1:
         return []
 
@@ -825,7 +855,6 @@ def detect_swings(prices: pd.Series, order: int = SWING_ORDER) -> List[Tuple[Any
     indices = prices.index
     swings = []
 
-    # Iterate through the series, excluding the first and last 'order' candles
     for i in range(order, n - order):
         window = price_values[i - order : i + order + 1]
         center_val = price_values[i]
@@ -834,27 +863,33 @@ def detect_swings(prices: pd.Series, order: int = SWING_ORDER) -> List[Tuple[Any
         if pd.isna(center_val) or np.isnan(window).any():
             continue
 
-        # Check if the center value is the max or min in the window
         is_max = np.all(center_val >= window)
         is_min = np.all(center_val <= window)
 
-        # To avoid duplicates on flat lines, check if the center value is unique in the window
-        is_unique_max = is_max and (np.sum(np.isclose(window, center_val, atol=1e-9)) == 1) # Use atol for float comparison
-        is_unique_min = is_min and (np.sum(np.isclose(window, center_val, atol=1e-9)) == 1) # Use atol for float comparison
+        # Ensure it's a strict peak/trough within the window to avoid duplicates on flat lines
+        # Check if the center value is strictly greater/less than its neighbors if it's a max/min
+        is_strict_peak = is_max and (center_val > price_values[i-1] or center_val > price_values[i+1])
+        is_strict_trough = is_min and (center_val < price_values[i-1] or center_val < price_values[i+1])
 
+        # Check for uniqueness (only one max/min in the window) - less strict than strict peak/trough
+        is_unique_max = is_max and (np.sum(np.isclose(window, center_val)) == 1)
+        is_unique_min = is_min and (np.sum(np.isclose(window, center_val)) == 1)
+
+        # Use unique check, it's generally sufficient and less prone to float issues
         if is_unique_max or is_unique_min:
+            # Optional: Add check to ensure swings are reasonably spaced if needed
+            # if not swings or abs(indices.get_loc(indices[i]) - indices.get_loc(swings[-1][0])) > order:
              swings.append((indices[i], center_val))
 
-    # Ensure swings are sorted by index (time)
+    # Sort by index just in case
     swings.sort(key=lambda x: x[0])
     return swings
 
 
 def find_relevant_swing_points(df_history: pd.DataFrame, current_index: Any) -> Tuple[Optional[Tuple[Any, float]], Optional[Tuple[Any, float]]]:
     """
-    Finds the most recent significant swing low and swing high before or at the current index.
+    Finds the most recent significant swing low and swing high before the current index.
     Used for Fibonacci calculation and dynamic SL placement.
-    Returns (last_swing_low, last_swing_high) as tuples (index, price).
     """
     if df_history is None or df_history.empty or len(df_history) < 2 * SWING_ORDER + 1:
         return None, None
@@ -862,44 +897,43 @@ def find_relevant_swing_points(df_history: pd.DataFrame, current_index: Any) -> 
     # Ensure data is sorted by time
     df_history = df_history.sort_index()
 
-    # Detect swings on high and low prices within the lookback period up to the current index
-    # Filter data up to and including the current index
-    df_relevant = df_history.loc[df_history.index <= current_index].copy()
+    # Detect swings on high and low prices within the lookback period
+    all_high_swings = detect_swings(df_history['high'], order=SWING_ORDER)
+    all_low_swings = detect_swings(df_history['low'], order=SWING_ORDER)
 
-    if df_relevant.empty or len(df_relevant) < 2 * SWING_ORDER + 1:
-         return None, None
+    # Filter swings that occurred before the current index (or the latest index in history if current_index is beyond)
+    relevant_high_swings = [s for s in all_high_swings if s[0] < current_index]
+    relevant_low_swings = [s for s in all_low_swings if s[0] < current_index]
 
-    all_high_swings = detect_swings(df_relevant['high'], order=SWING_ORDER)
-    all_low_swings = detect_swings(df_relevant['low'], order=SWING_ORDER)
+    if not relevant_high_swings or not relevant_low_swings:
+        return None, None
 
-    last_swing_high = max(all_high_swings, key=lambda item: item[0]) if all_high_swings else None
-    last_swing_low = max(all_low_swings, key=lambda item: item[0]) if all_low_swings else None
+    # Find the most recent swing high and low from the relevant lists
+    last_swing_high = max(relevant_high_swings, key=lambda item: item[0])
+    last_swing_low = max(relevant_low_swings, key=lambda item: item[0])
 
-    # Basic validation: Ensure the swing high is above the swing low
-    if last_swing_high and last_swing_low and last_swing_high[1] <= last_swing_low[1]:
-        logger.debug(f"ℹ️ [Swings] Swing high ({last_swing_high[1]:.4f}) not above swing low ({last_swing_low[1]:.4f}). Invalid structure for retracement.")
-        # In this case, we might still return the most recent high and low, but acknowledge the structure isn't a clear uptrend wave
-        # For Fibonacci retracement specifically, this structure is required.
-        # For SL tracking based on lows, we still need the last low.
-        # Let's return them but the calling function (generate_buy_signal) should handle the validity for Fib.
-        pass # Keep the found last_swing_high and last_swing_low
+    # Basic check: ensure the identified low is before the high for a valid retracement/structure
+    # More complex logic could be added here to validate the wave structure if needed
+    # if last_swing_low[0] >= last_swing_high[0]:
+    #     # If the most recent low is AT or AFTER the most recent high, look for the low BEFORE that high
+    #     lows_before_high = [s for s in relevant_low_swings if s[0] < last_swing_high[0]]
+    #     if not lows_before_high:
+    #         return None, last_swing_high # Return high but no valid preceding low
+    #     last_swing_low = max(lows_before_high, key=lambda item: item[0])
 
-    logger.debug(f"ℹ️ [Swings] Found last swing low: {last_swing_low}, last swing high: {last_swing_high}")
+
     return last_swing_low, last_swing_high
 
 
 def calculate_fibonacci_retracements(swing_low_val: float, swing_high_val: float) -> Dict[float, float]:
     """Calculates Fibonacci retracement levels based on a swing low and high value."""
     if pd.isna(swing_low_val) or pd.isna(swing_high_val) or swing_high_val <= swing_low_val:
-        logger.warning(f"⚠️ [Fib] Invalid swing points for Fibonacci: Low={swing_low_val}, High={swing_high_val}")
         return {} # Cannot calculate if high is not above low or values are NaN
 
     diff = swing_high_val - swing_low_val
     levels = {}
     for level in FIB_LEVELS_TO_CHECK:
-        # Fibonacci retracement levels are calculated from the high back towards the low
         levels[level] = swing_high_val - (diff * level)
-    logger.debug(f"ℹ️ [Fib] Calculated Fib levels from Low {swing_low_val:.4f} to High {swing_high_val:.4f}: {levels}")
     return levels
 
 def fetch_recent_volume(symbol: str) -> float:
@@ -914,16 +948,17 @@ def fetch_recent_volume(symbol: str) -> float:
              logger.warning(f"⚠️ [Data Volume] Insufficient 1m data (less than 15 candles) for {symbol}.")
              return 0.0
         volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        logger.debug(f"✅ [Data Volume] Last 15 minutes liquidity for {symbol}: {volume_usdt:,.2f} USDT")
+        logger.debug(f"✅ [Data Volume] Last 15 minutes liquidity for {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Volume] Binance API or network error while fetching volume for {symbol}: {binance_err}")
+         logger.error(f"❌ [Data Volume] Binance API or network error fetching volume for {symbol}: {binance_err}")
          return 0.0
     except Exception as e:
         logger.error(f"❌ [Data Volume] Unexpected error fetching volume for {symbol}: {e}", exc_info=True)
         return 0.0
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
+# (No changes needed here)
 def generate_performance_report() -> str:
     """Generates a comprehensive performance report from the database in Arabic."""
     logger.info("ℹ️ [Report] Generating performance report...")
@@ -931,22 +966,8 @@ def generate_performance_report() -> str:
         return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
     try:
         with conn.cursor() as report_cur: # Uses RealDictCursor
-            # Count signals that are not yet fully closed (hit_stop_loss = FALSE)
-            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE hit_stop_loss = FALSE;")
+            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
             open_signals_count = (report_cur.fetchone() or {}).get('count', 0)
-
-            # Count signals that hit TP1 but are not yet fully closed
-            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp1_hit = TRUE AND hit_stop_loss = FALSE;")
-            tp1_hit_open_count = (report_cur.fetchone() or {}).get('count', 0)
-
-            # Count signals that hit TP2 but are not yet fully closed
-            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp2_hit = TRUE AND hit_stop_loss = FALSE;")
-            tp2_hit_open_count = (report_cur.fetchone() or {}).get('count', 0)
-
-             # Count signals that hit TP3 but are not yet fully closed
-            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp3_hit = TRUE AND hit_stop_loss = FALSE;")
-            tp3_hit_open_count = (report_cur.fetchone() or {}).get('count', 0)
-
             report_cur.execute("""
                 SELECT
                     COUNT(*) AS total_closed,
@@ -958,54 +979,38 @@ def generate_performance_report() -> str:
                     COALESCE(SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END), 0) AS gross_profit_pct,
                     COALESCE(SUM(CASE WHEN profit_percentage < 0 THEN profit_percentage ELSE 0 END), 0) AS gross_loss_pct,
                     COALESCE(AVG(CASE WHEN profit_percentage > 0 THEN profit_percentage END), 0) AS avg_win_pct,
-                    COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct,
-                    COALESCE(AVG(risk_reward_ratio), 0) AS avg_rr_ratio -- Average R:R Ratio (New)
+                    COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct
                 FROM signals
-                WHERE hit_stop_loss = TRUE; -- Only consider trades fully closed by SL
+                WHERE achieved_target = TRUE OR hit_stop_loss = TRUE;
             """)
-            closed_stats_sl = report_cur.fetchone() or {}
-            total_closed_sl = closed_stats_sl.get('total_closed', 0)
-            winning_signals_sl = closed_stats_sl.get('winning_signals', 0)
-            losing_signals_sl = closed_stats_sl.get('losing_signals', 0)
-            total_profit_pct_sl = closed_stats_sl.get('total_profit_pct', 0.0)
-            gross_profit_pct_sl = closed_stats_sl.get('gross_profit_pct', 0.0)
-            gross_loss_pct_sl = closed_stats_sl.get('gross_loss_pct', 0.0)
-            avg_win_pct_sl = closed_stats_sl.get('avg_win_pct', 0.0)
-            avg_loss_pct_sl = closed_stats_sl.get('avg_loss_pct', 0.0)
-            avg_rr_ratio = closed_stats_sl.get('avg_rr_ratio', 0.0)
-
-            # Note: The current code only marks trades as 'closed' when SL is hit.
-            # If you implement full target exits later, you'll need to adjust the
-            # query to include trades closed by target as well. For now, 'achieved_target'
-            # is effectively replaced by tp1_hit, tp2_hit, tp3_hit which don't close the trade.
-
-            win_rate_sl = (winning_signals_sl / total_closed_sl * 100) if total_closed_sl > 0 else 0.0
-            profit_factor_sl = (gross_profit_pct_sl / abs(gross_loss_pct_sl)) if gross_loss_pct_sl != 0 else float('inf')
-
+            closed_stats = report_cur.fetchone() or {}
+            total_closed = closed_stats.get('total_closed', 0)
+            winning_signals = closed_stats.get('winning_signals', 0)
+            losing_signals = closed_stats.get('losing_signals', 0)
+            total_profit_pct = closed_stats.get('total_profit_pct', 0.0)
+            gross_profit_pct = closed_stats.get('gross_profit_pct', 0.0)
+            gross_loss_pct = closed_stats.get('gross_loss_pct', 0.0)
+            avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
+            avg_loss_pct = closed_stats.get('avg_loss_pct', 0.0)
+            win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
+            profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
             f"——————————————\n"
             f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
-            f"  • ضربت TP1: *{tp1_hit_open_count}*\n"
-            f"  • ضربت TP2: *{tp2_hit_open_count}*\n"
-            f"  • ضربت TP3: *{tp3_hit_open_count}*\n"
             f"——————————————\n"
-            f"📉 *إحصائيات الإشارات المغلقة (بواسطة وقف الخسارة):*\n"
-            f"  • إجمالي الإشارات المغلقة (SL): *{total_closed_sl}*\n"
-            f"  ✅ إشارات رابحة (SL): *{winning_signals_sl}* ({win_rate_sl:.2f}%)\n"
-            f"  ❌ إشارات خاسرة (SL): *{losing_signals_sl}*\n"
+            f"📉 *إحصائيات الإشارات المغلقة:*\n"
+            f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
+            f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n"
+            f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
             f"——————————————\n"
-            f"💰 *الربحية (للصفقات المغلقة بوقف الخسارة):*\n"
-            f"  • صافي الربح/الخسارة (الإجمالي %): *{total_profit_pct_sl:+.2f}%*\n"
-            f"  • إجمالي الربح (%): *{gross_profit_pct_sl:+.2f}%*\n"
-            f"  • إجمالي الخسارة (%): *{gross_loss_pct_sl:.2f}%*\n"
-            f"  • متوسط الصفقة الرابحة (%): *{avg_win_pct_sl:+.2f}%*\n"
-            f"  • متوسط الصفقة الخاسرة (%): *{avg_loss_pct_sl:.2f}%*\n"
-            f"  • عامل الربح: *{'∞' if profit_factor_sl == float('inf') else f'{profit_factor_sl:.2f}'}*\n"
-            f"  • متوسط نسبة المخاطرة/العائد: *{avg_rr_ratio:.2f}*\n" # Display Avg R:R
-            f"——————————————\n"
-            f"😨/🤑 **الخوف والجشع:** {get_fear_greed_index()}\n" # Include F&G Index
-            f"₿ **اتجاه البيتكوين (4H):** {get_btc_trend_4h()}\n" # Include BTC Trend
+            f"💰 *الربحية:*\n"
+            f"  • صافي الربح/الخسارة (الإجمالي %): *{total_profit_pct:+.2f}%*\n"
+            f"  • إجمالي الربح (%): *{gross_profit_pct:+.2f}%*\n"
+            f"  • إجمالي الخسارة (%): *{gross_loss_pct:.2f}%*\n"
+            f"  • متوسط الصفقة الرابحة (%): *{avg_win_pct:+.2f}%*\n"
+            f"  • متوسط الصفقة الخاسرة (%): *{avg_loss_pct:.2f}%*\n"
+            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
             f"——————————————\n"
             f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
@@ -1020,11 +1025,11 @@ def generate_performance_report() -> str:
         return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
 
 # ---------------------- Trading Strategy (Fibonacci Entry Check) -------------------
+# (No changes needed in the Strategy class itself from the previous version)
 class ConservativeTradingStrategy:
     """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions."""
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # Added tp2_price, tp3_price to required_cols_indicators if needed for scoring/validation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume', 'ema_13', 'ema_34', 'vwma',
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle', 'macd', 'macd_signal', 'macd_hist',
@@ -1036,16 +1041,13 @@ class ConservativeTradingStrategy:
             'macd', 'macd_signal', 'macd_hist', 'supertrend_trend', 'adx', 'di_plus', 'di_minus',
             'vwap', 'bb_upper', 'BullishCandleSignal', 'obv'
         ]
-        # Added weight for R:R ratio check (although it's a filter, can give a score boost)
         self.condition_weights = {
             'rsi_ok': 0.5, 'bullish_candle': 1.0, 'not_bb_extreme': 0.5, 'obv_rising': 1.5,
-            'rsi_filter_breakout': 1.5, 'macd_filter_breakout': 1.5, 'near_fib_level': 2.0,
-            # 'good_rr_ratio': 1.0 # R:R is now a mandatory filter, not a score component
+            'rsi_filter_breakout': 1.5, 'macd_filter_breakout': 1.5, 'near_fib_level': 2.0
         }
         self.essential_conditions = [
             'ema_cross_bullish', 'supertrend_up', 'macd_positive_or_cross',
-            'adx_trending_bullish', 'breakout_bb_upper', 'above_vwma',
-            'valid_rr_ratio' # Added R:R as an essential condition
+            'adx_trending_bullish', 'breakout_bb_upper', 'above_vwma'
         ]
         self.total_possible_score = sum(self.condition_weights.values())
         self.min_score_threshold_pct = 0.50
@@ -1054,8 +1056,7 @@ class ConservativeTradingStrategy:
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating indicators...")
-        # Ensure enough data for all indicators, including swings for Fib
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS, SWING_ORDER*2) + 5
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, LOOKBACK_FOR_SWINGS) + 5
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df)} < {min_len_required}) to calculate indicators.")
             return None
@@ -1097,14 +1098,11 @@ class ConservativeTradingStrategy:
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """Generates a buy signal based on conditions, Fibonacci, and scoring."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
-        # Ensure enough data for indicators and swing detection
-        min_len_required = max(len(self.required_cols_buy_signal), LOOKBACK_FOR_SWINGS + SWING_ORDER * 2) + 5
-        if df_processed is None or df_processed.empty or len(df_processed) < min_len_required:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df_processed)} < {min_len_required}) for signal generation.")
+        if df_processed is None or df_processed.empty or len(df_processed) < max(2, LOOKBACK_FOR_SWINGS):
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short for signal generation.")
             return None
-
-        required_cols_full = list(set(self.required_cols_buy_signal + ['bb_upper', 'bb_lower', 'rsi', 'macd_hist', 'vwma', 'atr'])) # Ensure ATR is included
-        missing_cols = [col for col in required_cols_full if col not in df_processed.columns]
+        required_cols_with_breakout = list(set(self.required_cols_buy_signal + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
+        missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
         if missing_cols: logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns: {missing_cols}."); return None
 
         btc_trend = get_btc_trend_4h()
@@ -1112,132 +1110,39 @@ class ConservativeTradingStrategy:
         elif "N/A" in btc_trend: logger.warning(f"⚠️ [Strategy {self.symbol}] Cannot determine Bitcoin trend, ignoring condition.")
 
         last_row = df_processed.iloc[-1]
-        prev_row = df_processed.iloc[-2] if len(df_processed) >= 2 else None
-        last_row_check = last_row[required_cols_full]
+        prev_row = df_processed.iloc[-2]
+        last_row_check = last_row[required_cols_with_breakout]
         if last_row_check.isnull().any(): logger.warning(f"⚠️ [Strategy {self.symbol}] Last row contains NaN in required signal columns: {last_row_check[last_row_check.isnull()].index.tolist()}."); return None
-        if prev_row is None or pd.isna(prev_row['obv']): logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN or previous row missing.")
-
-        current_price = last_row['close']
-        current_atr = last_row.get('atr')
-        if pd.isna(current_atr) or current_atr <= 0: logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR ({current_atr}) for SL/TP calc."); return None
+        if pd.isna(prev_row['obv']): logger.warning(f"⚠️ [Strategy {self.symbol}] Previous OBV value is NaN.")
 
         # --- Check Mandatory Conditions ---
         essential_passed = True
         failed_essential_conditions = []
         signal_details = {}
-
-        # EMA Cross Bullish
         if not (last_row['ema_13'] > last_row['ema_34']): essential_passed = False; failed_essential_conditions.append('EMA Cross'); signal_details['EMA_Cross'] = 'Failed'
         else: signal_details['EMA_Cross'] = 'Passed'
-
-        # SuperTrend Up
         if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1): essential_passed = False; failed_essential_conditions.append('SuperTrend'); signal_details['SuperTrend'] = 'Failed'
         else: signal_details['SuperTrend'] = 'Passed'
-
-        # MACD Positive or Bullish Cross
-        if not (last_row['macd_hist'] > 0 or (prev_row is not None and pd.notna(prev_row['macd']) and pd.notna(prev_row['macd_signal']) and last_row['macd'] > last_row['macd_signal'] and prev_row['macd'] <= prev_row['macd_signal'])): essential_passed = False; failed_essential_conditions.append('MACD'); signal_details['MACD'] = 'Failed'
+        if not (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal']): essential_passed = False; failed_essential_conditions.append('MACD'); signal_details['MACD'] = 'Failed'
         else: signal_details['MACD'] = 'Passed'
-
-        # ADX Trending Bullish (ADX > 20 and DI+ > DI-)
-        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']): essential_passed = False; failed_essential_conditions.append('ADX/DI'); signal_details['ADX/DI'] = 'Passed'
-        else: signal_details['ADX/DI'] = 'Failed'
-
-        # Breakout above Bollinger Upper Band
-        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']): essential_passed = False; failed_essential_conditions.append('Breakout BB'); signal_details['Breakout_BB'] = 'Passed'
-        else: signal_details['Breakout_BB'] = 'Failed'
-
-        # Above VWMA
+        if not (last_row['adx'] > 20 and last_row['di_plus'] > last_row['di_minus']): essential_passed = False; failed_essential_conditions.append('ADX/DI'); signal_details['ADX/DI'] = 'Failed'
+        else: signal_details['ADX/DI'] = 'Passed'
+        if not (pd.notna(last_row['bb_upper']) and last_row['close'] > last_row['bb_upper']): essential_passed = False; failed_essential_conditions.append('Breakout BB'); signal_details['Breakout_BB'] = 'Failed'
+        else: signal_details['Breakout_BB'] = 'Passed'
         if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']): essential_passed = False; failed_essential_conditions.append('Above VWMA'); signal_details['VWMA_Mandatory'] = 'Failed'
         else: signal_details['VWMA_Mandatory'] = 'Passed'
-
-        # --- Determine Initial Stop Loss (Based on Market Structure or ATR) ---
-        # Find the most recent swing low BEFORE the current candle close
-        # We use data up to the second to last candle for swing detection to avoid lookahead bias
-        lookback_data_for_sl = df_processed.iloc[:-1].tail(LOOKBACK_FOR_SWINGS + SWING_ORDER * 2) # Data before current candle
-        last_swing_low_for_sl, _ = find_relevant_swing_points(lookback_data_for_sl, df_processed.index[-2]) # Swings before the last candle
-
-        # Use the adjusted ENTRY_ATR_MULTIPLIER (Tighter for Scalping)
-        atr_based_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
-        swing_based_stop_loss = None
-
-        if last_swing_low_for_sl is not None:
-            swing_based_stop_loss = last_swing_low_for_sl[1] * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
-            signal_details['Initial_SL_Basis'] = f'Swing Low ({last_swing_low_for_sl[1]:.8g})'
-            # Choose the lower (safer) stop loss between ATR and Swing
-            initial_stop_loss = min(atr_based_stop_loss, swing_based_stop_loss)
-            signal_details['Initial_SL_Calc'] = f'Min(ATR: {atr_based_stop_loss:.8g}, Swing: {swing_based_stop_loss:.8g})'
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Swing low found for initial SL: {last_swing_low_for_sl[1]:.8g}. ATR SL: {atr_based_stop_loss:.8g}. Chosen SL: {initial_stop_loss:.8g}")
-        else:
-            # If no valid swing low found, default to ATR based SL
-            initial_stop_loss = atr_based_stop_loss
-            signal_details['Initial_SL_Basis'] = 'ATR'
-            signal_details['Initial_SL_Calc'] = f'ATR: {atr_based_stop_loss:.8g}'
-            logger.warning(f"⚠️ [Strategy {self.symbol}] No relevant swing low found for initial SL. Using ATR based SL: {initial_stop_loss:.8g}")
-
-
-        # --- Calculate Take Profit Levels (Adjusted Multipliers for Scalping) ---
-        # Increased multipliers significantly to ensure TP1 is > 1.5 * Risk (especially ATR-based risk)
-        # Adjusted for tighter range. Ensure TP1_ATR_MULTIPLIER / ENTRY_ATR_MULTIPLIER >= MIN_RR_RATIO
-        # Example: 2.5 / 1.5 = 1.67 (أكبر من 1.5)
-        tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr)
-        tp2_price_calc = current_price + (TP2_ATR_MULTIPLIER * current_atr) # New TP2
-        tp3_price_calc = current_price + (TP3_ATR_MULTIPLIER * current_atr) # New TP3
-        # initial_target_atr = current_price + (ENTRY_ATR_MULTIPLIER * current_atr) # Keep original ATR target for reference/display - Removed as TP1 is now the primary target
-
-
-        # --- SL/TP Validation & R:R Check ---
-        # Ensure SL is not zero or above entry
-        if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated initial SL ({initial_stop_loss:.8g}) is invalid. Price: {current_price:.8g}. Signal rejected.")
-             signal_details['Warning_SL'] = 'Invalid calculated SL'
-             # essential_passed = False; failed_essential_conditions.append('Valid SL Price') # Make this mandatory? Or just reject? Reject seems safer.
-             return None # Reject signal if initial SL is invalid
-
-        # Check max loss percentage (using the new MAX_INITIAL_LOSS_PCT constant)
-        loss_pct_initial_sl = ((initial_stop_loss / current_price) - 1) * 100 if current_price > 0 else 0
-        if abs(loss_pct_initial_sl) > MAX_INITIAL_LOSS_PCT:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL ({initial_stop_loss:.8g}) is too wide (>{MAX_INITIAL_LOSS_PCT}% loss). Signal rejected.")
-             signal_details['Warning_SL'] = f'Initial SL too wide (> {MAX_INITIAL_LOSS_PCT}%)'
-             return None # Reject signal if SL is too wide
-
-        # Check minimum profit margin for TP1 (using the adjusted TP1 multiplier)
-        # Now using tp1_price_calc for this check
-        profit_margin_pct = ((tp1_price_calc / current_price) - 1) * 100 if current_price > 0 else 0
-        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Initial Profit margin ({profit_margin_pct:.2f}%) below minimum ({MIN_PROFIT_MARGIN_PCT}%). Signal rejected.")
-            signal_details['Warning_ProfitMargin'] = f'Profit margin ({profit_margin_pct:.2f}%) below min ({MIN_PROFIT_MARGIN_PCT}%)'
-            return None # Reject signal if initial profit margin is too small
-
-        # Calculate Risk:Reward Ratio
-        risk = current_price - initial_stop_loss
-        # Use TP1 for R:R calculation as it's the first significant target
-        reward = tp1_price_calc - current_price
-        rr_ratio = reward / risk if risk > 0 else 0.0
-
-        if rr_ratio < MIN_RR_RATIO:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Risk:Reward Ratio ({rr_ratio:.2f}) below minimum ({MIN_RR_RATIO}). Signal rejected.")
-            signal_details['Warning_RRRatio'] = f'R:R ({rr_ratio:.2f}) below min ({MIN_RR_RATIO})'
-            essential_passed = False; failed_essential_conditions.append('Valid R:R Ratio') # Make this a mandatory filter
-        else:
-             signal_details['Risk_Reward_Ratio'] = float(f"{rr_ratio:.2f}")
-             signal_details['Valid_RRRatio'] = 'Passed'
-
 
         if not essential_passed: logger.debug(f"ℹ️ [Strategy {self.symbol}] Mandatory conditions failed: {', '.join(failed_essential_conditions)}. Signal rejected."); return None
 
         # --- Calculate Score for Optional Conditions ---
         current_score = 0.0
-
-        # Fibonacci Check (Now a scoring condition, not mandatory)
+        # Fibonacci Check
         fib_level_found = None
         try:
-            # Use lookback data up to the current candle for Fib check
-            lookback_data_for_fib = df_processed.tail(LOOKBACK_FOR_SWINGS + SWING_ORDER * 2)
-            # Find swings on the full lookback data
-            fib_swing_low, fib_swing_high = find_relevant_swing_points(lookback_data_for_fib, last_row.name) # Swings up to last candle
-
-            if fib_swing_low and fib_swing_high and fib_swing_low[0] < fib_swing_high[0] and fib_swing_high[1] > fib_swing_low[1]: # Ensure valid swing structure for Fib
-                 fib_levels = calculate_fibonacci_retracements(fib_swing_low[1], fib_swing_high[1])
+            lookback_data = df_processed.iloc[-LOOKBACK_FOR_SWINGS:]
+            last_swing_low, last_swing_high = find_relevant_swing_points(lookback_data, last_row.name) # Use helper function
+            if last_swing_low and last_swing_high and last_swing_low[0] < last_swing_high[0]:
+                 fib_levels = calculate_fibonacci_retracements(last_swing_low[1], last_swing_high[1])
                  current_price_fib = last_row['close']
                  for level_pct, level_price in fib_levels.items():
                      if level_price * (1 - FIB_TOLERANCE) <= current_price_fib <= level_price * (1 + FIB_TOLERANCE):
@@ -1250,50 +1155,58 @@ class ConservativeTradingStrategy:
             else: signal_details['Fibonacci'] = 'No Valid Swing Found (0)'
         except Exception as fib_err: logger.error(f"❌ [Strategy {self.symbol}] Error during Fibonacci calc: {fib_err}", exc_info=True); signal_details['Fibonacci'] = 'Error (0)'
 
-
         # Other Optional Conditions
-        # RSI not overbought/oversold (between 30 and 70)
         if last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD: current_score += self.condition_weights.get('rsi_ok', 0); signal_details['RSI_Basic'] = f'OK (+{self.condition_weights.get("rsi_ok", 0)})'
         else: signal_details['RSI_Basic'] = 'Not OK (0)'
-
-        # Bullish Candle Pattern (Hammer or Bullish Engulfing)
         if last_row['BullishCandleSignal'] == 1: current_score += self.condition_weights.get('bullish_candle', 0); signal_details['Candle'] = f'Bullish (+{self.condition_weights.get("bullish_candle", 0)})'
         else: signal_details['Candle'] = 'Neutral (0)'
-
-        # Price not at extreme of Bollinger Bands (e.g., not touching upper band)
-        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995: current_score += self.condition_weights.get('not_bb_extreme', 0); signal_details['Bollinger_Basic'] = f'Not Extreme (+{self.condition_weights.get("not_bb_extreme", 0)})'
+        if last_row['close'] < last_row['bb_upper'] * 0.995: current_score += self.condition_weights.get('not_bb_extreme', 0); signal_details['Bollinger_Basic'] = f'Not Extreme (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else: signal_details['Bollinger_Basic'] = 'Extreme (0)'
-
-        # OBV Rising (compared to previous candle)
-        if prev_row is not None and pd.notna(prev_row['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > prev_row['obv']: current_score += self.condition_weights.get('obv_rising', 0); signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
+        if pd.notna(prev_row['obv']) and last_row['obv'] > prev_row['obv']: current_score += self.condition_weights.get('obv_rising', 0); signal_details['OBV'] = f'Rising (+{self.condition_weights.get("obv_rising", 0)})'
         else: signal_details['OBV'] = 'Not Rising (0)'
-
-        # RSI Filter for Breakout (e.g., RSI between 55 and 75)
         if pd.notna(last_row['rsi']) and 55 <= last_row['rsi'] <= 75: current_score += self.condition_weights.get('rsi_filter_breakout', 0); signal_details['RSI_Filter_Breakout'] = f'OK (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else: signal_details['RSI_Filter_Breakout'] = 'Not OK (0)'
-
-        # MACD Histogram Positive (already part of mandatory, but can add score for strength)
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0: current_score += self.condition_weights.get('macd_filter_breakout', 0); signal_details['MACD_Filter_Breakout'] = f'Positive (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else: signal_details['MACD_Filter_Breakout'] = 'Negative (0)'
 
-
-        # Final Score Check
+        # Final Decision
         if current_score < self.min_signal_score: logger.debug(f"ℹ️ [Strategy {self.symbol}] Optional score not met (Score: {current_score:.2f}/{self.total_possible_score:.2f}). Signal rejected."); return None
 
-        # --- Final Liquidity Check ---
         volume_recent = fetch_recent_volume(self.symbol)
-        if volume_recent < MIN_VOLUME_15M_USDT: logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) below threshold ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected."); return None
+        if volume_recent < MIN_VOLUME_15M_USDT: logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f}) below threshold. Signal rejected."); return None
 
+        current_price = last_row['close']
+        current_atr = last_row.get('atr')
+        if pd.isna(current_atr) or current_atr <= 0: logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR ({current_atr}) for SL/TP calc."); return None
+
+        initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
+        initial_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
+        tp1_price_calc = current_price + (TP1_ATR_MULTIPLIER * current_atr) # Calculate TP1 for break-even
+
+        # --- SL/TP Validation ---
+        if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
+            min_sl_price_pct = current_price * (1 - 0.015)
+            initial_stop_loss = max(min_sl_price_pct, current_price * 0.001)
+            logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL invalid. Adjusted to {initial_stop_loss:.8f}")
+            signal_details['Warning_SL'] = f'Initial SL adjusted to {initial_stop_loss:.8f}'
+        else: # Check max loss
+            max_sl_price = current_price * (1 - 0.10)
+            if initial_stop_loss < max_sl_price:
+                 logger.warning(f"⚠️ [Strategy {self.symbol}] Initial SL too wide. Adjusted to {max_sl_price:.8f}")
+                 initial_stop_loss = max_sl_price
+                 signal_details['Warning_SL'] = f'Initial SL adjusted (wide) to {initial_stop_loss:.8f}'
+
+        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
+        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT: logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) below minimum. Signal rejected."); return None
 
         # --- Compile Signal ---
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
-            # Use tp1_price for the initial target display as it's now the primary first target
-            'initial_target': float(f"{tp1_price_calc:.8g}"),
-            'initial_stop_loss': float(f"{initial_stop_loss:.8g}"), # This is the chosen initial SL (Min of ATR/Swing)
-            'current_target': float(f"{tp1_price_calc:.8g}"), # Keep initial target for now, dynamic TPs handled in tracking
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Initial current SL is the chosen initial SL
+            'initial_target': float(f"{initial_target:.8g}"), # Keep initial target for reference
+            'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"), # This might become less relevant with dynamic TPs
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'r2_score': float(f"{current_score:.2f}"),
             'strategy_name': 'Breakout_Fib_VWMA_Dynamic', # Updated name
             'signal_details': signal_details,
@@ -1301,16 +1214,14 @@ class ConservativeTradingStrategy:
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}"),
             'tp1_price': float(f"{tp1_price_calc:.8g}"), # Store calculated TP1
-            'tp2_price': float(f"{tp2_price_calc:.8g}"), # Store calculated TP2 (New)
-            'tp3_price': float(f"{tp3_price_calc:.8g}"), # Store calculated TP3 (New)
-            'initial_atr': float(f"{current_atr:.8g}"), # Store initial ATR
-            'risk_reward_ratio': float(f"{rr_ratio:.2f}") # Store R:R Ratio (New)
+            'initial_atr': float(f"{current_atr:.8g}") # Store initial ATR
         }
-        logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, TP1: {tp1_price_calc:.6f}, TP2: {tp2_price_calc:.6f}, TP3: {tp3_price_calc:.6f}, R:R: {rr_ratio:.2f}")
+        logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score: {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, TP1: {tp1_price_calc:.6f}")
         return signal_output
 
 
 # ---------------------- Telegram Functions ----------------------
+# (Modify send_tracking_notification for new types)
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
     """Sends a message via Telegram Bot API with improved error handling."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -1338,31 +1249,20 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     logger.debug(f"ℹ️ [Telegram Alert] Formatting alert for signal: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
-        # Use tp1_price for the initial target display as it's now the primary first target
-        initial_target_price_display = float(signal_data['tp1_price'])
+        target_price = float(signal_data['initial_target']) # Use initial for display
         stop_loss_price = float(signal_data['initial_stop_loss'])
         tp1_price = signal_data.get('tp1_price', 0.0)
-        tp2_price = signal_data.get('tp2_price', 0.0) # New
-        tp3_price = signal_data.get('tp3_price', 0.0) # New
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
         signal_score = signal_data.get('r2_score', 0.0)
         total_possible_score = signal_data.get('total_possible_score', 10.0)
         volume_15m = signal_data.get('volume_15m', 0.0)
         trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
-        rr_ratio = signal_data.get('risk_reward_ratio', 0.0) # New
         signal_details = signal_data.get('signal_details', {})
-
-        # Calculate percentages relative to entry price
-        # Calculate profit percentage for the displayed initial target (TP1)
-        profit_pct_initial_target_display = ((initial_target_price_display / entry_price) - 1) * 100 if entry_price > 0 else 0
-        loss_pct_sl = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-        profit_pct_tp1 = ((tp1_price / entry_price) - 1) * 100 if entry_price > 0 and tp1_price else 0
-        profit_pct_tp2 = ((tp2_price / entry_price) - 1) * 100 if entry_price > 0 and tp2_price else 0 # New
-        profit_pct_tp3 = ((tp3_price / entry_price) - 1) * 100 if entry_price > 0 and tp3_price else 0 # New
-
-
-        loss_usdt = abs(trade_value_signal * (loss_pct_sl / 100))
+        profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+        loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+        profit_usdt = trade_value_signal * (profit_pct / 100)
+        loss_usdt = abs(trade_value_signal * (loss_pct / 100))
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
         fear_greed = get_fear_greed_index()
@@ -1376,30 +1276,19 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
             f"📊 **قوة الإشارة (اختياري):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
             f"💧 **السيولة (15 د):** {volume_15m:,.0f} USDT\n"
-            f"⚖️ **المخاطرة/العائد (R:R):** *{rr_ratio:.2f}*\n" # Display R:R
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct_sl:.2f}% / ≈ ${loss_usdt:.2f})\n"
-            # Display TP1 as the primary target with its calculated price and percentage
-            f"🎯 **الهدف الأول (للتعادل):** `${tp1_price:,.8g}` ({profit_pct_tp1:+.2f}%)\n"
-            f"🎯 **الهدف الثاني (جزئي):** `${tp2_price:,.8g}` ({profit_pct_tp2:+.2f}%)\n" # Show TP2 (New)
-            f"🎯 **الهدف الثالث (جزئي):** `${tp3_price:,.8g}` ({profit_pct_tp3:+.2f}%)\n" # Show TP3 (New)
+            f"🎯 **الهدف الأولي (مرجعي):** `${target_price:,.8g}` ({profit_pct:+.2f}%)\n"
+            f"🛡️ **الهدف الأول (للتعادل):** `${tp1_price:,.8g}`\n" # Show TP1
+            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
-            f"✅ *الشروط الإلزامية:*\n"
-            f"  - عبور EMA: {'✅' if signal_details.get('EMA_Cross') == 'Passed' else '❌'}\n"
-            f"  - سوبر ترند صاعد: {'✅' if signal_details.get('SuperTrend') == 'Passed' else '❌'}\n"
-            f"  - MACD إيجابي/تقاطع: {'✅' if signal_details.get('MACD') == 'Passed' else '❌'}\n"
-            f"  - ADX/DI اتجاه صاعد: {'✅' if signal_details.get('ADX/DI') == 'Passed' else '❌'}\n"
-            f"  - اختراق البولينجر العلوي: {'✅' if signal_details.get('Breakout_BB') == 'Passed' else '❌'}\n"
-            f"  - فوق VWMA: {'✅' if signal_details.get('VWMA_Mandatory') == 'Passed' else '❌'}\n"
-            f"  - نسبة مخاطرة/عائد مقبولة: {'✅' if signal_details.get('Valid_RRRatio') == 'Passed' else '❌'}\n"
+            f"✅ *الشروط الإلزامية:* {' '.join(k for k, v in signal_details.items() if v == 'Passed' and k not in ['Fibonacci', 'RSI_Basic', 'Candle', 'Bollinger_Basic', 'OBV', 'RSI_Filter_Breakout', 'MACD_Filter_Breakout'])}\n" # Show mandatory passes
             f"➕ *الشروط الاختيارية المحققة:*\n"
             f"  - فيبوناتشي: {signal_details.get('Fibonacci', 'N/A')}\n"
             f"  - RSI: {signal_details.get('RSI_Basic', 'N/A')}\n"
             f"  - شمعة: {signal_details.get('Candle', 'N/A')}\n"
             f"  - OBV: {signal_details.get('OBV', 'N/A')}\n"
-            f"  - RSI فلتر: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
-            f"  - MACD فلتر: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
+            # Add other optional checks if needed
             f"——————————————\n"
             f"😨/🤑 **الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4H):** {btc_trend}\n"
@@ -1425,73 +1314,54 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     old_stop_loss = details.get('old_stop_loss')
     entry_price = details.get('entry_price')
     swing_price = details.get('swing_price') # Price of the swing high/low used
-    target_price = details.get('target_price') # Price of the TP hit (TP1, TP2, or TP3)
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
     if notification_type == 'stop_loss_hit':
         sl_type_msg_ar = "بربح ✅" if details.get('profitable_sl', False) else "بخسارة ❌"
-        # Safely format closing_price
-        closing_price_str = f"${closing_price:,.8g}" if closing_price is not None else "N/A"
         message = (
             f"🛑 *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🚫 **سعر الإغلاق (الوقف):** `{closing_price_str}`\n"
-            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})" # profit_pct should always be calculated before sending
+            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
+            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})"
         )
     elif notification_type == 'tp1_hit_breakeven':
-        # Safely format prices
-        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
-        target_price_str = f"${target_price:,.8g}" if target_price is not None else "N/A"
-        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"🛡️ *تم الوصول للهدف الأول ونقل الوقف للتعادل (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند الهدف 1):** `{current_price_str}`\n"
-            f"🎯 **سعر الهدف الأول:** `{target_price_str}`\n" # Use target_price
-            f"➡️ **وقف الخسارة الجديد:** `{new_stop_loss_str}` (نقطة الدخول)" # Use new_stop_loss (which is entry)
-        )
-    elif notification_type == 'tp_hit': # Generic for TP2, TP3
-        target_level = details.get('target_level', 'هدف')
-        # Safely format prices
-        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
-        target_price_str = f"${target_price:,.8g}" if target_price is not None else "N/A"
-        message = (
-            f"🎯 *تم الوصول إلى {target_level} (ID: {signal_id})*\n" # e.g., الهدف الثاني
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `{current_price_str}`\n"
-            f"🎯 **سعر {target_level}:** `{target_price_str}`" # Use target_price
+            f"📈 **السعر الحالي (عند الهدف 1):** `${current_price:,.8g}`\n"
+            f"🎯 **سعر الهدف الأول:** `${details.get('tp1_price', 'N/A'):,.8g}`\n"
+            f"➡️ **وقف الخسارة الجديد:** `${entry_price:,.8g}` (نقطة الدخول)"
         )
     elif notification_type == 'trailing_activated_swing':
-        # Safely format prices
-        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
-        swing_price_str = f"${swing_price:,.8g}" if swing_price is not None else "N/A"
-        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"⬆️ *تم تفعيل الوقف المتحرك (كسر قمة) (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند الكسر):** `{current_price_str}`\n"
-            f"⛰️ **القمة المكسورة:** `{swing_price_str}`\n"
-            f"🛡️ **وقف الخسارة المبدئي (تحت القاع):** `{new_stop_loss_str}`"
+            f"📈 **السعر الحالي (عند الكسر):** `${current_price:,.8g}`\n"
+            f"⛰️ **القمة المكسورة:** `${swing_price:,.8g}`\n"
+            f"🛡️ **وقف الخسارة المبدئي (تحت القاع):** `${new_stop_loss:,.8g}`"
         )
     elif notification_type == 'trailing_updated_swing':
-        # Safely format prices
-        current_price_str = f"${current_price:,.8g}" if current_price is not None else "N/A"
-        swing_price_str = f"${swing_price:,.8g}" if swing_price is not None else "N/A"
-        old_stop_loss_str = f"${old_stop_loss:,.8g}" if old_stop_loss is not None else "N/A"
-        new_stop_loss_str = f"${new_stop_loss:,.8g}" if new_stop_loss is not None else "N/A"
         message = (
             f"➡️ *تم تحديث الوقف المتحرك (قاع أعلى) (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `{current_price_str}`\n"
-            f"⚓ **القاع الجديد:** `{swing_price_str}`\n"
-            f"🔒 **الوقف السابق:** `{old_stop_loss_str}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `{new_stop_loss_str}`"
+            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
+            f"⚓ **القاع الجديد:** `${swing_price:,.8g}`\n"
+            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+        )
+    # Keep original target hit message if needed, though less likely with dynamic approach
+    elif notification_type == 'target_hit': # This might be used if a final fixed target remains
+        message = (
+            f"✅ *تم الوصول إلى الهدف النهائي (ID: {signal_id})*\n"
+            f"——————————————\n"
+            f"🪙 **الزوج:** `{safe_symbol}`\n"
+            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
+            f"💰 **الربح المحقق:** {profit_pct:+.2f}%"
         )
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
@@ -1503,7 +1373,7 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 
 # ---------------------- Database Functions (Insert and Update) ----------------------
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    """Inserts a new signal into the signals table, including TP1, TP2, TP3, initial ATR, and R:R."""
+    """Inserts a new signal into the signals table, including TP1 and initial ATR."""
     if not check_db_connection() or not conn:
         logger.error(f"❌ [DB Insert] Failed to insert signal {signal.get('symbol', 'N/A')} due to DB connection issue.")
         return False
@@ -1520,29 +1390,25 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
                  r2_score, strategy_name, signal_details, volume_15m,
-                 tp1_price, tp2_price, tp3_price, initial_atr, risk_reward_ratio) -- Added new columns
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                 tp1_price, initial_atr) -- Added new columns
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
                 signal_prepared['entry_price'],
-                # Use tp1_price as initial_target in DB for consistency with display/checks
-                signal_prepared['tp1_price'],
+                signal_prepared['initial_target'],
                 signal_prepared['initial_stop_loss'],
-                signal_prepared['tp1_price'], # Keep initial target for now, dynamic TPs handled in tracking
+                signal_prepared['current_target'], # Keep initial target for now
                 signal_prepared['current_stop_loss'],
                 signal_prepared.get('r2_score'),
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
                 signal_prepared.get('volume_15m'),
                 signal_prepared.get('tp1_price'), # Insert TP1 price
-                signal_prepared.get('tp2_price'), # Insert TP2 price (New)
-                signal_prepared.get('tp3_price'), # Insert TP3 price (New) - Corrected from tp2_price
-                signal_prepared.get('initial_atr'), # Insert initial ATR
-                signal_prepared.get('risk_reward_ratio') # Insert R:R Ratio (New)
+                signal_prepared.get('initial_atr') # Insert initial ATR
             ))
         conn.commit()
-        logger.info(f"✅ [DB Insert] Signal for {symbol} inserted (Score: {signal_prepared.get('r2_score')}, TP1: {signal_prepared.get('tp1_price')}, TP2: {signal_prepared.get('tp2_price')}, TP3: {signal_prepared.get('tp3_price')}, R:R: {signal_prepared.get('risk_reward_ratio')}).")
+        logger.info(f"✅ [DB Insert] Signal for {symbol} inserted (Score: {signal_prepared.get('r2_score')}, TP1: {signal_prepared.get('tp1_price')}).")
         return True
     except psycopg2.Error as db_err:
         logger.error(f"❌ [DB Insert] Database error inserting signal for {symbol}: {db_err}")
@@ -1561,11 +1427,9 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
 def track_signals() -> None:
     """
     Tracks open signals with dynamic logic:
-    - Checks for Stop Loss Hit.
-    - Checks for TP1, TP2, TP3 Hits and sends notifications.
-    - Moves SL to Break-Even when TP1 is hit (if BE > current SL).
-    - Activates trailing stop based on breaking a recent swing high (above entry).
-    - Updates trailing stop based on newly formed swing lows (always keeping SL at or above BE if BE is set).
+    - Moves SL to Break-Even when TP1 is hit.
+    - Activates trailing stop based on breaking a recent swing high.
+    - Updates trailing stop based on newly formed swing lows.
     """
     logger.info("ℹ️ [Tracker] Starting open signal tracking process (Dynamic)...")
     while True:
@@ -1583,17 +1447,18 @@ def track_signals() -> None:
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_stop_loss, current_target, current_stop_loss,
                            is_trailing_active, last_swing_low_price, last_swing_high_price,
-                           tp1_price, tp1_hit, tp2_price, tp2_hit, tp3_price, tp3_hit,
-                           stop_loss_at_breakeven
+                           tp1_price, tp1_hit, stop_loss_at_breakeven
                     FROM signals
-                    WHERE hit_stop_loss = FALSE; -- Only track signals that haven't hit the final SL
+                    WHERE hit_stop_loss = FALSE;
                 """)
+                 # Filter only signals that are not fully closed (hit_stop_loss = FALSE)
+                 # Note: achieved_target might be TRUE if TP1 hit, but trade might still be open
                  open_signals: List[Dict] = track_cur.fetchall()
 
 
             if not open_signals:
                 # logger.debug("ℹ️ [Tracker] No open signals to track.")
-                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS // 2)
+                time.sleep(TRACKING_CYCLE_SLEEP_SECONDS // 2) # Wait less if no signals
                 continue
 
             logger.debug(f"ℹ️ [Tracker] Tracking {len(open_signals)} open signals...")
@@ -1602,52 +1467,37 @@ def track_signals() -> None:
                 signal_id = signal_row['id']
                 symbol = signal_row['symbol']
                 processed_in_cycle += 1
-                update_executed = False # Flag to prevent multiple DB updates per signal per cycle
+                update_executed = False # Flag to prevent multiple updates in one cycle
 
                 try:
                     # Safely extract data from the row
                     entry_price = float(signal_row['entry_price'])
-                    # Safely handle potential None from DB for current_stop_loss before converting to float
-                    current_stop_loss_db = signal_row.get('current_stop_loss')
-                    current_stop_loss = float(current_stop_loss_db) if current_stop_loss_db is not None else None # Handle None here
+                    current_stop_loss = float(signal_row['current_stop_loss'])
+                    is_trailing_active = signal_row['is_trailing_active']
+                    last_sl_swing_low = signal_row['last_swing_low_price'] # Price of swing low defining current SL
+                    last_activation_swing_high = signal_row['last_swing_high_price'] # Price of swing high used for activation
+                    tp1_price = signal_row.get('tp1_price') # Use .get for potentially new columns
+                    tp1_hit = signal_row.get('tp1_hit', False)
+                    stop_loss_at_breakeven = signal_row.get('stop_loss_at_breakeven', False)
 
                     # Get current price
                     current_price = ticker_data.get(symbol)
-                    # Safely handle potential None for current_price
-                    current_price_val = float(current_price) if current_price is not None else None
+                    if current_price is None:
+                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price unavailable.")
+                         continue
 
-                    # Format prices safely for the summary string using conditional expressions
-                    current_price_str = f"{current_price_val:.4f}" if current_price_val is not None else "N/A"
-                    current_stop_loss_str = f"{current_stop_loss:.4f}" if current_stop_loss is not None else "N/A"
-
-                    # Ensure boolean flags are handled safely in the f-string
-                    tp1_hit = signal_row.get('tp1_hit', False)
-                    tp2_hit = signal_row.get('tp2_hit', False)
-                    tp3_hit = signal_row.get('tp3_hit', False)
-                    stop_loss_at_breakeven = signal_row.get('stop_loss_at_breakeven', False)
-                    # Use .get() for is_trailing_active as well for consistency and safety
-                    is_trailing_active = signal_row.get('is_trailing_active', False)
-
-
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price_str} SL={current_stop_loss_str} TP1={'✅' if tp1_hit else '❌'} TP2={'✅' if tp2_hit else '❌'} TP3={'✅' if tp3_hit else '❌'} BE={'✅' if stop_loss_at_breakeven else '❌'} Trail={'On' if is_trailing_active else 'Off'}")
-
-                    # Continue processing only if current price and stop loss are available
-                    if current_price_val is None or current_stop_loss is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price or stop loss unavailable ({current_price_val}, {current_stop_loss}). Skipping signal tracking logic for this cycle.")
-                         continue # Skip the rest of the loop for this signal
-
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} SL={current_stop_loss:.4f} TP1Hit={'T' if tp1_hit else 'F'} BE={'T' if stop_loss_at_breakeven else 'F'} Trail={'On' if is_trailing_active else 'Off'}")
 
                     # --- Define DB Update variables ---
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'entry_price': entry_price, 'current_price': current_price_val}
+                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'entry_price': entry_price}
 
                     # ======================================
                     # 1. Check for Stop Loss Hit FIRST
                     # ======================================
-                    # Now that current_stop_loss is guaranteed not None here
-                    if current_price_val <= current_stop_loss:
+                    if current_price <= current_stop_loss:
                         loss_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
                         profitable_sl = current_stop_loss > entry_price
                         sl_type_msg = "at a profit ✅" if profitable_sl else "at a loss ❌"
@@ -1659,167 +1509,108 @@ def track_signals() -> None:
                             WHERE id = %s;
                         """)
                         update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
-                        # Safely format variables in log message
-                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g if current_stop_loss is not None else 'N/A'} (Percentage: {loss_pct:.2f}%)."
+                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl})
                         update_executed = True
-                        # Go to next signal after SL hit - Execute update below
+                        # Go to next signal after SL hit
+                        # (Execute update outside the inner try block)
 
                     # ==================================================
-                    # 2. Check for Take Profit Hits (TP1, TP2, TP3)
-                    #    Only if SL not hit.
+                    # 2. Check for TP1 Hit (Move to Break-Even)
+                    #    Only if SL not hit and TP1 not already hit.
                     # ==================================================
-                    else: # Only check TPs if SL is not hit
-                        # Check TP3 first (highest target)
-                        tp3_price = signal_row.get('tp3_price') # Re-fetch locally for checks
-                        if not tp3_hit and tp3_price is not None and current_price_val >= tp3_price:
-                            update_query = sql.SQL("UPDATE signals SET tp3_hit = TRUE WHERE id = %s;")
-                            update_params = (signal_id,)
-                            # Safely format variables in log message
-                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP3 hit at {current_price_val:.8g if current_price_val is not None else 'N/A'} (>= {tp3_price:.8g if tp3_price is not None else 'N/A'})."
-                            notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثالث', 'target_price': tp3_price})
+                    elif not tp1_hit and tp1_price is not None and current_price >= tp1_price:
+                        new_stop_loss_be = entry_price # Move SL to entry
+                        # Only update if the new SL is higher than the current one
+                        if new_stop_loss_be > current_stop_loss:
+                            update_query = sql.SQL("""
+                                UPDATE signals
+                                SET tp1_hit = TRUE, stop_loss_at_breakeven = TRUE, current_stop_loss = %s,
+                                    is_trailing_active = FALSE -- Deactivate ATR/percentage trailing if BE is set
+                                WHERE id = %s;
+                            """)
+                            update_params = (new_stop_loss_be, signal_id)
+                            log_message = f"🛡️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price:.8g} (>= {tp1_price:.8g}). Moving SL to Break-Even ({new_stop_loss_be:.8g})."
+                            notification_details.update({'type': 'tp1_hit_breakeven', 'current_price': current_price, 'tp1_price': tp1_price, 'new_stop_loss': new_stop_loss_be})
                             update_executed = True
-                        # Check TP2
-                        tp2_price = signal_row.get('tp2_price') # Re-fetch locally for checks
-                        elif not tp2_hit and tp2_price is not None and current_price_val >= tp2_price:
-                            update_query = sql.SQL("UPDATE signals SET tp2_hit = TRUE WHERE id = %s;")
-                            update_params = (signal_id,)
-                            # Safely format variables in log message
-                            log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): TP2 hit at {current_price_val:.8g if current_price_val is not None else 'N/A'} (>= {tp2_price:.8g if tp2_price is not None else 'N/A'})."
-                            notification_details.update({'type': 'tp_hit', 'target_level': 'الهدف الثاني', 'target_price': tp2_price})
-                            update_executed = True
-                        # Check TP1 (triggers Break-Even)
-                        tp1_price = signal_row.get('tp1_price') # Re-fetch locally for checks
-                        elif not tp1_hit and tp1_price is not None and current_price_val >= tp1_price:
-                            new_stop_loss_be = entry_price # Move SL to entry
-                            # Only update SL if the new BE SL is higher than the current one
-                            if new_stop_loss_be > current_stop_loss:
-                                update_query = sql.SQL("""
-                                    UPDATE signals
-                                    SET tp1_hit = TRUE, stop_loss_at_breakeven = TRUE, current_stop_loss = %s
-                                    WHERE id = %s;
-                                """)
-                                update_params = (new_stop_loss_be, signal_id)
-                                # Safely format variables in log message
-                                log_message = f"🛡️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g if current_price_val is not None else 'N/A'} (>= {tp1_price:.8g if tp1_price is not None else 'N/A'}). Moving SL to Break-Even ({new_stop_loss_be:.8g})."
-                                notification_details.update({'type': 'tp1_hit_breakeven', 'target_price': tp1_price, 'new_stop_loss': new_stop_loss_be})
-                                update_executed = True
-                            else:
-                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit, but Break-Even SL ({entry_price:.8g}) is not higher than current SL ({current_stop_loss:.8g if current_stop_loss is not None else 'N/A'}). Keeping current SL.")
-                                 # Still mark TP1 as hit, but don't change SL yet
-                                 update_query = sql.SQL("UPDATE signals SET tp1_hit = TRUE WHERE id = %s;")
-                                 update_params = (signal_id,)
-                                 # Safely format variables in log message
-                                 log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price_val:.8g if current_price_val is not None else 'N/A'}, but BE SL not higher. Marked TP1 hit."
-                                 # No notification needed if SL didn't move
-                                 update_executed = True
+                        else:
+                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit, but Break-Even SL ({entry_price:.8g}) is not higher than current SL ({current_stop_loss:.8g}). Keeping current SL.")
+                             # Still mark TP1 as hit, but don't change SL yet
+                             update_query = sql.SQL("UPDATE signals SET tp1_hit = TRUE WHERE id = %s;")
+                             update_params = (signal_id,)
+                             log_message = f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): TP1 hit at {current_price:.8g}, but BE SL not higher. Marked TP1 hit."
+                             # No notification needed if SL didn't move
+                             update_executed = True
 
 
-                        # ==================================================
-                        # 3. Check for Trailing Stop Activation/Update
-                        #    Only if SL not hit.
-                        #    This logic now runs regardless of TP1 hit status,
-                        #    but respects the Break-Even level as a floor.
-                        # ==================================================
-                        # Fetch recent data for swing analysis up to the current candle
+                    # ==================================================
+                    # 3. Check for Trailing Stop Activation/Update
+                    #    Only if SL not hit and SL is not already at Break-Even.
+                    # ==================================================
+                    elif not stop_loss_at_breakeven:
+                        # Fetch recent data for swing analysis
+                        # Use a slightly larger lookback for tracking swings than for Fib entry
                         df_track_hist = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, limit_override=LOOKBACK_FOR_SWINGS + SWING_ORDER * 2)
 
                         if df_track_hist is not None and not df_track_hist.empty:
-                            # Find the latest swing low and high up to the current candle
+                            # Find the latest swing low and high BEFORE the current time/price
                             last_swing_low_point, last_swing_high_point = find_relevant_swing_points(df_track_hist, df_track_hist.index[-1])
 
-                            # Determine the floor for the stop loss (entry price if BE hit, otherwise initial SL)
-                            sl_floor = entry_price if stop_loss_at_breakeven else float(signal_row['initial_stop_loss']) # Use initial_stop_loss from DB
-
-                            potential_new_sl_from_swing = current_stop_loss # Start with current SL
-
-                            # --- a) Update Trailing Stop based on New Swing Low ---
-                            if last_swing_low_point is not None:
-                                last_swing_low_price = last_swing_low_point[1]
-                                # Calculate potential new SL based on the latest swing low
-                                potential_new_sl_from_swing = last_swing_low_price * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
-
-                                # Only consider this new swing-based SL if it's higher than the PREVIOUSLY recorded swing low price
-                                # and also higher than the current stop loss. This prevents unnecessary updates on the same swing.
-                                if last_sl_swing_low_price is None or last_swing_low_price > last_sl_swing_low_price * (1 + SWING_SL_BUFFER_PCT/2): # Add a small buffer to avoid float comparison issues
-                                     logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Found potentially new swing low at {last_swing_low_price:.8g}. Previous SL Swing Low: {last_sl_swing_low_price:.8g if last_sl_swing_low_price is not None else 'N/A'}")
-                                else:
-                                     logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Latest swing low ({last_swing_low_price:.8g}) is not significantly higher than the one defining current SL.")
-                                     # If the latest swing low is not higher, we don't update based on it in this step.
-                                     # The potential_new_sl_from_swing remains the current_stop_loss for now.
-                                     potential_new_sl_from_swing = current_stop_loss # Revert if not a new higher low
-
-
-                            # --- Determine the final new Stop Loss ---
-                            # The new SL is the maximum of:
-                            # 1. The current stop loss (to only move up)
-                            # 2. The break-even price (if TP1 was hit)
-                            # 3. The potential SL based on the latest significant swing low
-                            new_stop_loss = max(current_stop_loss, sl_floor, potential_new_sl_from_swing)
-
-                            # --- Execute SL Update if it's higher ---
-                            # This update should only happen if a TP hit didn't already trigger an update in this cycle
-                            # (e.g., TP1 hit moves SL to BE). We can check the `update_executed` flag.
-                            if not update_executed and new_stop_loss > current_stop_loss:
-                                update_query = sql.SQL("""
-                                    UPDATE signals
-                                    SET current_stop_loss = %s, is_trailing_active = TRUE,
-                                        last_swing_low_price = %s -- Store the price of the swing low that caused this update
-                                    WHERE id = %s;
-                                """)
-                                # Store the swing low price ONLY if it was the factor that increased the SL
-                                swing_low_price_to_store = last_swing_low_point[1] if last_swing_low_point is not None and new_stop_loss == potential_new_sl_from_swing else last_sl_swing_low_price
-
-                                update_params = (new_stop_loss, swing_low_price_to_store, signal_id)
-
-                                if not is_trailing_active:
-                                     # Safely format variables in log message
-                                     log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (SL moved up). New SL={new_stop_loss:.8g if new_stop_loss is not None else 'N/A'} (Old SL={current_stop_loss:.8g if current_stop_loss is not None else 'N/A'})."
-                                     notification_details.update({'type': 'trailing_activated_swing', 'new_stop_loss': new_stop_loss, 'old_stop_loss': current_stop_loss, 'swing_price': swing_low_price_to_store}) # Notify Activation
-                                else:
-                                    # Safely format variables in log message
-                                    log_message = f"➡️ [Tracker] {symbol}(ID:{signal_id}): Trailing Stop Updated (SL moved up). New SL={new_stop_loss:.8g if new_stop_loss is not None else 'N/A'} (Old SL={current_stop_loss:.8g if current_stop_loss is not None else 'N/A'})."
-                                    notification_details.update({'type': 'trailing_updated_swing', 'new_stop_loss': new_stop_loss, 'old_stop_loss': current_stop_loss, 'swing_price': swing_low_price_to_store}) # Notify Update
-
-                                update_executed = True # Mark update as executed
-
-                            # --- Initial Trailing Activation Check (Swing High Break above Entry) ---
-                            # This is a secondary trigger for activation, in case the price runs up fast
-                            # and forms a new high before a clear higher low appears.
-                            # Only check this if trailing is NOT active and BE is NOT set, AND no other update has happened yet in this cycle.
-                            elif not update_executed and not is_trailing_active and not stop_loss_at_breakeven and last_swing_high_point is not None:
+                            # --- a) Activate Trailing Stop on Swing High Break ---
+                            if not is_trailing_active and last_swing_high_point is not None:
                                 last_swing_high_price = last_swing_high_point[1]
-                                # Check if current price broke the last swing high AND this high is above entry
-                                if current_price_val > last_swing_high_price and last_swing_high_price > entry_price and \
-                                   (last_activation_swing_high_price is None or not np.isclose(last_swing_high_price, last_activation_swing_high_price)):
+                                # Check if current price broke the last swing high
+                                # And ensure we are not activating based on the same high again if already stored
+                                if current_price > last_swing_high_price and \
+                                   (last_activation_swing_high is None or not np.isclose(last_swing_high_price, last_activation_swing_high)):
 
                                     # Find the swing low that formed *before* this broken high
                                     lows_before_break = [s for s in detect_swings(df_track_hist['low'], SWING_ORDER) if s[0] < last_swing_high_point[0]]
                                     if lows_before_break:
                                         activating_swing_low = max(lows_before_break, key=lambda item: item[0])
                                         activating_swing_low_price = activating_swing_low[1]
-                                        potential_new_sl_swing_activation = activating_swing_low_price * (1 - SWING_SL_BUFFER_PCT) # Use tighter buffer
+                                        new_stop_loss_swing = activating_swing_low_price * (1 - SWING_SL_BUFFER_PCT)
 
-                                        # Only activate if the new SL is higher than the current one (which is likely initial_stop_loss here)
-                                        if potential_new_sl_swing_activation > current_stop_loss:
+                                        # Only activate if the new SL is higher than the current one
+                                        if new_stop_loss_swing > current_stop_loss:
                                             update_query = sql.SQL("""
                                                 UPDATE signals
                                                 SET is_trailing_active = TRUE, current_stop_loss = %s,
-                                                    last_swing_low_price = %s, last_swing_high_price = %s -- Store the high that triggered activation
+                                                    last_swing_low_price = %s, last_swing_high_price = %s
                                                 WHERE id = %s;
                                             """)
-                                            update_params = (potential_new_sl_swing_activation, activating_swing_low_price, last_swing_high_price, signal_id)
-                                            # Safely format variables in log message
-                                            log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (Swing High Break). Price={current_price_val:.8g if current_price_val is not None else 'N/A'} > High={last_swing_high_price:.8g}. New SL={potential_new_sl_swing_activation:.8g if potential_new_sl_swing_activation is not None else 'N/A'} (Below Low={activating_swing_low_price:.8g})"
-                                            notification_details.update({'type': 'trailing_activated_swing', 'current_price': current_price_val, 'swing_price': last_swing_high_price, 'new_stop_loss': potential_new_sl_swing_activation}) # Notify Activation
-                                            update_executed = True # Mark update as executed
+                                            update_params = (new_stop_loss_swing, activating_swing_low_price, last_swing_high_price, signal_id)
+                                            log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing Activated (Swing High Break). Price={current_price:.8g} > High={last_swing_high_price:.8g}. New SL={new_stop_loss_swing:.8g} (Below Low={activating_swing_low_price:.8g})"
+                                            notification_details.update({'type': 'trailing_activated_swing', 'current_price': current_price, 'swing_price': last_swing_high_price, 'new_stop_loss': new_stop_loss_swing})
+                                            update_executed = True
                                         else:
-                                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Swing High Break detected, but new SL ({potential_new_sl_swing_activation:.8g if potential_new_sl_swing_activation is not None else 'N/A'}) based on preceding low ({activating_swing_low_price:.8g}) is not higher than current SL ({current_stop_loss:.8g if current_stop_loss is not None else 'N/A'}). Not activating yet.")
+                                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Swing High Break detected, but new SL ({new_stop_loss_swing:.8g}) based on preceding low ({activating_swing_low_price:.8g}) is not higher than current SL ({current_stop_loss:.8g}). Not activating yet.")
                                     else:
                                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Swing High Break detected, but couldn't find preceding swing low to set initial trailing SL.")
                                 else:
-                                     logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price didn't break the last swing high above entry, or already activated based on this high.")
-                            # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Trailing active or BE set, skipping initial activation check.")
+                                     # Price didn't break the last swing high, or we already activated based on this high
+                                     pass
+
+                            # --- b) Update Trailing Stop based on New Swing Low ---
+                            elif is_trailing_active and last_swing_low_point is not None:
+                                last_swing_low_price = last_swing_low_point[1]
+                                # Check if this swing low is different (higher) than the one defining the current SL
+                                if last_sl_swing_low is None or not np.isclose(last_swing_low_price, last_sl_swing_low):
+                                    potential_new_sl = last_swing_low_price * (1 - SWING_SL_BUFFER_PCT)
+                                    # Only update if the new SL is higher than the current one
+                                    if potential_new_sl > current_stop_loss:
+                                        update_query = sql.SQL("""
+                                            UPDATE signals
+                                            SET current_stop_loss = %s, last_swing_low_price = %s
+                                            WHERE id = %s;
+                                        """)
+                                        update_params = (potential_new_sl, last_swing_low_price, signal_id)
+                                        log_message = f"➡️ [Tracker] {symbol}(ID:{signal_id}): Trailing Stop Updated (New Swing Low). New SL={potential_new_sl:.8g} (Below Low={last_swing_low_price:.8g}). Old SL={current_stop_loss:.8g}"
+                                        notification_details.update({'type': 'trailing_updated_swing', 'current_price': current_price, 'swing_price': last_swing_low_price, 'old_stop_loss': current_stop_loss, 'new_stop_loss': potential_new_sl})
+                                        update_executed = True
+                                    # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): New swing low found ({last_swing_low_price:.8g}), but potential SL ({potential_new_sl:.8g}) not higher than current ({current_stop_loss:.8g}).")
+                                # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Most recent swing low ({last_swing_low_price:.8g}) is same as last used for SL. No update.")
+                            # else: logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Trailing active, but no new swing low found yet.")
 
                         else:
                              logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Could not fetch historical data for swing analysis.")
@@ -1828,8 +1619,6 @@ def track_signals() -> None:
                     # ======================================
                     # Execute DB Update (if any)
                     # ======================================
-                    # This block is now outside the main if/else chain,
-                    # executing if update_executed is True regardless of which condition set it.
                     if update_executed and update_query:
                         try:
                              with conn.cursor() as update_cur:
@@ -1847,7 +1636,6 @@ def track_signals() -> None:
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
-                    # Added more specific logging for conversion errors
                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error converting signal values: {convert_err} - Row: {signal_row}")
                     continue # Skip this signal
                 except Exception as inner_loop_err:
@@ -1862,16 +1650,16 @@ def track_signals() -> None:
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
-             if conn: conn.rollback(); time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
-             try: init_db()
-             except Exception as recon_err: logger.critical(f"❌ [Tracker] Failed to reconnect DB: {recon_err}. Exiting..."); break
+             if conn: conn.rollback()
+             time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after DB error
+             check_db_connection() # Try to re-init
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
-            logger.info("ℹ️ [Tracker] Waiting 120s before retrying...")
-            time.sleep(120)
+            time.sleep(TRACKING_CYCLE_SLEEP_SECONDS * 2) # Wait longer after unexpected error
 
 
 # ---------------------- Flask Service (Optional for Webhook) ----------------------
+# (No changes needed here)
 app = Flask(__name__)
 
 @app.route('/')
@@ -1930,21 +1718,10 @@ def handle_status_command(chat_id_msg: int) -> None:
     message_id_to_edit = msg_sent['result']['message_id']
     try:
         open_count = 0
-        tp1_hit_count = 0
-        tp2_hit_count = 0
-        tp3_hit_count = 0
-
         if check_db_connection() and conn:
             with conn.cursor() as status_cur:
                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE hit_stop_loss = FALSE;") # Count all not stopped
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp1_hit = TRUE AND hit_stop_loss = FALSE;")
-                tp1_hit_count = (status_cur.fetchone() or {}).get('count', 0)
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp2_hit = TRUE AND hit_stop_loss = FALSE;")
-                tp2_hit_count = (status_cur.fetchone() or {}).get('count', 0)
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE tp3_hit = TRUE AND hit_stop_loss = FALSE;")
-                tp3_hit_count = (status_cur.fetchone() or {}).get('count', 0)
-
         ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
         tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
         final_status_msg = (
@@ -1952,9 +1729,6 @@ def handle_status_command(chat_id_msg: int) -> None:
             f"- تتبع الأسعار (WS): {ws_status}\n"
             f"- تتبع الإشارات: {tracker_status}\n"
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"  • ضربت TP1: {tp1_hit_count}\n"
-            f"  • ضربت TP2: {tp2_hit_count}\n"
-            f"  • ضربت TP3: {tp3_hit_count}\n"
             f"- وقت الخادم: {datetime.now().strftime('%H:%M:%S')}"
         )
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
@@ -1982,12 +1756,12 @@ def run_flask() -> None:
     except Exception as serve_err: logger.critical(f"❌ [Flask] Failed to start server: {serve_err}", exc_info=True)
 
 # ---------------------- Main Loop and Check Function ----------------------
+# (No changes needed here)
 def main_loop() -> None:
     """Main loop to scan pairs and generate signals."""
-    # Call the new function to get symbols directly from Binance
-    symbols_to_scan = get_crypto_symbols_from_binance()
-    if not symbols_to_scan: logger.critical("❌ [Main] No valid symbols loaded from Binance. Cannot proceed."); return
-    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning from Binance.")
+    symbols_to_scan = get_crypto_symbols()
+    if not symbols_to_scan: logger.critical("❌ [Main] No valid symbols loaded. Cannot proceed."); return
+    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning.")
 
     while True:
         try:
@@ -2004,12 +1778,7 @@ def main_loop() -> None:
                  with conn.cursor() as cur_check:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE hit_stop_loss = FALSE;") # Count non-closed signals
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
-            except psycopg2.Error as db_err:
-                logger.error(f"❌ [Main] DB error checking open count: {db_err}. Skipping.")
-                if conn:
-                    conn.rollback()
-                time.sleep(60)
-                continue
+            except psycopg2.Error as db_err: logger.error(f"❌ [Main] DB error checking open count: {db_err}. Skipping."); if conn: conn.rollback(); time.sleep(60); continue
 
             logger.info(f"ℹ️ [Main] Currently Open Signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES: logger.info(f"⚠️ [Main] Max open signals reached. Waiting..."); time.sleep(60); continue
@@ -2023,25 +1792,19 @@ def main_loop() -> None:
                  try:
                     with conn.cursor() as symbol_cur: # Check if already open
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
-                        if symbol_cur.fetchone():
-                            logger.debug(f"ℹ️ [Main] {symbol} already has an open signal. Skipping.")
-                            continue
+                        if symbol_cur.fetchone(): continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty:
-                        logger.debug(f"ℹ️ [Main] No historical data for {symbol}. Skipping.")
-                        continue
+                    if df_hist is None or df_hist.empty: continue
 
                     strategy = ConservativeTradingStrategy(symbol)
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None:
-                        logger.debug(f"ℹ️ [Main] Failed to populate indicators for {symbol}. Skipping.")
-                        continue
+                    if df_indicators is None: continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
                     if potential_signal:
-                        logger.info(f"✨ [Main] Potential signal for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}, R:R: {potential_signal.get('risk_reward_ratio', 0):.2f}) Final check...")
+                        logger.info(f"✨ [Main] Potential signal for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}) Final check...")
                         with conn.cursor() as final_check_cur: # Final check before insert
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE hit_stop_loss = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
@@ -2049,18 +1812,10 @@ def main_loop() -> None:
                                  if insert_signal_into_db(potential_signal):
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1; slots_available -= 1
-                                     logger.info(f"✅ [Main] Signal inserted and alert sent for {symbol}.")
                                      time.sleep(2) # Small delay after sending alert
                                  else: logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
                              else: logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored."); break
-                    else:
-                         logger.debug(f"ℹ️ [Main] No signal generated for {symbol} after checks.")
-
-                 except psycopg2.Error as db_loop_err:
-                     logger.error(f"❌ [Main] DB error processing {symbol}: {db_loop_err}. Moving next...")
-                     if conn:
-                         conn.rollback()
-                     continue
+                 except psycopg2.Error as db_loop_err: logger.error(f"❌ [Main] DB error processing {symbol}: {db_loop_err}. Moving next..."); if conn: conn.rollback(); continue
                  except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error processing {symbol}: {symbol_proc_err}", exc_info=True); continue
                  time.sleep(0.3) # Small delay between symbols
 
@@ -2129,4 +1884,4 @@ if __name__ == "__main__":
         # send_telegram_message(CHAT_ID, "⚠️ Alert: Trading bot is shutting down now.")
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
-        os._exit(0) # Force exit if threads is stuck
+        os._exit(0) # Force exit if threads are stuck
