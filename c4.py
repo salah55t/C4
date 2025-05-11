@@ -71,7 +71,7 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Keep Fib levels, but le
 FIB_TOLERANCE: float = 0.005 # Keep tolerance
 LOOKBACK_FOR_SWINGS: int = 50 # Reduced lookback for swings
 ENTRY_ATR_PERIOD: int = 10     # ATR Period for entry (Reduced)
-ENTRY_ATR_MULTIPLIER: float = 2 # ATR Multiplier for initial target/stop (SIGNIFICANTLY REDUCED for tighter levels)
+ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target/stop (SIGNIFICANTLY REDUCED for tighter levels)
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window (Keep 20, standard)
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation (Keep 2)
 MACD_FAST: int = 9            # MACD Fast Period (Reduced)
@@ -81,13 +81,24 @@ ADX_PERIOD: int = 10            # ADX Period (Reduced)
 SUPERTREND_PERIOD: int = 10     # SuperTrend Period (Keep 10, standard)
 SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or keep 3.0)
 
+# --- New Momentum Indicator Parameters ---
+STOCH_K_PERIOD: int = 14       # Stochastic %K Period (Standard)
+STOCH_D_PERIOD: int = 3        # Stochastic %D Period (Standard)
+STOCH_SMOOTH_K: int = 3        # Stochastic Smoothing for %K (Standard)
+STOCH_OVERBOUGHT: int = 80     # Stochastic Overbought Threshold (Standard)
+STOCH_OVERSOLD: int = 20       # Stochastic Oversold Threshold (Standard)
+WILLIAMS_R_PERIOD: int = 14    # Williams %R Period (Standard)
+WILLIAMS_R_OVERBOUGHT: int = -20 # Williams %R Overbought Threshold (Standard)
+WILLIAMS_R_OVERSOLD: int = -80 # Williams %R Oversold Threshold (Standard)
+# -----------------------------------------
+
 # Trailing Stop Loss (Adjusted for Scalping)
 TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
 TRAILING_STOP_ATR_MULTIPLIER: float = 1.8        # ATR Multiplier for trailing stop (Reduced for tighter stop)
 TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.0005 # Price increase percentage to move trailing stop (0.05% - Reduced)
 
 # Additional Signal Conditions (Adjusted)
-MIN_PROFIT_MARGIN_PCT: float = 0.8 # Minimum required profit margin percentage (SIGNIFICANTLY REDUCED)
+MIN_PROFIT_MARGIN_PCT: float = 0.01 # Minimum required profit margin percentage (SET TO 1%)
 MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
@@ -95,6 +106,7 @@ RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candl
 MIN_ADX_TREND_STRENGTH: int = 20 # Increased minimum ADX for stronger trend confirmation (Slightly reduced threshold for 5m)
 MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles (Keep or Reduce)
 OBV_INCREASE_CANDLES: int = 2 # Check if OBV is increasing over the last X candles (Reduced)
+RECENT_STOCH_CROSS_LOOKBACK: int = 2 # Check for Stochastic cross within the last X candles (New Parameter)
 
 # --- New Parameter for Dynamic Target/SL Update (Adjusted for 5m) ---
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Percentage threshold to consider price "approaching" target (1% - Reduced)
@@ -341,7 +353,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if missing_columns:
                 logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
                 # (Original code to add columns was fine, can keep or improve here if needed)
-                # ... (ALTER TABLE code can be added here if you anticipate future changes) ...
+                # Add missing columns dynamically - Example for one column:
+                # if 'new_column_name' in missing_columns:
+                #     try:
+                #         cur.execute("ALTER TABLE signals ADD COLUMN new_column_name DOUBLE PRECISION;")
+                #         conn.commit()
+                #         logger.info("✅ [DB] Added missing column 'new_column_name'.")
+                #     except Exception as alter_err:
+                #         logger.error(f"❌ [DB] Failed to add column 'new_column_name': {alter_err}")
                 logger.warning("⚠️ [DB] Automatic addition of missing columns is not implemented in this enhanced version. Please check manually if needed.")
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
@@ -739,6 +758,8 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
         except Exception:
             logger.error("❌ [Indicator VWAP] Failed to convert index to DatetimeIndex, cannot calculate daily VWAP.")
             df['vwap'] = np.nan
+            # Drop temporary columns if they exist
+            df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
             return df
 
     df['date'] = df.index.date
@@ -927,6 +948,68 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
 
     return df_st
+
+# --- New Indicator Calculation Functions ---
+def calculate_stochastic(df: pd.DataFrame, k_period: int = STOCH_K_PERIOD, d_period: int = STOCH_D_PERIOD, smooth_k: int = STOCH_SMOOTH_K) -> pd.DataFrame:
+    """Calculates Stochastic Oscillator (%K and %D)."""
+    df_stoch = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_stoch.columns for col in required_cols) or df_stoch[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Stochastic] 'high', 'low', 'close' columns missing or empty.")
+        df_stoch['stoch_k'] = np.nan
+        df_stoch['stoch_d'] = np.nan
+        return df_stoch
+    min_len = max(k_period, d_period, smooth_k) # Minimum length for calculation
+    if len(df_stoch) < min_len:
+        logger.warning(f"⚠️ [Indicator Stochastic] Insufficient data ({len(df_stoch)} < {min_len}) to calculate Stochastic.")
+        df_stoch['stoch_k'] = np.nan
+        df_stoch['stoch_d'] = np.nan
+        return df_stoch
+
+    # Calculate %K
+    lowest_low = df_stoch['low'].rolling(window=k_period).min()
+    highest_high = df_stoch['high'].rolling(window=k_period).max()
+
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    df_stoch['stoch_k_raw'] = ((df_stoch['close'] - lowest_low) / range_hl) * 100
+    df_stoch['stoch_k_raw'].replace([np.inf, -np.inf], np.nan, inplace=True) # Handle potential inf values
+
+    # Smooth %K
+    df_stoch['stoch_k'] = df_stoch['stoch_k_raw'].rolling(window=smooth_k).mean()
+
+    # Calculate %D (SMA of %K)
+    df_stoch['stoch_d'] = df_stoch['stoch_k'].rolling(window=d_period).mean()
+
+    # Drop temporary column
+    df_stoch.drop(columns=['stoch_k_raw'], inplace=True, errors='ignore')
+
+    return df_stoch[['stoch_k', 'stoch_d']]
+
+def calculate_williams_r(df: pd.DataFrame, period: int = WILLIAMS_R_PERIOD) -> pd.DataFrame:
+    """Calculates Williams %R."""
+    df_wr = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_wr.columns for col in required_cols) or df_wr[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator WilliamsR] 'high', 'low', 'close' columns missing or empty.")
+        df_wr['williams_r'] = np.nan
+        return df_wr
+    if len(df_wr) < period:
+        logger.warning(f"⚠️ [Indicator WilliamsR] Insufficient data ({len(df_wr)} < {period}) to calculate Williams %R.")
+        df_wr['williams_r'] = np.nan
+        return df_wr
+
+    highest_high = df_wr['high'].rolling(window=period).max()
+    lowest_low = df_wr['low'].rolling(window=period).min()
+
+    # Avoid division by zero
+    range_hl = highest_high - lowest_low
+    df_wr['williams_r'] = ((highest_high - df_wr['close']) / range_hl) * -100
+    df_wr['williams_r'].replace([np.inf, -np.inf], np.nan, inplace=True) # Handle potential inf values
+
+    return df_wr[['williams_r']]
+
+# ---------------------------------------------
 
 
 # ---------------------- Candlestick Patterns ----------------------
@@ -1202,16 +1285,20 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
             'vwap', 'obv', 'supertrend', 'supertrend_trend',
-            'BullishCandleSignal', 'BearishCandleSignal'
+            'BullishCandleSignal', 'BearishCandleSignal',
+            'stoch_k', 'stoch_d', # Added Stochastic
+            'williams_r' # Added Williams %R
         ]
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
             'close',
-            'ema_8', 'ema_21', 'vwma', # Adjusted EMA names
+            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', # Adjusted EMA names
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
-            'BullishCandleSignal', 'obv'
+            'BullishCandleSignal', 'obv',
+            'stoch_k', 'stoch_d', # Added Stochastic
+            'williams_r' # Added Williams %R
         ]
 
         # =====================================================================
@@ -1226,20 +1313,23 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'rsi_filter_breakout': 1.0, # RSI filter for breakout (optional)
             'macd_filter_breakout': 1.0, # MACD histogram positive filter for breakout (optional)
             'macd_hist_increasing': 2.5, # MACD histogram is increasing (strong momentum sign)
-            'obv_increasing_recent': 2.0 # OBV is increasing over the last few candles
+            'obv_increasing_recent': 2.0, # OBV is increasing over the last few candles
+            'williams_r_not_oversold': 1.5 # Added: Williams %R is not in the oversold zone (Optional)
         }
         # =====================================================================
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
         # Adjusted mandatory conditions for Scalping
+        # Added: Stochastic Bullish Cross Recent
         # =====================================================================
         self.essential_conditions = [
             'ema_cross_bullish_recent', # EMA cross must be recent (Adjusted lookback)
             'supertrend_up',
             'macd_positive_or_cross',
             'adx_trending_bullish_strong', # ADX must be stronger (Adjusted threshold)
-            'above_vwma' # VWMA condition remains mandatory
+            'above_vwma', # VWMA condition remains mandatory
+            'stochastic_bullish_cross_recent' # Added: Stochastic Bullish Cross must be recent (Mandatory)
         ]
         # =====================================================================
 
@@ -1257,7 +1347,13 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating indicators...")
         # Update minimum required rows based on the largest period of used indicators
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 5 # Add a small buffer
+        min_len_required = max(
+            EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD,
+            ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2,
+            SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES,
+            OBV_INCREASE_CANDLES, STOCH_K_PERIOD, STOCH_D_PERIOD, STOCH_SMOOTH_K,
+            WILLIAMS_R_PERIOD, RECENT_STOCH_CROSS_LOOKBACK
+        ) + 5 # Add a small buffer
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df)} < {min_len_required}) to calculate indicators.")
@@ -1290,8 +1386,17 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             df_calc = calculate_obv(df_calc)
             df_calc = detect_candlestick_patterns(df_calc)
 
+            # --- New Momentum Indicators Calculation ---
+            stoch_df = calculate_stochastic(df_calc, STOCH_K_PERIOD, STOCH_D_PERIOD, STOCH_SMOOTH_K)
+            df_calc = df_calc.join(stoch_df)
+
+            williams_r_df = calculate_williams_r(df_calc, WILLIAMS_R_PERIOD)
+            df_calc = df_calc.join(williams_r_df)
+            # -------------------------------------------
+
+
             # Check for required columns after calculation
-            # Adjust required columns list based on the new EMA names
+            # Adjust required columns list based on the new EMA names and new indicators
             required_cols_indicators_adjusted = [
                 'open', 'high', 'low', 'close', 'volume',
                 f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
@@ -1299,7 +1404,8 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
                 'macd', 'macd_signal', 'macd_hist',
                 'adx', 'di_plus', 'di_minus',
                 'vwap', 'obv', 'supertrend', 'supertrend_trend',
-                'BullishCandleSignal', 'BearishCandleSignal'
+                'BullishCandleSignal', 'BearishCandleSignal',
+                'stoch_k', 'stoch_d', 'williams_r' # Added new indicator columns
             ]
             missing_cols = [col for col in required_cols_indicators_adjusted if col not in df_calc.columns]
             if missing_cols:
@@ -1320,7 +1426,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest Close: {latest.get('close', np.nan):.4f}, EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, Stoch K: {latest.get('stoch_k', np.nan):.2f}, Stoch D: {latest.get('stoch_d', np.nan):.2f}, Williams %R: {latest.get('williams_r', np.nan):.2f}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1334,25 +1440,29 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
-        Adjusted for Scalping.
+        Adjusted for Scalping with new momentum indicators.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
         # Check DataFrame and columns
         # Ensure enough data for lookback periods for momentum checks
-        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 1
+        min_signal_data_len = max(
+            RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES,
+            OBV_INCREASE_CANDLES, RECENT_STOCH_CROSS_LOOKBACK
+        ) + 1
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<{min_signal_data_len}), cannot generate signal.")
             return None
 
-        # Adjust required columns list based on the new EMA names
+        # Adjust required columns list based on the new EMA names and new indicators
         required_cols_buy_signal_adjusted = [
             'close',
             f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
             'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
-            'BullishCandleSignal', 'obv'
+            'BullishCandleSignal', 'obv',
+            'stoch_k', 'stoch_d', 'williams_r' # Added new indicator columns
         ]
         required_cols_with_breakout = list(set(required_cols_buy_signal_adjusted + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
         missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
@@ -1456,6 +1566,29 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['VWMA_Mandatory'] = f'Failed: Not Closed Above VWMA ({detail_vwma})'
         else:
              signal_details['VWMA_Mandatory'] = f'Passed: Closed Above VWMA'
+
+        # --- New Mandatory Condition: Recent Stochastic Bullish Cross ---
+        stoch_bullish_cross_recent = False
+        if len(recent_df) >= RECENT_STOCH_CROSS_LOOKBACK + 1:
+             # Check for a bullish cross (%K crossing above %D) in the last RECENT_STOCH_CROSS_LOOKBACK candles
+             stoch_k_slice = recent_df['stoch_k'].iloc[-RECENT_STOCH_CROSS_LOOKBACK-1:]
+             stoch_d_slice = recent_df['stoch_d'].iloc[-RECENT_STOCH_CROSS_LOOKBACK-1:]
+
+             if not stoch_k_slice.isnull().any() and not stoch_d_slice.isnull().any():
+                for i in range(1, RECENT_STOCH_CROSS_LOOKBACK + 1):
+                     if stoch_k_slice.iloc[-i] > stoch_d_slice.iloc[-i] and stoch_k_slice.iloc[-i-1] <= stoch_d_slice.iloc[-i-1]:
+                          stoch_bullish_cross_recent = True
+                          break # Found a recent cross, no need to check further back
+             else:
+                 logger.debug(f"⚠️ [Strategy {self.symbol}] NaN values in Stochastic slices for recent cross check.")
+
+        if not stoch_bullish_cross_recent:
+            essential_passed = False
+            failed_essential_conditions.append(f'Recent Stochastic Bullish Cross in last {RECENT_STOCH_CROSS_LOOKBACK} candles')
+            signal_details['Stoch_Cross'] = f'Failed: No recent bullish cross in last {RECENT_STOCH_CROSS_LOOKBACK} candles'
+        else:
+             signal_details['Stoch_Cross'] = f'Passed: Recent bullish cross detected'
+        # -----------------------------------------------------------------
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1562,6 +1695,14 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         else:
              signal_details['OBV_Increasing_Recent'] = f'OBV not increasing over last {OBV_INCREASE_CANDLES} candles (0)'
 
+        # --- New Optional Condition: Williams %R not in Oversold ---
+        if pd.notna(last_row['williams_r']) and last_row['williams_r'] > WILLIAMS_R_OVERSOLD:
+             current_score += self.condition_weights.get('williams_r_not_oversold', 0)
+             signal_details['Williams_R'] = f'Williams %R ({last_row["williams_r"]:.2f}) not oversold (> {WILLIAMS_R_OVERSOLD}) (+{self.condition_weights.get("williams_r_not_oversold", 0)})'
+        else:
+             signal_details['Williams_R'] = f'Williams %R ({last_row["williams_r"]:.2f}) is oversold (0)'
+        # ---------------------------------------------------------
+
         # ------------------------------------------
 
         # Final buy decision based on the score of optional conditions
@@ -1588,8 +1729,16 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         target_multiplier = ENTRY_ATR_MULTIPLIER
         stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
 
-        initial_target = current_price + (target_multiplier * current_atr)
-        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
+        # Calculate ATR-based target and stop loss
+        initial_target_atr = current_price + (target_multiplier * current_atr)
+        initial_stop_loss_atr = current_price - (stop_loss_multiplier * current_atr)
+
+        # --- Ensure Minimum 1% Profit Target ---
+        min_profit_target_price = current_price * (1 + MIN_PROFIT_MARGIN_PCT) # Use the new MIN_PROFIT_MARGIN_PCT (1%)
+        initial_target = max(initial_target_atr, min_profit_target_price) # Take the maximum of ATR target and minimum profit target
+        # ---------------------------------------
+
+        initial_stop_loss = initial_stop_loss_atr # Keep ATR-based stop loss for now
 
         # Ensure stop loss is not zero or negative and is below the entry price
         if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
@@ -1609,11 +1758,12 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
                   signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # Use the new value here
 
 
-        # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
-        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
-        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
-            return None
+        # Check minimum profit margin (after calculating final target and stop loss) - This check is now implicitly handled by setting a minimum target price of 1%
+        # profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
+        # if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
+        #     logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
+        #     return None
+
 
         # Compile final signal data
         signal_output = {
@@ -1725,6 +1875,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
             f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
              f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n"
+            f"  - تقاطع Stochastic صعودي (حديث): {'تم ✅' if 'Passed: Recent' in signal_details.get('Stoch_Cross', '') else 'فشل ❌'}\n" # Added
             f"——————————————\n"
             f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
             f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
@@ -1736,6 +1887,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
             f"  - هيستوجرام MACD يتزايد: {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n" # Added
             f"  - حجم التوازن (OBV) يتزايد مؤخراً: {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n" # Added
+            f"  - Williams %R ليس في تشبع بيع: {signal_details.get('Williams_R', 'N/A')}\n" # Added
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -1979,17 +2131,27 @@ def track_signals() -> None:
                               if df_indicators_recent is not None:
                                    # Attempt to generate a new signal based on recent conditions
                                    # Note: This will use the Scalping strategy's buy signal logic and thresholds
-                                   potential_new_signal = strategy_tracker.generate_buy_signal(df_indicators_recent)
+                                   # We pass a flag to generate_buy_signal to indicate it's for update analysis, not a new trade entry
+                                   potential_new_signal = strategy_tracker.generate_buy_signal(df_indicators_recent) # No need for special flag, just check if signal is generated
 
                                    if potential_new_signal:
                                         logger.info(f"✨ [Tracker] {symbol}(ID:{signal_id}): New bullish signal detected near target. Calculating new levels...")
                                         # Calculate new target and stop loss based on current price and ATR from recent data
-                                        current_atr_recent = df_indicators_recent['atr'].iloc[-1]
+                                        # Use the last row of the df_indicators_recent for current ATR and price
+                                        latest_recent_row = df_indicators_recent.iloc[-1]
+                                        current_atr_recent = latest_recent_row.get('atr')
+                                        current_price_for_update = latest_recent_row.get('close') # Use price from the fetched data
 
-                                        if pd.notna(current_atr_recent) and current_atr_recent > 0:
+                                        if pd.notna(current_atr_recent) and current_atr_recent > 0 and pd.notna(current_price_for_update):
                                              # Use the Scalping strategy's ATR multipliers for the new levels
-                                             new_target_calc = current_price + (strategy_tracker.ENTRY_ATR_MULTIPLIER * current_atr_recent)
-                                             new_stop_loss_calc = current_price - (strategy_tracker.TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent) # Use trailing stop multiplier for new SL
+                                             new_target_calc = current_price_for_update + (strategy_tracker.ENTRY_ATR_MULTIPLIER * current_atr_recent)
+                                             # Use trailing stop multiplier for the new SL when updating near target
+                                             new_stop_loss_calc = current_price_for_update - (strategy_tracker.TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent)
+
+                                             # Ensure minimum 1% profit for the NEW target relative to the CURRENT price
+                                             min_profit_target_price_update = current_price_for_update * (1 + MIN_PROFIT_MARGIN_PCT)
+                                             new_target_calc = max(new_target_calc, min_profit_target_price_update)
+
 
                                              # Only update if the new target is higher and new stop loss is higher
                                              if new_target_calc > current_target and new_stop_loss_calc > current_stop_loss:
@@ -2002,22 +2164,23 @@ def track_signals() -> None:
                                                            is_trailing_active = TRUE, last_trailing_update_price = %s
                                                        WHERE id = %s;
                                                   """)
-                                                  # Use the current price as the last trailing update price upon dynamic target update
-                                                  update_params = (new_target_update, new_stop_loss_update, current_price, signal_id)
+                                                  # Use the current price for update as the last trailing update price upon dynamic target update
+                                                  update_params = (new_target_update, new_stop_loss_update, current_price_for_update, signal_id)
 
-                                                  log_message = f"🔄✅ [Tracker] {symbol}(ID:{signal_id}): Target/SL updated based on new signal. Price={current_price:.8g}, Old T={current_target:.8g}, New T={new_target_update:.8g}, Old SL={current_stop_loss:.8g}, New SL={new_stop_loss_update:.8g}"
+                                                  log_message = f"🔄✅ [Tracker] {symbol}(ID:{signal_id}): Target/SL updated based on new signal. Price={current_price_for_update:.8g}, Old T={current_target:.8g}, New T={new_target_update:.8g}, Old SL={current_stop_loss:.8g}, New SL={new_stop_loss_update:.8g}"
                                                   notification_details.update({
                                                       'type': 'target_and_sl_updated',
                                                       'old_target': current_target,
                                                       'new_target': new_target_update,
                                                       'old_stop_loss': current_stop_loss,
-                                                      'new_stop_loss': new_stop_loss_update
+                                                      'new_stop_loss': new_stop_loss_update,
+                                                      'current_price': current_price_for_update # Use price from fetched data for notification
                                                   })
                                                   update_executed = True
                                              else:
                                                   logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated new target ({new_target_calc:.8g}) or stop loss ({new_stop_loss_calc:.8g}) not higher than current levels. No update.")
                                         else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR ({current_atr_recent}) from recent data for update calculation.")
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR ({current_atr_recent}) or price ({current_price_for_update}) from recent data for update calculation.")
                                    else:
                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): No new bullish signal generated from recent data. No target/SL update.")
                               else:
@@ -2042,8 +2205,10 @@ def track_signals() -> None:
                                 if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
                                     current_atr_val = df_atr['atr'].iloc[-1]
                                     if current_atr_val > 0:
+                                         # Calculate new stop loss using the trailing stop multiplier
                                          new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.0005)) # Ensure a very small profit or keep current stop
+                                         # Ensure the new stop loss is at least the entry price or the current stop loss
+                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price) # Ensure at least entry price
 
                                          if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
                                             update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
@@ -2487,3 +2652,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0)
+
