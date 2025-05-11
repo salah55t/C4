@@ -974,8 +974,7 @@ def calculate_stochastic(df: pd.DataFrame, k_period: int = STOCH_K_PERIOD, d_per
     range_hl = highest_high - lowest_low
     # Fix FutureWarning: Assign the result back to the column
     df_stoch['stoch_k_raw'] = ((df_stoch['close'] - lowest_low) / range_hl) * 100
-    # Fix the inplace=True warning here
-    df_stoch['stoch_k_raw'] = df_stoch['stoch_k_raw'].replace([np.inf, -np.inf], np.nan)
+    df_stoch['stoch_k_raw'] = df_stoch['stoch_k_raw'].replace([np.inf, -np.inf], np.nan) # Handle potential inf values
 
     # Smooth %K
     df_stoch['stoch_k'] = df_stoch['stoch_k_raw'].rolling(window=smooth_k).mean()
@@ -1008,8 +1007,7 @@ def calculate_williams_r(df: pd.DataFrame, period: int = WILLIAMS_R_PERIOD) -> p
     range_hl = highest_high - lowest_low
     # Fix FutureWarning: Assign the result back to the column
     df_wr['williams_r'] = ((highest_high - df_wr['close']) / range_hl) * -100
-    # Fix the inplace=True warning here
-    df_wr['williams_r'] = df_wr['williams_r'].replace([np.inf, -np.inf], np.nan)
+    df_wr['williams_r'] = df_wr['williams_r'].replace([np.inf, -np.inf], np.nan) # Handle potential inf values
 
     return df_wr[['williams_r']]
 
