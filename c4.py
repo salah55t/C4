@@ -298,7 +298,7 @@ def get_btc_trend_4h() -> str:
 
 # ---------------------- Database Connection Setup ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    """Initializes database connection and creates tables if they don't exist."""
+    """ Initializes database connection and creates tables if they don't exist. """
     global conn, cur
     logger.info("[DB] Starting database initialization...")
     for attempt in range(retries):
@@ -712,7 +712,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     # Calculate True Range (TR)
     df_calc['high-low'] = df_calc['high'] - df_calc['low']
     df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
-    df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
+    df_calc['low-prev_close'] = abs(df_calc['low'].shift(1) - df_calc['low']) # Corrected calculation
     df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
 
     # Calculate Directional Movement (+DM, -DM)
@@ -972,8 +972,10 @@ def calculate_stochastic(df: pd.DataFrame, k_period: int = STOCH_K_PERIOD, d_per
 
     # Avoid division by zero
     range_hl = highest_high - lowest_low
+    # Fix FutureWarning: Assign the result back to the column
     df_stoch['stoch_k_raw'] = ((df_stoch['close'] - lowest_low) / range_hl) * 100
-    df_stoch['stoch_k_raw'].replace([np.inf, -np.inf], np.nan, inplace=True) # Handle potential inf values
+    # Fix the inplace=True warning here
+    df_stoch['stoch_k_raw'] = df_stoch['stoch_k_raw'].replace([np.inf, -np.inf], np.nan)
 
     # Smooth %K
     df_stoch['stoch_k'] = df_stoch['stoch_k_raw'].rolling(window=smooth_k).mean()
@@ -1004,8 +1006,10 @@ def calculate_williams_r(df: pd.DataFrame, period: int = WILLIAMS_R_PERIOD) -> p
 
     # Avoid division by zero
     range_hl = highest_high - lowest_low
+    # Fix FutureWarning: Assign the result back to the column
     df_wr['williams_r'] = ((highest_high - df_wr['close']) / range_hl) * -100
-    df_wr['williams_r'].replace([np.inf, -np.inf], np.nan, inplace=True) # Handle potential inf values
+    # Fix the inplace=True warning here
+    df_wr['williams_r'] = df_wr['williams_r'].replace([np.inf, -np.inf], np.nan)
 
     return df_wr[['williams_r']]
 
@@ -1187,7 +1191,7 @@ def fetch_recent_volume(symbol: str) -> float:
         logger.debug(f"✅ [Data Volume] Last 15 minutes liquidity for {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Volume] Binance API or network error fetching volume for {symbol}: {binance_err}")
+         logger.error(f"❌ [Data Volume] Binance API or network error while fetching volume for {symbol}: {binance_err}")
          return 0.0
     except Exception as e:
         logger.error(f"❌ [Data Volume] Unexpected error fetching volume for {symbol}: {e}", exc_info=True)
@@ -1618,7 +1622,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             current_score += self.condition_weights.get('rsi_ok', 0)
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
-             signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
+             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) not in OK range (0)'
 
 
         # Bullish engulfing or hammer candle present (Increased weight)
