@@ -57,7 +57,7 @@ SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and stop l
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1   # Reduced historical data lookback in days for signal tracking
 
 # =============================================================================
-# --- Indicator Parameters (Adjusted for 5m Scalping) ---
+# --- Indicator Parameters (Adjusted for 5m Scalping and Early Entry) ---
 # You can adjust these values to better suit your strategy
 # =============================================================================
 RSI_PERIOD: int = 9          # RSI Period (Reduced for faster reaction)
@@ -95,8 +95,8 @@ MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
 MIN_ADX_TREND_STRENGTH: int = 20 # Increased minimum ADX for stronger trend confirmation (Slightly reduced threshold for 5m)
-MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles (Keep or Reduce)
-OBV_INCREASE_CANDLES: int = 2 # Check if OBV is increasing over the last X candles (Reduced)
+MACD_HIST_INCREASE_CANDLES: int = 3 # Check if MACD histogram is increasing over the last X candles (Increased slightly for better momentum confirmation)
+OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candles (Increased slightly for better momentum confirmation)
 
 # --- Removed Parameter for Dynamic Target/SL Update ---
 # TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Removed as dynamic update logic is changed
@@ -1113,7 +1113,7 @@ def fetch_recent_volume(symbol: str) -> float:
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
 def generate_performance_report() -> str:
-    """Generates a comprehensive performance report from the database in Arabic."""
+    """Generates a comprehensive performance report from the database in Arabic, including recent closed trades."""
     logger.info("ℹ️ [Report] Generating performance report...")
     if not check_db_connection() or not conn or not cur:
         return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
@@ -1156,7 +1156,17 @@ def generate_performance_report() -> str:
              # Profit Factor: Total Profit / Absolute Total Loss
             profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
 
-        # 4. Format the report in Arabic
+            # 4. Fetch Recent Closed Trades (Last 10)
+            report_cur.execute("""
+                SELECT symbol, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
+                FROM signals
+                WHERE achieved_target = TRUE OR hit_stop_loss = TRUE
+                ORDER BY closed_at DESC
+                LIMIT 10;
+            """)
+            recent_closed_trades = report_cur.fetchall()
+
+        # 5. Format the report in Arabic
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
             f"——————————————\n"
@@ -1175,8 +1185,29 @@ def generate_performance_report() -> str:
             f"  • متوسط الصفقة الخاسرة (%): *{avg_loss_pct:.2f}%*\n"
             f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
             f"——————————————\n"
+        )
+
+        # Add Recent Closed Trades section
+        if recent_closed_trades:
+            report += "📋 *آخر الصفقات المغلقة:*\n"
+            for trade in recent_closed_trades:
+                symbol = trade['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+                closing_price = trade['closing_price']
+                profit_pct = trade['profit_percentage']
+                closed_at = trade['closed_at'].strftime('%Y-%m-%d %H:%M')
+                outcome = "هدف ✅" if trade['achieved_target'] else "وقف 🛑"
+                report += (
+                    f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [{outcome}] ({closed_at})\n"
+                )
+            report += "——————————————\n"
+        else:
+            report += "📋 *لا توجد صفقات مغلقة مؤخراً.*\n——————————————\n"
+
+
+        report += (
             f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
+
         logger.info("✅ [Report] Performance report generated successfully.")
         return report
 
@@ -1191,7 +1222,7 @@ def generate_performance_report() -> str:
 # ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
 
 class ScalpingTradingStrategy: # Renamed strategy for clarity
-    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions, adjusted for Scalping."""
+    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions, adjusted for Scalping and targeting early momentum."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -1219,16 +1250,17 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # =====================================================================
         # --- Scoring System (Weights) for Optional Conditions ---
         # Weights adjusted to reflect importance in capturing momentum/early entry for Scalping
+        # Increased weights for momentum indicators (MACD Hist Increasing, OBV Increasing)
         # =====================================================================
         self.condition_weights = {
             'rsi_ok': 0.5,          # RSI in acceptable zone (not extreme overbought)
             'bullish_candle': 1.5,  # Increased weight for bullish engulfing or hammer candle
             'not_bb_extreme': 0.5,  # Price not at upper Bollinger Band
-            'obv_rising': 2.0,       # Increased weight for OBV is rising (momentum confirmation)
+            'obv_rising': 1.0,       # Keep OBV rising on last candle, but less weight than recent trend
             'rsi_filter_breakout': 1.0, # RSI filter for breakout (optional)
             'macd_filter_breakout': 1.0, # MACD histogram positive filter for breakout (optional)
-            'macd_hist_increasing': 2.5, # MACD histogram is increasing (strong momentum sign)
-            'obv_increasing_recent': 2.0, # OBV is increasing over the last few candles
+            'macd_hist_increasing': 3.0, # Increased weight: MACD histogram is increasing (strong momentum sign)
+            'obv_increasing_recent': 3.0, # Increased weight: OBV is increasing over the last few candles (volume confirmation)
             'above_vwap': 1.0 # Price above daily VWAP (optional)
         }
         # =====================================================================
@@ -1236,13 +1268,14 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
         # Adjusted mandatory conditions for Scalping - Stronger Trend Alignment
+        # These conditions ensure we are looking for entries within a confirmed bullish context.
         # =====================================================================
         self.essential_conditions = [
             'price_above_emas_and_vwma', # New: Price must be above Short EMA, Long EMA, AND VWMA
             'ema_short_above_ema_long', # New: Short EMA must be above Long EMA
             'supertrend_up', # SuperTrend must be in an uptrend
-            'macd_positive_or_cross', # MACD must be bullish
-            'adx_trending_bullish_strong', # ADX must confirm a strong bullish trend
+            'macd_positive_or_cross', # MACD must be bullish (positive hist or bullish cross)
+            'adx_trending_bullish_strong', # ADX must confirm a strong bullish trend (DI+ > DI- and ADX > threshold)
         ]
         # =====================================================================
 
@@ -1340,7 +1373,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
-        Adjusted for Scalping.
+        Adjusted for Scalping and targeting early upward momentum.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
@@ -1391,12 +1424,13 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # =====================================================================
         # --- Check Mandatory Conditions First ---
         # If any mandatory condition fails, the signal is rejected immediately
+        # These conditions establish the necessary bullish trend context.
         # =====================================================================
         essential_passed = True
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
-        # New Mandatory Condition: Price must be above Short EMA, Long EMA, AND VWMA
+        # Mandatory Condition: Price must be above Short EMA, Long EMA, AND VWMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
                 last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
                 last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
@@ -1408,7 +1442,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         else:
             signal_details['Price_MA_Alignment'] = f'Passed: Price above all MAs'
 
-        # New Mandatory Condition: Short EMA must be above Long EMA
+        # Mandatory Condition: Short EMA must be above Long EMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
                 last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
              essential_passed = False
@@ -1419,7 +1453,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['EMA_Order'] = f'Passed: Short EMA above Long EMA'
 
 
-        # SuperTrend condition: Price closes above SuperTrend and SuperTrend trend is up
+        # Mandatory Condition: SuperTrend must be in an uptrend and Price closes above SuperTrend
         if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
              essential_passed = False
              failed_essential_conditions.append('SuperTrend (Up Trend & Price Above)')
@@ -1429,7 +1463,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
 
 
-        # MACD condition (Positive histogram or bullish cross) - Remains mandatory
+        # Mandatory Condition: MACD must be bullish (Positive histogram or bullish cross)
         if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
              essential_passed = False
              failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
@@ -1442,7 +1476,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['MACD'] = f'Passed: {detail_macd}'
 
 
-        # Stronger ADX and DI+ above DI- condition (ADX threshold increased)
+        # Mandatory Condition: Stronger ADX and DI+ above DI- condition (ADX threshold increased)
         if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
              essential_passed = False
              failed_essential_conditions.append(f'ADX/DI (Strong Trending Bullish, ADX > {MIN_ADX_TREND_STRENGTH})')
@@ -1462,7 +1496,8 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         # =====================================================================
         # --- Calculate Score for Optional Conditions (if mandatory passed) ---
-        # These conditions add points to confirm momentum and refine entry
+        # These conditions add points to confirm momentum and refine entry,
+        # specifically targeting the *beginning* of upward moves within the trend.
         # =====================================================================
         current_score = 0.0
 
@@ -1491,6 +1526,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
 
         # Price not at upper Bollinger Band (still useful for some strategies)
+        # This helps avoid entering right at a potential resistance level.
         if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
              current_score += self.condition_weights.get('not_bb_extreme', 0)
              signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
@@ -1507,6 +1543,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['OBV_Last'] = f'Not Rising on last candle (0)'
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
+        # This helps confirm momentum is building.
         if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80: # Adjusted range slightly for scalping
              current_score += self.condition_weights.get('rsi_filter_breakout', 0)
              signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
@@ -1515,6 +1552,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
 
         # MACD filter for breakout (optional): MACD histogram is positive
+        # Confirms bullish momentum is dominant.
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
              current_score += self.condition_weights.get('macd_filter_breakout', 0)
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
@@ -1522,6 +1560,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
 
         # MACD histogram is increasing over the last X candles (strong momentum)
+        # This is a key condition for targeting the *beginning* of upward moves.
         macd_hist_increasing = False
         if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
              # Check if the last MACD_HIST_INCREASE_CANDLES histogram values are strictly increasing
@@ -1540,6 +1579,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
 
         # OBV is increasing over the last X candles (volume confirmation of momentum)
+        # This is also a key condition for targeting early moves, confirming volume supports the price rise.
         obv_increasing_recent = False
         if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
              # Check if the last OBV_INCREASE_CANDLES values are strictly increasing
@@ -1602,8 +1642,8 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
                   initial_stop_loss = max_sl_price
                   signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # Use the new value here
 
-
         # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
+        # This ensures the potential reward is sufficient for the risk.
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
@@ -1725,11 +1765,11 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - مؤشر القوة النسبية (RSI): {signal_details.get('RSI_Basic', 'N/A')}\n"
             f"  - نمط شمعة صعودي: {signal_details.get('Candle', 'N/A')}\n"
             f"  - ليس عند الحد العلوي لبولينجر: {signal_details.get('Bollinger_Basic', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يرتفع: {signal_details.get('OBV_Last', 'N/A')}\n"
+            f"  - حجم التوازن (OBV) يرتفع (شمعة أخيرة): {signal_details.get('OBV_Last', 'N/A')}\n" # Clarified
             f"  - فلتر RSI للاختراق: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
             f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
-            f"  - هيستوجرام MACD يتزايد: {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n" # Added
-            f"  - حجم التوازن (OBV) يتزايد مؤخراً: {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n" # Added
+            f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n" # Added & Clarified
+            f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n" # Added & Clarified
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -1962,7 +2002,7 @@ def track_signals() -> None:
                                 indicator_name = 'SuperTrend'
                             elif TRAILING_STOP_INDICATOR == 'ema_short':
                                 # Ensure EMA_SHORT_PERIOD is defined and calculate EMA
-                                if 'ema_short' not in df_recent.columns:
+                                if f'ema_{EMA_SHORT_PERIOD}' not in df_recent.columns:
                                      df_recent[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_recent['close'], EMA_SHORT_PERIOD)
                                 indicator_value = df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1] if f'ema_{EMA_SHORT_PERIOD}' in df_recent.columns and pd.notna(df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1]) else np.nan
                                 indicator_name = f'EMA{EMA_SHORT_PERIOD}'
@@ -2275,7 +2315,8 @@ def main_loop() -> None:
             logger.info(f"ℹ️ [Main] Currently Open Signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"⚠️ [Main] Maximum number of open signals reached. Waiting...")
-                time.sleep(60)
+                # Wait for a full 5-minute candle duration before checking again
+                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
                 continue
 
             # 2. Iterate through the list of symbols and scan them
@@ -2323,7 +2364,7 @@ def main_loop() -> None:
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                                      signals_generated_in_loop += 1
                                      slots_available -= 1
-                                     time.sleep(2)
+                                     time.sleep(2) # Small delay after sending alert
                                  else:
                                      logger.error(f"❌ [Main] Failed to insert signal for {symbol} into database.")
                              else:
@@ -2338,13 +2379,16 @@ def main_loop() -> None:
                       logger.error(f"❌ [Main] General error processing symbol {symbol}: {symbol_proc_err}", exc_info=True)
                       continue
 
-                 time.sleep(0.3)
+                 # Small delay between processing symbols to avoid overwhelming the API or CPU
+                 time.sleep(0.1)
 
             # 3. Wait before starting the next cycle
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] Scan cycle finished. Signals generated: {signals_generated_in_loop}. Scan duration: {scan_duration:.2f} seconds.")
             # Adjust wait time for scalping (e.g., scan every minute or two)
-            wait_time = max(15, 120 - scan_duration) # Wait 2 minutes total or at least 15 seconds
+            # Ensure the wait time is at least the timeframe duration to get new candles
+            frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
+            wait_time = max(frame_minutes * 60, 120 - scan_duration) # Wait 2 minutes total or at least the timeframe duration
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f} seconds for the next cycle...")
             time.sleep(wait_time)
 
