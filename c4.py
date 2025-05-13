@@ -1113,7 +1113,7 @@ def fetch_recent_volume(symbol: str) -> float:
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
 def generate_performance_report() -> str:
-    """Generates a comprehensive performance report from the database in Arabic, including recent closed trades."""
+    """Generates a comprehensive performance report from the database in Arabic, including recent closed trades and USD profit/loss."""
     logger.info("ℹ️ [Report] Generating performance report...")
     if not check_db_connection() or not conn or not cur:
         return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
@@ -1131,10 +1131,10 @@ def generate_performance_report() -> str:
                     COUNT(CASE WHEN profit_percentage > 0 THEN 1 END) AS winning_signals,
                     COUNT(CASE WHEN profit_percentage < 0 THEN 1 END) AS losing_signals,
                     COUNT(CASE WHEN profit_percentage = 0 THEN 1 END) AS neutral_signals,
-                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct,
+                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum, -- Sum of percentages
                     COALESCE(AVG(profit_percentage), 0) AS avg_profit_pct,
-                    COALESCE(SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END), 0) AS gross_profit_pct,
-                    COALESCE(SUM(CASE WHEN profit_percentage < 0 THEN profit_percentage ELSE 0 END), 0) AS gross_loss_pct,
+                    COALESCE(SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END), 0) AS gross_profit_pct_sum, -- Sum of positive percentages
+                    COALESCE(SUM(CASE WHEN profit_percentage < 0 THEN profit_percentage ELSE 0 END), 0) AS gross_loss_pct_sum, -- Sum of negative percentages
                     COALESCE(AVG(CASE WHEN profit_percentage > 0 THEN profit_percentage END), 0) AS avg_win_pct,
                     COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct
                 FROM signals
@@ -1145,20 +1145,25 @@ def generate_performance_report() -> str:
             total_closed = closed_stats.get('total_closed', 0)
             winning_signals = closed_stats.get('winning_signals', 0)
             losing_signals = closed_stats.get('losing_signals', 0)
-            total_profit_pct = closed_stats.get('total_profit_pct', 0.0)
-            gross_profit_pct = closed_stats.get('gross_profit_pct', 0.0)
-            gross_loss_pct = closed_stats.get('gross_loss_pct', 0.0) # Will be negative or zero
+            total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0) # Sum of percentages
+            gross_profit_pct_sum = closed_stats.get('gross_profit_pct_sum', 0.0) # Sum of positive percentages
+            gross_loss_pct_sum = closed_stats.get('gross_loss_pct_sum', 0.0) # Sum of negative percentages
             avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
             avg_loss_pct = closed_stats.get('avg_loss_pct', 0.0) # Will be negative or zero
+
+            # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
+            total_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
+            gross_profit_usd = (gross_profit_pct_sum / 100.0) * TRADE_VALUE
+            gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be negative or zero
 
             # 3. Calculate Derived Metrics
             win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
              # Profit Factor: Total Profit / Absolute Total Loss
-            profit_factor = (gross_profit_pct / abs(gross_loss_pct)) if gross_loss_pct != 0 else float('inf')
+            profit_factor = (gross_profit_pct_sum / abs(gross_loss_pct_sum)) if gross_loss_pct_sum != 0 else float('inf')
 
             # 4. Fetch Recent Closed Trades (Last 10)
             report_cur.execute("""
-                SELECT symbol, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
+                SELECT symbol, entry_price, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
                 FROM signals
                 WHERE achieved_target = TRUE OR hit_stop_loss = TRUE
                 ORDER BY closed_at DESC
@@ -1169,6 +1174,7 @@ def generate_performance_report() -> str:
         # 5. Format the report in Arabic
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
+            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f})_\n" # Indicate assumed trade size
             f"——————————————\n"
             f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
             f"——————————————\n"
@@ -1177,12 +1183,12 @@ def generate_performance_report() -> str:
             f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n" # Add win rate here
             f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
             f"——————————————\n"
-            f"💰 *الربحية:*\n"
-            f"  • صافي الربح/الخسارة (الإجمالي %): *{total_profit_pct:+.2f}%*\n"
-            f"  • إجمالي الربح (%): *{gross_profit_pct:+.2f}%*\n"
-            f"  • إجمالي الخسارة (%): *{gross_loss_pct:.2f}%*\n"
-            f"  • متوسط الصفقة الرابحة (%): *{avg_win_pct:+.2f}%*\n"
-            f"  • متوسط الصفقة الخاسرة (%): *{avg_loss_pct:.2f}%*\n"
+            f"💰 *الربحية الإجمالية:*\n"
+            f"  • صافي الربح/الخسارة: *{total_profit_pct_sum:+.2f}%* (≈ *${total_profit_usd:+.2f}*)\n" # Show total % and USD
+            f"  • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n" # Show gross profit % and USD
+            f"  • إجمالي الخسارة: *{gross_loss_pct_sum:.2f}%* (≈ *${gross_loss_usd:.2f}*)\n" # Show gross loss % and USD
+            f"  • متوسط الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
+            f"  • متوسط الصفقة الخاسرة: *{avg_loss_pct:.2f}%*\n"
             f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
             f"——————————————\n"
         )
@@ -1196,8 +1202,12 @@ def generate_performance_report() -> str:
                 profit_pct = trade['profit_percentage']
                 closed_at = trade['closed_at'].strftime('%Y-%m-%d %H:%M')
                 outcome = "هدف ✅" if trade['achieved_target'] else "وقف 🛑"
+
+                # Calculate profit/loss in USD for this specific trade
+                trade_profit_usd = (profit_pct / 100.0) * TRADE_VALUE
+
                 report += (
-                    f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [{outcome}] ({closed_at})\n"
+                    f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [≈ ${trade_profit_usd:+.2f}] [{outcome}] ({closed_at})\n" # Added USD profit/loss per trade
                 )
             report += "——————————————\n"
         else:
@@ -2472,4 +2482,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0)
-
