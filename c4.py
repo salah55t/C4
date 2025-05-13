@@ -1156,20 +1156,17 @@ def generate_performance_report() -> str:
             gross_profit_usd = (gross_profit_pct_sum / 100.0) * TRADE_VALUE
             gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be negative or zero
 
-            # 3. Calculate Derived Metrics
-            win_rate = (winning_signals / total_closed * 100) if total_closed > 0 else 0.0
-             # Profit Factor: Total Profit / Absolute Total Loss
-            profit_factor = (gross_profit_pct_sum / abs(gross_loss_pct_sum)) if gross_loss_pct_sum != 0 else float('inf')
+            # --- Removed: Fetch Recent Closed Trades (Last 10) ---
+            # report_cur.execute("""
+            #     SELECT symbol, entry_price, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
+            #     FROM signals
+            #     WHERE achieved_target = TRUE OR hit_stop_loss = TRUE
+            #     ORDER BY closed_at DESC
+            #     LIMIT 10;
+            # """)
+            # recent_closed_trades = report_cur.fetchall()
+            # --- End Removed ---
 
-            # 4. Fetch Recent Closed Trades (Last 10)
-            report_cur.execute("""
-                SELECT symbol, entry_price, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
-                FROM signals
-                WHERE achieved_target = TRUE OR hit_stop_loss = TRUE
-                ORDER BY closed_at DESC
-                LIMIT 10;
-            """)
-            recent_closed_trades = report_cur.fetchall()
 
         # 5. Format the report in Arabic
         report = (
@@ -1193,25 +1190,30 @@ def generate_performance_report() -> str:
             f"——————————————\n"
         )
 
-        # Add Recent Closed Trades section
-        if recent_closed_trades:
-            report += "📋 *آخر الصفقات المغلقة:*\n"
-            for trade in recent_closed_trades:
-                symbol = trade['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-                closing_price = trade['closing_price']
-                profit_pct = trade['profit_percentage']
-                closed_at = trade['closed_at'].strftime('%Y-%m-%d %H:%M')
-                outcome = "هدف ✅" if trade['achieved_target'] else "وقف 🛑"
+        # --- Removed: Add Recent Closed Trades section ---
+        # if recent_closed_trades:
+        #     report += "📋 *آخر الصفقات المغلقة:*\n"
+        #     for trade in recent_closed_trades:
+        #         symbol = trade['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+        #         closing_price = trade['closing_price']
+        #         profit_pct = trade['profit_percentage']
+        #         closed_at = trade['closed_at'].strftime('%Y-%m-%d %H:%M')
+        #         outcome = "هدف ✅" if trade['achieved_target'] else "وقف 🛑"
+        #
+        #         # Calculate profit/loss in USD for this specific trade
+        #         trade_profit_usd = (profit_pct / 100.0) * TRADE_VALUE
+        #
+        #         report += (
+        #             f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [≈ ${trade_profit_usd:+.2f}] [{outcome}] ({closed_at})\n" # Added USD profit/loss per trade
+        #         )
+        #     report += "——————————————\n"
+        # else:
+        #     report += "📋 *لا توجد صفقات مغلقة مؤخراً.*\n——————————————\n"
+        # --- End Removed ---
 
-                # Calculate profit/loss in USD for this specific trade
-                trade_profit_usd = (profit_pct / 100.0) * TRADE_VALUE
-
-                report += (
-                    f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [≈ ${trade_profit_usd:+.2f}] [{outcome}] ({closed_at})\n" # Added USD profit/loss per trade
-                )
-            report += "——————————————\n"
-        else:
-            report += "📋 *لا توجد صفقات مغلقة مؤخراً.*\n——————————————\n"
+        # Add a placeholder or note about the detailed report if needed
+        report += "ℹ️ *للحصول على تقرير تدقيق مفصل بجميع الصفقات، يرجى طلب ذلك بشكل منفصل.*" # Note about detailed report
+        report += "\n——————————————\n"
 
 
         report += (
@@ -1524,7 +1526,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             current_score += self.condition_weights.get('rsi_ok', 0)
             signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
-             signal_details['RSI_Basic'] = f'Not OK ({last_row["rsi"]:.1f}) (0)'
+             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) Not OK (0)'
 
 
         # Bullish engulfing or hammer candle present (Increased weight)
