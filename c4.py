@@ -1156,6 +1156,14 @@ def generate_performance_report() -> str:
             gross_profit_usd = (gross_profit_pct_sum / 100.0) * TRADE_VALUE
             gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be negative or zero
 
+            # 3. Calculate Derived Metrics
+            win_rate = 0.0 # Initialize win_rate
+            if total_closed > 0:
+                win_rate = (winning_signals / total_closed) * 100
+
+             # Profit Factor: Total Profit / Absolute Total Loss
+            profit_factor = (gross_profit_pct_sum / abs(gross_loss_pct_sum)) if gross_loss_pct_sum != 0 else float('inf')
+
             # --- Removed: Fetch Recent Closed Trades (Last 10) ---
             # report_cur.execute("""
             #     SELECT symbol, entry_price, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
