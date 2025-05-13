@@ -51,10 +51,10 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 # ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للسكالبينج على إطار 5 دقائق) ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT (Keep small for testing)
 MAX_OPEN_TRADES: int = 5          # Maximum number of open trades simultaneously (Increased slightly for scalping)
-SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Timeframe for signal generation (Changed to 5m)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # Reduced historical data lookback for shorter timeframe
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and stop loss updates (Changed to 5m)
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 10   # Reduced historical data lookback in days for signal tracking
+SIGNAL_GENERATION_TIMEFRAME: str = '5m' # Timeframe for signal generation (Changed to 5m)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Reduced historical data lookback for shorter timeframe
+SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and stop loss updates (Changed to 5m)
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1   # Reduced historical data lookback in days for signal tracking
 
 # =============================================================================
 # --- Indicator Parameters (Adjusted for 5m Scalping) ---
@@ -83,8 +83,10 @@ SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or 
 
 # Trailing Stop Loss (Adjusted for Scalping)
 TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
-TRAILING_STOP_ATR_MULTIPLIER: float = 1.8        # ATR Multiplier for trailing stop (Reduced for tighter stop)
-TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.0005 # Price increase percentage to move trailing stop (0.05% - Reduced)
+# TRAILING_STOP_ATR_MULTIPLIER: float = 1.8 # Removed - Trailing stop will follow indicator, not fixed ATR distance
+TRAILING_STOP_INDICATOR: str = 'supertrend' # New: Indicator to follow for trailing stop ('supertrend' or 'ema_short')
+TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the trailing stop indicator (use SuperTrend period or EMA_SHORT_PERIOD)
+TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
 
 # Additional Signal Conditions (Adjusted)
 MIN_PROFIT_MARGIN_PCT: float = 0.8 # Minimum required profit margin percentage (SIGNIFICANTLY REDUCED)
@@ -96,8 +98,8 @@ MIN_ADX_TREND_STRENGTH: int = 20 # Increased minimum ADX for stronger trend conf
 MACD_HIST_INCREASE_CANDLES: int = 2 # Check if MACD histogram is increasing over the last X candles (Keep or Reduce)
 OBV_INCREASE_CANDLES: int = 2 # Check if OBV is increasing over the last X candles (Reduced)
 
-# --- New Parameter for Dynamic Target/SL Update (Adjusted for 5m) ---
-TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Percentage threshold to consider price "approaching" target (1% - Reduced)
+# --- Removed Parameter for Dynamic Target/SL Update ---
+# TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Removed as dynamic update logic is changed
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -823,18 +825,17 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
         return df_st
 
     # Ensure ATR column exists or calculate it
-    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-        logger.debug(f"ℹ️ [Indicator SuperTrend] Calculating ATR (period={period}) for SuperTrend...")
-        # Use the ATR period specific to SuperTrend here
-        df_st = calculate_atr_indicator(df_st, period=period)
+    # Use the ATR period specific to SuperTrend here (SUPERTREND_PERIOD)
+    df_st = calculate_atr_indicator(df_st, period=SUPERTREND_PERIOD)
+
 
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
          logger.warning("⚠️ [Indicator SuperTrend] Cannot calculate SuperTrend due to missing valid ATR values.")
          df_st['supertrend'] = np.nan
          df_st['supertrend_trend'] = 0
          return df_st
-    if len(df_st) < period:
-        logger.warning(f"⚠️ [Indicator SuperTrend] Insufficient data ({len(df_st)} < {period}) to calculate SuperTrend.")
+    if len(df_st) < SUPERTREND_PERIOD:
+        logger.warning(f"⚠️ [Indicator SuperTrend] Insufficient data ({len(df_st)} < {SUPERTREND_PERIOD}) to calculate SuperTrend.")
         df_st['supertrend'] = np.nan
         df_st['supertrend_trend'] = 0
         return df_st
@@ -1197,7 +1198,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # Required columns for indicator calculation
         self.required_cols_indicators = [
             'open', 'high', 'low', 'close', 'volume',
-            'ema_8', 'ema_21', 'vwma', # Adjusted EMA names
+            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', # Adjusted EMA names
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
@@ -1207,10 +1208,11 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
             'close',
-            'ema_8', 'ema_21', 'vwma', # Adjusted EMA names
+            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', # Adjusted EMA names
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
-            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'supertrend', 'supertrend_trend', # Added supertrend value itself
+            'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
             'BullishCandleSignal', 'obv'
         ]
 
@@ -1226,20 +1228,21 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'rsi_filter_breakout': 1.0, # RSI filter for breakout (optional)
             'macd_filter_breakout': 1.0, # MACD histogram positive filter for breakout (optional)
             'macd_hist_increasing': 2.5, # MACD histogram is increasing (strong momentum sign)
-            'obv_increasing_recent': 2.0 # OBV is increasing over the last few candles
+            'obv_increasing_recent': 2.0, # OBV is increasing over the last few candles
+            'above_vwap': 1.0 # Price above daily VWAP (optional)
         }
         # =====================================================================
 
         # =====================================================================
         # --- Mandatory Entry Conditions (All must be met) ---
-        # Adjusted mandatory conditions for Scalping
+        # Adjusted mandatory conditions for Scalping - Stronger Trend Alignment
         # =====================================================================
         self.essential_conditions = [
-            'ema_cross_bullish_recent', # EMA cross must be recent (Adjusted lookback)
-            'supertrend_up',
-            'macd_positive_or_cross',
-            'adx_trending_bullish_strong', # ADX must be stronger (Adjusted threshold)
-            'above_vwma' # VWMA condition remains mandatory
+            'price_above_emas_and_vwma', # New: Price must be above Short EMA, Long EMA, AND VWMA
+            'ema_short_above_ema_long', # New: Short EMA must be above Long EMA
+            'supertrend_up', # SuperTrend must be in an uptrend
+            'macd_positive_or_cross', # MACD must be bullish
+            'adx_trending_bullish_strong', # ADX must confirm a strong bullish trend
         ]
         # =====================================================================
 
@@ -1249,7 +1252,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         # Required signal score threshold for *optional* conditions (as a percentage)
         # Adjusted threshold for Scalping to potentially get more signals
-        self.min_score_threshold_pct = 0.55 # Example: 55% of optional points (Adjusted)
+        self.min_score_threshold_pct = 0.60 # Example: 60% of optional points (Adjusted slightly up)
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
 
@@ -1266,9 +1269,12 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         try:
             df_calc = df.copy()
             # ATR is required for SuperTrend and Stop Loss/Target
+            # Use the ATR period designated for entry/tracking (ENTRY_ATR_PERIOD)
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
-            # SuperTrend needs ATR calculated with its own period
+            # SuperTrend needs ATR calculated with its own period (SUPERTREND_PERIOD)
+            # Recalculate SuperTrend with its specific period
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+
 
             # --- EMA Calculation ---
             # Use the adjusted EMA periods
@@ -1291,14 +1297,14 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             df_calc = detect_candlestick_patterns(df_calc)
 
             # Check for required columns after calculation
-            # Adjust required columns list based on the new EMA names
+            # Adjust required columns list based on the new EMA names and added supertrend value
             required_cols_indicators_adjusted = [
                 'open', 'high', 'low', 'close', 'volume',
                 f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
                 'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
                 'macd', 'macd_signal', 'macd_hist',
                 'adx', 'di_plus', 'di_minus',
-                'vwap', 'obv', 'supertrend', 'supertrend_trend',
+                'vwap', 'obv', 'supertrend', 'supertrend_trend', # Added supertrend value
                 'BullishCandleSignal', 'BearishCandleSignal'
             ]
             missing_cols = [col for col in required_cols_indicators_adjusted if col not in df_calc.columns]
@@ -1320,7 +1326,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] Indicators calculated. Latest EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, SuperTrend: {latest.get('supertrend', np.nan):.4f}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1345,17 +1351,17 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<{min_signal_data_len}), cannot generate signal.")
             return None
 
-        # Adjust required columns list based on the new EMA names
+        # Adjust required columns list based on the new EMA names and added supertrend value
         required_cols_buy_signal_adjusted = [
             'close',
             f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
-            'supertrend_trend', 'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
+            'supertrend', 'supertrend_trend', # Added supertrend value itself
+            'adx', 'di_plus', 'di_minus', 'vwap', 'bb_upper',
             'BullishCandleSignal', 'obv'
         ]
-        required_cols_with_breakout = list(set(required_cols_buy_signal_adjusted + ['bb_upper', 'rsi', 'macd_hist', 'vwma']))
-        missing_cols = [col for col in required_cols_with_breakout if col not in df_processed.columns]
+        missing_cols = [col for col in required_cols_buy_signal_adjusted if col not in df_processed.columns]
         if missing_cols:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}.")
             return None
@@ -1377,7 +1383,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         recent_df = df_processed.iloc[-min_signal_data_len:]
 
         # Check for NaN in essential columns required for the signal in recent data
-        if recent_df[required_cols_with_breakout].isnull().values.any():
+        if recent_df[required_cols_buy_signal_adjusted].isnull().values.any():
              logger.warning(f"⚠️ [Strategy {self.symbol}] Recent data contains NaN in required signal columns. Cannot generate signal.")
              return None
 
@@ -1390,30 +1396,27 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
-        # Positive EMA Cross condition (Must be recent)
-        # Check if EMA_SHORT_PERIOD was below EMA_LONG_PERIOD and is now above within the lookback period
-        ema_cross_bullish_recent = False
-        if len(recent_df) >= RECENT_EMA_CROSS_LOOKBACK + 1:
-             # Check for a bullish cross (ema_short crossing above ema_long) in the last RECENT_EMA_CROSS_LOOKBACK candles
-             # Ensure no NaN in the relevant slice before checking
-             ema_short_slice = recent_df[f'ema_{EMA_SHORT_PERIOD}'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
-             ema_long_slice = recent_df[f'ema_{EMA_LONG_PERIOD}'].iloc[-RECENT_EMA_CROSS_LOOKBACK-1:]
-
-             if not ema_short_slice.isnull().any() and not ema_long_slice.isnull().any():
-                for i in range(1, RECENT_EMA_CROSS_LOOKBACK + 1):
-                     if ema_short_slice.iloc[-i] > ema_long_slice.iloc[-i] and ema_short_slice.iloc[-i-1] <= ema_long_slice.iloc[-i-1]:
-                          ema_cross_bullish_recent = True
-                          break # Found a recent cross, no need to check further back
-             else:
-                 logger.debug(f"⚠️ [Strategy {self.symbol}] NaN values in EMA slices for recent cross check.")
-
-
-        if not ema_cross_bullish_recent:
+        # New Mandatory Condition: Price must be above Short EMA, Long EMA, AND VWMA
+        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
+                last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
+                last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
+                last_row['close'] > last_row['vwma']):
             essential_passed = False
-            failed_essential_conditions.append(f'Recent EMA Cross (Bullish) in last {RECENT_EMA_CROSS_LOOKBACK} candles')
-            signal_details['EMA_Cross'] = f'Failed: No recent bullish cross in last {RECENT_EMA_CROSS_LOOKBACK} candles'
+            failed_essential_conditions.append('Price Above EMAs and VWMA')
+            detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
+            signal_details['Price_MA_Alignment'] = f'Failed: Price not above all MAs ({detail_ma})'
         else:
-             signal_details['EMA_Cross'] = f'Passed: Recent bullish cross detected'
+            signal_details['Price_MA_Alignment'] = f'Passed: Price above all MAs'
+
+        # New Mandatory Condition: Short EMA must be above Long EMA
+        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
+                last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
+             essential_passed = False
+             failed_essential_conditions.append('Short EMA Above Long EMA')
+             detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
+             signal_details['EMA_Order'] = f'Failed: Short EMA not above Long EMA ({detail_ema_cross})'
+        else:
+             signal_details['EMA_Order'] = f'Passed: Short EMA above Long EMA'
 
 
         # SuperTrend condition: Price closes above SuperTrend and SuperTrend trend is up
@@ -1447,15 +1450,6 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['ADX/DI'] = f'Failed: Not Strong Trending Bullish (ADX <= {MIN_ADX_TREND_STRENGTH} or DI+ <= DI-) ({detail_adx})'
         else:
              signal_details['ADX/DI'] = f'Passed: Strong Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
-
-        # VWMA condition: Price closes above the VWMA - Remains mandatory
-        if not (pd.notna(last_row['vwma']) and last_row['close'] > last_row['vwma']):
-             essential_passed = False
-             failed_essential_conditions.append('Above VWMA')
-             detail_vwma = f'Close:{last_row.get("close", np.nan):.4f}, VWMA:{last_row.get("vwma", np.nan):.4f}'
-             signal_details['VWMA_Mandatory'] = f'Failed: Not Closed Above VWMA ({detail_vwma})'
-        else:
-             signal_details['VWMA_Mandatory'] = f'Passed: Closed Above VWMA'
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1586,7 +1580,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         # These multipliers can be adjusted based on ADX or other factors for a more dynamic strategy if desired
         target_multiplier = ENTRY_ATR_MULTIPLIER
-        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER
+        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # Use the same multiplier for initial SL
 
         initial_target = current_price + (target_multiplier * current_atr)
         initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
@@ -1621,10 +1615,10 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"),
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial
+            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Current SL starts as initial
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
-            'strategy_name': 'Scalping_Momentum', # Changed strategy name
+            'strategy_name': 'Scalping_Momentum_Trend', # Changed strategy name
             'signal_details': signal_details, # Now contains details of mandatory and optional conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
@@ -1720,11 +1714,11 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - تقاطع المتوسطات الأسيّة (حديث): {'تم ✅' if 'Passed: Recent' in signal_details.get('EMA_Cross', '') else 'فشل ❌'}\n" # Updated text
+            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'Passed: Price above all MAs' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n" # Updated text
+            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'Passed: Short EMA above Long EMA' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n" # Added text
             f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
             f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
             f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
-             f"  - المتوسط الوزني للحجم (VWMA): {'إغلاق فوق VWMA ✅' if 'Passed' in signal_details.get('VWMA_Mandatory', '') else 'لم يغلق فوق VWMA ❌'}\n"
             f"——————————————\n"
             f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
             f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
@@ -1766,12 +1760,10 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
-    atr_value = details.get('atr_value', 0.0)
+    atr_value = details.get('atr_value', 0.0) # Still used for activation notification
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
-    new_target = details.get('new_target', 0.0) # Added for new notification type
-    old_target = details.get('old_target', 0.0) # Added for new notification type
-
+    # Removed new_target, old_target as dynamic target update is removed
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
@@ -1799,31 +1791,21 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (الربح > {activation_profit_pct:.1f}%)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`\n" # Show the initial trailing stop level
+            f"ℹ️ *سيتبع الوقف مؤشر {TRAILING_STOP_INDICATOR.upper()}* (Buffer: {TRAILING_STOP_BUFFER_PCT*100:.1f}%)" # Indicate which indicator is followed
         )
     elif notification_type == 'trailing_updated':
-        trigger_price_increase_pct = details.get('trigger_price_increase_pct', TRAILING_STOP_MOVE_INCREMENT_PCT * 100)
+        # Removed trigger_price_increase_pct as update is indicator-based
         message = (
             f"➡️ *تم تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التحديث):** `${current_price:,.8g}` (+{trigger_price_increase_pct:.1f}% منذ آخر تحديث)\n"
-            f"📊 **قيمة ATR ({ENTRY_ATR_PERIOD}):** `{atr_value:,.8g}` (المضاعف: {TRAILING_STOP_ATR_MULTIPLIER})\n"
+            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n" # Show current price
             f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
+            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`\n"
+            f"ℹ️ *تم التحديث بناءً على مؤشر {TRAILING_STOP_INDICATOR.upper()}* (Buffer: {TRAILING_STOP_BUFFER_PCT*100:.1f}%)" # Indicate update reason
         )
-    elif notification_type == 'target_and_sl_updated': # New notification type
-        message = (
-            f"🔄 *تم تحديث الهدف ووقف الخسارة بناءً على تحليل جديد (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"🎯 **الهدف السابق:** `${old_target:,.8g}`\n"
-            f"🎯 **الهدف الجديد:** `${new_target:,.8g}`\n"
-            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`"
-        )
+    # Removed 'target_and_sl_updated' notification type
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
         return # Don't send anything if type is unknown
@@ -1862,7 +1844,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared.get('r2_score'), # Weighted score
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price
+                None, # last_trailing_update_price - Will be set when trailing is activated
                 signal_prepared.get('volume_15m')
             ))
         conn.commit()
@@ -1920,12 +1902,12 @@ def track_signals() -> None:
                 try:
                     # Extract and safely convert numeric data
                     entry_price = float(signal_row['entry_price'])
-                    initial_target = float(signal_row['initial_target']) # Keep initial target for reference
+                    # initial_target = float(signal_row['initial_target']) # Keep initial target for reference - not strictly needed in tracking loop
                     current_target = float(signal_row['current_target'])
                     current_stop_loss = float(signal_row['current_stop_loss'])
                     is_trailing_active = signal_row['is_trailing_active']
-                    last_update_px = signal_row['last_trailing_update_price']
-                    last_trailing_update_price = float(last_update_px) if last_update_px is not None else None
+                    # last_update_px = signal_row['last_trailing_update_price'] # Not used for indicator trailing
+                    # last_trailing_update_price = float(last_update_px) if last_update_px is not None else None # Not used
 
                     # Get current price from WebSocket Ticker data
                     current_price = ticker_data.get(symbol)
@@ -1963,124 +1945,72 @@ def track_signals() -> None:
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
                         update_executed = True
 
-                    # 3. Check for Dynamic Target/SL Update (If price is approaching target and not closed yet)
-                    elif current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
-                         logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} approaching target {current_target:.8g} (within {TARGET_APPROACH_THRESHOLD_PCT*100:.1f}%). Analyzing for potential update...")
-
-                         # Fetch recent data for re-analysis using the TRACKING timeframe
-                         df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
-
-                         if df_recent is not None and not df_recent.empty:
-                              # Calculate indicators on recent data
-                              # Use the ScalpingTradingStrategy for re-analysis
-                              strategy_tracker = ScalpingTradingStrategy(symbol)
-                              df_indicators_recent = strategy_tracker.populate_indicators(df_recent)
-
-                              if df_indicators_recent is not None:
-                                   # Attempt to generate a new signal based on recent conditions
-                                   # Note: This will use the Scalping strategy's buy signal logic and thresholds
-                                   potential_new_signal = strategy_tracker.generate_buy_signal(df_indicators_recent)
-
-                                   if potential_new_signal:
-                                        logger.info(f"✨ [Tracker] {symbol}(ID:{signal_id}): New bullish signal detected near target. Calculating new levels...")
-                                        # Calculate new target and stop loss based on current price and ATR from recent data
-                                        current_atr_recent = df_indicators_recent['atr'].iloc[-1]
-
-                                        if pd.notna(current_atr_recent) and current_atr_recent > 0:
-                                             # Use the Scalping strategy's ATR multipliers for the new levels
-                                             new_target_calc = current_price + (strategy_tracker.ENTRY_ATR_MULTIPLIER * current_atr_recent)
-                                             new_stop_loss_calc = current_price - (strategy_tracker.TRAILING_STOP_ATR_MULTIPLIER * current_atr_recent) # Use trailing stop multiplier for new SL
-
-                                             # Only update if the new target is higher and new stop loss is higher
-                                             if new_target_calc > current_target and new_stop_loss_calc > current_stop_loss:
-                                                  new_target_update = float(f"{new_target_calc:.8g}")
-                                                  new_stop_loss_update = float(f"{new_stop_loss_calc:.8g}")
-
-                                                  update_query = sql.SQL("""
-                                                       UPDATE signals
-                                                       SET current_target = %s, current_stop_loss = %s,
-                                                           is_trailing_active = TRUE, last_trailing_update_price = %s
-                                                       WHERE id = %s;
-                                                  """)
-                                                  # Use the current price as the last trailing update price upon dynamic target update
-                                                  update_params = (new_target_update, new_stop_loss_update, current_price, signal_id)
-
-                                                  log_message = f"🔄✅ [Tracker] {symbol}(ID:{signal_id}): Target/SL updated based on new signal. Price={current_price:.8g}, Old T={current_target:.8g}, New T={new_target_update:.8g}, Old SL={current_stop_loss:.8g}, New SL={new_stop_loss_update:.8g}"
-                                                  notification_details.update({
-                                                      'type': 'target_and_sl_updated',
-                                                      'old_target': current_target,
-                                                      'new_target': new_target_update,
-                                                      'old_stop_loss': current_stop_loss,
-                                                      'new_stop_loss': new_stop_loss_update
-                                                  })
-                                                  update_executed = True
-                                             else:
-                                                  logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated new target ({new_target_calc:.8g}) or stop loss ({new_stop_loss_calc:.8g}) not higher than current levels. No update.")
-                                        else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR ({current_atr_recent}) from recent data for update calculation.")
-                                   else:
-                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): No new bullish signal generated from recent data. No target/SL update.")
-                              else:
-                                   logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to populate indicators on recent data for update analysis.")
-                         else:
-                              logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to fetch recent data for update analysis.")
-
-
-                    # 4. Check for Trailing Stop Activation or Update (Only if Target, SL, or Dynamic Update not hit/executed)
-                    # This section remains largely the same, but now runs *after* the dynamic update check.
-                    # It will handle trailing stop movement based on the *current* (potentially updated) stop loss.
-                    if not update_executed: # Only check trailing stop if no other update happened
+                    # 3. Check for Trailing Stop Activation or Update (Only if Target or SL not hit)
+                    if not update_executed: # Only check trailing stop if no other exit happened
                         activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
-                        # a. Activate Trailing Stop
-                        if not is_trailing_active and current_price >= activation_threshold_price:
-                            logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing activation threshold ({activation_threshold_price:.8g}). Fetching ATR...")
-                            # Use the specified tracking timeframe
-                            df_atr = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
-                            if df_atr is not None and not df_atr.empty:
-                                # Use the ATR period designated for entry/tracking
-                                df_atr = calculate_atr_indicator(df_atr, period=ENTRY_ATR_PERIOD)
-                                if not df_atr.empty and 'atr' in df_atr.columns and pd.notna(df_atr['atr'].iloc[-1]):
-                                    current_atr_val = df_atr['atr'].iloc[-1]
-                                    if current_atr_val > 0:
-                                         new_stop_loss_calc = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val)
-                                         new_stop_loss = max(new_stop_loss_calc, current_stop_loss, entry_price * (1 + 0.0005)) # Ensure a very small profit or keep current stop
 
-                                         if new_stop_loss > current_stop_loss: # Only if the new stop is actually higher
-                                            update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                            update_params = (new_stop_loss, current_price, signal_id)
-                                            log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}, ATR={current_atr_val:.8g}. New Stop: {new_stop_loss:.8g}"
-                                            notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'atr_value': current_atr_val, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
-                                            update_executed = True
-                                         else:
-                                            logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
-                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val}) for trailing stop activation.")
-                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for trailing stop activation.")
-                            else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for trailing stop activation.")
+                        # Fetch recent data for indicator-based trailing stop
+                        # Use the specified tracking timeframe and sufficient lookback for the indicator period
+                        required_lookback_days = max(SIGNAL_TRACKING_LOOKBACK_DAYS, TRAILING_STOP_INDICATOR_PERIOD // (get_interval_minutes(SIGNAL_TRACKING_TIMEFRAME) * 60 * 24) + 1) # Ensure enough data for indicator
+                        df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=required_lookback_days)
 
-                        # b. Update Trailing Stop
-                        elif is_trailing_active and last_trailing_update_price is not None:
-                            update_threshold_price = last_trailing_update_price * (1 + TRAILING_STOP_MOVE_INCREMENT_PCT)
-                            if current_price >= update_threshold_price:
-                                logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price {current_price:.8g} reached trailing update threshold ({update_threshold_price:.8g}). Fetching ATR...")
-                                df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
-                                if df_recent is not None and not df_recent.empty:
-                                    df_recent = calculate_atr_indicator(df_recent, period=ENTRY_ATR_PERIOD)
-                                    if not df_recent.empty and 'atr' in df_recent.columns and pd.notna(df_recent['atr'].iloc[-1]):
-                                         current_atr_val_update = df_recent['atr'].iloc[-1]
-                                         if current_atr_val_update > 0:
-                                             potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr_val_update)
-                                             if potential_new_stop_loss > current_stop_loss:
-                                                new_stop_loss_update = potential_new_stop_loss
-                                                update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                                update_params = (new_stop_loss_update, current_price, signal_id)
-                                                log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}, ATR={current_atr_val_update:.8g}. Old={current_stop_loss:.8g}, New: {new_stop_loss_update:.8g}"
-                                                notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'atr_value': current_atr_val_update, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update, 'trigger_price_increase_pct': TRAILING_STOP_MOVE_INCREMENT_PCT * 100})
-                                                update_executed = True
-                                             else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
-                                         else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid ATR value ({current_atr_val_update}) for update.")
-                                    else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate ATR for update.")
-                                else: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch data to calculate ATR for update.")
+                        if df_recent is not None and not df_recent.empty:
+                            # Calculate the relevant indicator for trailing stop
+                            if TRAILING_STOP_INDICATOR == 'supertrend':
+                                df_recent = calculate_supertrend(df_recent, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+                                indicator_value = df_recent['supertrend'].iloc[-1] if 'supertrend' in df_recent.columns and pd.notna(df_recent['supertrend'].iloc[-1]) else np.nan
+                                indicator_name = 'SuperTrend'
+                            elif TRAILING_STOP_INDICATOR == 'ema_short':
+                                # Ensure EMA_SHORT_PERIOD is defined and calculate EMA
+                                if 'ema_short' not in df_recent.columns:
+                                     df_recent[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_recent['close'], EMA_SHORT_PERIOD)
+                                indicator_value = df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1] if f'ema_{EMA_SHORT_PERIOD}' in df_recent.columns and pd.notna(df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1]) else np.nan
+                                indicator_name = f'EMA{EMA_SHORT_PERIOD}'
+                            else:
+                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Unknown TRAILING_STOP_INDICATOR '{TRAILING_STOP_INDICATOR}'. Trailing stop cannot be calculated.")
+                                indicator_value = np.nan
+                                indicator_name = 'Unknown Indicator'
+
+
+                            if pd.notna(indicator_value):
+                                # Calculate potential new stop loss based on the indicator and buffer
+                                potential_new_stop_loss = indicator_value * (1 - TRAILING_STOP_BUFFER_PCT)
+
+                                # a. Activate Trailing Stop
+                                if not is_trailing_active and current_price >= activation_threshold_price:
+                                    # The new stop loss should be the calculated indicator-based value, but not lower than the initial stop loss
+                                    new_stop_loss_calc = max(potential_new_stop_loss, current_stop_loss) # Ensure it doesn't go below the initial SL
+                                    # Also ensure the new stop loss is *at least* slightly above entry if activating above entry
+                                    new_stop_loss = max(new_stop_loss_calc, entry_price * (1 + 0.0005)) # Ensure a very small profit or keep calculated stop
+
+                                    if new_stop_loss > current_stop_loss: # Only update if the new stop is actually higher
+                                        update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                        # Store the current price at activation as last_trailing_update_price (for logging/reference, not used in logic anymore)
+                                        update_params = (new_stop_loss, current_price, signal_id)
+                                        log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}. New Stop ({indicator_name} based): {new_stop_loss:.8g}"
+                                        notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
+                                        update_executed = True
+                                    else:
+                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
+
+                                # b. Update Trailing Stop (if already active)
+                                elif is_trailing_active:
+                                    # The new stop loss is the calculated indicator-based value
+                                    # Ensure it's higher than the current stop loss before updating
+                                    if potential_new_stop_loss > current_stop_loss:
+                                        new_stop_loss_update = potential_new_stop_loss
+                                        update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
+                                        # Store the current price at update (for logging/reference)
+                                        update_params = (new_stop_loss_update, current_price, signal_id)
+                                        log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}. Old={current_stop_loss:.8g}, New ({indicator_name} based): {new_stop_loss_update:.8g}"
+                                        notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
+                                        update_executed = True
+                                    else:
+                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
+                            else:
+                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid indicator value ({indicator_name}: {indicator_value}) for trailing stop calculation.")
+                        else:
+                            logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch recent data for indicator-based trailing stop.")
 
 
                     # --- Execute Database Update and Send Notification ---
@@ -2119,6 +2049,17 @@ def track_signals() -> None:
         except Exception as cycle_err:
             logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
             time.sleep(30)
+
+def get_interval_minutes(interval: str) -> int:
+    """Helper function to convert Binance interval string to minutes."""
+    if interval.endswith('m'):
+        return int(interval[:-1])
+    elif interval.endswith('h'):
+        return int(interval[:-1]) * 60
+    elif interval.endswith('d'):
+        return int(interval[:-1]) * 60 * 24
+    # Add other intervals if needed
+    return 0 # Default to 0 if unknown
 
 
 # ---------------------- Flask Service (Optional for Webhook) ----------------------
@@ -2487,3 +2428,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] Trading signal bot stopped.")
         os._exit(0)
+
