@@ -89,8 +89,7 @@ TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the tr
 TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
 
 # Additional Signal Conditions (Adjusted)
-# MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
-MIN_PROFIT_MARGIN_PCT: float = 1.0
+MIN_PROFIT_MARGIN_PCT: float = 1.0 # Minimum required profit margin percentage (Changed to 1.0% as requested)
 MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
@@ -99,8 +98,8 @@ MIN_ADX_TREND_STRENGTH: int = 20 # Increased minimum ADX for stronger trend conf
 MACD_HIST_INCREASE_CANDLES: int = 3 # Check if MACD histogram is increasing over the last X candles (Increased slightly for better momentum confirmation)
 OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candles (Increased slightly for better momentum confirmation)
 
-# --- Removed Parameter for Dynamic Target/SL Update ---
-# TARGET_APPROACH_THRESHOLD_PCT: float = 0.01 # Removed as dynamic update logic is changed
+# --- Target Extension Parameter ---
+TARGET_APPROACH_THRESHOLD_PCT: float = 0.005 # Percentage threshold to consider price "close" to target (0.5%)
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -439,79 +438,34 @@ def convert_np_values(obj: Any) -> Any:
         return obj
 
 # ---------------------- Reading and Validating Symbols List ----------------------
-def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+def get_crypto_symbols() -> List[str]:
     """
-    Reads the list of currency symbols from a text file, then validates them
-    as valid USDT pairs available for Spot trading on Binance.
+    Fetches the list of valid USDT pairs directly from Binance API.
     """
-    raw_symbols: List[str] = []
-    logger.info(f"ℹ️ [Data] Reading symbols list from file '{filename}'...")
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(script_dir, filename)
-
-        if not os.path.exists(file_path):
-            file_path = os.path.abspath(filename) # Try current path if not next to script
-            if not os.path.exists(file_path):
-                 logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
-                 return [] # Return empty list if file not found
-            else:
-                 logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
-
-        with open(file_path, 'r', encoding='utf-8') as f:
-            # Clean and format symbols: remove spaces, convert to uppercase, ensure ends with USDT
-            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
-                           for line in f if line.strip() and not line.startswith('#')]
-        raw_symbols = sorted(list(set(raw_symbols))) # Remove duplicates and sort
-        logger.info(f"ℹ️ [Data] Read {len(raw_symbols)} initial symbols from '{file_path}'.")
-
-    except FileNotFoundError:
-         logger.error(f"❌ [Data] File '{filename}' not found.")
-         return []
-    except Exception as e:
-        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
-        return [] # Return empty list in case of error
-
-    if not raw_symbols:
-         logger.warning("⚠️ [Data] Initial symbols list is empty.")
-         return []
-
-    # --- Validate symbols against Binance API ---
     if not client:
-        logger.error("❌ [Data Validation] Binance client not initialized. Cannot validate symbols.")
-        return raw_symbols # Return unfiltered list if client is not ready
+        logger.error("❌ [Data Fetch] Binance client not initialized. Cannot fetch symbols.")
+        return [] # Return empty list if client is not ready
 
     try:
-        logger.info("ℹ️ [Data Validation] Validating symbols and trading status from Binance API...")
+        logger.info("ℹ️ [Data Fetch] Fetching valid USDT Spot trading pairs from Binance API...")
         exchange_info = client.get_exchange_info()
-        # Build a set of valid trading USDT symbols for faster lookup
-        valid_trading_usdt_symbols = {
+        # Filter for symbols where quoteAsset is USDT, status is TRADING, and spot trading is allowed
+        valid_trading_usdt_symbols = [
             s['symbol'] for s in exchange_info['symbols']
             if s.get('quoteAsset') == 'USDT' and    # Ensure quote asset is USDT
                s.get('status') == 'TRADING' and         # Ensure status is TRADING
                s.get('isSpotTradingAllowed') is True    # Ensure Spot trading is allowed
-        }
-        logger.info(f"ℹ️ [Data Validation] Found {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs on Binance.")
-
-        # Filter the list read from the file based on the valid list from Binance
-        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
-
-        removed_count = len(raw_symbols) - len(validated_symbols)
-        if removed_count > 0:
-            removed_symbols = set(raw_symbols) - set(validated_symbols)
-            logger.warning(f"⚠️ [Data Validation] Removed {removed_count} invalid or unavailable USDT Spot trading symbols from the list: {', '.join(removed_symbols)}")
-
-        logger.info(f"✅ [Data Validation] Symbols validated. Using {len(validated_symbols)} valid symbols.")
-        return validated_symbols
+        ]
+        valid_trading_usdt_symbols.sort() # Sort the list alphabetically
+        logger.info(f"✅ [Data Fetch] Found and validated {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs on Binance.")
+        return valid_trading_usdt_symbols
 
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Validation] Binance API or network error while validating symbols: {binance_err}")
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
-         return raw_symbols # Return unfiltered list in case of API error
+         logger.error(f"❌ [Data Fetch] Binance API or network error while fetching symbols: {binance_err}")
+         return [] # Return empty list in case of API error
     except Exception as api_err:
-         logger.error(f"❌ [Data Validation] Unexpected error while validating Binance symbols: {api_err}", exc_info=True)
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
-         return raw_symbols # Return unfiltered list in case of API error
+         logger.error(f"❌ [Data Fetch] Unexpected error while fetching Binance symbols: {api_err}", exc_info=True)
+         return [] # Return empty list in case of API error
 
 
 # ---------------------- WebSocket Management for Ticker Prices ----------------------
@@ -906,7 +860,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
              elif close[i] < final_lb[i]: # Start of downtrend
                   st[i] = final_ub[i]
                   st_trend[i] = -1
-             else: # Still between bands (rare) or previous trend was 0
+             else: # If price is between bands initially (rare) or previous trend was 0
                   # Try to infer trend from current price vs bands if previous was 0
                   if close[i] > basic_ub[i]:
                       st[i] = basic_lb[i]
@@ -977,9 +931,6 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     # Check for NaN in required values
     if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
         return 0
-    # Check if previous candle has a body (not a perfect doji)
-    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1:
-        return 0 # Previous candle is too much like a doji
 
     # Bullish Engulfing: Previous candle bearish, current bullish engulfing previous body
     is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
@@ -1829,7 +1780,9 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     atr_value = details.get('atr_value', 0.0) # Still used for activation notification
     new_stop_loss = details.get('new_stop_loss', 0.0)
     old_stop_loss = details.get('old_stop_loss', 0.0)
-    # Removed new_target, old_target as dynamic target update is removed
+    old_target = details.get('old_target', 0.0) # Added for target update notification
+    new_target = details.get('new_target', 0.0) # Added for target update notification
+
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
@@ -1871,7 +1824,16 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`\n"
             f"ℹ️ *تم التحديث بناءً على مؤشر {TRAILING_STOP_INDICATOR.upper()}* (Buffer: {TRAILING_STOP_BUFFER_PCT*100:.1f}%)" # Indicate update reason
         )
-    # Removed 'target_and_sl_updated' notification type
+    elif notification_type == 'target_updated': # New notification type for target updates
+         message = (
+             f"↗️ *تم تحديث الهدف (ID: {signal_id})*\n"
+             f"——————————————\n"
+             f"🪙 **الزوج:** `{safe_symbol}`\n"
+             f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
+             f"🎯 **الهدف السابق:** `${old_target:,.8g}`\n"
+             f"🎯 **الهدف الجديد:** `${new_target:,.8g}`\n"
+             f"ℹ️ *تم التحديث بناءً على استمرار الزخم الصعودي.*"
+         )
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
         return # Don't send anything if type is unknown
@@ -2011,8 +1973,60 @@ def track_signals() -> None:
                         notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
                         update_executed = True
 
-                    # 3. Check for Trailing Stop Activation or Update (Only if Target or SL not hit)
-                    if not update_executed: # Only check trailing stop if no other exit happened
+                    # 3. Check for Target Extension (Only if Target or SL not hit)
+                    if not update_executed:
+                        # Check if price is close to the current target
+                        if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
+                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price is close to target ({current_price:.8g} vs {current_target:.8g}). Checking for continuation signal...")
+
+                             # Fetch recent data using the signal generation timeframe and lookback
+                             df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+
+                             if df_continuation is not None and not df_continuation.empty:
+                                 # Instantiate the strategy and check for a new buy signal
+                                 # This re-evaluates the conditions at the current price level
+                                 continuation_strategy = ScalpingTradingStrategy(symbol)
+                                 df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
+
+                                 if df_continuation_indicators is not None:
+                                     # Generate a potential signal using the strategy's logic
+                                     continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
+
+                                     # Check if a valid continuation signal was generated
+                                     # A valid signal means all mandatory conditions are met and the optional score is above the threshold
+                                     if continuation_signal:
+                                         # A new bullish signal was generated, indicating potential for continuation
+                                         # Calculate a new target based on the *current* price and strategy logic
+                                         latest_row = df_continuation_indicators.iloc[-1]
+                                         current_atr_for_new_target = latest_row.get('atr')
+
+                                         if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
+                                             # Use the same ATR multiplier as initial entry, but from the current price
+                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_new_target)
+
+                                             # Only update the target if the new calculated target is higher than the current one
+                                             if potential_new_target > current_target:
+                                                 old_target = current_target # Store the old target for notification
+                                                 new_target = potential_new_target
+                                                 update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
+                                                 update_params = (new_target, signal_id)
+                                                 log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): Target updated from {old_target:.8g} to {new_target:.8g} based on continuation signal."
+                                                 notification_details.update({'type': 'target_updated', 'old_target': old_target, 'new_target': new_target})
+                                                 update_executed = True
+                                             else:
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Continuation signal detected, but new target ({potential_new_target:.8g}) is not higher than current ({current_target:.8g}). Not updating target.")
+                                         else:
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate new target due to invalid ATR ({current_atr_for_new_target}) from continuation data.")
+                                     else:
+                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price close to target, but no continuation signal generated.")
+                                 else:
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to populate indicators for continuation check.")
+                             else:
+                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch historical data for continuation check.")
+
+
+                    # 4. Check for Trailing Stop Activation or Update (Only if Target, SL, or Target Extension not hit/updated)
+                    if not update_executed: # Only check trailing stop if no other exit or target extension happened
                         activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
 
                         # Fetch recent data for indicator-based trailing stop
@@ -2245,14 +2259,8 @@ def handle_status_command(chat_id_msg: int) -> None:
     if not (msg_sent and msg_sent.get('ok')):
          logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
          return
-    # Check if msg_sent and msg_sent['result'] are not None before accessing message_id
-    message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit is None:
-        logger.error(f"❌ [Flask Status] Failed to get message_id for status update in chat {chat_id_msg}")
-        return # Exit if message_id is not available
-
-
+    message_id_to_edit = msg_sent['result']['message_id']
     try:
         open_count = 0
         if check_db_connection() and conn:
@@ -2312,6 +2320,7 @@ def run_flask() -> None:
 # ---------------------- Main Loop and Check Function ----------------------
 def main_loop() -> None:
     """Main loop to scan pairs and generate signals."""
+    # Fetch symbols directly from Binance API
     symbols_to_scan = get_crypto_symbols()
     if not symbols_to_scan:
         logger.critical("❌ [Main] No valid symbols loaded or validated. Cannot proceed.")
