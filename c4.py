@@ -89,7 +89,8 @@ TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the tr
 TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
 
 # Additional Signal Conditions (Adjusted)
-MIN_PROFIT_MARGIN_PCT: float = 0.8 # Minimum required profit margin percentage (SIGNIFICANTLY REDUCED)
+# MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
+MIN_PROFIT_MARGIN_PCT: float = 1.0
 MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
@@ -905,7 +906,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
              elif close[i] < final_lb[i]: # Start of downtrend
                   st[i] = final_ub[i]
                   st_trend[i] = -1
-             else: # If price is between bands initially (rare) or previous trend was 0
+             else: # Still between bands (rare) or previous trend was 0
                   # Try to infer trend from current price vs bands if previous was 0
                   if close[i] > basic_ub[i]:
                       st[i] = basic_lb[i]
@@ -976,6 +977,9 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     # Check for NaN in required values
     if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
         return 0
+    # Check if previous candle has a body (not a perfect doji)
+    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1:
+        return 0 # Previous candle is too much like a doji
 
     # Bullish Engulfing: Previous candle bearish, current bullish engulfing previous body
     is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
@@ -1304,8 +1308,8 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         self.total_possible_score = sum(self.condition_weights.values())
 
         # Required signal score threshold for *optional* conditions (as a percentage)
-        # Adjusted threshold for Scalping to potentially get more signals
-        self.min_score_threshold_pct = 0.60 # Example: 60% of optional points (Adjusted slightly up)
+        # MODIFIED: Adjusted threshold for Scalping to 70% as requested
+        self.min_score_threshold_pct = 0.70
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
 
@@ -1619,6 +1623,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # ------------------------------------------
 
         # Final buy decision based on the score of optional conditions
+        # MODIFIED: Check against the updated min_signal_score (70% of total possible)
         if current_score < self.min_signal_score:
             logger.debug(f"ℹ️ [Strategy {self.symbol}] Required signal score from optional conditions not met (Score: {current_score:.2f} / {self.total_possible_score:.2f}, Threshold: {self.min_signal_score:.2f}). Signal rejected.")
             return None
@@ -1664,6 +1669,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
         # This ensures the potential reward is sufficient for the risk.
+        # MODIFIED: Check against the updated MIN_PROFIT_MARGIN_PCT (1.0%)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
@@ -1679,7 +1685,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Current SL starts as initial
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
             'strategy_name': 'Scalping_Momentum_Trend', # Changed strategy name
-            'signal_details': signal_details, # Now contains details of mandatory and optional conditions
+            'signal_details': signal_details, # Now contains details of checked conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
@@ -2239,8 +2245,14 @@ def handle_status_command(chat_id_msg: int) -> None:
     if not (msg_sent and msg_sent.get('ok')):
          logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
          return
+    # Check if msg_sent and msg_sent['result'] are not None before accessing message_id
+    message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    message_id_to_edit = msg_sent['result']['message_id']
+    if message_id_to_edit is None:
+        logger.error(f"❌ [Flask Status] Failed to get message_id for status update in chat {chat_id_msg}")
+        return # Exit if message_id is not available
+
+
     try:
         open_count = 0
         if check_db_connection() and conn:
