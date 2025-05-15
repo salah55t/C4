@@ -1199,105 +1199,114 @@ def run_flask() -> None:
 
 # ---------------------- Main Loop and Check Function ----------------------
 def main_loop() -> None:
-    symbols_to_scan = get_crypto_symbols()
-    if not symbols_to_scan: logger.critical("❌ [Main] No valid symbols loaded. Cannot proceed."); return
-    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} symbols for scanning.")
-
+    logger.info("🚀 [Main] Starting main scanning loop...")
     while True:
+        scan_start_time = time.time()
+        logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # Read symbols list at the beginning of each scan cycle
+        symbols_to_scan = get_crypto_symbols()
+        if not symbols_to_scan:
+            logger.warning("⚠️ [Main] No valid symbols loaded for this scan cycle. Waiting 60s.")
+            time.sleep(60)
+            continue
+
+        if not check_db_connection() or not conn:
+            logger.error("❌ [Main] DB connection failure. Skipping scan.")
+            time.sleep(60)
+            continue
+
+        open_count = 0
         try:
-            scan_start_time = time.time()
-            logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            if not check_db_connection() or not conn:
-                logger.error("❌ [Main] DB connection failure. Skipping scan.")
-                time.sleep(60)
-                continue
-
-            open_count = 0
-            try:
-                 with conn.cursor() as cur_check:
-                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                    open_count = (cur_check.fetchone() or {}).get('count', 0)
-            except psycopg2.Error as db_err:
-                logger.error(f"❌ [Main] DB error checking open signals: {db_err}. Skipping.")
-                if conn:
-                    conn.rollback()
-                time.sleep(60)
-                continue
-
-            logger.info(f"ℹ️ [Main] Open Signals: {open_count} / {MAX_OPEN_TRADES}")
-            if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"⚠️ [Main] Max open signals reached. Waiting...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
-                continue
-
-            processed_in_loop = 0; signals_generated_in_loop = 0; slots_available = MAX_OPEN_TRADES - open_count
-            for symbol in symbols_to_scan:
-                 if slots_available <= 0:
-                     logger.info(f"ℹ️ [Main] Max limit reached during scan. Stopping.")
-                     break
-                 processed_in_loop += 1
-                 logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
-                 try:
-                    with conn.cursor() as symbol_cur: # Check for existing open signal for symbol
-                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
-                        if symbol_cur.fetchone(): continue
-
-                    df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty: continue
-                    strategy = ScalpingTradingStrategy(symbol)
-                    df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None: continue
-                    potential_signal = strategy.generate_buy_signal(df_indicators)
-
-                    if potential_signal:
-                        logger.info(f"✨ [Main] Potential signal for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f})")
-                        with conn.cursor() as final_check_cur: # Final check on open slots before inserting
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
-                             final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
-                             if final_open_count < MAX_OPEN_TRADES:
-                                 if insert_signal_into_db(potential_signal):
-                                     send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                                     signals_generated_in_loop += 1
-                                     slots_available -= 1
-                                     time.sleep(2)
-                                 else:
-                                     logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
-                             else:
-                                 logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored.")
-                                 break
-                 except psycopg2.Error as db_loop_err:
-                     logger.error(f"❌ [Main] DB error for {symbol}: {db_loop_err}. Next...")
-                     if conn:
-                         conn.rollback()
-                     continue
-                 except Exception as symbol_proc_err:
-                     logger.error(f"❌ [Main] General error for {symbol}: {symbol_proc_err}", exc_info=True)
-                     continue
-                 time.sleep(0.1) # Small delay between processing symbols
-
-            scan_duration = time.time() - scan_start_time
-            logger.info(f"🏁 [Main] Scan finished. Signals: {signals_generated_in_loop}. Duration: {scan_duration:.2f}s.")
-            frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
-            wait_time = max(frame_minutes * 60, 120 - scan_duration) # Wait 2 minutes total or at least the timeframe duration
-            logger.info(f"⏳ [Main] Waiting {wait_time:.1f}s for next cycle...")
-            time.sleep(wait_time)
-        except KeyboardInterrupt:
-            logger.info("🛑 [Main] Stop requested. Shutting down...")
-            break
-        except psycopg2.Error as db_main_err:
-            logger.error(f"❌ [Main] Fatal DB error: {db_main_err}. Reconnecting...")
+             with conn.cursor() as cur_check:
+                cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                open_count = (cur_check.fetchone() or {}).get('count', 0)
+        except psycopg2.Error as db_err:
+            logger.error(f"❌ [Main] DB error checking open signals: {db_err}. Skipping.")
             if conn:
                 conn.rollback()
             time.sleep(60)
-            try:
-                init_db()
-            except Exception as recon_err:
-                logger.critical(f"❌ [Main] DB reconnect failed: {recon_err}. Exiting...")
-                break
-        except Exception as main_err:
-            logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
-            logger.info("ℹ️ [Main] Waiting 120s before retry...")
-            time.sleep(120)
+            continue
+
+        logger.info(f"ℹ️ [Main] Open Signals: {open_count} / {MAX_OPEN_TRADES}")
+        if open_count >= MAX_OPEN_TRADES:
+            logger.info(f"⚠️ [Main] Max open signals reached. Waiting for next cycle.")
+            # Wait for the remainder of the minute
+            elapsed_time = time.time() - scan_start_time
+            wait_time = max(0, 60 - elapsed_time) # Wait up to 60 seconds total per cycle
+            time.sleep(wait_time)
+            continue
+
+        processed_in_loop = 0; signals_generated_in_loop = 0; slots_available = MAX_OPEN_TRADES - open_count
+        for symbol in symbols_to_scan:
+             if slots_available <= 0:
+                 logger.info(f"ℹ️ [Main] Max limit reached during scan. Stopping.")
+                 break
+             processed_in_loop += 1
+             logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
+             try:
+                with conn.cursor() as symbol_cur: # Check for existing open signal for symbol
+                    symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
+                    if symbol_cur.fetchone(): continue
+
+                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+                if df_hist is None or df_hist.empty: continue
+                strategy = ScalpingTradingStrategy(symbol)
+                df_indicators = strategy.populate_indicators(df_hist)
+                if df_indicators is None: continue
+                potential_signal = strategy.generate_buy_signal(df_indicators)
+
+                if potential_signal:
+                    logger.info(f"✨ [Main] Potential signal for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f})")
+                    with conn.cursor() as final_check_cur: # Final check on open slots before inserting
+                         final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                         final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
+                         if final_open_count < MAX_OPEN_TRADES:
+                             if insert_signal_into_db(potential_signal):
+                                 send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
+                                 signals_generated_in_loop += 1
+                                 slots_available -= 1
+                                 time.sleep(2) # Small delay after sending alert
+                             else:
+                                 logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
+                         else:
+                             logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored.")
+                             break
+             except psycopg2.Error as db_loop_err:
+                 logger.error(f"❌ [Main] DB error for {symbol}: {db_loop_err}. Next...")
+                 if conn:
+                     conn.rollback()
+                 continue
+             except Exception as symbol_proc_err:
+                 logger.error(f"❌ [Main] General error for {symbol}: {symbol_proc_err}", exc_info=True)
+                 continue
+             time.sleep(0.1) # Small delay between processing symbols
+
+        scan_duration = time.time() - scan_start_time
+        logger.info(f"🏁 [Main] Scan finished. Signals: {signals_generated_in_loop}. Duration: {scan_duration:.2f}s.")
+        # Wait for the remainder of the minute cycle
+        wait_time = max(0, 60 - scan_duration) # Wait up to 60 seconds total per cycle
+        logger.info(f"⏳ [Main] Waiting {wait_time:.1f}s for next cycle...")
+        time.sleep(wait_time)
+
+    except KeyboardInterrupt:
+        logger.info("🛑 [Main] Stop requested. Shutting down...")
+        break
+    except psycopg2.Error as db_main_err:
+        logger.error(f"❌ [Main] Fatal DB error: {db_main_err}. Reconnecting...")
+        if conn:
+            conn.rollback()
+        time.sleep(60)
+        try:
+            init_db()
+        except Exception as recon_err:
+            logger.critical(f"❌ [Main] DB reconnect failed: {recon_err}. Exiting...")
+            break
+    except Exception as main_err:
+        logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
+        logger.info("ℹ️ [Main] Waiting 120s before retry...")
+        time.sleep(120)
+
 
 def cleanup_resources() -> None:
     global conn
