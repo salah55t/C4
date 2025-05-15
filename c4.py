@@ -550,7 +550,7 @@ def is_shooting_star(row: pd.Series) -> int:
     lower_shadow = min(o, c) - l
     upper_shadow = h - max(o, c)
     is_small_body = body < (candle_range * 0.35)
-    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
+    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow < candle_range * 0.6
     is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
     return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0
 
@@ -1058,7 +1058,7 @@ def track_signals() -> None:
                                         }
                                     })
                                     update_params = (new_dynamic_target, update_details_json, signal_id)
-                                    log_message = f"🔄 [Tracker] {symbol}(ID:{signal_id}): Dynamic target update! Old: {current_target:.6f}, New: {new_dynamic_target:.6f}"
+                                    log_message = f"🔄 [Tracker] {symbol}(ID:{signal_id}): Dynamic target update! Old: {current_target:.6f}, New: {new_target:.6f}"
                                     notification_details.update({'type': 'target_updated_dynamically',
                                                                  'old_target': current_target,
                                                                  'new_target': new_dynamic_target,
@@ -1092,8 +1092,15 @@ def track_signals() -> None:
 
             if active_signals_summary: logger.debug(f"ℹ️ [Tracker] Cycle end ({processed_in_cycle} processed): {'; '.join(active_signals_summary)}")
             time.sleep(3) # Wait between tracking cycles
-        except psycopg2.Error as db_cycle_err: logger.error(f"❌ [Tracker] DB error in tracking cycle: {db_cycle_err}. Reconnecting..."); if conn: conn.rollback(); time.sleep(30); check_db_connection()
-        except Exception as cycle_err: logger.error(f"❌ [Tracker] Error in tracking cycle: {cycle_err}", exc_info=True); time.sleep(30)
+        except psycopg2.Error as db_cycle_err:
+            logger.error(f"❌ [Tracker] DB error in tracking cycle: {db_cycle_err}. Reconnecting...")
+            if conn:
+                conn.rollback()
+            time.sleep(30)
+            check_db_connection()
+        except Exception as cycle_err:
+            logger.error(f"❌ [Tracker] Error in tracking cycle: {cycle_err}", exc_info=True)
+            time.sleep(30)
 
 def get_interval_minutes(interval: str) -> int:
     if interval.endswith('m'): return int(interval[:-1])
@@ -1239,8 +1246,20 @@ def main_loop() -> None:
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f}s for next cycle...")
             time.sleep(wait_time)
         except KeyboardInterrupt: logger.info("🛑 [Main] Stop requested. Shutting down..."); break
-        except psycopg2.Error as db_main_err: logger.error(f"❌ [Main] Fatal DB error: {db_main_err}. Reconnecting..."); if conn: conn.rollback(); time.sleep(60); try: init_db() except Exception as recon_err: logger.critical(f"❌ [Main] DB reconnect failed: {recon_err}. Exiting..."); break
-        except Exception as main_err: logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True); logger.info("ℹ️ [Main] Waiting 120s before retry..."); time.sleep(120)
+        except psycopg2.Error as db_main_err:
+            logger.error(f"❌ [Main] Fatal DB error: {db_main_err}. Reconnecting...")
+            if conn:
+                conn.rollback()
+            time.sleep(60)
+            try:
+                init_db()
+            except Exception as recon_err:
+                logger.critical(f"❌ [Main] DB reconnect failed: {recon_err}. Exiting...")
+                break
+        except Exception as main_err:
+            logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
+            logger.info("ℹ️ [Main] Waiting 120s before retry...")
+            time.sleep(120)
 
 def cleanup_resources() -> None:
     global conn; logger.info("ℹ️ [Cleanup] Closing resources...")
