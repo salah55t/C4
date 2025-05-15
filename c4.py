@@ -577,15 +577,19 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------- Other Helper Functions ----------------------
 def fetch_recent_volume(symbol: str) -> float:
-    if not client: logger.error(f"❌ [Data Volume] Binance client not initialized for {symbol}."); return 0.0
+    if not client:
+        logger.error(f"❌ [Data Volume] Binance client not initialized for {symbol}."); return 0.0
     try:
         logger.debug(f"ℹ️ [Data Volume] Fetching 15m volume for {symbol}...")
         klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=15)
-        if not klines or len(klines) < 15: logger.warning(f"⚠️ [Data Volume] Insufficient 1m data for {symbol}."); return 0.0
+        if not klines or len(klines) < 15:
+            logger.warning(f"⚠️ [Data Volume] Insufficient 1m data for {symbol}."); return 0.0
         volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
         logger.debug(f"✅ [Data Volume] Last 15m liquidity for {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
-    except Exception as e: logger.error(f"❌ [Data Volume] Error fetching volume for {symbol}: {e}", exc_info=True); return 0.0
+    except Exception as e:
+        logger.error(f"❌ [Data Volume] Error fetching volume for {symbol}: {e}", exc_info=True)
+        return 0.0
 
 # ---------------------- Performance Report Function ----------------------
 def generate_performance_report() -> str:
@@ -970,9 +974,9 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
         return False
     except Exception as e: # General exception
         logger.error(f"❌ [DB Insert] Error inserting signal for {symbol}: {e}", exc_info=True)
-        if conn: # Corrected: Indentation for if statement
+        if conn:
             conn.rollback()
-        return False # Corrected: Indentation for return
+        return False
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
@@ -1178,13 +1182,20 @@ def handle_status_command(chat_id_msg: int) -> None:
 
 
 def run_flask() -> None:
-    if not WEBHOOK_URL: logger.info("ℹ️ [Flask] Webhook URL not configured. Flask not starting."); return
+    if not WEBHOOK_URL:
+        logger.info("ℹ️ [Flask] Webhook URL not configured. Flask not starting.")
+        return
     host = "0.0.0.0"; port = int(config('PORT', default=10000))
     logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
     try:
-        from waitress import serve; logger.info("✅ [Flask] Using 'waitress'."); serve(app, host=host, port=port, threads=6)
-    except ImportError: logger.warning("⚠️ [Flask] 'waitress' not installed. Using Flask dev server."); app.run(host=host, port=port)
-    except Exception as serve_err: logger.critical(f"❌ [Flask] Failed to start server: {serve_err}", exc_info=True)
+        from waitress import serve
+        logger.info("✅ [Flask] Using 'waitress'.")
+        serve(app, host=host, port=port, threads=6)
+    except ImportError:
+        logger.warning("⚠️ [Flask] 'waitress' not installed. Using Flask dev server.")
+        app.run(host=host, port=port)
+    except Exception as serve_err:
+        logger.critical(f"❌ [Flask] Failed to start server: {serve_err}", exc_info=True)
 
 # ---------------------- Main Loop and Check Function ----------------------
 def main_loop() -> None:
@@ -1196,22 +1207,36 @@ def main_loop() -> None:
         try:
             scan_start_time = time.time()
             logger.info(f"🔄 [Main] Starting Market Scan Cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            if not check_db_connection() or not conn: logger.error("❌ [Main] DB connection failure. Skipping scan."); time.sleep(60); continue
+            if not check_db_connection() or not conn:
+                logger.error("❌ [Main] DB connection failure. Skipping scan.")
+                time.sleep(60)
+                continue
 
             open_count = 0
             try:
                  with conn.cursor() as cur_check:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
-            except psycopg2.Error as db_err: logger.error(f"❌ [Main] DB error checking open signals: {db_err}. Skipping."); if conn: conn.rollback(); time.sleep(60); continue
+            except psycopg2.Error as db_err:
+                logger.error(f"❌ [Main] DB error checking open signals: {db_err}. Skipping.")
+                if conn:
+                    conn.rollback()
+                time.sleep(60)
+                continue
 
             logger.info(f"ℹ️ [Main] Open Signals: {open_count} / {MAX_OPEN_TRADES}")
-            if open_count >= MAX_OPEN_TRADES: logger.info(f"⚠️ [Main] Max open signals reached. Waiting..."); time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60); continue
+            if open_count >= MAX_OPEN_TRADES:
+                logger.info(f"⚠️ [Main] Max open signals reached. Waiting...")
+                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
+                continue
 
             processed_in_loop = 0; signals_generated_in_loop = 0; slots_available = MAX_OPEN_TRADES - open_count
             for symbol in symbols_to_scan:
-                 if slots_available <= 0: logger.info(f"ℹ️ [Main] Max limit reached during scan. Stopping."); break
-                 processed_in_loop += 1; logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
+                 if slots_available <= 0:
+                     logger.info(f"ℹ️ [Main] Max limit reached during scan. Stopping.")
+                     break
+                 processed_in_loop += 1
+                 logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
                  try:
                     with conn.cursor() as symbol_cur: # Check for existing open signal for symbol
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
@@ -1232,11 +1257,22 @@ def main_loop() -> None:
                              if final_open_count < MAX_OPEN_TRADES:
                                  if insert_signal_into_db(potential_signal):
                                      send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                                     signals_generated_in_loop += 1; slots_available -= 1; time.sleep(2)
-                                 else: logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
-                             else: logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored."); break
-                 except psycopg2.Error as db_loop_err: logger.error(f"❌ [Main] DB error for {symbol}: {db_loop_err}. Next..."); if conn: conn.rollback(); continue
-                 except Exception as symbol_proc_err: logger.error(f"❌ [Main] General error for {symbol}: {symbol_proc_err}", exc_info=True); continue
+                                     signals_generated_in_loop += 1
+                                     slots_available -= 1
+                                     time.sleep(2)
+                                 else:
+                                     logger.error(f"❌ [Main] Failed to insert signal for {symbol}.")
+                             else:
+                                 logger.warning(f"⚠️ [Main] Max limit reached before inserting {symbol}. Ignored.")
+                                 break
+                 except psycopg2.Error as db_loop_err:
+                     logger.error(f"❌ [Main] DB error for {symbol}: {db_loop_err}. Next...")
+                     if conn:
+                         conn.rollback()
+                     continue
+                 except Exception as symbol_proc_err:
+                     logger.error(f"❌ [Main] General error for {symbol}: {symbol_proc_err}", exc_info=True)
+                     continue
                  time.sleep(0.1) # Small delay between processing symbols
 
             scan_duration = time.time() - scan_start_time
@@ -1245,7 +1281,9 @@ def main_loop() -> None:
             wait_time = max(frame_minutes * 60, 120 - scan_duration) # Wait 2 minutes total or at least the timeframe duration
             logger.info(f"⏳ [Main] Waiting {wait_time:.1f}s for next cycle...")
             time.sleep(wait_time)
-        except KeyboardInterrupt: logger.info("🛑 [Main] Stop requested. Shutting down..."); break
+        except KeyboardInterrupt:
+            logger.info("🛑 [Main] Stop requested. Shutting down...")
+            break
         except psycopg2.Error as db_main_err:
             logger.error(f"❌ [Main] Fatal DB error: {db_main_err}. Reconnecting...")
             if conn:
@@ -1262,29 +1300,45 @@ def main_loop() -> None:
             time.sleep(120)
 
 def cleanup_resources() -> None:
-    global conn; logger.info("ℹ️ [Cleanup] Closing resources...")
-    if conn: try: conn.close(); logger.info("✅ [DB] DB connection closed.") except Exception as close_err: logger.error(f"⚠️ [DB] Error closing DB: {close_err}")
+    global conn
+    logger.info("ℹ️ [Cleanup] Closing resources...")
+    if conn:
+        try:
+            conn.close()
+            logger.info("✅ [DB] DB connection closed.")
+        except Exception as close_err:
+            logger.error(f"⚠️ [DB] Error closing DB: {close_err}")
     logger.info("✅ [Cleanup] Resource cleanup complete.")
 
 # ---------------------- Main Entry Point ----------------------
 if __name__ == "__main__":
     logger.info("🚀 Starting trading signal bot (No Stop Loss Version)...")
     logger.info(f"Local: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
-    ws_thread: Optional[Thread] = None; tracker_thread: Optional[Thread] = None; flask_thread: Optional[Thread] = None
+    ws_thread: Optional[Thread] = None
+    tracker_thread: Optional[Thread] = None
+    flask_thread: Optional[Thread] = None
     try:
         init_db()
-        ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread"); ws_thread.start()
-        logger.info("✅ [Main] WebSocket Ticker thread started. Waiting 5s for init..."); time.sleep(5)
-        if not ticker_data: logger.warning("⚠️ [Main] No initial data from WebSocket after 5s.")
-        else: logger.info(f"✅ [Main] Initial data from WebSocket for {len(ticker_data)} symbols.")
-        tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread"); tracker_thread.start()
+        ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
+        ws_thread.start()
+        logger.info("✅ [Main] WebSocket Ticker thread started. Waiting 5s for init...")
+        time.sleep(5)
+        if not ticker_data:
+            logger.warning("⚠️ [Main] No initial data from WebSocket after 5s.")
+        else:
+            logger.info(f"✅ [Main] Initial data from WebSocket for {len(ticker_data)} symbols.")
+        tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
+        tracker_thread.start()
         logger.info("✅ [Main] Signal Tracker thread started.")
         if WEBHOOK_URL:
-            flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread"); flask_thread.start()
+            flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
+            flask_thread.start()
             logger.info("✅ [Main] Flask Webhook thread started.")
-        else: logger.info("ℹ️ [Main] Webhook URL not configured, Flask server not starting.")
+        else:
+            logger.info("ℹ️ [Main] Webhook URL not configured, Flask server not starting.")
         main_loop()
-    except Exception as startup_err: logger.critical(f"❌ [Main] Fatal error during startup/main loop: {startup_err}", exc_info=True)
+    except Exception as startup_err:
+        logger.critical(f"❌ [Main] Fatal error during startup/main loop: {startup_err}", exc_info=True)
     finally:
         logger.info("🛑 [Main] Program shutting down...")
         cleanup_resources()
