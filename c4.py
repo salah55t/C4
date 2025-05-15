@@ -261,14 +261,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             }
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
-            
+
             for col_name, col_type in columns_to_add.items():
                 if col_name not in existing_columns:
                     logger.info(f"[DB] Adding column '{col_name}' to 'signals' table...")
                     cur.execute(sql.SQL(f"ALTER TABLE signals ADD COLUMN IF NOT EXISTS {col_name} {col_type};"))
                     conn.commit()
                     logger.info(f"✅ [DB] Column '{col_name}' added.")
-            
+
             logger.info("[DB] Checking/Creating 'market_dominance' table...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS market_dominance (
@@ -756,16 +756,16 @@ class ScalpingTradingStrategy:
         if not (pd.notna(last_row['macd_hist']) and (last_row['macd_hist'] > 0 or (pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and last_row['macd'] > last_row['macd_signal']))):
             essential_passed = False; failed_essential_conditions.append('MACD Bullish'); signal_details['MACD'] = 'Failed: Not Positive Hist AND No Bullish Cross'
         else: signal_details['MACD'] = 'Passed: Positive Hist or Bullish Cross'
-        
+
         if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
             essential_passed = False; failed_essential_conditions.append(f'ADX Strong Bullish (>{MIN_ADX_TREND_STRENGTH})'); signal_details['ADX/DI'] = f'Failed: Not Strong Bullish (ADX <= {MIN_ADX_TREND_STRENGTH} or DI+ <= DI-)'
         else: signal_details['ADX/DI'] = f'Passed: Strong Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
 
         if not essential_passed: logger.debug(f"ℹ️ [Strategy {self.symbol}] Mandatory conditions failed: {', '.join(failed_essential_conditions)}."); return None
-        
+
         current_score = 0.0 # Optional Conditions Scoring (abbreviated)
-        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']: current_score += self.condition_weights.get('above_vwap', 0); signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap",0)})' 
+        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']: current_score += self.condition_weights.get('above_vwap', 0); signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap",0)})'
         else: signal_details['VWAP_Daily'] = 'Below Daily VWAP (0)'
         if pd.notna(last_row['rsi']) and RSI_OVERSOLD < last_row['rsi'] < RSI_OVERBOUGHT : current_score += self.condition_weights.get('rsi_ok', 0); signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok",0)})'
         else: signal_details['RSI_Basic'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) Not OK (0)'
@@ -861,7 +861,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         profit_usdt = trade_value_signal * (profit_pct / 100)
-        
+
         generation_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
@@ -950,8 +950,8 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
-                 r2_score, strategy_name, signal_details, volume_15m, sent_at) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()); 
+                 r2_score, strategy_name, signal_details, volume_15m, sent_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
             """) # sent_at is recommendation generation time
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'], signal_prepared['entry_price'],
@@ -988,7 +988,7 @@ def track_signals() -> None:
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, current_target, sent_at, dynamic_updates_count
                     FROM signals
-                    WHERE achieved_target = FALSE AND hit_stop_loss = FALSE; 
+                    WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
                 """) # Removed stop loss fields from select
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1006,7 +1006,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
                     if current_price is None: logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Price not in Ticker."); continue
-                    
+
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} DynUpd={dynamic_updates_count}")
 
                     update_query: Optional[sql.SQL] = None; update_params: Tuple = (); log_message: Optional[str] = None
@@ -1020,7 +1020,7 @@ def track_signals() -> None:
                         time_to_target_seconds = int(time_to_target_delta.total_seconds())
 
                         update_query = sql.SQL("""
-                            UPDATE signals SET achieved_target = TRUE, closing_price = %s, 
+                            UPDATE signals SET achieved_target = TRUE, closing_price = %s,
                                          closed_at = %s, profit_percentage = %s,
                                          time_to_target_seconds = %s
                             WHERE id = %s;
@@ -1029,7 +1029,7 @@ def track_signals() -> None:
                         log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%). Time: {format_duration(time_to_target_seconds)}."
                         notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target_seconds': time_to_target_seconds})
                         update_executed = True
-                    
+
                     # 3. Dynamic Target Update (Only if Target not hit and updates allowed)
                     elif not update_executed and dynamic_updates_count < MAX_DYNAMIC_TARGET_UPDATES and \
                          current_price >= (current_target * (1 - DYNAMIC_TARGET_APPROACH_PCT)) and \
@@ -1044,7 +1044,7 @@ def track_signals() -> None:
                                 new_dynamic_target = strategy.analyze_target_continuation(df_indicators_dynamic, current_price, current_target)
                                 if new_dynamic_target and new_dynamic_target > current_target:
                                     update_query = sql.SQL("""
-                                        UPDATE signals SET current_target = %s, 
+                                        UPDATE signals SET current_target = %s,
                                                        dynamic_updates_count = dynamic_updates_count + 1,
                                                        signal_details = signal_details || %s::jsonb
                                         WHERE id = %s;
@@ -1059,18 +1059,18 @@ def track_signals() -> None:
                                     })
                                     update_params = (new_dynamic_target, update_details_json, signal_id)
                                     log_message = f"🔄 [Tracker] {symbol}(ID:{signal_id}): Dynamic target update! Old: {current_target:.6f}, New: {new_dynamic_target:.6f}"
-                                    notification_details.update({'type': 'target_updated_dynamically', 
-                                                                 'old_target': current_target, 
+                                    notification_details.update({'type': 'target_updated_dynamically',
+                                                                 'old_target': current_target,
                                                                  'new_target': new_dynamic_target,
                                                                  'current_price': current_price})
                                     update_executed = True
                                 else:
                                     logger.info(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Conditions not met for dynamic target extension or new target not higher.")
-                            else: 
+                            else:
                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Could not get indicators for dynamic update.")
                         else:
                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Could not fetch data for dynamic update.")
-                    
+
                     if update_executed and update_query:
                         try:
                              with conn.cursor() as update_cur: update_cur.execute(update_query, update_params)
@@ -1080,7 +1080,7 @@ def track_signals() -> None:
                         except psycopg2.Error as db_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error on update: {db_err}"); if conn: conn.rollback()
                         except Exception as exec_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error during update/notification: {exec_err}", exc_info=True); if conn: conn.rollback()
                 except Exception as inner_loop_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error processing signal: {inner_loop_err}", exc_info=True)
-            
+
             if active_signals_summary: logger.debug(f"ℹ️ [Tracker] Cycle end ({processed_in_cycle} processed): {'; '.join(active_signals_summary)}")
             time.sleep(3) # Wait between tracking cycles
         except psycopg2.Error as db_cycle_err: logger.error(f"❌ [Tracker] DB error in tracking cycle: {db_cycle_err}. Reconnecting..."); if conn: conn.rollback(); time.sleep(30); check_db_connection()
@@ -1188,7 +1188,7 @@ def main_loop() -> None:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err: logger.error(f"❌ [Main] DB error checking open signals: {db_err}. Skipping."); if conn: conn.rollback(); time.sleep(60); continue
-            
+
             logger.info(f"ℹ️ [Main] Open Signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES: logger.info(f"⚠️ [Main] Max open signals reached. Waiting..."); time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60); continue
 
@@ -1200,7 +1200,7 @@ def main_loop() -> None:
                     with conn.cursor() as symbol_cur: # Check for existing open signal for symbol
                         symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone(): continue
-                    
+
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty: continue
                     strategy = ScalpingTradingStrategy(symbol)
