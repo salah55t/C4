@@ -1073,12 +1073,21 @@ def track_signals() -> None:
 
                     if update_executed and update_query:
                         try:
-                             with conn.cursor() as update_cur: update_cur.execute(update_query, update_params)
+                             with conn.cursor() as update_cur:
+                                 update_cur.execute(update_query, update_params)
                              conn.commit()
-                             if log_message: logger.info(log_message)
-                             if notification_details.get('type'): send_tracking_notification(notification_details)
-                        except psycopg2.Error as db_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error on update: {db_err}"); if conn: conn.rollback()
-                        except Exception as exec_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error during update/notification: {exec_err}", exc_info=True); if conn: conn.rollback()
+                             if log_message:
+                                 logger.info(log_message)
+                             if notification_details.get('type'):
+                                 send_tracking_notification(notification_details)
+                        except psycopg2.Error as db_err:
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): DB error on update: {db_err}")
+                            if conn:
+                                conn.rollback()
+                        except Exception as exec_err:
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error during update/notification: {exec_err}", exc_info=True)
+                            if conn:
+                                conn.rollback()
                 except Exception as inner_loop_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error processing signal: {inner_loop_err}", exc_info=True)
 
             if active_signals_summary: logger.debug(f"ℹ️ [Tracker] Cycle end ({processed_in_cycle} processed): {'; '.join(active_signals_summary)}")
