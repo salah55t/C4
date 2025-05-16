@@ -689,9 +689,9 @@ def generate_performance_report() -> str:
 
             total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0)
             gross_profit_pct_sum = closed_stats.get('gross_profit_pct_sum', 0.0)
-            gross_loss_pct_sum = 0.0 # No losses from stop loss
+            gross_loss_pct_sum = 0.0
             avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
-            avg_loss_pct = 0.0 # No losses from stop loss
+            avg_loss_pct = 0.0
             avg_time_to_target_seconds = closed_stats.get('avg_time_to_target_seconds', 0.0)
 
             total_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
@@ -969,11 +969,11 @@ class ScalpingTradingStrategy:
 
         essential_passed = True; failed_essential_conditions = []; signal_details = {}
         # Mandatory Conditions Check (on 15m timeframe)
-        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and last_row['close'] > last_row[f'ema_{LONG_PERIOD}'] and last_row['close'] > last_row['vwma']):
+        # Corrected typo: EMA_LONG_PERIOD instead of LONG_PERIOD
+        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and last_row['close'] > last_row['vwma']):
             essential_passed = False; failed_essential_conditions.append('السعر فوق المتوسطات المتحركة و VWMA'); signal_details['Price_MA_Alignment_SignalTF'] = 'فشل: السعر ليس فوق جميع المتوسطات المتحركة على إطار الإشارة'
         else: signal_details['Price_MA_Alignment_SignalTF'] = 'اجتاز: السعر فوق جميع المتوسطات المتحركة على إطار الإشارة'
 
-        # Corrected typo: EMA_LONG_PERIOD instead of LONG_PERIOD
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
             essential_passed = False; failed_essential_conditions.append('EMA القصير > EMA الطويل'); signal_details['EMA_Order_SignalTF'] = 'فشل: EMA القصير ليس فوق EMA الطويل على إطار الإشارة'
         else: signal_details['EMA_Order_SignalTF'] = 'اجتاز: EMA القصير فوق EMA الطويل على إطار الإشارة'
