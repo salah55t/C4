@@ -8,8 +8,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
-# Note: psycopg2, Flask, ThreadedWebsocketManager, Binance API Client are removed/modified for backtesting
-# We will simulate data fetching and trade execution
+from binance.client import Client # Import Binance Client
+from binance.exceptions import BinanceAPIException, BinanceRequestException # Import Binance Exceptions
+import math # For handling API limits
+
+# Note: psycopg2, Flask, ThreadedWebsocketManager are removed/modified for backtesting
+# We will simulate trade execution and data fetching from Binance API
 
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
@@ -22,27 +26,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger('Backtester')
 
-# ---------------------- Load Environment Variables (Only needed for API if fetching fresh data) ----------------------
-# In a real backtest, you might load historical data from a file or database
-# For this example, we'll simulate fetching data using a mock client
+# ---------------------- Load Environment Variables ----------------------
 try:
-    # API_KEY and API_SECRET might still be needed if fetching data from Binance API for backtest
-    API_KEY: str = config('BINANCE_API_KEY', default='YOUR_BINANCE_API_KEY') # Use default if not set
-    API_SECRET: str = config('BINANCE_API_SECRET', default='YOUR_BINANCE_API_SECRET') # Use default if not set
-    # TELEGRAM_TOKEN and CHAT_ID are not needed for backtesting
-    # DB_URL is not needed for backtesting results storage (we'll use a list/DataFrame)
+    # API_KEY and API_SECRET are now essential for data fetching from Binance
+    API_KEY: str = config('BINANCE_API_KEY')
+    API_SECRET: str = config('BINANCE_API_SECRET')
+    if not API_KEY or not API_SECRET:
+         raise ValueError("Binance API Key and Secret must be set in .env for data fetching.")
 except Exception as e:
-     logger.warning(f"⚠️ Could not load environment variables. API keys might be needed for data fetching: {e}")
-     # We will proceed, but data fetching might fail if keys are required by the mock client
+     logger.critical(f"❌ Failed to load essential environment variables for Binance API: {e}")
+     exit(1) # Exit if API keys are not available
+
+logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not Available'}")
 
 # ---------------------- Constants and Global Variables (Copied/Modified from c4.py) ----------------------
 TRADE_VALUE: float = 100.0         # Simulated trade value in USDT
 MAX_OPEN_TRADES: int = 5          # Maximum number of simulated open trades simultaneously
 SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Timeframe for signal generation
+# SIGNAL_GENERATION_LOOKBACK_DAYS is now less critical as we fetch by date range, but still good for indicator calculations
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # Historical data lookback for signal generation
 
 # --- Confirmation Timeframe ---
 CONFIRMATION_TIMEFRAME: str = '30m' # Larger timeframe for trend confirmation
+# CONFIRMATION_LOOKBACK_DAYS is less critical for fetching, but used for indicator calculations
 CONFIRMATION_LOOKBACK_DAYS: int = 14 # Historical data lookback for confirmation timeframe
 
 # --- Parameters for Improved Entry Point (Less Strict Version) ---
@@ -93,70 +99,103 @@ CONDITION_WEIGHTS = {
 }
 TOTAL_POSSIBLE_SCORE = sum(CONDITION_WEIGHTS.values())
 MIN_SCORE_THRESHOLD_PCT = 0.55 # Lowered threshold for less strictness
-MIN_SIGNAL_SCORE = TOTAL_POSSIBLE_SCORE * MIN_SCORE_THRESHOLD_PCT
+MIN_SIGNAL_SCORE = TOTAL_POSSIBLE_SCORE * MIN_SCORE_threshold_pct
 # =============================================================================
 
-# Mock Binance Client and Data Fetcher for Backtesting
-class MockBinanceClient:
-    """A mock Binance client to simulate fetching historical data."""
-    def __init__(self, data_path="historical_data"):
-        self.data_path = data_path
-        os.makedirs(self.data_path, exist_ok=True)
+# Binance Client Initialization
+try:
+    logger.info("ℹ️ Initializing Binance client for data fetching...")
+    client = Client(API_KEY, API_SECRET)
+    client.ping()
+    server_time = client.get_server_time()
+    logger.info(f"✅ Binance client initialized successfully. Server time: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
+except (BinanceRequestException, BinanceAPIException) as binance_err:
+     logger.critical(f"❌ Binance API/Request Error during client initialization: {binance_err}")
+     exit(1)
+except Exception as e:
+    logger.critical(f"❌ Unexpected failure initializing Binance client: {e}", exc_info=True)
+    exit(1)
 
-    def get_historical_klines(self, symbol: str, interval: str, start_str: str, end_str: Optional[str] = None, limit: int = 1000):
-        """Simulates fetching historical klines from a local file or generating mock data."""
-        # In a real backtest, you would load pre-downloaded data here
-        # For this example, we'll just return empty data or mock data structure
-        logger.debug(f"Simulating fetching {interval} klines for {symbol} from {start_str} to {end_str}")
-        # This is a placeholder. You would replace this with actual data loading logic.
-        # Example: Load from a CSV file based on symbol, interval, and date range.
-        # For demonstration, returning an empty list or a minimal structure.
-        return [] # Replace with actual data loading
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 1):
-        """Simulates fetching recent klines."""
-         # This is a placeholder for backtesting. In a real backtest, you'd get this from your historical data.
-         # For volume check, we might need the last candle's volume from the historical data slice.
-         # This function is not ideal for backtesting volume checks.
-         # We will adjust the volume check logic in the backtester.
-        return [] # Replace with logic to get last kline from current backtest slice
-
-# Use the mock client
-mock_client = MockBinanceClient()
-
-# Modified fetch_historical_data for backtesting
+# Modified fetch_historical_data for backtesting - Fetches from Binance
 def fetch_historical_data_backtest(symbol: str, interval: str, start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
-    """Fetches historical data for backtesting from a source (e.g., CSV files)."""
-    logger.info(f"ℹ️ [Data] Fetching historical data for {symbol} - {interval} from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}...")
-    # --- REPLACE THIS WITH YOUR ACTUAL DATA LOADING LOGIC ---
-    # Example: Load from CSV files
-    try:
-        # Assuming your data is in CSV files named like 'BTCUSDT_15m.csv'
-        file_path = os.path.join(mock_client.data_path, f"{symbol.replace('/', '')}_{interval}.csv")
-        if not os.path.exists(file_path):
-            logger.error(f"❌ [Data] Historical data file not found: {file_path}")
-            return None
+    """Fetches historical data for backtesting from Binance API."""
+    logger.info(f"ℹ️ [Data] Fetching historical data for {symbol} - {interval} from {start_date.strftime('%Y-%m-%d %H:%M')} to {end_date.strftime('%Y-%m-%d %H:%M')} from Binance API...")
 
-        df = pd.read_csv(file_path)
-        df['timestamp'] = pd.to_datetime(df['timestamp']) # Assuming 'timestamp' column exists
-        df.set_index('timestamp', inplace=True)
-        df = df[['open', 'high', 'low', 'close', 'volume']] # Adjust columns as per your CSV
-        df.dropna(inplace=True)
+    klines: List[List[Any]] = []
+    current_start_time = start_date
 
-        # Filter data for the specified date range
-        df_filtered = df.loc[start_date:end_date].copy()
-
-        if df_filtered.empty:
-            logger.warning(f"⚠️ [Data] No data found for {symbol} - {interval} in the specified date range after filtering.")
-            return None
-
-        logger.info(f"✅ [Data] Fetched {len(df_filtered)} data points for {symbol} - {interval}.")
-        return df_filtered
-
-    except Exception as e:
-        logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}", exc_info=True)
+    # Binance API returns max 1000 klines per request
+    # We need to loop if the date range is large
+    interval_minutes = get_interval_minutes(interval)
+    if interval_minutes == 0:
+        logger.error(f"❌ [Data] Invalid interval format: {interval}")
         return None
-    # --- END OF REPLACEABLE DATA LOADING LOGIC ---
+
+    # Estimate number of requests needed (rough estimate)
+    total_minutes = (end_date - start_date).total_seconds() / 60
+    estimated_candles = total_minutes / interval_minutes
+    estimated_requests = math.ceil(estimated_candles / 1000)
+    logger.info(f"ℹ️ Estimated {estimated_candles:.0f} candles, ~{estimated_requests} API requests needed for {symbol} - {interval}.")
+
+
+    while current_start_time <= end_date:
+        start_str = str(int(current_start_time.timestamp() * 1000)) # Binance expects milliseconds timestamp
+        end_str_limit = str(int(min(current_start_time + timedelta(minutes=interval_minutes * 1000), end_date).timestamp() * 1000))
+
+        try:
+            # Fetch up to 1000 klines per request
+            new_klines = client.get_historical_klines(
+                symbol,
+                interval,
+                start_str,
+                end_str_limit,
+                limit=1000
+            )
+            if not new_klines:
+                # If no data is returned for a period, advance the time to avoid infinite loops
+                current_start_time += timedelta(minutes=interval_minutes * 1000)
+                logger.debug(f"ℹ️ No klines returned for {symbol} - {interval} from {datetime.fromtimestamp(int(start_str)/1000)}.")
+                continue # Move to the next iteration
+
+            klines.extend(new_klines)
+            # Advance the start time by the duration of the fetched klines
+            last_klines_timestamp = new_klines[-1][0] # Timestamp of the last kline
+            current_start_time = datetime.fromtimestamp(last_klines_timestamp / 1000) + timedelta(minutes=interval_minutes) # Start from the next candle
+
+            logger.debug(f"✅ Fetched {len(new_klines)} klines for {symbol} - {interval}. Total fetched: {len(klines)}")
+            # Add a small delay to respect rate limits
+            time.sleep(0.1) # Adjust if hitting rate limits
+
+        except (BinanceAPIException, BinanceRequestException) as binance_err:
+            logger.error(f"❌ [Data] Binance API error while fetching data for {symbol} - {interval}: {binance_err}")
+            # Depending on the error, you might want to retry or break
+            break # Break on error
+        except Exception as e:
+            logger.error(f"❌ [Data] Error while fetching historical data for {symbol} - {interval}: {e}", exc_info=True)
+            break # Break on unexpected error
+
+    if not klines:
+        logger.warning(f"⚠️ [Data] No historical data ({interval}) fetched for {symbol} in the specified range.")
+        return None
+
+    df = pd.DataFrame(klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+    ])
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df[numeric_cols]
+    df.dropna(subset=numeric_cols, inplace=True)
+    if df.empty:
+        logger.warning(f"⚠️ [Data] DataFrame for {symbol} - {interval} is empty after dropping NaN values.")
+        return None
+
+    logger.info(f"✅ Successfully fetched and processed {len(df)} klines ({interval}) for {symbol}.")
+    return df
 
 
 # ---------------------- Technical Indicator Functions (Copied from c4.py) ----------------------
@@ -333,24 +372,23 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     # logger.debug("✅ [Indicators] Candlestick patterns detected.") # Reduce logging
     return df
 
-# ---------------------- Other Helper Functions (Modified for Backtesting) ----------------------
-# get_fear_greed_index and get_btc_trend_4h are not used in the core signal logic in the provided code,
-# but they were in the alert message. For backtesting, we can either skip them or simulate.
-# Let's skip them for simplicity in the backtest logic itself.
-
-# Modified fetch_recent_volume for backtesting - get volume from the current candle in the backtest slice
-def get_volume_for_backtest_candle(df: pd.DataFrame, current_index: int) -> float:
-    """Gets the volume for the current candle in the backtest."""
-    if current_index < 0 or current_index >= len(df):
-        return 0.0
-    return df.iloc[current_index].get('volume', 0.0)
-
+# ---------------------- Other Helper Functions ----------------------
 def get_interval_minutes(interval: str) -> int:
     """Converts interval from string to minutes."""
     if interval.endswith('m'): return int(interval[:-1])
     elif interval.endswith('h'): return int(interval[:-1]) * 60
     elif interval.endswith('d'): return int(interval[:-1]) * 60 * 24
     return 0
+
+def format_duration(seconds: Optional[int]) -> str:
+    """Formats duration from seconds into a human-readable string."""
+    if seconds is None or seconds < 0:
+        return "N/A"
+    delta = timedelta(seconds=seconds)
+    hours, remainder = divmod(delta.total_seconds(), 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{int(hours)}h, {int(minutes)}m, {int(secs)}s"
+
 
 # ---------------------- Trading Strategy (Modified for Backtesting) -------------------
 class ScalpingTradingStrategyBacktest:
@@ -394,7 +432,7 @@ class ScalpingTradingStrategyBacktest:
 
     def populate_indicators(self, df: pd.DataFrame, timeframe: str) -> Optional[pd.DataFrame]:
         """Populates indicators for a given dataframe and timeframe."""
-        # logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating {timeframe} frame indicators...") # Reduce logging
+        # logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating {timeframe} frame indicators...") # Reduce logging in backtest indicators
         min_len_required = max(EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5
         if timeframe == CONFIRMATION_TIMEFRAME:
              min_len_required = max(EMA_LONG_PERIOD, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5
@@ -405,6 +443,7 @@ class ScalpingTradingStrategyBacktest:
 
         try:
             df_calc = df.copy()
+            # Calculate indicators relevant to both timeframes or specific to one
             df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
             df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
             df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
@@ -412,6 +451,7 @@ class ScalpingTradingStrategyBacktest:
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
 
             if timeframe == SIGNAL_GENERATION_TIMEFRAME:
+                # Add indicators specific to the signal timeframe (15m) - Removed VWAP, BB, OBV
                 df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
                 df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
                 df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
@@ -428,6 +468,7 @@ class ScalpingTradingStrategyBacktest:
                 logger.error(f"❌ [Strategy {self.symbol}] Missing {timeframe} frame indicator columns: {missing_cols}")
                 return None
 
+            # Drop rows with NaNs only for the required columns for this timeframe
             df_cleaned = df_calc.dropna(subset=required_cols).copy()
             if df_cleaned.empty:
                 # logger.debug(f"⚠️ [Strategy {self.symbol}] DataFrame {timeframe} empty after dropping NaN.") # Reduce logging
@@ -466,9 +507,10 @@ class ScalpingTradingStrategyBacktest:
         confirmation_details['MACD_Conf'] = "Passed" if macd_bullish_conf else "Failed"
 
         adx_trending_bullish_conf = (pd.notna(last_row_conf['adx']) and last_row_conf['adx'] > MIN_ADX_TREND_STRENGTH and
-                                     pd.notna(last_row_conf['di_plus']) and pd.notna(last_row['di_minus']) and
+                                     pd.notna(last_row_conf['di_plus']) and pd.notna(last_row_conf['di_minus']) and
                                      last_row_conf['di_plus'] > last_row_conf['di_minus'])
         confirmation_details['ADX_DI_Conf'] = "Passed" if adx_trending_bullish_conf else "Failed"
+
 
         all_confirmed = price_above_emas_conf and supertrend_up_conf and macd_bullish_conf and adx_trending_bullish_conf
 
@@ -527,11 +569,11 @@ class ScalpingTradingStrategyBacktest:
         min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, ENTRY_POINT_RECENT_CANDLE_LOOKBACK) + 1
         min_conf_data_len = max(EMA_LONG_PERIOD, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5 # From populate_indicators
 
-        if current_index < max(min_signal_data_len, min_conf_data_len) -1 :
-             # logger.debug(f"ℹ️ [Strategy {self.symbol}] Not enough historical data yet at index {current_index} for signal generation.") # Reduce logging
+        if current_index < min_signal_data_len -1 : # Need at least min_signal_data_len candles including current
+             # logger.debug(f"ℹ️ [Strategy {self.symbol}] Not enough historical data yet at index {current_index} for signal generation on signal TF.") # Reduce logging
              return None
 
-        # Get the data slice up to the current candle (inclusive)
+        # Get the data slice up to the current candle (inclusive) for signal timeframe
         df_processed_signal = self.populate_indicators(df_signal_tf.iloc[:current_index+1], SIGNAL_GENERATION_TIMEFRAME)
         if df_processed_signal is None or df_processed_signal.empty or len(df_processed_signal) < min_signal_data_len:
              # logger.debug(f"⚠️ [Strategy {self.symbol}] Processed signal DataFrame too short at index {current_index}."); # Reduce logging
@@ -544,8 +586,9 @@ class ScalpingTradingStrategyBacktest:
         # This assumes confirmation data is aligned or contains the signal timeframe timestamps
         # A more robust approach might involve resampling or finding the closest candle
         conf_index_at_signal_time = df_conf_tf.index.searchsorted(current_signal_timestamp, side='right') - 1
+
         if conf_index_at_signal_time < min_conf_data_len - 1:
-             # logger.debug(f"ℹ️ [Strategy {self.symbol}] Not enough historical data on confirmation timeframe at index {current_index} ({current_signal_timestamp}).") # Reduce logging
+             # logger.debug(f"ℹ️ [Strategy {self.symbol}] Not enough historical data on confirmation timeframe at index {conf_index_at_signal_time} ({current_signal_timestamp}).") # Reduce logging
              return None
 
         df_processed_conf = self.populate_indicators(df_conf_tf.iloc[:conf_index_at_signal_time+1], CONFIRMATION_TIMEFRAME)
@@ -584,7 +627,7 @@ class ScalpingTradingStrategyBacktest:
 
         essential_passed = True; failed_essential_conditions = []; signal_details = {}
         # Mandatory Conditions Check (on 15m timeframe)
-        if not (pd.notna(last_row_signal[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row_signal[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row_signal['vwma']) and last_row_signal['close'] > last_row_signal[f'ema_{EMA_SHORT_PERIOD}'] and last_row_signal['close'] > last_row_signal[f'ema_{LONG_PERIOD}'] and last_row_signal['close'] > last_row_signal['vwma']):
+        if not (pd.notna(last_row_signal[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row_signal[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row_signal['vwma']) and last_row_signal['close'] > last_row_signal[f'ema_{EMA_SHORT_PERIOD}'] and last_row_signal['close'] > last_row_signal[f'ema_{EMA_LONG_PERIOD}'] and last_row_signal['close'] > last_row_signal['vwma']):
             essential_passed = False; failed_essential_conditions.append('Price above MAs and VWMA'); signal_details['Price_MA_Alignment_SignalTF'] = 'Failed'
         else: signal_details['Price_MA_Alignment_SignalTF'] = 'Passed'
 
@@ -711,12 +754,13 @@ class Backtester:
         self.load_historical_data()
 
     def load_historical_data(self):
-        """Loads historical data required for the backtest."""
-        logger.info(f"⏳ Loading historical data for {self.symbol}...")
+        """Loads historical data required for the backtest from Binance API."""
+        logger.info(f"⏳ Loading historical data for {self.symbol} from Binance API...")
 
         # Determine the required start date for historical data based on lookback periods
+        # We need enough data before the backtest_start date to calculate indicators
         max_lookback_days = max(SIGNAL_GENERATION_LOOKBACK_DAYS, CONFIRMATION_LOOKBACK_DAYS)
-        data_fetch_start_date = self.backtest_start - timedelta(days=max_lookback_days + 5) # Add buffer
+        data_fetch_start_date = self.backtest_start - timedelta(days=max_lookback_days + 5) # Add buffer for indicators
 
         self.historical_data_signal_tf = fetch_historical_data_backtest(
             self.symbol, self.signal_interval, data_fetch_start_date, self.backtest_end
@@ -730,12 +774,13 @@ class Backtester:
              self.historical_data_signal_tf = None # Invalidate data if intervals are incompatible
              return
 
+        # Fetch data for the confirmation timeframe
         self.historical_data_conf_tf = fetch_historical_data_backtest(
             self.symbol, CONFIRMATION_TIMEFRAME, data_fetch_start_date, self.backtest_end
         )
 
         if self.historical_data_signal_tf is None or self.historical_data_conf_tf is None:
-            logger.error("❌ Failed to load all required historical data. Backtest cannot proceed.")
+            logger.error("❌ Failed to load all required historical data from Binance API. Backtest cannot proceed.")
             self.historical_data_signal_tf = None # Ensure both are None if loading failed
 
         logger.info("✅ Historical data loading complete.")
@@ -750,15 +795,23 @@ class Backtester:
         logger.info(f"▶️ Starting backtest for {self.symbol} from {self.backtest_start.strftime('%Y-%m-%d')} to {self.backtest_end.strftime('%Y-%m-%d')}...")
 
         # Find the starting index for the backtest period within the loaded data
+        # We start the backtest simulation from the first candle *at or after* the backtest_start date
         backtest_start_index = self.historical_data_signal_tf.index.searchsorted(self.backtest_start, side='left')
-        if backtest_start_index >= len(self.historical_data_signal_tf):
-             logger.warning("⚠️ Backtest start date is beyond available historical data. Adjusting start date.")
-             backtest_start_index = len(self.historical_data_signal_tf) - 1
-             self.backtest_start = self.historical_data_signal_tf.index[backtest_start_index]
+
+        # Ensure we have enough historical data *before* the backtest start index
+        # to calculate initial indicators.
+        min_required_for_indicators = max(EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + 5
+        if backtest_start_index < min_required_for_indicators:
+             logger.warning(f"⚠️ Not enough historical data before backtest start ({backtest_start_index} candles, need at least {min_required_for_indicators}). Adjusting backtest start date.")
+             # Adjust the actual backtest start date to the first index where indicators can be calculated
+             adjusted_backtest_start_index = min_required_for_indicators -1
+             self.backtest_start = self.historical_data_signal_tf.index[adjusted_backtest_start_index]
+             backtest_start_index = adjusted_backtest_start_index
+             logger.warning(f"⚠️ Adjusted backtest start date to {self.backtest_start.strftime('%Y-%m-%d %H:%M')}.")
 
 
         total_candles = len(self.historical_data_signal_tf)
-        logger.info(f"ℹ️ Total candles in data: {total_candles}. Starting simulation from index {backtest_start_index} ({self.historical_data_signal_tf.index[backtest_start_index].strftime('%Y-%m-%d %H:%M')})...")
+        logger.info(f"ℹ️ Total candles in signal data: {total_candles}. Starting simulation from index {backtest_start_index} ({self.historical_data_signal_tf.index[backtest_start_index].strftime('%Y-%m-%d %H:%M')})...")
 
 
         for i in range(backtest_start_index, total_candles):
@@ -767,7 +820,7 @@ class Backtester:
             current_candle_high = self.historical_data_signal_tf.iloc[i]['high']
             current_candle_low = self.historical_data_signal_tf.iloc[i]['low']
 
-            # Skip if current candle is beyond backtest end date
+            # Stop backtest if current candle is beyond the specified end date
             if current_candle_time > self.backtest_end:
                  logger.info(f"⏹️ Reached backtest end date {self.backtest_end.strftime('%Y-%m-%d')}. Stopping simulation.")
                  break
@@ -811,7 +864,13 @@ class Backtester:
                     simulated_entry_price = self.historical_data_signal_tf.iloc[i]['close']
                     potential_signal['entry_price'] = simulated_entry_price # Use actual close price for entry
                     potential_signal['entry_time'] = current_candle_time # Use actual candle time for entry
-                    potential_signal['current_target'] = simulated_entry_price + (ENTRY_ATR_MULTIPLIER * self.historical_data_signal_tf.iloc[i]['atr']) # Recalculate target based on actual entry price
+                    # Recalculate target based on actual entry price and ATR at that time
+                    current_atr = self.historical_data_signal_tf.iloc[i].get('atr')
+                    if pd.notna(current_atr) and current_atr > 0:
+                         potential_signal['current_target'] = simulated_entry_price + (ENTRY_ATR_MULTIPLIER * current_atr)
+                    else:
+                         logger.warning(f"⚠️ Cannot set target for signal at {current_candle_time}: Invalid ATR.")
+                         continue # Skip this signal if ATR is invalid
 
                     self.open_trades.append(potential_signal)
                     logger.debug(f"✨ Signal generated and trade opened at {potential_signal['entry_time'].strftime('%Y-%m-%d %H:%M')}. Entry: {potential_signal['entry_price']:.6f}, Target: {potential_signal['current_target']:.6f}")
@@ -819,14 +878,20 @@ class Backtester:
 
         # Close any remaining open trades at the end of the backtest period
         logger.info("Closing remaining open trades at the end of the backtest period.")
-        for trade in self.open_trades:
-            trade['closing_price'] = self.historical_data_signal_tf.iloc[-1]['close'] # Close at the last available price
-            trade['closed_at'] = self.historical_data_signal_tf.index[-1]
-            trade['profit_percentage'] = ((trade['closing_price'] / trade['entry_price']) - 1) * 100
-            trade['achieved_target'] = False # Did not hit target within backtest period
-            trade['time_to_target_seconds'] = None # Target not hit
-            self.closed_trades.append(trade)
-            logger.debug(f"Trade for {trade['symbol']} opened at {trade['entry_time'].strftime('%Y-%m-%d %H:%M')} closed at end of backtest. Profit: {trade['profit_percentage']:.2f}%")
+        if not self.historical_data_signal_tf.empty:
+            last_available_price = self.historical_data_signal_tf.iloc[-1]['close']
+            last_available_time = self.historical_data_signal_tf.index[-1]
+            for trade in self.open_trades:
+                trade['closing_price'] = last_available_price # Close at the last available price
+                trade['closed_at'] = last_available_time
+                trade['profit_percentage'] = ((trade['closing_price'] / trade['entry_price']) - 1) * 100
+                trade['achieved_target'] = False # Did not hit target within backtest period
+                trade['time_to_target_seconds'] = None # Target not hit
+                self.closed_trades.append(trade)
+                logger.debug(f"Trade for {trade['symbol']} opened at {trade['entry_time'].strftime('%Y-%m-%d %H:%M')} closed at end of backtest. Profit: {trade['profit_percentage']:.2f}%")
+        else:
+            logger.warning("⚠️ No historical data available to close remaining trades.")
+
 
         logger.info("🏁 Backtest simulation finished.")
 
@@ -838,6 +903,7 @@ class Backtester:
         if not self.closed_trades:
             report = "❌ No trades were closed during the backtest period."
             logger.warning(report)
+            print("\n" + report) # Print report to console
             return report
 
         df_results = pd.DataFrame(self.closed_trades)
@@ -895,9 +961,9 @@ class Backtester:
         print("\n" + report) # Print report to console
         return report
 
-# ---------------------- Main Execution Block ----------------------
+# ---------------------- Main Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 Starting Backtesting Script...")
+    logger.info("🚀 Starting Backtesting Script (Fetching data from Binance API)...")
 
     # --- Configure Backtest Parameters ---
     SYMBOL_TO_BACKTEST = "BTCUSDT" # Choose the symbol
@@ -905,10 +971,6 @@ if __name__ == "__main__":
     BACKTEST_START_DATE = datetime(2023, 1, 1) # Start date of backtest period
     BACKTEST_END_DATE = datetime(2023, 12, 31) # End date of backtest period
     # -------------------------------------
-
-    # Ensure you have historical data files in the 'historical_data' directory
-    # For example, 'historical_data/BTCUSDT_15m.csv' and 'historical_data/BTCUSDT_30m.csv'
-    # These files should have columns: 'timestamp', 'open', 'high', 'low', 'close', 'volume'
 
     backtester = Backtester(SYMBOL_TO_BACKTEST, SIGNAL_TIMEFRAME_TO_BACKTEST, BACKTEST_START_DATE, BACKTEST_END_DATE)
     backtester.run_backtest()
