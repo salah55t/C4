@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union # To add Type Hinting
 
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
-    level=logging.INFO, # Can change this to logging.DEBUG for more detailed logs
+    level=logging.DEBUG, # يمكن تغيير هذا إلى logging.DEBUG للحصول على سجلات أكثر تفصيلاً
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Add logger name
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
