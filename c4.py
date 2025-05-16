@@ -48,59 +48,59 @@ logger.info(f"Telegram Chat ID: {CHAT_ID}")
 logger.info(f"Database URL: {'متوفر' if DB_URL else 'غير متوفر'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'غير محدد'}")
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للسكالبينج على إطار 5 دقائق) ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للفحص على إطار 15 دقيقة) ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT (Keep small for testing)
 MAX_OPEN_TRADES: int = 5          # Maximum number of open trades simultaneously (Increased slightly for scalping)
-SIGNAL_GENERATION_TIMEFRAME: str = '5m' # Timeframe for signal generation (Changed to 5m)
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Reduced historical data lookback for shorter timeframe
-SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and target updates (Changed to 5m)
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1   # Reduced historical data lookback in days for signal tracking
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Timeframe for signal generation (Changed to 15m)
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # Increased historical data lookback for 15m timeframe
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Timeframe for signal tracking and target updates (Changed to 15m)
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 3   # Increased historical data lookback in days for signal tracking
 
 # --- New Constants for Multi-Timeframe Confirmation ---
-CONFIRMATION_TIMEFRAME: str = '15m' # Larger timeframe for trend confirmation
-CONFIRMATION_LOOKBACK_DAYS: int = 7 # Historical data lookback for confirmation timeframe
+CONFIRMATION_TIMEFRAME: str = '30m' # Larger timeframe for trend confirmation (Changed to 30m)
+CONFIRMATION_LOOKBACK_DAYS: int = 14 # Historical data lookback for confirmation timeframe (Increased for 30m)
 
 # --- Parameters for Improved Entry Point ---
-ENTRY_POINT_EMA_PROXIMITY_PCT: float = 0.001 # Price must be within this % of 5m EMA_SHORT
-ENTRY_POINT_RECENT_CANDLE_LOOKBACK: int = 3 # Look back this many candles on 5m for bullish sign
+ENTRY_POINT_EMA_PROXIMITY_PCT: float = 0.002 # Price must be within this % of signal timeframe EMA_SHORT (Increased tolerance slightly)
+ENTRY_POINT_RECENT_CANDLE_LOOKBACK: int = 2 # Look back this many candles on signal timeframe for bullish sign (Reduced lookback)
 
 # =============================================================================
-# --- Indicator Parameters (Adjusted for 5m Scalping and Early Entry) ---
+# --- Indicator Parameters (Adjusted for 15m Signal and 30m Confirmation) ---
 # =============================================================================
-RSI_PERIOD: int = 9
+RSI_PERIOD: int = 14 # Standard RSI period
 RSI_OVERSOLD: int = 30
 RSI_OVERBOUGHT: int = 70
-EMA_SHORT_PERIOD: int = 8
-EMA_LONG_PERIOD: int = 21
-VWMA_PERIOD: int = 15
-SWING_ORDER: int = 3
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
-FIB_TOLERANCE: float = 0.005
-LOOKBACK_FOR_SWINGS: int = 50
-ENTRY_ATR_PERIOD: int = 10
-ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target (Stop Loss Removed)
-BOLLINGER_WINDOW: int = 20
-BOLLINGER_STD_DEV: int = 2
-MACD_FAST: int = 9
-MACD_SLOW: int = 18
-MACD_SIGNAL: int = 9
-ADX_PERIOD: int = 10
-SUPERTREND_PERIOD: int = 10
-SUPERTREND_MULTIPLIER: float = 2.5
+EMA_SHORT_PERIOD: int = 13 # Adjusted for 15m
+EMA_LONG_PERIOD: int = 34 # Adjusted for 15m
+VWMA_PERIOD: int = 21 # Adjusted for 15m
+SWING_ORDER: int = 3 # Not used in current strategy logic
+FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618] # Not used in current strategy logic
+FIB_TOLERANCE: float = 0.005 # Not used in current strategy logic
+LOOKBACK_FOR_SWINGS: int = 50 # Not used in current strategy logic
+ENTRY_ATR_PERIOD: int = 14 # Adjusted for 15m
+ENTRY_ATR_MULTIPLIER: float = 1.75 # ATR Multiplier for initial target (Adjusted slightly)
+BOLLINGER_WINDOW: int = 20 # Standard Bollinger period
+BOLLINGER_STD_DEV: int = 2 # Standard Bollinger std dev
+MACD_FAST: int = 12 # Standard MACD fast period
+MACD_SLOW: int = 26 # Standard MACD slow period
+MACD_SIGNAL: int = 9 # Standard MACD signal period
+ADX_PERIOD: int = 14 # Standard ADX period
+SUPERTREND_PERIOD: int = 10 # Standard Supertrend period
+SUPERTREND_MULTIPLIER: float = 3.0 # Adjusted Supertrend multiplier slightly
 
 # --- Parameters for Dynamic Target Update ---
-DYNAMIC_TARGET_APPROACH_PCT: float = 0.002 # Percentage proximity to target to trigger re-evaluation (e.g., 0.2%)
-DYNAMIC_TARGET_EXTENSION_ATR_MULTIPLIER: float = 0.75 # ATR multiplier for extending the target
-MAX_DYNAMIC_TARGET_UPDATES: int = 2 # Maximum number of times a target can be dynamically updated for a single signal
-MIN_ADX_FOR_DYNAMIC_UPDATE: int = 22 # Minimum ADX value to consider dynamic target update
+DYNAMIC_TARGET_APPROACH_PCT: float = 0.003 # Percentage proximity to target to trigger re-evaluation (e.g., 0.3%) (Increased slightly)
+DYNAMIC_TARGET_EXTENSION_ATR_MULTIPLIER: float = 1.0 # ATR multiplier for extending the target (Increased)
+MAX_DYNAMIC_TARGET_UPDATES: int = 3 # Maximum number of times a target can be dynamically updated for a single signal (Increased)
+MIN_ADX_FOR_DYNAMIC_UPDATE: int = 25 # Minimum ADX value to consider dynamic target update (Increased slightly)
 
-MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 250000.0
+MIN_PROFIT_MARGIN_PCT: float = 1.5 # Increased minimum profit margin
+MIN_VOLUME_15M_USDT: float = 500000.0 # Increased minimum volume check (using 15m data now)
 
-RECENT_EMA_CROSS_LOOKBACK: int = 2
-MIN_ADX_TREND_STRENGTH: int = 20
-MACD_HIST_INCREASE_CANDLES: int = 3
-OBV_INCREASE_CANDLES: int = 3
+RECENT_EMA_CROSS_LOOKBACK: int = 3 # Adjusted for 15m
+MIN_ADX_TREND_STRENGTH: int = 25 # Increased minimum ADX trend strength for essential condition
+MACD_HIST_INCREASE_CANDLES: int = 2 # Reduced lookback for MACD Hist increase
+OBV_INCREASE_CANDLES: int = 2 # Reduced lookback for OBV increase
 # =============================================================================
 
 # Global variables
@@ -638,17 +638,19 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------- Other Helper Functions ----------------------
-def fetch_recent_volume(symbol: str) -> float:
-    """يجلب حجم التداول لآخر 15 دقيقة."""
+def fetch_recent_volume(symbol: str, interval: str = '15m') -> float:
+    """يجلب حجم التداول لآخر فترة زمنية محددة."""
     if not client:
         logger.error(f"❌ [Data Volume] عميل Binance غير مهيأ لـ {symbol}."); return 0.0
     try:
-        logger.debug(f"ℹ️ [Data Volume] جلب حجم التداول لآخر 15 دقيقة لـ {symbol}...")
-        klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=15)
-        if not klines or len(klines) < 15:
-            logger.warning(f"⚠️ [Data Volume] بيانات 1m غير كافية لـ {symbol}."); return 0.0
-        volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        logger.debug(f"✅ [Data Volume] السيولة لآخر 15 دقيقة لـ {symbol}: {volume_usdt:.2f} USDT")
+        logger.debug(f"ℹ️ [Data Volume] جلب حجم التداول لآخر {interval} لـ {symbol}...")
+        # Fetch klines for the specified interval
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=1)
+        if not klines or len(klines) < 1:
+            logger.warning(f"⚠️ [Data Volume] بيانات {interval} غير كافية لـ {symbol}."); return 0.0
+        # Use quote asset volume (index 7) for USDT volume
+        volume_usdt = float(klines[0][7]) if len(klines[0]) > 7 and klines[0][7] else 0.0
+        logger.debug(f"✅ [Data Volume] السيولة لآخر {interval} لـ {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
     except Exception as e:
         logger.error(f"❌ [Data Volume] خطأ أثناء جلب حجم التداول لـ {symbol}: {e}", exc_info=True)
@@ -697,7 +699,7 @@ def generate_performance_report() -> str:
             gross_loss_usd = 0.0
 
             win_rate = (winning_signals / total_closed) * 100 if total_closed > 0 else 0.0
-            profit_factor = float('inf') # Infinite if no losses
+            profit_factor = float('inf') if gross_loss_pct_sum == 0 else abs(gross_profit_pct_sum / gross_loss_pct_sum)
 
             avg_time_to_target_formatted = "N/A"
             if avg_time_to_target_seconds > 0:
@@ -739,17 +741,18 @@ def generate_performance_report() -> str:
 class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # Required columns for signal timeframe (5m) indicators
+        # Required columns for signal timeframe (15m) indicators - Removed VWAP, BB, OBV
         self.required_cols_signal_indicators = [
             'open', 'high', 'low', 'close', 'volume',
             f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+            'rsi', 'atr', # Removed bb_upper, bb_lower, bb_middle
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
-            'vwap', 'obv', 'supertrend', 'supertrend_trend',
-            'BullishCandleSignal', 'BearishCandleSignal'
+            # Removed vwap, obv
+            'supertrend', 'supertrend_trend',
+            'BullishCandleSignal', 'BearishCandleSignal' # Keep candle patterns for entry quality check
         ]
-        # Required columns for confirmation timeframe (15m) indicators
+        # Required columns for confirmation timeframe (30m) indicators
         self.required_cols_confirmation_indicators = [
              'open', 'high', 'low', 'close',
              f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}',
@@ -757,23 +760,33 @@ class ScalpingTradingStrategy:
              'adx', 'di_plus', 'di_minus',
              'supertrend', 'supertrend_trend'
         ]
+        # Required columns for buy signal generation - Removed VWAP, BB, OBV
         self.required_cols_buy_signal = [
             'close', f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
             'rsi', 'atr', 'macd', 'macd_signal', 'macd_hist',
             'supertrend', 'supertrend_trend', 'adx', 'di_plus', 'di_minus',
-            'vwap', 'bb_upper', 'BullishCandleSignal', 'obv'
+            # Removed vwap, bb_upper, obv
+            'BullishCandleSignal'
         ]
+        # Adjusted weights for remaining optional conditions to increase sensitivity
         self.condition_weights = {
-            'rsi_ok': 0.5, 'bullish_candle': 1.5, 'not_bb_extreme': 0.5,
-            'obv_rising': 1.0, 'rsi_filter_breakout': 1.0, 'macd_filter_breakout': 1.0,
-            'macd_hist_increasing': 3.0, 'obv_increasing_recent': 3.0, 'above_vwap': 1.0
+            'rsi_ok': 1.0, # Increased weight
+            'bullish_candle': 2.0, # Increased weight
+            # Removed 'not_bb_extreme': 0.5,
+            # Removed 'obv_rising': 1.0,
+            'rsi_filter_breakout': 1.5, # Increased weight
+            'macd_filter_breakout': 1.5, # Increased weight
+            'macd_hist_increasing': 4.0, # Increased weight
+            # Removed 'obv_increasing_recent': 3.0,
+            # Removed 'above_vwap': 1.0
         }
+        # Essential conditions remain the same
         self.essential_conditions = [
             'price_above_emas_and_vwma', 'ema_short_above_ema_long',
             'supertrend_up', 'macd_positive_or_cross', 'adx_trending_bullish_strong',
         ]
         self.total_possible_score = sum(self.condition_weights.values())
-        self.min_score_threshold_pct = 0.70
+        self.min_score_threshold_pct = 0.65 # Slightly lowered threshold for increased sensitivity
         self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
 
     def populate_indicators(self, df: pd.DataFrame, timeframe: str) -> Optional[pd.DataFrame]:
@@ -798,13 +811,13 @@ class ScalpingTradingStrategy:
             df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
 
             if timeframe == SIGNAL_GENERATION_TIMEFRAME:
-                # Add indicators specific to the signal timeframe
+                # Add indicators specific to the signal timeframe (15m) - Removed VWAP, BB, OBV
                 df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
                 df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
                 df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-                df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-                df_calc = calculate_vwap(df_calc) # VWAP is daily, but calculated on the timeframe data
-                df_calc = calculate_obv(df_calc)
+                # df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV) # Removed
+                # df_calc = calculate_vwap(df_calc) # Removed
+                # df_calc = calculate_obv(df_calc) # Removed
                 df_calc = detect_candlestick_patterns(df_calc)
                 required_cols = self.required_cols_signal_indicators
             elif timeframe == CONFIRMATION_TIMEFRAME:
@@ -831,7 +844,7 @@ class ScalpingTradingStrategy:
             return None
 
     def check_confirmation_conditions(self) -> Tuple[bool, Dict[str, Any]]:
-        """Checks for bullish trend confirmation on the larger timeframe."""
+        """Checks for bullish trend confirmation on the larger timeframe (30m)."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] التحقق من شروط التأكيد على إطار {CONFIRMATION_TIMEFRAME}...")
         df_conf = fetch_historical_data(self.symbol, interval=CONFIRMATION_TIMEFRAME, days=CONFIRMATION_LOOKBACK_DAYS)
         confirmation_details = {}
@@ -878,37 +891,37 @@ class ScalpingTradingStrategy:
 
         return all_confirmed, confirmation_details
 
-    def check_entry_point_quality(self, df_processed_5m: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
-        """Checks if the current price offers a good entry point on the 5m timeframe."""
+    def check_entry_point_quality(self, df_processed_signal: pd.DataFrame) -> Tuple[bool, Dict[str, Any]]:
+        """Checks if the current price offers a good entry point on the signal timeframe (15m)."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] التحقق من جودة نقطة الدخول على إطار {SIGNAL_GENERATION_TIMEFRAME}...")
         entry_point_details = {}
 
-        if df_processed_5m is None or df_processed_5m.empty or len(df_processed_5m) < ENTRY_POINT_RECENT_CANDLE_LOOKBACK + 1:
+        if df_processed_signal is None or df_processed_signal.empty or len(df_processed_signal) < ENTRY_POINT_RECENT_CANDLE_LOOKBACK + 1:
             logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات إطار {SIGNAL_GENERATION_TIMEFRAME} غير كافية للتحقق من نقطة الدخول.")
             entry_point_details['Status'] = f"فشل: بيانات إطار {SIGNAL_GENERATION_TIMEFRAME} غير كافية"
             return False, entry_point_details
 
-        last_row_5m = df_processed_5m.iloc[-1]
-        recent_df_5m = df_processed_5m.iloc[-ENTRY_POINT_RECENT_CANDLE_LOOKBACK-1:]
+        last_row_signal = df_processed_signal.iloc[-1]
+        recent_df_signal = df_processed_signal.iloc[-ENTRY_POINT_RECENT_CANDLE_LOOKBACK-1:]
 
-        if recent_df_5m[['close', 'open', f'ema_{EMA_SHORT_PERIOD}']].isnull().values.any():
+        if recent_df_signal[['close', 'open', f'ema_{EMA_SHORT_PERIOD}']].isnull().values.any():
              logger.warning(f"⚠️ [Strategy {self.symbol}] بيانات إطار {SIGNAL_GENERATION_TIMEFRAME} الأخيرة تحتوي على NaN للتحقق من نقطة الدخول.")
              entry_point_details['Status'] = f"فشل: NaN في بيانات إطار {SIGNAL_GENERATION_TIMEFRAME} الأخيرة"
              return False, entry_point_details
 
-        current_price = last_row_5m['close']
-        ema_short_5m = last_row_5m[f'ema_{EMA_SHORT_PERIOD}']
+        current_price = last_row_signal['close']
+        ema_short_signal = last_row_signal[f'ema_{EMA_SHORT_PERIOD}']
 
-        # Condition 1: Price is close to the 5m EMA_SHORT
-        price_near_ema_short = abs(current_price - ema_short_5m) / ema_short_5m <= ENTRY_POINT_EMA_PROXIMITY_PCT if ema_short_5m > 0 else False
-        entry_point_details['Price_Near_EMA_Short_5m'] = f"اجتاز (ضمن {ENTRY_POINT_EMA_PROXIMITY_PCT*100:.2f}%)" if price_near_ema_short else f"فشل (المسافة: {abs(current_price - ema_short_5m) / ema_short_5m * 100:.2f}%)"
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] تحقق القرب من EMA {EMA_SHORT_PERIOD} (5m): السعر {current_price:.4f}, EMA {EMA_SHORT_PERIOD} {ema_short_5m:.4f}, قريب: {price_near_ema_short}")
+        # Condition 1: Price is close to the signal timeframe EMA_SHORT
+        price_near_ema_short = abs(current_price - ema_short_signal) / ema_short_signal <= ENTRY_POINT_EMA_PROXIMITY_PCT if ema_short_signal > 0 else False
+        entry_point_details['Price_Near_EMA_Short_SignalTF'] = f"اجتاز (ضمن {ENTRY_POINT_EMA_PROXIMITY_PCT*100:.2f}%)" if price_near_ema_short else f"فشل (المسافة: {abs(current_price - ema_short_signal) / ema_short_signal * 100:.2f}%)"
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] تحقق القرب من EMA {EMA_SHORT_PERIOD} ({SIGNAL_GENERATION_TIMEFRAME}): السعر {current_price:.4f}, EMA {EMA_SHORT_PERIOD} {ema_short_signal:.4f}, قريب: {price_near_ema_short}")
 
 
         # Condition 2: Last candle is bullish or a hammer
-        last_candle_bullish_or_hammer = is_bullish_candle(last_row_5m) or is_hammer(last_row_5m) == 100
-        entry_point_details['Last_Candle_Bullish_or_Hammer_5m'] = "اجتاز" if last_candle_bullish_or_hammer else "فشل"
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] تحقق الشمعة الأخيرة (5m): صعودية أو مطرقة: {last_candle_bullish_or_hammer}")
+        last_candle_bullish_or_hammer = is_bullish_candle(last_row_signal) or is_hammer(last_row_signal) == 100
+        entry_point_details['Last_Candle_Bullish_or_Hammer_SignalTF'] = "اجتاز" if last_candle_bullish_or_hammer else "فشل"
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] تحقق الشمعة الأخيرة ({SIGNAL_GENERATION_TIMEFRAME}): صعودية أو مطرقة: {last_candle_bullish_or_hammer}")
 
 
         # Combine conditions for a good entry point
@@ -929,7 +942,7 @@ class ScalpingTradingStrategy:
         missing_cols = [col for col in self.required_cols_buy_signal if col not in df_processed.columns]
         if missing_cols: logger.warning(f"⚠️ [Strategy {self.symbol}] أعمدة مفقودة للإشارة: {missing_cols}."); return None
 
-        # --- Step 1: Check Multi-Timeframe Confirmation ---
+        # --- Step 1: Check Multi-Timeframe Confirmation (30m) ---
         is_confirmed_on_larger_tf, confirmation_details = self.check_confirmation_conditions()
         if not is_confirmed_on_larger_tf:
              logger.debug(f"ℹ️ [Strategy {self.symbol}] فشل التأكيد على إطار {CONFIRMATION_TIMEFRAME}. إلغاء الإشارة.")
@@ -937,7 +950,7 @@ class ScalpingTradingStrategy:
         logger.debug(f"✅ [Strategy {self.symbol}] تم التأكيد على إطار {CONFIRMATION_TIMEFRAME}. المتابعة.")
 
 
-        # --- Step 2: Check Entry Point Quality on Signal Timeframe ---
+        # --- Step 2: Check Entry Point Quality on Signal Timeframe (15m) ---
         is_good_entry_point, entry_point_details = self.check_entry_point_quality(df_processed)
         if not is_good_entry_point:
              logger.debug(f"ℹ️ [Strategy {self.symbol}] جودة نقطة الدخول على إطار {SIGNAL_GENERATION_TIMEFRAME} ليست مثالية. إلغاء الإشارة.")
@@ -955,55 +968,64 @@ class ScalpingTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات الأخيرة تحتوي على NaN في الأعمدة المطلوبة."); return None
 
         essential_passed = True; failed_essential_conditions = []; signal_details = {}
-        # Mandatory Conditions Check (abbreviated for brevity, logic remains same)
+        # Mandatory Conditions Check (on 15m timeframe)
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and last_row['close'] > last_row['vwma']):
-            essential_passed = False; failed_essential_conditions.append('السعر فوق المتوسطات المتحركة و VWMA'); signal_details['Price_MA_Alignment_5m'] = 'فشل: السعر ليس فوق جميع المتوسطات المتحركة على إطار 5m'
-        else: signal_details['Price_MA_Alignment_5m'] = 'اجتاز: السعر فوق جميع المتوسطات المتحركة على إطار 5m'
+            essential_passed = False; failed_essential_conditions.append('السعر فوق المتوسطات المتحركة و VWMA'); signal_details['Price_MA_Alignment_SignalTF'] = 'فشل: السعر ليس فوق جميع المتوسطات المتحركة على إطار الإشارة'
+        else: signal_details['Price_MA_Alignment_SignalTF'] = 'اجتاز: السعر فوق جميع المتوسطات المتحركة على إطار الإشارة'
 
-        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
-            essential_passed = False; failed_essential_conditions.append('EMA القصير > EMA الطويل'); signal_details['EMA_Order_5m'] = 'فشل: EMA القصير ليس فوق EMA الطويل على إطار 5m'
-        else: signal_details['EMA_Order_5m'] = 'اجتاز: EMA القصير فوق EMA الطويل على إطار 5m'
+        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{LONG_PERIOD}']):
+            essential_passed = False; failed_essential_conditions.append('EMA القصير > EMA الطويل'); signal_details['EMA_Order_SignalTF'] = 'فشل: EMA القصير ليس فوق EMA الطويل على إطار الإشارة'
+        else: signal_details['EMA_Order_SignalTF'] = 'اجتاز: EMA القصير فوق EMA الطويل على إطار الإشارة'
 
         if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-            essential_passed = False; failed_essential_conditions.append('SuperTrend صاعد'); signal_details['SuperTrend_5m'] = 'فشل: SuperTrend ليس صاعدًا أو السعر ليس فوقه على إطار 5m'
-        else: signal_details['SuperTrend_5m'] = 'اجتاز: SuperTrend صاعد والسعر فوقه على إطار 5m'
+            essential_passed = False; failed_essential_conditions.append('SuperTrend صاعد'); signal_details['SuperTrend_SignalTF'] = 'فشل: SuperTrend ليس صاعدًا أو السعر ليس فوقه على إطار الإشارة'
+        else: signal_details['SuperTrend_SignalTF'] = 'اجتاز: SuperTrend صاعد والسعر فوقه على إطار الإشارة'
 
         if not (pd.notna(last_row['macd_hist']) and (last_row['macd_hist'] > 0 or (pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and last_row['macd'] > last_row['macd_signal']))):
-            essential_passed = False; failed_essential_conditions.append('MACD صعودي'); signal_details['MACD_5m'] = 'فشل: MACD Hist ليس إيجابيًا ولا يوجد تقاطع صعودي على إطار 5m'
-        else: signal_details['MACD_5m'] = 'اجتاز: MACD Hist إيجابي أو يوجد تقاطع صعودي على إطار 5m'
+            essential_passed = False; failed_essential_conditions.append('MACD صعودي'); signal_details['MACD_SignalTF'] = 'فشل: MACD Hist ليس إيجابيًا ولا يوجد تقاطع صعودي على إطار الإشارة'
+        else: signal_details['MACD_SignalTF'] = 'اجتاز: MACD Hist إيجابي أو يوجد تقاطع صعودي على إطار الإشارة'
 
         if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
-            essential_passed = False; failed_essential_conditions.append(f'ADX قوي صعودي (>{MIN_ADX_TREND_STRENGTH})'); signal_details['ADX_DI_5m'] = f'فشل: ليس قويًا صعوديًا على إطار 5m (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-)'
-        else: signal_details['ADX_DI_5m'] = f'اجتاز: قوي صعوديًا على إطار 5m (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
+            essential_passed = False; failed_essential_conditions.append(f'ADX قوي صعودي (>{MIN_ADX_TREND_STRENGTH})'); signal_details['ADX_DI_SignalTF'] = f'فشل: ليس قويًا صعوديًا على إطار الإشارة (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-)'
+        else: signal_details['ADX_DI_SignalTF'] = f'اجتاز: قوي صعوديًا على إطار الإشارة (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
 
         if not essential_passed:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] شروط 5m الإلزامية فشلت: {', '.join(failed_essential_conditions)}.");
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] شروط {SIGNAL_GENERATION_TIMEFRAME} الإلزامية فشلت: {', '.join(failed_essential_conditions)}.");
             # Include essential conditions check results in details even if failed
-            signal_details['Essential_Conditions_5m_Status'] = 'فشل'
-            signal_details['Failed_Essential_Conditions_5m'] = failed_essential_conditions
+            signal_details['Essential_Conditions_SignalTF_Status'] = 'فشل'
+            signal_details['Failed_Essential_Conditions_SignalTF'] = failed_essential_conditions
             return None
 
-        signal_details['Essential_Conditions_5m_Status'] = 'اجتاز'
-        current_score = 0.0 # Optional Conditions Scoring (abbreviated)
-        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']: current_score += self.condition_weights.get('above_vwap', 0); signal_details['VWAP_Daily'] = f'فوق VWAP اليومي (+{self.condition_weights.get("above_vwap",0)})'
-        else: signal_details['VWAP_Daily'] = 'تحت VWAP اليومي (0)'
-        if pd.notna(last_row['rsi']) and RSI_OVERSOLD < last_row['rsi'] < RSI_OVERBOUGHT : current_score += self.condition_weights.get('rsi_ok', 0); signal_details['RSI_Basic_5m'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok",0)})'
-        else: signal_details['RSI_Basic_5m'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) غير مقبول (0)'
-        if last_row.get('BullishCandleSignal', 0) == 1: current_score += self.condition_weights.get('bullish_candle', 0); signal_details['Candle_5m'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle",0)})'
-        else: signal_details['Candle_5m'] = 'لا يوجد نمط شمعة صعودي (0)'
-        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995 : current_score += self.condition_weights.get('not_bb_extreme', 0); signal_details['Bollinger_Basic_5m'] = f'ليس عند النطاق العلوي (+{self.condition_weights.get("not_bb_extreme",0)})'
-        else: signal_details['Bollinger_Basic_5m'] = 'عند أو فوق النطاق العلوي (0)'
-        if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']: current_score += self.condition_weights.get('obv_rising', 0); signal_details['OBV_Last_5m'] = f'يرتفع في آخر شمعة (+{self.condition_weights.get("obv_rising",0)})'
-        else: signal_details['OBV_Last_5m'] = 'لا يرتفع في آخر شمعة (0)'
-        if pd.notna(last_row['rsi']) and 50 <= last_row['rsi'] <= 80: current_score += self.condition_weights.get('rsi_filter_breakout', 0); signal_details['RSI_Filter_Breakout_5m'] = f'RSI ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout",0)})'
-        else: signal_details['RSI_Filter_Breakout_5m'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) ليس في النطاق الصعودي (0)'
-        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0: current_score += self.condition_weights.get('macd_filter_breakout', 0); signal_details['MACD_Filter_Breakout_5m'] = f'MACD Hist إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout",0)})'
-        else: signal_details['MACD_Filter_Breakout_5m'] = 'MACD Hist ليس إيجابيًا (0)'
-        if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1 and not recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:].isnull().any() and np.all(np.diff(recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]) > 0): current_score += self.condition_weights.get('macd_hist_increasing', 0); signal_details['MACD_Hist_Increasing_5m'] = f'MACD Hist يزداد ({MACD_HIST_INCREASE_CANDLES} شمعة) (+{self.condition_weights.get("macd_hist_increasing",0)})'
-        else: signal_details['MACD_Hist_Increasing_5m'] = f'MACD Hist لا يزداد ({MACD_HIST_INCREASE_CANDLES} شمعة) (0)'
-        if len(recent_df) >= OBV_INCREASE_CANDLES + 1 and not recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:].isnull().any() and np.all(np.diff(recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]) > 0): current_score += self.condition_weights.get('obv_increasing_recent', 0); signal_details['OBV_Increasing_Recent_5m'] = f'OBV يزداد ({OBV_INCREASE_CANDLES} شمعة) (+{self.condition_weights.get("obv_increasing_recent",0)})'
-        else: signal_details['OBV_Increasing_Recent_5m'] = f'OBV لا يزداد ({OBV_INCREASE_CANDLES} شمعة) (0)'
+        signal_details['Essential_Conditions_SignalTF_Status'] = 'اجتاز'
+        current_score = 0.0 # Optional Conditions Scoring (Updated based on remaining conditions)
+
+        if pd.notna(last_row['rsi']) and RSI_OVERSOLD < last_row['rsi'] < RSI_OVERBOUGHT : current_score += self.condition_weights.get('rsi_ok', 0); signal_details['RSI_Basic_SignalTF'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok",0)})'
+        else: signal_details['RSI_Basic_SignalTF'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) غير مقبول (0)'
+
+        if last_row.get('BullishCandleSignal', 0) == 1: current_score += self.condition_weights.get('bullish_candle', 0); signal_details['Candle_SignalTF'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle",0)})'
+        else: signal_details['Candle_SignalTF'] = 'لا يوجد نمط شمعة صعودي (0)'
+
+        # Removed: if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995 : current_score += self.condition_weights.get('not_bb_extreme', 0); signal_details['Bollinger_Basic_SignalTF'] = f'ليس عند النطاق العلوي (+{self.condition_weights.get("not_bb_extreme",0)})'
+        # Removed: else: signal_details['Bollinger_Basic_SignalTF'] = 'عند أو فوق النطاق العلوي (0)'
+
+        # Removed: if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']: current_score += self.condition_weights.get('obv_rising', 0); signal_details['OBV_Last_SignalTF'] = f'يرتفع في آخر شمعة (+{self.condition_weights.get("obv_rising",0)})'
+        # Removed: else: signal_details['OBV_Last_SignalTF'] = 'لا يرتفع في آخر شمعة (0)'
+
+        if pd.notna(last_row['rsi']) and 50 <= last_row['rsi'] <= 80: current_score += self.condition_weights.get('rsi_filter_breakout', 0); signal_details['RSI_Filter_Breakout_SignalTF'] = f'RSI ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout",0)})'
+        else: signal_details['RSI_Filter_Breakout_SignalTF'] = f'RSI ({last_row.get("rsi", np.nan):.1f}) ليس في النطاق الصعودي (0)'
+
+        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0: current_score += self.condition_weights.get('macd_filter_breakout', 0); signal_details['MACD_Filter_Breakout_SignalTF'] = f'MACD Hist إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout",0)})'
+        else: signal_details['MACD_Filter_Breakout_SignalTF'] = 'MACD Hist ليس إيجابيًا (0)'
+
+        if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1 and not recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:].isnull().any() and np.all(np.diff(recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]) > 0): current_score += self.condition_weights.get('macd_hist_increasing', 0); signal_details['MACD_Hist_Increasing_SignalTF'] = f'MACD Hist يزداد ({MACD_HIST_INCREASE_CANDLES} شمعة) (+{self.condition_weights.get("macd_hist_increasing",0)})'
+        else: signal_details['MACD_Hist_Increasing_SignalTF'] = f'MACD Hist لا يزداد ({MACD_HIST_INCREASE_CANDLES} شمعة) (0)'
+
+        # Removed: if len(recent_df) >= OBV_INCREASE_CANDLES + 1 and not recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:].isnull().any() and np.all(np.diff(recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]) > 0): current_score += self.condition_weights.get('obv_increasing_recent', 0); signal_details['OBV_Increasing_Recent_SignalTF'] = f'OBV يزداد ({OBV_INCREASE_CANDLES} شمعة) (+{self.condition_weights.get("obv_increasing_recent",0)})'
+        # Removed: else: signal_details['OBV_Increasing_Recent_SignalTF'] = f'OBV لا يزداد ({OBV_INCREASE_CANDLES} شمعة) (0)'
+
+        # Removed: if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']: current_score += self.condition_weights.get('above_vwap', 0); signal_details['VWAP_Daily'] = f'فوق VWAP اليومي (+{self.condition_weights.get("above_vwap",0)})'
+        # Removed: else: signal_details['VWAP_Daily'] = 'تحت VWAP اليومي (0)'
 
 
         if current_score < self.min_signal_score:
@@ -1013,7 +1035,8 @@ class ScalpingTradingStrategy:
 
         signal_details['Optional_Score_Status'] = f'اجتاز: النقاط {current_score:.2f}'
 
-        volume_recent = fetch_recent_volume(self.symbol)
+        # Fetch volume for the signal timeframe (15m)
+        volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME)
         if volume_recent < MIN_VOLUME_15M_USDT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة منخفضة ({volume_recent:,.0f} < {MIN_VOLUME_15M_USDT:,.0f}). إلغاء الإشارة.");
             signal_details['Liquidity_Check'] = f'فشل: السيولة {volume_recent:,.0f} أقل من الحد الأدنى {MIN_VOLUME_15M_USDT:,.0f}'
@@ -1042,7 +1065,7 @@ class ScalpingTradingStrategy:
 
         # Include confirmation and entry point details in the signal details
         signal_details['Confirmation_Details'] = confirmation_details
-        signal_details['Entry_Point_Details_5m'] = entry_point_details
+        signal_details['Entry_Point_Details_SignalTF'] = entry_point_details
 
 
         signal_output = {
@@ -1052,8 +1075,8 @@ class ScalpingTradingStrategy:
             'current_target': float(f"{initial_target:.8g}"),
             'current_stop_loss': initial_stop_loss, # Stop loss removed
             'r2_score': float(f"{current_score:.2f}"),
-            'strategy_name': 'Scalping_Momentum_Trend_MultiTF_EnhancedEntry', # Updated strategy name
-            'signal_details': signal_details, 'volume_15m': volume_recent,
+            'strategy_name': 'Scalping_Momentum_Trend_MultiTF_EnhancedEntry_V2', # Updated strategy name
+            'signal_details': signal_details, 'volume_15m': volume_recent, # Renamed volume key to reflect interval
             'trade_value': TRADE_VALUE, 'total_possible_score': float(f"{self.total_possible_score:.2f}")
         }
         logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة شراء. السعر: {current_price:.6f}, النقاط: {current_score:.2f}, ATR: {current_atr:.6f}")
@@ -1067,10 +1090,10 @@ class ScalpingTradingStrategy:
             return None
         last_row = df_processed.iloc[-1]
 
-        # Conditions for continuation (example: strong momentum)
+        # Conditions for continuation (example: strong momentum) - Using signal timeframe indicators
         macd_hist_ok = pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0.1 # Example: histogram still positive and strong
         adx_ok = pd.notna(last_row['adx']) and last_row['adx'] > MIN_ADX_FOR_DYNAMIC_UPDATE and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['di_plus'] > last_row['di_minus']
-        rsi_ok = pd.notna(last_row['rsi']) and last_row['rsi'] < (RSI_OVERBOUGHT + 5) # Allow slightly higher RSI
+        rsi_ok = pd.notna(last_row['rsi']) and last_row['rsi'] < (RSI_OVERBOUGHT + 10) # Allow slightly higher RSI for continuation
 
         logger.debug(f"ℹ️ [Strategy {self.symbol}] تحقق الهدف الديناميكي: MACD Hist={last_row.get('macd_hist', np.nan):.4f} (مقبول:{macd_hist_ok}), ADX={last_row.get('adx', np.nan):.1f} (مقبول:{adx_ok}), RSI={last_row.get('rsi', np.nan):.1f} (مقبول:{rsi_ok})")
 
@@ -1107,17 +1130,18 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         entry_price = float(signal_data['entry_price']); target_price = float(signal_data['initial_target'])
         symbol = signal_data['symbol']; strategy_name = signal_data.get('strategy_name', 'N/A')
         signal_score = signal_data.get('r2_score', 0.0); total_possible_score = signal_data.get('total_possible_score', 10.0)
-        volume_15m = signal_data.get('volume_15m', 0.0); trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
+        volume_signal_tf = signal_data.get('volume_15m', 0.0); # Renamed key
+        trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
 
         # Extract and format confirmation and entry point details
         confirmation_details = signal_data.get('signal_details', {}).get('Confirmation_Details', {})
-        entry_point_details = signal_data.get('signal_details', {}).get('Entry_Point_Details_5m', {})
+        entry_point_details = signal_data.get('signal_details', {}).get('Entry_Point_Details_SignalTF', {}) # Renamed key
 
         confirmation_text = "\n".join([f"    - {k.replace('_', ' ').title()}: {v}" for k,v in confirmation_details.items()])
         entry_point_text = "\n".join([f"    - {k.replace('_', ' ').title()}: {v}" for k,v in entry_point_details.items()])
 
         # Construct a readable string from other signal_details for conditions met
-        other_signal_details_text = "\n".join([f"  - {k.replace('_', ' ').title()}: {v}" for k,v in signal_data.get('signal_details', {}).items() if k not in ['Confirmation_Details', 'Entry_Point_Details_5m'] and ('اجتاز' in str(v) or 'فشل' not in str(v) or '+' in str(v) or '(0)' not in str(v))])
+        other_signal_details_text = "\n".join([f"  - {k.replace('_', ' ').title()}: {v}" for k,v in signal_data.get('signal_details', {}).items() if k not in ['Confirmation_Details', 'Entry_Point_Details_SignalTF'] and ('اجتاز' in str(v) or 'فشل' not in str(v) or '+' in str(v) or '(0)' not in str(v))]) # Updated key
 
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
@@ -1137,15 +1161,15 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"📈 **نوع الإشارة:** شراء (طويل)\n"
             f"🕰️ **الإطار الزمني للإشارة:** {timeframe}\n"
             f"📊 **قوة الإشارة (النقاط):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
+            f"💧 **السيولة ({timeframe}):** {volume_signal_tf:,.0f} USDT\n" # Updated volume interval
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
             f"——————————————\n"
-            f"✅ *تأكيد الإطار الزمني الأكبر ({CONFIRMATION_TIMEFRAME}):*\n"
+            f"✅ *تأكيد الإطار الزمني الأكبر ({CONFIRMATION_TIMEFRAME}):*\n" # Updated confirmation timeframe
             f"{confirmation_text if confirmation_text else '    - لا توجد تفاصيل تأكيد متاحة.'}\n"
             f"——————————————\n"
-            f"📍 *جودة نقطة الدخول ({SIGNAL_GENERATION_TIMEFRAME}):*\n"
+            f"📍 *جودة نقطة الدخول ({SIGNAL_GENERATION_TIMEFRAME}):*\n" # Updated signal timeframe
             f"{entry_point_text if entry_point_text else '    - لا توجد تفاصيل نقطة الدخول متاحة.'}\n"
             f"——————————————\n"
             f"📋 *تفاصيل شروط الإشارة الأخرى:*\n"
@@ -1231,7 +1255,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared['initial_target'], signal_prepared.get('initial_stop_loss', 0.0), # Default SL to 0.0
                 signal_prepared['current_target'], signal_prepared.get('current_stop_loss', 0.0), # Default SL to 0.0
                 signal_prepared.get('r2_score'), signal_prepared.get('strategy_name', 'unknown'),
-                signal_details_json, signal_prepared.get('volume_15m')
+                signal_details_json, signal_prepared.get('volume_15m') # Using the renamed key
             ))
         conn.commit()
         logger.info(f"✅ [DB Insert] تم إدراج إشارة لـ {symbol} (النقاط: {signal_prepared.get('r2_score')}).")
@@ -1318,10 +1342,12 @@ def track_signals() -> None:
                          current_price < current_target: # Price is near target but hasn't hit it
 
                         logger.info(f"🔍 [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف. إعادة تقييم للتحديث الديناميكي (التحديث رقم {dynamic_updates_count + 1}).")
+                        # Fetch data for the signal tracking timeframe (15m) for dynamic update analysis
                         df_dynamic = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                         if df_dynamic is not None and not df_dynamic.empty:
                             strategy = ScalpingTradingStrategy(symbol) # Re-initialize strategy to use its methods
-                            df_indicators_dynamic = strategy.populate_indicators(df_dynamic, SIGNAL_TRACKING_TIMEFRAME) # Pass timeframe
+                            # Populate indicators for the signal tracking timeframe (15m)
+                            df_indicators_dynamic = strategy.populate_indicators(df_dynamic, SIGNAL_TRACKING_TIMEFRAME)
                             if df_indicators_dynamic is not None and not df_indicators_dynamic.empty:
                                 new_dynamic_target = strategy.analyze_target_continuation(df_indicators_dynamic, current_price, current_target)
                                 if new_dynamic_target and new_dynamic_target > current_target:
@@ -1374,7 +1400,7 @@ def track_signals() -> None:
                 except Exception as inner_loop_err: logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ أثناء معالجة الإشارة: {inner_loop_err}", exc_info=True)
 
             if active_signals_summary: logger.debug(f"ℹ️ [Tracker] نهاية الدورة ({processed_in_cycle} تمت معالجتها): {'; '.join(active_signals_summary)}")
-            time.sleep(3) # Wait between tracking cycles
+            time.sleep(5) # Increased wait time between tracking cycles
         except psycopg2.Error as db_cycle_err:
             logger.error(f"❌ [Tracker] خطأ في قاعدة البيانات في دورة التتبع: {db_cycle_err}. إعادة الاتصال...")
             if conn:
@@ -1520,7 +1546,7 @@ def main_loop() -> None:
             logger.info(f"ℹ️ [Main] الإشارات المفتوحة: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"⚠️ [Main] تم الوصول إلى الحد الأقصى للإشارات المفتوحة. انتظار...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
+                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60) # Wait for the signal timeframe duration
                 continue
 
             processed_in_loop = 0; signals_generated_in_loop = 0; slots_available = MAX_OPEN_TRADES - open_count
@@ -1540,20 +1566,21 @@ def main_loop() -> None:
                             continue
                     logger.debug(f"ℹ️ [Main] لا توجد إشارة مفتوحة لـ {symbol}. المتابعة بالتحليل.")
 
-                    # Fetch and process data for the signal timeframe (5m)
-                    df_hist_5m = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist_5m is None or df_hist_5m.empty:
+                    # Fetch and process data for the signal timeframe (15m)
+                    df_hist_signal_tf = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df_hist_signal_tf is None or df_hist_signal_tf.empty:
                         logger.debug(f"⚠️ [Main] تعذر جلب بيانات إطار {SIGNAL_GENERATION_TIMEFRAME} لـ {symbol}. تخطي.")
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol)
-                    df_indicators_5m = strategy.populate_indicators(df_hist_5m, SIGNAL_GENERATION_TIMEFRAME) # Pass timeframe
-                    if df_indicators_5m is None:
+                    # Populate indicators for the signal timeframe (15m)
+                    df_indicators_signal_tf = strategy.populate_indicators(df_hist_signal_tf, SIGNAL_GENERATION_TIMEFRAME)
+                    if df_indicators_signal_tf is None:
                         logger.debug(f"⚠️ [Main] تعذر حساب مؤشرات إطار {SIGNAL_GENERATION_TIMEFRAME} لـ {symbol}. تخطي.")
                         continue
 
                     # Generate potential signal (which now includes the multi-TF and entry point checks internally)
-                    potential_signal = strategy.generate_buy_signal(df_indicators_5m)
+                    potential_signal = strategy.generate_buy_signal(df_indicators_signal_tf)
 
                     if potential_signal:
                         logger.info(f"✨ [Main] إشارة محتملة لـ {symbol}! (النقاط: {potential_signal.get('r2_score', 0):.2f})")
@@ -1589,7 +1616,8 @@ def main_loop() -> None:
             scan_duration = time.time() - scan_start_time
             logger.info(f"🏁 [Main] انتهاء المسح. الإشارات المولدة: {signals_generated_in_loop}. المدة: {scan_duration:.2f} ثانية.")
             frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
-            wait_time = max(frame_minutes * 60, 120 - scan_duration) # Wait 2 minutes total or at least the timeframe duration
+            # Wait until the next candle close for the signal timeframe, or at least 2 minutes
+            wait_time = max(frame_minutes * 60 - (scan_duration % (frame_minutes * 60)), 120 - scan_duration) if scan_duration < 120 else frame_minutes * 60
             logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
             time.sleep(wait_time)
         except KeyboardInterrupt:
