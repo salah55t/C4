@@ -99,7 +99,7 @@ TRAILING_STOP_MOVE_INCREMENT_PCT: float = 0.0005 # Price increase percentage to 
 
 # Additional Signal Conditions (Adjusted)
 MIN_PROFIT_MARGIN_PCT: float = 0.01 # Minimum required profit margin percentage (SET TO 1%)
-MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
+MIN_VOLUME_15M_USDT: float = 20000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
