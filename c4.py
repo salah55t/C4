@@ -81,12 +81,11 @@ ADX_PERIOD: int = 10            # ADX Period (Reduced)
 SUPERTREND_PERIOD: int = 10     # SuperTrend Period (Keep 10, standard)
 SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or keep 3.0)
 
-# Trailing Stop Loss (Adjusted for Scalping)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
-# TRAILING_STOP_ATR_MULTIPLIER: float = 1.8 # Removed - Trailing stop will follow indicator, not fixed ATR distance
-TRAILING_STOP_INDICATOR: str = 'supertrend' # New: Indicator to follow for trailing stop ('supertrend' or 'ema_short')
-TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the trailing stop indicator (use SuperTrend period or EMA_SHORT_PERIOD)
-TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
+# Trailing Stop Loss (Adjusted for Scalping) - REMOVED
+# TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
+# TRAILING_STOP_INDICATOR: str = 'supertrend' # New: Indicator to follow for trailing stop ('supertrend' or 'ema_short')
+# TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the trailing stop indicator (use SuperTrend period or EMA_SHORT_PERIOD)
+# TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
 
 # Additional Signal Conditions (Adjusted)
 # MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
@@ -300,7 +299,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             cur = conn.cursor()
             logger.info("✅ [DB] Successfully connected to database.")
 
-            # --- Create or update signals table ---
+            # --- Create or update signals table (Modified schema) ---
             logger.info("[DB] Checking/Creating 'signals' table...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
@@ -308,46 +307,45 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
-                    initial_stop_loss DOUBLE PRECISION NOT NULL,
                     current_target DOUBLE PRECISION NOT NULL,
-                    current_stop_loss DOUBLE PRECISION NOT NULL,
                     r2_score DOUBLE PRECISION, -- Now represents the weighted signal score
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
-                    hit_stop_loss BOOLEAN DEFAULT FALSE,
                     closing_price DOUBLE PRECISION,
                     closed_at TIMESTAMP,
                     sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(), -- Added entry_time
+                    time_to_target INTERVAL, -- Added time_to_target
                     profit_percentage DOUBLE PRECISION,
-                    profitable_stop_loss BOOLEAN DEFAULT FALSE,
-                    is_trailing_active BOOLEAN DEFAULT FALSE,
                     strategy_name TEXT,
-                    signal_details JSONB,
-                    last_trailing_update_price DOUBLE PRECISION
+                    signal_details JSONB
+                    -- Removed: initial_stop_loss, current_stop_loss, hit_stop_loss, profitable_stop_loss, is_trailing_active, last_trailing_update_price
                 );""")
             conn.commit()
             logger.info("✅ [DB] 'signals' table exists or was created.")
 
             # --- Check and add missing columns (if necessary) ---
+            # Adjusted required columns based on the new schema
             required_columns = {
-                "symbol", "entry_price", "initial_target", "initial_stop_loss",
-                "current_target", "current_stop_loss", "r2_score", "volume_15m",
-                "achieved_target", "hit_stop_loss", "closing_price", "closed_at",
-                "sent_at", "profit_percentage", "profitable_stop_loss",
-                "is_trailing_active", "strategy_name", "signal_details",
-                "last_trailing_update_price"
+                "symbol", "entry_price", "initial_target",
+                "current_target", "r2_score", "volume_15m",
+                "achieved_target", "closing_price", "closed_at",
+                "sent_at", "entry_time", "time_to_target",
+                "profit_percentage", "strategy_name", "signal_details"
             }
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
             missing_columns = required_columns - existing_columns
+            extra_columns = existing_columns - required_columns # Identify columns to potentially remove
 
             if missing_columns:
-                logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
-                # (Original code to add columns was fine, can keep or improve here if needed)
-                # ... (ALTER TABLE code can be added here if you anticipate future changes) ...
-                logger.warning("⚠️ [DB] Automatic addition of missing columns is not implemented in this enhanced version. Please check manually if needed.")
+                logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Please add them manually if needed.")
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
+
+            if extra_columns:
+                 logger.warning(f"⚠️ [DB] Following extra columns exist in 'signals' table (likely stop-loss related): {extra_columns}. Consider removing them manually.")
+
 
             # --- Create market_dominance table (if it doesn't exist) ---
             logger.info("[DB] Checking/Creating 'market_dominance' table...")
@@ -743,6 +741,15 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
             logger.error("❌ [Indicator VWAP] Failed to convert index to DatetimeIndex, cannot calculate daily VWAP.")
             df['vwap'] = np.nan
             return df
+    if df.index.tz is not None:
+        # Convert to UTC if timezone-aware
+        df.index = df.index.tz_convert('UTC')
+        logger.debug("ℹ️ [Indicator VWAP] Index converted to UTC for daily reset.")
+    else:
+        # Assume UTC if timezone-naive
+        df.index = df.index.tz_localize('UTC')
+        logger.debug("ℹ️ [Indicator VWAP] Index localized to UTC for daily reset.")
+
 
     df['date'] = df.index.date
     # Calculate typical price and volume * typical price
@@ -949,6 +956,8 @@ def is_hammer(row: pd.Series) -> int:
 
 def is_shooting_star(row: pd.Series) -> int:
     """Checks for Shooting Star pattern (bearish signal)."""
+    # This pattern is less relevant without stop-loss, but keeping the function for completeness
+    # or potential future use in other contexts.
     o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
     if pd.isna([o, h, l, c]).any(): return 0
     body = abs(c - o)
@@ -986,10 +995,10 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
                   curr['open'] <= prev['close'] and curr['close'] >= prev['open'])
     # Bearish Engulfing: Previous candle bullish, current bearish engulfing previous body
     is_bearish = (prev['close'] > prev['open'] and curr['close'] < curr['open'] and
-                  curr['open'] >= prev['close'] and curr['close'] <= prev['open'])
+                  curr['open'] >= prev['close'] and curr['close'] <= prev['open']) # Less relevant without SL
 
     if is_bullish: return 100
-    if is_bearish: return -100
+    if is_bearish: return -100 # Less relevant without SL
     return 0
 
 def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
@@ -998,7 +1007,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     logger.debug("ℹ️ [Indicators] Detecting candlestick patterns...")
     # Apply single-row patterns
     df['Hammer'] = df.apply(is_hammer, axis=1)
-    df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
+    df['ShootingStar'] = df.apply(is_shooting_star, axis=1) # Less relevant without SL
     df['Doji'] = df.apply(is_doji, axis=1)
     # df['SpinningTop'] = df.apply(is_spinning_top, axis=1) # Can be added if needed
 
@@ -1009,7 +1018,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     # Aggregate strong bullish and bearish candle signals
     # Note: Signal value here is 100 or 0, weight will be applied later in the strategy
     df['BullishCandleSignal'] = df.apply(lambda row: 1 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
-    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
+    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1) # Less relevant without SL
 
     # Drop individual pattern columns if not needed later
     # df.drop(columns=['Hammer', 'ShootingStar', 'Doji', 'Engulfing'], inplace=True, errors='ignore')
@@ -1054,6 +1063,7 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
 
 def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dict[str, Any]]:
     """Simple attempt to identify Elliott Waves based on MACD histogram swings."""
+    # This function is less relevant without stop-loss, but keeping it for completeness.
     if 'macd_hist' not in df.columns or df['macd_hist'].isnull().all():
         logger.warning("⚠️ [Elliott] 'macd_hist' column missing or empty for Elliott Wave calculation.")
         return []
@@ -1125,106 +1135,73 @@ def generate_performance_report() -> str:
         # Use a new cursor within the function to ensure no interference
         with conn.cursor() as report_cur: # Uses RealDictCursor
             # 1. Open Signals
-            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+            # Adjusted query to reflect removal of hit_stop_loss
+            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
             open_signals_count = (report_cur.fetchone() or {}).get('count', 0)
 
-            # 2. Closed Signals Statistics
+            # 2. Closed Signals Statistics (Only Target Hits)
+            # Adjusted query to only count achieved targets as closed
             report_cur.execute("""
                 SELECT
                     COUNT(*) AS total_closed,
-                    COUNT(CASE WHEN profit_percentage > 0 THEN 1 END) AS winning_signals,
-                    COUNT(CASE WHEN profit_percentage < 0 THEN 1 END) AS losing_signals,
-                    COUNT(CASE WHEN profit_percentage = 0 THEN 1 END) AS neutral_signals,
+                    COUNT(*) AS winning_signals, -- All closed signals are winning (target hit)
                     COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum, -- Sum of percentages
                     COALESCE(AVG(profit_percentage), 0) AS avg_profit_pct,
-                    COALESCE(SUM(CASE WHEN profit_percentage > 0 THEN profit_percentage ELSE 0 END), 0) AS gross_profit_pct_sum, -- Sum of positive percentages
-                    COALESCE(SUM(CASE WHEN profit_percentage < 0 THEN profit_percentage ELSE 0 END), 0) AS gross_loss_pct_sum, -- Sum of negative percentages
-                    COALESCE(AVG(CASE WHEN profit_percentage > 0 THEN profit_percentage END), 0) AS avg_win_pct,
-                    COALESCE(AVG(CASE WHEN profit_percentage < 0 THEN profit_percentage END), 0) AS avg_loss_pct
+                    COALESCE(AVG(profit_percentage), 0) AS avg_win_pct -- Avg win is same as avg profit
                 FROM signals
-                WHERE achieved_target = TRUE OR hit_stop_loss = TRUE;
+                WHERE achieved_target = TRUE;
             """)
             closed_stats = report_cur.fetchone() or {} # Handle case with no results
 
             total_closed = closed_stats.get('total_closed', 0)
             winning_signals = closed_stats.get('winning_signals', 0)
-            losing_signals = closed_stats.get('losing_signals', 0)
+            # Losing signals are now considered as signals that didn't hit target or SL (which is removed)
+            # We can report on signals that were open for a long time without hitting target if needed,
+            # but for simplicity, we'll only report on successful trades (target hits).
+            losing_signals = 0 # No losing signals based on this simplified logic
             total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0) # Sum of percentages
-            gross_profit_pct_sum = closed_stats.get('gross_profit_pct_sum', 0.0) # Sum of positive percentages
-            gross_loss_pct_sum = closed_stats.get('gross_loss_pct_sum', 0.0) # Sum of negative percentages
             avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
-            avg_loss_pct = closed_stats.get('avg_loss_pct', 0.0) # Will be negative or zero
+
+            # Gross profit/loss calculations are less meaningful without stop-loss,
+            # total profit is the sum of profits from target hits.
+            gross_profit_pct_sum = total_profit_pct_sum
+            gross_loss_pct_sum = 0.0
+            avg_loss_pct = 0.0
+
 
             # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
             total_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
             gross_profit_usd = (gross_profit_pct_sum / 100.0) * TRADE_VALUE
-            gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be negative or zero
+            gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be zero
 
             # 3. Calculate Derived Metrics
-            win_rate = 0.0 # Initialize win_rate
-            if total_closed > 0:
-                win_rate = (winning_signals / total_closed) * 100
+            win_rate = 100.0 if total_closed > 0 else 0.0 # Win rate is 100% for target hits
 
-             # Profit Factor: Total Profit / Absolute Total Loss
-            profit_factor = (gross_profit_pct_sum / abs(gross_loss_pct_sum)) if gross_loss_pct_sum != 0 else float('inf')
-
-            # --- Removed: Fetch Recent Closed Trades (Last 10) ---
-            # report_cur.execute("""
-            #     SELECT symbol, entry_price, closing_price, profit_percentage, closed_at, achieved_target, hit_stop_loss
-            #     FROM signals
-            #     WHERE achieved_target = TRUE OR hit_stop_loss = TRUE
-            #     ORDER BY closed_at DESC
-            #     LIMIT 10;
-            # """)
-            # recent_closed_trades = report_cur.fetchall()
-            # --- End Removed ---
+             # Profit Factor: Total Profit / Absolute Total Loss - Less meaningful without losses
+            profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
 
 
-        # 5. Format the report in Arabic
+        # 4. Format the report in Arabic
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
             f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f})_\n" # Indicate assumed trade size
             f"——————————————\n"
             f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
             f"——————————————\n"
-            f"📉 *إحصائيات الإشارات المغلقة:*\n"
+            f"📉 *إحصائيات الإشارات المغلقة (تم تحقيق الهدف فقط):*\n" # Clarified
             f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
             f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n" # Add win rate here
-            f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
+            f"  ❌ إشارات خاسرة: *{losing_signals}*\n" # Will be 0
             f"——————————————\n"
-            f"💰 *الربحية الإجمالية:*\n"
-            f"  • صافي الربح/الخسارة: *{total_profit_pct_sum:+.2f}%* (≈ *${total_profit_usd:+.2f}*)\n" # Show total % and USD
+            f"💰 *الربحية الإجمالية (للصفقات التي حققت الهدف):*\n" # Clarified
             f"  • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n" # Show gross profit % and USD
-            f"  • إجمالي الخسارة: *{gross_loss_pct_sum:.2f}%* (≈ *${gross_loss_usd:.2f}*)\n" # Show gross loss % and USD
             f"  • متوسط الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
-            f"  • متوسط الصفقة الخاسرة: *{avg_loss_pct:.2f}%*\n"
-            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
+            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n" # Will be infinity
             f"——————————————\n"
         )
 
-        # --- Removed: Add Recent Closed Trades section ---
-        # if recent_closed_trades:
-        #     report += "📋 *آخر الصفقات المغلقة:*\n"
-        #     for trade in recent_closed_trades:
-        #         symbol = trade['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-        #         closing_price = trade['closing_price']
-        #         profit_pct = trade['profit_percentage']
-        #         closed_at = trade['closed_at'].strftime('%Y-%m-%d %H:%M')
-        #         outcome = "هدف ✅" if trade['achieved_target'] else "وقف 🛑"
-        #
-        #         # Calculate profit/loss in USD for this specific trade
-        #         trade_profit_usd = (profit_pct / 100.0) * TRADE_VALUE
-        #
-        #         report += (
-        #             f"  • `{symbol}`: ${closing_price:,.8g} ({profit_pct:+.2f}%) [≈ ${trade_profit_usd:+.2f}] [{outcome}] ({closed_at})\n" # Added USD profit/loss per trade
-        #         )
-        #     report += "——————————————\n"
-        # else:
-        #     report += "📋 *لا توجد صفقات مغلقة مؤخراً.*\n——————————————\n"
-        # --- End Removed ---
-
         # Add a placeholder or note about the detailed report if needed
-        report += "ℹ️ *للحصول على تقرير تدقيق مفصل بجميع الصفقات، يرجى طلب ذلك بشكل منفصل.*" # Note about detailed report
+        report += "ℹ️ *ملاحظة: هذا التقرير يعرض فقط الصفقات التي حققت الهدف، حيث تم إزالة منطق وقف الخسارة.*" # Added note about SL removal
         report += "\n——————————————\n"
 
 
@@ -1258,7 +1235,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus',
             'vwap', 'obv', 'supertrend', 'supertrend_trend',
-            'BullishCandleSignal', 'BearishCandleSignal'
+            'BullishCandleSignal', 'BearishCandleSignal' # Bearish still included but less relevant
         ]
         # Required columns for buy signal generation
         self.required_cols_buy_signal = [
@@ -1398,6 +1375,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
         Adjusted for Scalping and targeting early upward momentum.
+        Stop-loss logic is removed.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
@@ -1634,41 +1612,21 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) is below the minimum threshold ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected.")
             return None
 
-        # Calculate initial target and stop loss based on ATR
+        # Calculate initial target based on ATR (Stop loss calculation removed)
         current_price = last_row['close']
         current_atr = last_row.get('atr')
 
         # Ensure ATR is not NaN before using it
         if pd.isna(current_atr) or current_atr <= 0:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR value ({current_atr}) for calculating target and stop loss.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR value ({current_atr}) for calculating target.")
              return None
 
-        # These multipliers can be adjusted based on ADX or other factors for a more dynamic strategy if desired
+        # Target calculation (Stop loss calculation removed)
         target_multiplier = ENTRY_ATR_MULTIPLIER
-        stop_loss_multiplier = ENTRY_ATR_MULTIPLIER # Use the same multiplier for initial SL
-
         initial_target = current_price + (target_multiplier * current_atr)
-        initial_stop_loss = current_price - (stop_loss_multiplier * current_atr)
 
-        # Ensure stop loss is not zero or negative and is below the entry price
-        if initial_stop_loss <= 0 or initial_stop_loss >= current_price:
-            # Use a percentage as a minimum stop loss if the initial calculation is invalid
-            # Adjusted minimum stop loss percentage for scalping
-            min_sl_price_pct = current_price * (1 - 0.008) # Example: 0.8% below entry as a minimum
-            initial_stop_loss = max(min_sl_price_pct, current_price * 0.0005) # Ensure it's not too close to zero
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is invalid or above entry price. Adjusted to {initial_stop_loss:.8f}")
-            signal_details['Warning'] = f'Initial SL adjusted (was <= 0 or >= entry, set to {initial_stop_loss:.8f})'
-        else:
-             # Ensure the initial stop loss is not too wide (optional)
-             max_allowed_loss_pct = 0.03 # Example: Initial loss should not exceed 3% for scalping
-             max_sl_price = current_price * (1 - max_allowed_loss_pct)
-             if initial_stop_loss < max_sl_price:
-                  logger.warning(f"⚠️ [Strategy {self.symbol}] Calculated stop loss ({initial_stop_loss:.8g}) is too wide. Adjusted to {max_sl_price:.8f}")
-                  initial_stop_loss = max_sl_price
-                  signal_details['Warning'] = f'Initial SL adjusted (was too wide, set to {initial_stop_loss:.8f})' # Use the new value here
-
-        # Check minimum profit margin (after calculating final target and stop loss) - still a mandatory filter
-        # This ensures the potential reward is sufficient for the risk.
+        # Check minimum profit margin (after calculating final target) - still a mandatory filter
+        # This ensures the potential reward is sufficient.
         # MODIFIED: Check against the updated MIN_PROFIT_MARGIN_PCT (1.0%)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
@@ -1680,15 +1638,15 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
-            'initial_stop_loss': float(f"{initial_stop_loss:.8g}"),
             'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Current SL starts as initial
+            # Removed initial_stop_loss, current_stop_loss
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
             'strategy_name': 'Scalping_Momentum_Trend', # Changed strategy name
             'signal_details': signal_details, # Now contains details of checked conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
+            # entry_time and time_to_target will be handled in DB insertion/tracking
         }
 
         logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
@@ -1743,7 +1701,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     try:
         entry_price = float(signal_data['entry_price'])
         target_price = float(signal_data['initial_target'])
-        stop_loss_price = float(signal_data['initial_stop_loss'])
+        # Removed stop_loss_price
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
         signal_score = signal_data.get('r2_score', 0.0) # Weighted score for optional conditions
@@ -1753,9 +1711,9 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         signal_details = signal_data.get('signal_details', {})
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-        loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+        # Removed loss_pct calculation
         profit_usdt = trade_value_signal * (profit_pct / 100)
-        loss_usdt = abs(trade_value_signal * (loss_pct / 100))
+        # Removed loss_usdt calculation
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Escape special characters for Markdown
@@ -1777,7 +1735,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
-            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}` ({loss_pct:.2f}% / ≈ ${loss_usdt:.2f})\n"
+            # Removed Stop Loss line
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
             f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'Passed: Price above all MAs' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n" # Updated text
@@ -1826,10 +1784,8 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
-    atr_value = details.get('atr_value', 0.0) # Still used for activation notification
-    new_stop_loss = details.get('new_stop_loss', 0.0)
-    old_stop_loss = details.get('old_stop_loss', 0.0)
-    # Removed new_target, old_target as dynamic target update is removed
+    # Removed atr_value, new_stop_loss, old_stop_loss, profitable_sl
+    time_to_target = details.get('time_to_target', 'N/A') # Added time_to_target
     old_target = details.get('old_target', 0.0) # Added for target update notification
     new_target = details.get('new_target', 0.0) # Added for target update notification
 
@@ -1842,38 +1798,10 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
-            f"💰 **الربح المحقق:** {profit_pct:+.2f}%"
+            f"💰 **الربح المحقق:** {profit_pct:+.2f}%\n"
+            f"⏱️ **الوقت المستغرق:** {time_to_target}" # Added time to target
         )
-    elif notification_type == 'stop_loss_hit':
-        sl_type_msg_ar = "بربح ✅" if details.get('profitable_sl', False) else "بخسارة ❌" # Use profitable_sl flag
-        message = (
-            f"🛑 *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🚫 **سعر الإغلاق (الوقف):** `${closing_price:,.8g}`\n"
-            f"📉 **النتيجة:** {profit_pct:.2f}% ({sl_type_msg_ar})"
-        )
-    elif notification_type == 'trailing_activated':
-        activation_profit_pct = details.get('activation_profit_pct', TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100)
-        message = (
-            f"⬆️ *تم تفعيل وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي (عند التفعيل):** `${current_price:,.8g}` (الربح > {activation_profit_pct:.1f}%)\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`\n" # Show the initial trailing stop level
-            f"ℹ️ *سيتبع الوقف مؤشر {TRAILING_STOP_INDICATOR.upper()}* (Buffer: {TRAILING_STOP_BUFFER_PCT*100:.1f}%)" # Indicate which indicator is followed
-        )
-    elif notification_type == 'trailing_updated':
-        # Removed trigger_price_increase_pct as update is indicator-based
-        message = (
-            f"➡️ *تم تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n" # Show current price
-            f"🔒 **الوقف السابق:** `${old_stop_loss:,.8g}`\n"
-            f"🛡️ **وقف الخسارة الجديد:** `${new_stop_loss:,.8g}`\n"
-            f"ℹ️ *تم التحديث بناءً على مؤشر {TRAILING_STOP_INDICATOR.upper()}* (Buffer: {TRAILING_STOP_BUFFER_PCT*100:.1f}%)" # Indicate update reason
-        )
+    # Removed 'stop_loss_hit', 'trailing_activated', 'trailing_updated' notification types
     elif notification_type == 'target_updated': # New notification type for target updates
          message = (
              f"↗️ *تم تحديث الهدف (ID: {signal_id})*\n"
@@ -1893,7 +1821,7 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 
 # ---------------------- Database Functions (Insert and Update) ----------------------
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    """Inserts a new signal into the signals table with the weighted score."""
+    """Inserts a new signal into the signals table with the weighted score and entry time."""
     if not check_db_connection() or not conn:
         logger.error(f"❌ [DB Insert] Failed to insert signal {signal.get('symbol', 'N/A')} due to DB connection issue.")
         return False
@@ -1908,22 +1836,20 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
         with conn.cursor() as cur_ins:
             insert_query = sql.SQL("""
                 INSERT INTO signals
-                 (symbol, entry_price, initial_target, initial_stop_loss, current_target, current_stop_loss,
-                 r2_score, strategy_name, signal_details, last_trailing_update_price, volume_15m)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                 (symbol, entry_price, initial_target, current_target,
+                 r2_score, strategy_name, signal_details, volume_15m, entry_time) -- Added entry_time
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW()); -- Set entry_time to NOW()
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
                 signal_prepared['entry_price'],
                 signal_prepared['initial_target'],
-                signal_prepared['initial_stop_loss'],
                 signal_prepared['current_target'],
-                signal_prepared['current_stop_loss'],
                 signal_prepared.get('r2_score'), # Weighted score
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
-                None, # last_trailing_update_price - Will be set when trailing is activated
                 signal_prepared.get('volume_15m')
+                # entry_time is set by NOW() in the query
             ))
         conn.commit()
         logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (Score: {signal_prepared.get('r2_score')}).")
@@ -1943,7 +1869,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
-    """Tracks open signals, checks targets and stop losses, and applies trailing stop."""
+    """Tracks open signals and checks targets. Calculates time to target upon hit."""
     logger.info("ℹ️ [Tracker] Starting open signal tracking process...")
     while True:
         active_signals_summary: List[str] = []
@@ -1956,11 +1882,11 @@ def track_signals() -> None:
 
             # Use a cursor with context manager to fetch open signals
             with conn.cursor() as track_cur: # Uses RealDictCursor
+                 # Adjusted query to reflect removal of hit_stop_loss
                  track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_target, current_target, current_stop_loss,
-                           is_trailing_active, last_trailing_update_price
+                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time
                     FROM signals
-                    WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
+                    WHERE achieved_target = FALSE;
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1980,12 +1906,8 @@ def track_signals() -> None:
                 try:
                     # Extract and safely convert numeric data
                     entry_price = float(signal_row['entry_price'])
-                    # initial_target = float(signal_row['initial_target']) # Keep initial target for reference - not strictly needed in tracking loop
+                    entry_time = signal_row['entry_time'] # Get entry time
                     current_target = float(signal_row['current_target'])
-                    current_stop_loss = float(signal_row['current_stop_loss'])
-                    is_trailing_active = signal_row['is_trailing_active']
-                    # last_update_px = signal_row['last_trailing_update_price'] # Not used for indicator trailing
-                    # last_trailing_update_price = float(last_update_px) if last_update_px is not None else None # Not used
 
                     # Get current price from WebSocket Ticker data
                     current_price = ticker_data.get(symbol)
@@ -1994,7 +1916,7 @@ def track_signals() -> None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in Ticker data.")
                          continue # Skip this signal in this cycle
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} Trail={'On' if is_trailing_active else 'Off'}")
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}") # Removed SL from summary
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
@@ -2006,24 +1928,21 @@ def track_signals() -> None:
                     # 1. Check for Target Hit
                     if current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;")
-                        update_params = (current_target, profit_pct, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%)."
-                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct})
+                        closed_at = datetime.now() # Record closing time
+                        # Calculate time to target
+                        time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
+                        # Format timedelta for storage/display (e.g., '0 days 01:23:45')
+                        # PostgreSQL INTERVAL type stores this directly, but for display/logging, format is good.
+                        # Let's store as INTERVAL in DB and format for notification.
+                        time_to_target_str = str(time_to_target_duration)
+
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") # Added time_to_target
+                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id) # Pass timedelta object
+                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%, Time: {time_to_target_str})." # Added time
+                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str}) # Added time
                         update_executed = True
 
-                    # 2. Check for Stop Loss Hit (Must be after Target check)
-                    elif current_price <= current_stop_loss:
-                        loss_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        profitable_sl = current_stop_loss > entry_price
-                        sl_type_msg = "at a profit ✅" if profitable_sl else "at a loss ❌"
-                        update_query = sql.SQL("UPDATE signals SET hit_stop_loss = TRUE, closing_price = %s, closed_at = NOW(), profit_percentage = %s, profitable_stop_loss = %s WHERE id = %s;")
-                        update_params = (current_stop_loss, loss_pct, profitable_sl, signal_id)
-                        log_message = f"🔻 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit ({sl_type_msg}) at {current_stop_loss:.8g} (Percentage: {loss_pct:.2f}%)."
-                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': loss_pct, 'profitable_sl': profitable_sl}) # Pass the profitable_sl flag
-                        update_executed = True
-
-                    # 3. Check for Target Extension (Only if Target or SL not hit)
+                    # 2. Check for Target Extension (Only if Target not hit)
                     if not update_executed:
                         # Check if price is close to the current target
                         if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
@@ -2070,74 +1989,6 @@ def track_signals() -> None:
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to populate indicators for continuation check.")
                              else:
                                  logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch historical data for continuation check.")
-
-
-                    # 4. Check for Trailing Stop Activation or Update (Only if Target, SL, or Target Extension not hit/updated)
-                    if not update_executed: # Only check trailing stop if no other exit or target extension happened
-                        activation_threshold_price = entry_price * (1 + TRAILING_STOP_ACTIVATION_PROFIT_PCT)
-
-                        # Fetch recent data for indicator-based trailing stop
-                        # Use the specified tracking timeframe and sufficient lookback for the indicator period
-                        required_lookback_days = max(SIGNAL_TRACKING_LOOKBACK_DAYS, TRAILING_STOP_INDICATOR_PERIOD // (get_interval_minutes(SIGNAL_TRACKING_TIMEFRAME) * 60 * 24) + 1) # Ensure enough data for indicator
-                        df_recent = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=required_lookback_days)
-
-                        if df_recent is not None and not df_recent.empty:
-                            # Calculate the relevant indicator for trailing stop
-                            if TRAILING_STOP_INDICATOR == 'supertrend':
-                                df_recent = calculate_supertrend(df_recent, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-                                indicator_value = df_recent['supertrend'].iloc[-1] if 'supertrend' in df_recent.columns and pd.notna(df_recent['supertrend'].iloc[-1]) else np.nan
-                                indicator_name = 'SuperTrend'
-                            elif TRAILING_STOP_INDICATOR == 'ema_short':
-                                # Ensure EMA_SHORT_PERIOD is defined and calculate EMA
-                                if f'ema_{EMA_SHORT_PERIOD}' not in df_recent.columns:
-                                     df_recent[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_recent['close'], EMA_SHORT_PERIOD)
-                                indicator_value = df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1] if f'ema_{EMA_SHORT_PERIOD}' in df_recent.columns and pd.notna(df_recent[f'ema_{EMA_SHORT_PERIOD}'].iloc[-1]) else np.nan
-                                indicator_name = f'EMA{EMA_SHORT_PERIOD}'
-                            else:
-                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Unknown TRAILING_STOP_INDICATOR '{TRAILING_STOP_INDICATOR}'. Trailing stop cannot be calculated.")
-                                indicator_value = np.nan
-                                indicator_name = 'Unknown Indicator'
-
-
-                            if pd.notna(indicator_value):
-                                # Calculate potential new stop loss based on the indicator and buffer
-                                potential_new_stop_loss = indicator_value * (1 - TRAILING_STOP_BUFFER_PCT)
-
-                                # a. Activate Trailing Stop
-                                if not is_trailing_active and current_price >= activation_threshold_price:
-                                    # The new stop loss should be the calculated indicator-based value, but not lower than the initial stop loss
-                                    new_stop_loss_calc = max(potential_new_stop_loss, current_stop_loss) # Ensure it doesn't go below the initial SL
-                                    # Also ensure the new stop loss is *at least* slightly above entry if activating above entry
-                                    new_stop_loss = max(new_stop_loss_calc, entry_price * (1 + 0.0005)) # Ensure a very small profit or keep calculated stop
-
-                                    if new_stop_loss > current_stop_loss: # Only update if the new stop is actually higher
-                                        update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                        # Store the current price at activation as last_trailing_update_price (for logging/reference, not used in logic anymore)
-                                        update_params = (new_stop_loss, current_price, signal_id)
-                                        log_message = f"⬆️✅ [Tracker] {symbol}(ID:{signal_id}): Trailing stop activated. Price={current_price:.8g}. New Stop ({indicator_name} based): {new_stop_loss:.8g}"
-                                        notification_details.update({'type': 'trailing_activated', 'current_price': current_price, 'new_stop_loss': new_stop_loss, 'activation_profit_pct': TRAILING_STOP_ACTIVATION_PROFIT_PCT * 100})
-                                        update_executed = True
-                                    else:
-                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({new_stop_loss:.8g}) is not higher than current stop ({current_stop_loss:.8g}). Not activating.")
-
-                                # b. Update Trailing Stop (if already active)
-                                elif is_trailing_active:
-                                    # The new stop loss is the calculated indicator-based value
-                                    # Ensure it's higher than the current stop loss before updating
-                                    if potential_new_stop_loss > current_stop_loss:
-                                        new_stop_loss_update = potential_new_stop_loss
-                                        update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                        # Store the current price at update (for logging/reference)
-                                        update_params = (new_stop_loss_update, current_price, signal_id)
-                                        log_message = f"➡️🔼 [Tracker] {symbol}(ID:{signal_id}): Trailing stop updated. Price={current_price:.8g}. Old={current_stop_loss:.8g}, New ({indicator_name} based): {new_stop_loss_update:.8g}"
-                                        notification_details.update({'type': 'trailing_updated', 'current_price': current_price, 'old_stop_loss': current_stop_loss, 'new_stop_loss': new_stop_loss_update})
-                                        update_executed = True
-                                    else:
-                                        logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Calculated trailing stop ({potential_new_stop_loss:.8g}) is not higher than current ({current_stop_loss:.8g}). Not updating.")
-                            else:
-                                logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Invalid indicator value ({indicator_name}: {indicator_value}) for trailing stop calculation.")
-                        else:
-                            logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot fetch recent data for indicator-based trailing stop.")
 
 
                     # --- Execute Database Update and Send Notification ---
@@ -2318,7 +2169,8 @@ def handle_status_command(chat_id_msg: int) -> None:
         open_count = 0
         if check_db_connection() and conn:
             with conn.cursor() as status_cur:
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                # Adjusted query to reflect removal of hit_stop_loss
+                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
         # Check if variables exist before accessing them
@@ -2397,7 +2249,8 @@ def main_loop() -> None:
             open_count = 0
             try:
                  with conn.cursor() as cur_check:
-                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                    # Adjusted query to reflect removal of hit_stop_loss
+                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err:
                  logger.error(f"❌ [Main] DB error checking open signal count: {db_err}. Skipping cycle.")
@@ -2428,7 +2281,8 @@ def main_loop() -> None:
                  try:
                     # a. Check if there is already an open signal for this symbol
                     with conn.cursor() as symbol_cur:
-                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
+                        # Adjusted query to reflect removal of hit_stop_loss
+                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone():
                             continue
 
@@ -2449,7 +2303,8 @@ def main_loop() -> None:
                     if potential_signal:
                         logger.info(f"✨ [Main] Potential signal found for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}) Final check and insertion...")
                         with conn.cursor() as final_check_cur:
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                             # Adjusted query to reflect removal of hit_stop_loss
+                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
 
                              if final_open_count < MAX_OPEN_TRADES:
