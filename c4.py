@@ -325,9 +325,9 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             logger.info("✅ [DB] 'signals' table exists or was created.")
 
             # --- Check and add missing columns (if necessary) ---
-            # Adjusted required columns based on the new schema
+            # Adjusted required columns based on the new schema - FIX: Added 'id'
             required_columns = {
-                "symbol", "entry_price", "initial_target",
+                "id", "symbol", "entry_price", "initial_target",
                 "current_target", "r2_score", "volume_15m",
                 "achieved_target", "closing_price", "closed_at",
                 "sent_at", "entry_time", "time_to_target",
@@ -967,7 +967,7 @@ def is_shooting_star(row: pd.Series) -> int:
     upper_shadow = h - max(o, c)
     is_small_body = body < (candle_range * 0.35)
     is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
-    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else lower_shadow < candle_range * 0.15
+    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
     return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0 # Negative signal
 
 def is_doji(row: pd.Series) -> int:
@@ -2275,7 +2275,7 @@ def main_loop() -> None:
                       logger.info(f"ℹ️ [Main] Maximum limit ({MAX_OPEN_TRADES}) reached during scan. Stopping symbol scan for this cycle.")
                       break
 
-                 processed_in_loop += 1
+                 processed_in_loop += 0 # Keep track of processed symbols even if no signal is generated
                  logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
 
                  try:
