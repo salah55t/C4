@@ -90,7 +90,7 @@ SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or 
 # Additional Signal Conditions (Adjusted)
 # MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 50000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
+MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
@@ -2275,7 +2275,7 @@ def main_loop() -> None:
                       logger.info(f"ℹ️ [Main] Maximum limit ({MAX_OPEN_TRADES}) reached during scan. Stopping symbol scan for this cycle.")
                       break
 
-                 processed_in_loop += 0 # Keep track of processed symbols even if no signal is generated
+                 processed_in_loop += 1 # Keep track of processed symbols even if no signal is generated
                  logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
 
                  try:
