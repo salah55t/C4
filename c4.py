@@ -156,7 +156,7 @@ def get_fear_greed_index() -> str:
         return "N/A (Data Error)"
     except Exception as e:
         logger.error(f"❌ [Indicators] Unexpected error fetching Fear & Greed Index: {e}", exc_info=True)
-        return "N/A (Unknown Error)" # Corrected: Removed extra ')'
+        return "N/A (Unknown Error)"
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     """Fetches historical candlestick data from Binance."""
@@ -1162,7 +1162,8 @@ def generate_performance_report() -> str:
             winning_signals = closed_stats.get('winning_signals', 0)
             losing_signals = 0 # No losing signals based on this simplified logic
             total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0) # Sum of percentages
-            avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
+            gross_profit_pct_sum = total_profit_pct_sum # <--- ADDED THIS LINE
+            avg_win_pct = closed_stats.get('avg_profit_pct', 0.0) # Corrected to use avg_profit_pct from query
             total_exit_value = closed_stats.get('total_exit_value', 0.0)
 
             # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
