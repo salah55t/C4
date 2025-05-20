@@ -306,7 +306,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             logger.info("[DB] Checking/Creating 'signals' table...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
-                    id SERIAL PRIMARY KEY,
+                    id SERIAL PRIMARY PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
@@ -1325,7 +1325,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         try:
             df_calc = df.copy()
             # ATR is required for SuperTrend and Stop Loss/Target
-            # Use the ATR period designated for entry/tracking (ENTRY_ATR_PERIOD)
+            # Use the ATR period specific to SuperTrend here (ENTRY_ATR_PERIOD)
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
             # SuperTrend needs ATR calculated with its own period (SUPERTREND_PERIOD)
             # Recalculate SuperTrend with its specific period
