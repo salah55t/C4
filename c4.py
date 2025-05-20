@@ -156,7 +156,7 @@ def get_fear_greed_index() -> str:
         return "N/A (Data Error)"
     except Exception as e:
         logger.error(f"❌ [Indicators] Unexpected error fetching Fear & Greed Index: {e}", exc_info=True)
-        return "N/A (Unknown Error)")
+        return "N/A (Unknown Error)" # Corrected: Removed extra ')'
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     """Fetches historical candlestick data from Binance."""
