@@ -306,7 +306,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             logger.info("[DB] Checking/Creating 'signals' table...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
-                    id SERIAL PRIMARY PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
