@@ -1070,7 +1070,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]]]:
+def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
     if n < 2 * order + 1: return [], []
@@ -1603,12 +1603,42 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
+        # NEW Mandatory Condition: Higher Timeframe Trend Confirmation - Calculate this first
+        higher_tf_df = fetch_historical_data(self.symbol, interval=HIGHER_TIMEFRAME, days=HIGHER_TIMEFRAME_LOOKBACK_DAYS)
+        higher_tf_trend_ok = False
+        # Initialize higher_tf_trend_status with a default value
+        higher_tf_trend_status = "N/A (بيانات الإطار الزمني الأعلى غير متوفرة)" # Default status
+        if higher_tf_df is not None and not higher_tf_df.empty:
+            # Calculate SuperTrend for higher timeframe
+            higher_tf_df = calculate_supertrend(higher_tf_df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+            # Calculate EMAs for higher timeframe
+            higher_tf_df[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_SHORT_PERIOD)
+            higher_tf_df[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_LONG_PERIOD)
+
+            latest_higher_tf = higher_tf_df.iloc[-1]
+
+            if (pd.notna(latest_higher_tf['supertrend_trend']) and latest_higher_tf['supertrend_trend'] == 1 and # SuperTrend is uptrend
+                pd.notna(latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']) and
+                latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}'] > latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']): # Short EMA > Long EMA
+                higher_tf_trend_ok = True
+                higher_tf_trend_status = "صعودي قوي (SuperTrend و EMAs)"
+            else:
+                higher_tf_trend_status = "غير صعودي"
+        
+        if not higher_tf_trend_ok:
+            essential_passed = False
+            failed_essential_conditions.append(f'Higher Timeframe ({HIGHER_TIMEFRAME}) Trend Confirmation')
+            signal_details['Higher_TF_Trend'] = f'فشل: لا يوجد تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME} ({higher_tf_trend_status})'
+        else:
+            signal_details['Higher_TF_Trend'] = f'نجاح: تم تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME}'
+
+
         # NEW Mandatory Condition: AI Recommendation (must be "شراء")
         ai_recommendation_data = get_ai_recommendation(
             symbol=self.symbol,
             latest_data=last_row,
             timeframe=SIGNAL_GENERATION_TIMEFRAME,
-            higher_tf_trend=higher_tf_trend_status, # This needs to be calculated first
+            higher_tf_trend=higher_tf_trend_status, # Now this variable is guaranteed to be defined
             btc_trend=btc_trend,
             fear_greed=get_fear_greed_index()
         )
@@ -1680,34 +1710,6 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
         else:
              signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
-
-        # NEW Mandatory Condition: Higher Timeframe Trend Confirmation
-        higher_tf_df = fetch_historical_data(self.symbol, interval=HIGHER_TIMEFRAME, days=HIGHER_TIMEFRAME_LOOKBACK_DAYS)
-        higher_tf_trend_ok = False
-        higher_tf_trend_status = "غير كافية البيانات" # Default status
-        if higher_tf_df is not None and not higher_tf_df.empty:
-            # Calculate SuperTrend for higher timeframe
-            higher_tf_df = calculate_supertrend(higher_tf_df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            # Calculate EMAs for higher timeframe
-            higher_tf_df[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_SHORT_PERIOD)
-            higher_tf_df[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_LONG_PERIOD)
-
-            latest_higher_tf = higher_tf_df.iloc[-1]
-
-            if (pd.notna(latest_higher_tf['supertrend_trend']) and latest_higher_tf['supertrend_trend'] == 1 and # SuperTrend is uptrend
-                pd.notna(latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']) and
-                latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}'] > latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']): # Short EMA > Long EMA
-                higher_tf_trend_ok = True
-                higher_tf_trend_status = "صعودي قوي (SuperTrend و EMAs)"
-            else:
-                higher_tf_trend_status = "غير صعودي"
-        
-        if not higher_tf_trend_ok:
-            essential_passed = False
-            failed_essential_conditions.append(f'Higher Timeframe ({HIGHER_TIMEFRAME}) Trend Confirmation')
-            signal_details['Higher_TF_Trend'] = f'فشل: لا يوجد تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME} ({higher_tf_trend_status})'
-        else:
-            signal_details['Higher_TF_Trend'] = f'نجاح: تم تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME}'
 
 
         # If any mandatory condition failed, reject the signal immediately
