@@ -97,7 +97,7 @@ TRAILING_STOP_BUFFER_PCT: float = 0.001 # Small buffer below the indicator line 
 
 # Additional Signal Conditions (Adjusted)
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Minimum required profit margin percentage (Changed to 1.0% as requested)
-MIN_VOLUME_15M_USDT: float = 50000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
+MIN_VOLUME_15M_USDT: float = 10000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
