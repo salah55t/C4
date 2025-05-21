@@ -97,7 +97,7 @@ TRAILING_STOP_BUFFER_PCT: float = 0.001 # Small buffer below the indicator line 
 
 # Additional Signal Conditions (Adjusted)
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Minimum required profit margin percentage (Changed to 1.0% as requested)
-MIN_VOLUME_15M_USDT: float = 10000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
+MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
@@ -1070,7 +1070,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
     if n < 2 * order + 1: return [], []
@@ -1287,7 +1287,7 @@ def generate_performance_report() -> str:
 def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, higher_tf_trend: str, btc_trend: str, fear_greed: str) -> Dict[str, str]:
     """
     Generates a trading recommendation using Gemini AI based on provided market data.
-    Returns a dictionary with 'recommendation' (BUY/HOLD/NEUTRAL) and 'reasoning'.
+    Returns a dictionary with 'recommendation' (شراء/احتفاظ/محايد) and 'reasoning' (in Arabic).
     """
     if not GEMINI_API_KEY:
         logger.warning("⚠️ [Gemini AI] GEMINI_API_KEY is not configured. Skipping AI recommendation.")
@@ -1298,45 +1298,46 @@ def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, h
     rsi = latest_data.get('rsi', np.nan)
     macd_hist = latest_data.get('macd_hist', np.nan)
     supertrend_val = latest_data.get('supertrend', np.nan)
-    supertrend_trend = "Uptrend" if latest_data.get('supertrend_trend') == 1 else ("Downtrend" if latest_data.get('supertrend_trend') == -1 else "Neutral")
+    supertrend_trend = "اتجاه صعودي" if latest_data.get('supertrend_trend') == 1 else ("اتجاه هبوطي" if latest_data.get('supertrend_trend') == -1 else "محايد")
     ema_short = latest_data.get(f'ema_{EMA_SHORT_PERIOD}', np.nan)
     ema_long = latest_data.get(f'ema_{EMA_LONG_PERIOD}', np.nan)
     vwma = latest_data.get('vwma', np.nan)
     adx = latest_data.get('adx', np.nan)
     di_plus = latest_data.get('di_plus', np.nan)
     di_minus = latest_data.get('di_minus', np.nan)
-    bullish_candle = "Yes" if latest_data.get('BullishCandleSignal') == 1 else "No"
+    bullish_candle = "نعم" if latest_data.get('BullishCandleSignal') == 1 else "لا"
     obv = latest_data.get('obv', np.nan)
 
-    # Construct the prompt for Gemini
+    # Construct the prompt for Gemini in Arabic
     prompt_text = f"""
-    Analyze the following cryptocurrency market data for {symbol} on a {timeframe} chart.
-    Provide a concise trading recommendation (BUY, HOLD, or NEUTRAL) and a brief reasoning based on the provided technical indicators.
-    Also, consider the higher timeframe trend and overall market sentiment.
+    حلل بيانات سوق العملات المشفرة التالية لـ {symbol} على الرسم البياني للإطار الزمني {timeframe}.
+    قدم توصية تداول موجزة (شراء، احتفاظ، محايد) وتعليلاً موجزاً باللغة العربية بناءً على المؤشرات الفنية المقدمة.
+    يجب أن تكون التوصية إحدى الكلمات التالية فقط: 'شراء', 'احتفاظ', 'محايد'.
+    ضع في اعتبارك أيضاً اتجاه الإطار الزمني الأعلى ومعنويات السوق العامة.
 
-    **Data for {symbol} ({timeframe}):**
-    Current Price: {current_price:.8g}
-    RSI: {rsi:.2f}
-    MACD Histogram: {macd_hist:.4f}
-    SuperTrend: {supertrend_val:.4f} (Trend: {supertrend_trend})
-    EMA{EMA_SHORT_PERIOD}: {ema_short:.4f}, EMA{EMA_LONG_PERIOD}: {ema_long:.4f}
-    VWMA: {vwma:.4f}
-    ADX: {adx:.2f}, DI+: {di_plus:.2f}, DI-: {di_minus:.2f}
-    Bullish Candlestick Pattern: {bullish_candle}
-    OBV: {obv:.2f}
+    **البيانات لـ {symbol} ({timeframe}):**
+    السعر الحالي: {current_price:.8g}
+    مؤشر القوة النسبية (RSI): {rsi:.2f}
+    هيستوجرام MACD: {macd_hist:.4f}
+    سوبر ترند: {supertrend_val:.4f} (الاتجاه: {supertrend_trend})
+    المتوسط المتحرك الأسي EMA{EMA_SHORT_PERIOD}: {ema_short:.4f}, المتوسط المتحرك الأسي EMA{EMA_LONG_PERIOD}: {ema_long:.4f}
+    متوسط السعر المرجح بالحجم (VWMA): {vwma:.4f}
+    مؤشر الاتجاه المتوسط (ADX): {adx:.2f}, DI+: {di_plus:.2f}, DI-: {di_minus:.2f}
+    نمط شمعة صعودي: {bullish_candle}
+    حجم التوازن (OBV): {obv:.2f}
 
-    **Higher Timeframe ({HIGHER_TIMEFRAME}) Trend Confirmation:** {higher_tf_trend}
-    **Bitcoin 4H Trend:** {btc_trend}
-    **Fear & Greed Index:** {fear_greed}
+    **تأكيد اتجاه الإطار الزمني الأعلى ({HIGHER_TIMEFRAME}):** {higher_tf_trend}
+    **اتجاه البيتكوين (4 ساعات):** {btc_trend}
+    **مؤشر الخوف والجشع:** {fear_greed}
 
-    **Recommendation Format (JSON):**
+    **تنسيق التوصية (JSON):**
     ```json
     {{
-      "recommendation": "BUY" | "HOLD" | "NEUTRAL",
-      "reasoning": "Brief explanation based on indicators and trends."
+      "recommendation": "شراء" | "احتفاظ" | "محايد",
+      "reasoning": "شرح موجز بناءً على المؤشرات والاتجاهات."
     }}
     ```
-    Ensure the JSON is valid and only contains the specified fields.
+    تأكد من أن JSON صالح ويحتوي فقط على الحقول المحددة.
     """
 
     # Gemini API endpoint and payload
@@ -1348,7 +1349,7 @@ def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, h
             "responseSchema": {
                 "type": "OBJECT",
                 "properties": {
-                    "recommendation": {"type": "STRING", "enum": ["BUY", "HOLD", "NEUTRAL"]},
+                    "recommendation": {"type": "STRING", "enum": ["شراء", "احتفاظ", "محايد"]},
                     "reasoning": {"type": "STRING"}
                 },
                 "propertyOrdering": ["recommendation", "reasoning"]
@@ -1358,7 +1359,7 @@ def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, h
 
     logger.debug(f"ℹ️ [Gemini AI] Sending request for {symbol}...")
     try:
-        response = requests.post(api_url, json=payload, timeout=15)
+        response = requests.post(api_url, json=payload, timeout=20) # Increased timeout slightly
         response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
         result = response.json()
 
@@ -1367,25 +1368,25 @@ def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, h
             json_str = result['candidates'][0]['content']['parts'][0]['text']
             ai_response = json.loads(json_str)
             recommendation = ai_response.get('recommendation', 'N/A')
-            reasoning = ai_response.get('reasoning', 'No reasoning provided.')
+            reasoning = ai_response.get('reasoning', 'لا يوجد تعليل.')
             logger.info(f"✅ [Gemini AI] Recommendation for {symbol}: {recommendation} - {reasoning}")
             return {"recommendation": recommendation, "reasoning": reasoning}
         else:
             logger.warning(f"⚠️ [Gemini AI] No valid recommendation found in Gemini response for {symbol}: {result}")
-            return {"recommendation": "N/A", "reasoning": "Invalid AI response structure."}
+            return {"recommendation": "N/A", "reasoning": "هيكل استجابة الذكاء الاصطناعي غير صالح."}
 
     except requests.exceptions.Timeout:
         logger.error(f"❌ [Gemini AI] Request to Gemini API timed out for {symbol}.")
-        return {"recommendation": "N/A", "reasoning": "AI API timeout."}
+        return {"recommendation": "N/A", "reasoning": "انتهت مهلة واجهة برمجة تطبيقات الذكاء الاصطناعي."}
     except requests.exceptions.HTTPError as http_err:
         logger.error(f"❌ [Gemini AI] HTTP error from Gemini API for {symbol}: {http_err.response.status_code} - {http_err.response.text}")
-        return {"recommendation": "N/A", "reasoning": f"AI API HTTP error: {http_err.response.status_code}"}
+        return {"recommendation": "N/A", "reasoning": f"خطأ HTTP في واجهة برمجة تطبيقات الذكاء الاصطناعي: {http_err.response.status_code}"}
     except json.JSONDecodeError as json_err:
         logger.error(f"❌ [Gemini AI] JSON decode error from Gemini API for {symbol}: {json_err} - Response: {response.text}")
-        return {"recommendation": "N/A", "reasoning": "AI response not valid JSON."}
+        return {"recommendation": "N/A", "reasoning": "استجابة الذكاء الاصطناعي ليست بتنسيق JSON صالح."}
     except Exception as e:
         logger.error(f"❌ [Gemini AI] Unexpected error getting AI recommendation for {symbol}: {e}", exc_info=True)
-        return {"recommendation": "N/A", "reasoning": "Unexpected AI error."}
+        return {"recommendation": "N/A", "reasoning": "خطأ غير متوقع في الذكاء الاصطناعي."}
 
 
 # ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
@@ -1440,6 +1441,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # These conditions ensure we are looking for entries within a confirmed bullish context.
         # =====================================================================
         self.essential_conditions = [
+            'ai_recommendation_is_buy', # NEW: AI Recommendation must be 'شراء'
             'price_above_emas_and_vwma', # New: Price must be above Short EMA, Long EMA, AND VWMA
             'ema_short_above_ema_long', # New: Short EMA must be above Long EMA
             'supertrend_up', # SuperTrend must be in an uptrend
@@ -1601,6 +1603,29 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
+        # NEW Mandatory Condition: AI Recommendation (must be "شراء")
+        ai_recommendation_data = get_ai_recommendation(
+            symbol=self.symbol,
+            latest_data=last_row,
+            timeframe=SIGNAL_GENERATION_TIMEFRAME,
+            higher_tf_trend=higher_tf_trend_status, # This needs to be calculated first
+            btc_trend=btc_trend,
+            fear_greed=get_fear_greed_index()
+        )
+        ai_recommendation = ai_recommendation_data.get('recommendation', 'N/A')
+        ai_reasoning = ai_recommendation_data.get('reasoning', 'لا يوجد تعليل.')
+        
+        signal_details['AI_Recommendation'] = ai_recommendation
+        signal_details['AI_Reasoning'] = ai_reasoning
+
+        if ai_recommendation != "شراء":
+            essential_passed = False
+            failed_essential_conditions.append('AI Recommendation (Must be "شراء")')
+            signal_details['AI_Recommendation_Status'] = f'فشل: الذكاء الاصطناعي أوصى بـ "{ai_recommendation}"'
+        else:
+            signal_details['AI_Recommendation_Status'] = f'نجاح: الذكاء الاصطناعي أوصى بـ "{ai_recommendation}"'
+
+
         # Mandatory Condition: Price must be above Short EMA, Long EMA, AND VWMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
                 last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
@@ -1609,9 +1634,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             essential_passed = False
             failed_essential_conditions.append('Price Above EMAs and VWMA')
             detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
-            signal_details['Price_MA_Alignment'] = f'Failed: Price not above all MAs ({detail_ma})'
+            signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق كل المتوسطات المتحركة ({detail_ma})'
         else:
-            signal_details['Price_MA_Alignment'] = f'Passed: Price above all MAs'
+            signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق كل المتوسطات المتحركة'
 
         # Mandatory Condition: Short EMA must be above Long EMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
@@ -1619,9 +1644,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('Short EMA Above Long EMA')
              detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
-             signal_details['EMA_Order'] = f'Failed: Short EMA not above Long EMA ({detail_ema_cross})'
+             signal_details['EMA_Order'] = f'فشل: المتوسط المتحرك الأسي القصير ليس فوق المتوسط المتحرك الأسي الطويل ({detail_ema_cross})'
         else:
-             signal_details['EMA_Order'] = f'Passed: Short EMA above Long EMA'
+             signal_details['EMA_Order'] = f'نجاح: المتوسط المتحرك الأسي القصير فوق المتوسط المتحرك الأسي الطويل'
 
 
         # Mandatory Condition: SuperTrend must be in an uptrend and Price closes above SuperTrend
@@ -1629,9 +1654,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('SuperTrend (Up Trend & Price Above)')
              detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-             signal_details['SuperTrend'] = f'Failed: Not Up Trend or Price Not Above ({detail_st})'
+             signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوق سوبر ترند ({detail_st})'
         else:
-            signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
+            signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوق سوبر ترند'
 
 
         # Mandatory Condition: MACD must be bullish (Positive histogram or bullish cross)
@@ -1639,12 +1664,12 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
              detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'Failed: Not Positive Hist AND No Bullish Cross ({detail_macd})'
+             signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي و/أو لا يوجد تقاطع صعودي ({detail_macd})'
         else:
-             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
+             detail_macd = f'هيستوجرام > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
              detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
-             signal_details['MACD'] = f'Passed: {detail_macd}'
+             detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
+             signal_details['MACD'] = f'نجاح: {detail_macd}'
 
 
         # Mandatory Condition: Stronger ADX and DI+ above DI- condition (ADX threshold increased)
@@ -1652,14 +1677,14 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append(f'ADX/DI (Strong Trending Bullish, ADX > {MIN_ADX_TREND_STRENGTH})')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-             signal_details['ADX/DI'] = f'Failed: Not Strong Trending Bullish (ADX <= {MIN_ADX_TREND_STRENGTH} or DI+ <= DI-) ({detail_adx})'
+             signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
         else:
-             signal_details['ADX/DI'] = f'Passed: Strong Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
+             signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
         # NEW Mandatory Condition: Higher Timeframe Trend Confirmation
         higher_tf_df = fetch_historical_data(self.symbol, interval=HIGHER_TIMEFRAME, days=HIGHER_TIMEFRAME_LOOKBACK_DAYS)
         higher_tf_trend_ok = False
-        higher_tf_trend_status = "N/A (Insufficient Data)"
+        higher_tf_trend_status = "غير كافية البيانات" # Default status
         if higher_tf_df is not None and not higher_tf_df.empty:
             # Calculate SuperTrend for higher timeframe
             higher_tf_df = calculate_supertrend(higher_tf_df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
@@ -1680,9 +1705,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         if not higher_tf_trend_ok:
             essential_passed = False
             failed_essential_conditions.append(f'Higher Timeframe ({HIGHER_TIMEFRAME}) Trend Confirmation')
-            signal_details['Higher_TF_Trend'] = f'Failed: No {HIGHER_TIMEFRAME} Bullish Trend Confirmation ({higher_tf_trend_status})'
+            signal_details['Higher_TF_Trend'] = f'فشل: لا يوجد تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME} ({higher_tf_trend_status})'
         else:
-            signal_details['Higher_TF_Trend'] = f'Passed: {HIGHER_TIMEFRAME} Bullish Trend Confirmed'
+            signal_details['Higher_TF_Trend'] = f'نجاح: تم تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME}'
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1703,60 +1728,60 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # Price above VWAP (Original VWAP, daily reset) - Still optional
         if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
             current_score += self.condition_weights.get('above_vwap', 0)
-            signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap", 0)})'
+            signal_details['VWAP_Daily'] = f'فوق متوسط السعر المرجح بالحجم اليومي (+{self.condition_weights.get("above_vwap", 0)})'
         else:
-             signal_details['VWAP_Daily'] = f'Below Daily VWAP (0)'
+             signal_details['VWAP_Daily'] = f'تحت متوسط السعر المرجح بالحجم اليومي (0)'
 
 
         # RSI in acceptable zone (not extreme overbought)
         if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
+            signal_details['RSI_Basic'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
-             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) Not OK (0)'
+             signal_details['RSI_Basic'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) ليس مقبولاً (0)'
 
 
         # Bullish engulfing or hammer candle present (Increased weight)
         if last_row.get('BullishCandleSignal', 0) == 1:
             current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
+            signal_details['Candle'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle", 0)})'
         else:
-             signal_details['Candle'] = f'No Bullish Pattern (0)'
+             signal_details['Candle'] = f'لا يوجد نمط شمعة صعودي (0)'
 
 
         # Price not at upper Bollinger Band (still useful for some strategies)
         # This helps avoid entering right at a potential resistance level.
         if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
              current_score += self.condition_weights.get('not_bb_extreme', 0)
-             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
+             signal_details['Bollinger_Basic'] = f'ليس عند الحد العلوي لبولينجر (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
-             signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
+             signal_details['Bollinger_Basic'] = f'عند أو فوق الحد العلوي لبولينجر (0)'
 
 
         # OBV is rising (Increased weight)
         # Check OBV only if the previous value is valid
         if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']:
             current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV_Last'] = f'Rising on last candle (+{self.condition_weights.get("obv_rising", 0)})'
+            signal_details['OBV_Last'] = f'يرتفع في الشمعة الأخيرة (+{self.condition_weights.get("obv_rising", 0)})'
         else:
-             signal_details['OBV_Last'] = f'Not Rising on last candle (0)'
+             signal_details['OBV_Last'] = f'لا يرتفع في الشمعة الأخيرة (0)'
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
         # This helps confirm momentum is building.
         if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80: # Adjusted range slightly for scalping
              current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
+             signal_details['RSI_Filter_Breakout'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
+             signal_details['RSI_Filter_Breakout'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) ليس في النطاق الصعودي (0)'
 
 
         # MACD filter for breakout (optional): MACD histogram is positive
         # Confirms bullish momentum is dominant.
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
              current_score += self.condition_weights.get('macd_filter_breakout', 0)
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
+             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else:
-             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
+             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD ليس إيجابياً (0)'
 
         # MACD histogram is increasing over the last X candles (strong momentum)
         # This is a key condition for targeting the *beginning* of upward moves.
@@ -1772,9 +1797,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         if macd_hist_increasing:
              current_score += self.condition_weights.get('macd_hist_increasing', 0)
-             signal_details['MACD_Hist_Increasing'] = f'MACD Hist increasing over last {MACD_HIST_INCREASE_CANDLES} candles (+{self.condition_weights.get("macd_hist_increasing", 0)})'
+             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("macd_hist_increasing", 0)})'
         else:
-             signal_details['MACD_Hist_Increasing'] = f'MACD Hist not increasing over last {MACD_HIST_INCREASE_CANDLES} candles (0)'
+             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD لا يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (0)'
 
 
         # OBV is increasing over the last X candles (volume confirmation of momentum)
@@ -1791,9 +1816,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         if obv_increasing_recent:
              current_score += self.condition_weights.get('obv_increasing_recent', 0)
-             signal_details['OBV_Increasing_Recent'] = f'OBV increasing over last {OBV_INCREASE_CANDLES} candles (+{self.condition_weights.get("obv_increasing_recent", 0)})'
+             signal_details['OBV_Increasing_Recent'] = f'حجم التوازن (OBV) يتزايد مؤخراً خلال آخر {OBV_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("obv_increasing_recent", 0)})'
         else:
-             signal_details['OBV_Increasing_Recent'] = f'OBV not increasing over last {OBV_INCREASE_CANDLES} candles (0)'
+             signal_details['OBV_Increasing_Recent'] = f'حجم التوازن (OBV) لا يتزايد مؤخراً خلال آخر {OBV_INCREASE_CANDLES} شمعات (0)'
 
         # ------------------------------------------
 
@@ -1840,20 +1865,6 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         reward_amount = initial_target - current_price
         risk_reward_ratio = reward_amount / risk_amount if risk_amount > 0 else float('inf')
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Risk-Reward Ratio: {risk_reward_ratio:.2f}")
-
-        # --- NEW: Get AI Recommendation ---
-        ai_recommendation_data = get_ai_recommendation(
-            symbol=self.symbol,
-            latest_data=last_row,
-            timeframe=SIGNAL_GENERATION_TIMEFRAME,
-            higher_tf_trend=higher_tf_trend_status, # Pass the detailed status
-            btc_trend=btc_trend,
-            fear_greed=get_fear_greed_index()
-        )
-        # Add AI recommendation to signal details
-        signal_details['AI_Recommendation'] = ai_recommendation_data.get('recommendation', 'N/A')
-        signal_details['AI_Reasoning'] = ai_recommendation_data.get('reasoning', 'No reasoning.')
-        # ----------------------------------
 
         # Compile final signal data
         signal_output = {
@@ -1963,7 +1974,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
 
         # Get AI recommendation details
         ai_recommendation = signal_details.get('AI_Recommendation', 'N/A')
-        ai_reasoning = signal_details.get('AI_Reasoning', 'No reasoning provided.')
+        ai_reasoning = signal_details.get('AI_Reasoning', 'لا يوجد تعليل.')
 
         # Build the message in Arabic with weighted score and condition details
         message = (
@@ -1989,12 +2000,13 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  • **التعليل:** {ai_reasoning}\n"
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'Passed: Price above all MAs' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n"
-            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'Passed: Short EMA above Long EMA' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n"
-            f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
-            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
-            f"  - تأكيد الاتجاه ({HIGHER_TIMEFRAME}): {'صعودي ✅' if 'Passed' in signal_details.get('Higher_TF_Trend', '') else 'غير صعودي ❌'}\n"
+            f"  - توصية الذكاء الاصطناعي: {'شراء ✅' if signal_details.get('AI_Recommendation_Status', '').startswith('نجاح') else 'فشل ❌'}\n" # NEW
+            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'نجاح' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n"
+            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'نجاح' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n"
+            f"  - سوبر ترند: {'صعودي ✅' if 'نجاح' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
+            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'نجاح' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
+            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'نجاح' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
+            f"  - تأكيد الاتجاه ({HIGHER_TIMEFRAME}): {'صعودي ✅' if 'نجاح' in signal_details.get('Higher_TF_Trend', '') else 'غير صعودي ❌'}\n"
             f"——————————————\n"
             f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
             f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
