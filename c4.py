@@ -38,8 +38,6 @@ try:
     DB_URL: str = config('DATABASE_URL')
     # استخدام قيمة افتراضية None إذا لم يكن المتغير موجودًا
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
-    # NEW: Gemini API Key
-    GEMINI_API_KEY: Optional[str] = config('GEMINI_API_KEY', default=None)
 except Exception as e:
      logger.critical(f"❌ Failed to load essential environment variables: {e}")
      exit(1) # استخدام رمز خروج غير صفري للإشارة إلى خطأ
@@ -49,8 +47,6 @@ logger.info(f"Telegram Token: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN
 logger.info(f"Telegram Chat ID: {CHAT_ID}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
-logger.info(f"Gemini API Key: {'Available' if GEMINI_API_KEY else 'Not available'}")
-
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للسكالبينج على إطار 5 دقائق) ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT (Keep small for testing)
@@ -59,10 +55,6 @@ SIGNAL_GENERATION_TIMEFRAME: str = '5m' # Timeframe for signal generation (Chang
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Reduced historical data lookback for shorter timeframe
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and stop loss updates (Changed to 5m)
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1   # Reduced historical data lookback in days for signal tracking
-
-# --- NEW: Higher Timeframe for Trend Confirmation ---
-HIGHER_TIMEFRAME: str = '15m' # New: Higher timeframe for trend confirmation
-HIGHER_TIMEFRAME_LOOKBACK_DAYS: int = 7 # New: Lookback for higher timeframe data
 
 # =============================================================================
 # --- Indicator Parameters (Adjusted for 5m Scalping and Early Entry) ---
@@ -80,7 +72,6 @@ FIB_TOLERANCE: float = 0.005 # Keep tolerance
 LOOKBACK_FOR_SWINGS: int = 50 # Reduced lookback for swings
 ENTRY_ATR_PERIOD: int = 10     # ATR Period for entry (Reduced)
 ENTRY_ATR_MULTIPLIER: float = 1.5 # ATR Multiplier for initial target/stop (SIGNIFICANTLY REDUCED for tighter levels)
-SL_ATR_MULTIPLIER: float = 2.0 # New: ATR Multiplier for initial Stop Loss (Increased slightly for more buffer)
 BOLLINGER_WINDOW: int = 20     # Bollinger Bands Window (Keep 20, standard)
 BOLLINGER_STD_DEV: int = 2       # Bollinger Bands Standard Deviation (Keep 2)
 MACD_FAST: int = 9            # MACD Fast Period (Reduced)
@@ -90,13 +81,15 @@ ADX_PERIOD: int = 10            # ADX Period (Reduced)
 SUPERTREND_PERIOD: int = 10     # SuperTrend Period (Keep 10, standard)
 SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or keep 3.0)
 
-# --- Trailing Stop Loss Parameters (Re-introduced and Adjusted for Scalping) ---
-TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8%)
-TRAILING_STOP_INDICATOR: str = 'supertrend' # Indicator to follow for trailing stop ('supertrend' or 'ema_short')
-TRAILING_STOP_BUFFER_PCT: float = 0.001 # Small buffer below the indicator line (0.1%)
+# Trailing Stop Loss (Adjusted for Scalping) - REMOVED
+# TRAILING_STOP_ACTIVATION_PROFIT_PCT: float = 0.008 # Profit percentage to activate trailing stop (0.8% - Reduced)
+# TRAILING_STOP_INDICATOR: str = 'supertrend' # New: Indicator to follow for trailing stop ('supertrend' or 'ema_short')
+# TRAILING_STOP_INDICATOR_PERIOD: int = SUPERTREND_PERIOD # New: Period for the trailing stop indicator (use SuperTrend period or EMA_SHORT_PERIOD)
+# TRAILING_STOP_BUFFER_PCT: float = 0.001 # New: Small buffer below the indicator line (0.1%)
 
 # Additional Signal Conditions (Adjusted)
-MIN_PROFIT_MARGIN_PCT: float = 1.0 # Minimum required profit margin percentage (Changed to 1.0% as requested)
+# MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
+MIN_PROFIT_MARGIN_PCT: float = 1.0
 MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
@@ -309,7 +302,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             cur = conn.cursor()
             logger.info("✅ [DB] Successfully connected to database.")
 
-            # --- Create or update signals table (Modified schema for SL) ---
+            # --- Create or update signals table (Modified schema) ---
             logger.info("[DB] Checking/Creating 'signals' table...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
@@ -318,34 +311,27 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
                     current_target DOUBLE PRECISION NOT NULL,
-                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- Re-added
-                    current_stop_loss DOUBLE PRECISION NOT NULL, -- Re-added
-                    hit_stop_loss BOOLEAN DEFAULT FALSE, -- Re-added
-                    profitable_stop_loss BOOLEAN DEFAULT FALSE, -- Re-added
-                    is_trailing_active BOOLEAN DEFAULT FALSE, -- Re-added
-                    last_trailing_update_price DOUBLE PRECISION, -- Re-added
-                    r2_score DOUBLE PRECISION,
+                    r2_score DOUBLE PRECISION, -- Now represents the weighted signal score
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
                     closing_price DOUBLE PRECISION,
                     closed_at TIMESTAMP,
                     sent_at TIMESTAMP DEFAULT NOW(),
-                    entry_time TIMESTAMP DEFAULT NOW(),
-                    time_to_target INTERVAL,
+                    entry_time TIMESTAMP DEFAULT NOW(), -- Added entry_time
+                    time_to_target INTERVAL, -- Added time_to_target
                     profit_percentage DOUBLE PRECISION,
                     strategy_name TEXT,
                     signal_details JSONB
+                    -- Removed: initial_stop_loss, current_stop_loss, hit_stop_loss, profitable_stop_loss, is_trailing_active, last_trailing_update_price
                 );""")
             conn.commit()
             logger.info("✅ [DB] 'signals' table exists or was created.")
 
             # --- Check and add missing columns (if necessary) ---
-            # Adjusted required columns based on the new schema
+            # Adjusted required columns based on the new schema - FIX: Added 'id'
             required_columns = {
                 "id", "symbol", "entry_price", "initial_target",
-                "current_target", "initial_stop_loss", "current_stop_loss",
-                "hit_stop_loss", "profitable_stop_loss", "is_trailing_active",
-                "last_trailing_update_price", "r2_score", "volume_15m",
+                "current_target", "r2_score", "volume_15m",
                 "achieved_target", "closing_price", "closed_at",
                 "sent_at", "entry_time", "time_to_target",
                 "profit_percentage", "strategy_name", "signal_details"
@@ -353,43 +339,16 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'signals' AND table_schema = 'public';")
             existing_columns = {row['column_name'] for row in cur.fetchall()}
             missing_columns = required_columns - existing_columns
+            extra_columns = existing_columns - required_columns # Identify columns to potentially remove
 
             if missing_columns:
-                logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Attempting to add them...")
-                for col in missing_columns:
-                    # Define column types for new columns
-                    col_type = "DOUBLE PRECISION"
-                    default_val = "0.0"
-                    if col in ["hit_stop_loss", "profitable_stop_loss", "is_trailing_active", "achieved_target"]:
-                        col_type = "BOOLEAN"
-                        default_val = "FALSE"
-                    elif col == "closed_at" or col == "entry_time" or col == "sent_at":
-                        col_type = "TIMESTAMP"
-                        default_val = "NOW()"
-                    elif col == "time_to_target":
-                        col_type = "INTERVAL"
-                        default_val = "'0 seconds'::interval"
-                    elif col == "signal_details":
-                        col_type = "JSONB"
-                        default_val = "'{}'::jsonb"
-                    elif col == "strategy_name":
-                        col_type = "TEXT"
-                        default_val = "'Scalping_Momentum_Trend'"
-
-                    try:
-                        cur.execute(sql.SQL(f"ALTER TABLE signals ADD COLUMN {col} {col_type} DEFAULT {default_val};"))
-                        conn.commit()
-                        logger.info(f"✅ [DB] Column '{col}' added to 'signals' table.")
-                    except psycopg2.Error as add_col_err:
-                        # Handle cases where column already exists (e.g., if re-running script after manual fix)
-                        if "already exists" in str(add_col_err):
-                            logger.warning(f"⚠️ [DB] Column '{col}' already exists, skipping addition.")
-                            conn.rollback() # Rollback if there was an error but not critical
-                        else:
-                            logger.error(f"❌ [DB] Error adding column '{col}': {add_col_err}")
-                            conn.rollback()
+                logger.warning(f"⚠️ [DB] Following columns are missing in 'signals' table: {missing_columns}. Please add them manually if needed.")
             else:
                 logger.info("✅ [DB] All required columns exist in 'signals' table.")
+
+            if extra_columns:
+                 logger.warning(f"⚠️ [DB] Following extra columns exist in 'signals' table (likely stop-loss related): {extra_columns}. Consider removing them manually.")
+
 
             # --- Create market_dominance table (if it doesn't exist) ---
             logger.info("[DB] Checking/Creating 'market_dominance' table...")
@@ -729,7 +688,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
         return df_calc
     # ADX requires period + an additional period for smoothing
     if len(df_calc) < period * 2:
-        logger.warning(f"⚠️ [Indicator ADX] Insufficient data ({len(df)} < {period * 2}) to calculate ADX.")
+        logger.warning(f"⚠️ [Indicator ADX] Insufficient data ({len(df_calc)} < {period * 2}) to calculate ADX.")
         df_calc['adx'] = np.nan
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
@@ -1179,67 +1138,61 @@ def generate_performance_report() -> str:
         # Use a new cursor within the function to ensure no interference
         with conn.cursor() as report_cur: # Uses RealDictCursor
             # 1. Open Signals
-            report_cur.execute("SELECT id, symbol, entry_price, entry_time FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE ORDER BY entry_time DESC;")
+            # Adjusted query to reflect removal of hit_stop_loss
+            report_cur.execute("SELECT id, symbol, entry_price, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
             open_signals = report_cur.fetchall()
             open_signals_count = len(open_signals)
 
-            # 2. Closed Signals Statistics (Target Hits)
+            # 2. Closed Signals Statistics (Only Target Hits)
+            # Adjusted query to only count achieved targets as closed
             report_cur.execute("""
                 SELECT
-                    COUNT(*) AS total_winning_trades,
-                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum,
+                    COUNT(*) AS total_closed,
+                    COUNT(*) AS winning_signals, -- All closed signals are winning (target hit)
+                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum, -- Sum of percentages
                     COALESCE(AVG(profit_percentage), 0) AS avg_profit_pct,
-                    COALESCE(SUM(entry_price * (1 + profit_percentage/100.0)), 0) AS total_exit_value_winning
+                    COALESCE(AVG(profit_percentage), 0) AS avg_win_pct, -- Avg win is same as avg profit
+                    COALESCE(SUM(entry_price * (1 + profit_percentage/100.0)), 0) AS total_exit_value -- Total value at exit for fee calculation
                 FROM signals
                 WHERE achieved_target = TRUE;
             """)
-            winning_stats = report_cur.fetchone() or {}
+            closed_stats = report_cur.fetchone() or {} # Handle case with no results
 
-            total_winning_trades = winning_stats.get('total_winning_trades', 0)
-            total_profit_pct_sum = winning_stats.get('total_profit_pct_sum', 0.0)
-            avg_win_pct = winning_stats.get('avg_profit_pct', 0.0)
-            total_exit_value_winning = winning_stats.get('total_exit_value_winning', 0.0)
+            total_closed = closed_stats.get('total_closed', 0)
+            winning_signals = closed_stats.get('winning_signals', 0)
+            losing_signals = 0 # No losing signals based on this simplified logic
+            total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0) # Sum of percentages
+            gross_profit_pct_sum = total_profit_pct_sum # <--- ADDED THIS LINE
+            avg_win_pct = closed_stats.get('avg_profit_pct', 0.0) # Corrected to use avg_profit_pct from query
+            total_exit_value = closed_stats.get('total_exit_value', 0.0)
 
-            # 3. Closed Signals Statistics (Stop Loss Hits)
-            report_cur.execute("""
-                SELECT
-                    COUNT(*) AS total_losing_trades,
-                    COALESCE(SUM(profit_percentage), 0) AS total_loss_pct_sum,
-                    COALESCE(AVG(profit_percentage), 0) AS avg_loss_pct,
-                    COALESCE(SUM(entry_price * (1 + profit_percentage/100.0)), 0) AS total_exit_value_losing
-                FROM signals
-                WHERE hit_stop_loss = TRUE;
-            """)
-            losing_stats = report_cur.fetchone() or {}
-
-            total_losing_trades = losing_stats.get('total_losing_trades', 0)
-            total_loss_pct_sum = losing_stats.get('total_loss_pct_sum', 0.0)
-            avg_loss_pct = losing_stats.get('avg_loss_pct', 0.0)
-            total_exit_value_losing = losing_stats.get('total_exit_value_losing', 0.0)
-
-            total_closed_trades = total_winning_trades + total_losing_trades
-            win_rate = (total_winning_trades / total_closed_trades) * 100 if total_closed_trades > 0 else 0.0
-
-            # Calculate total profit/loss in USD
+            # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
+            # Gross profit is based on percentage gain on initial TRADE_VALUE
             gross_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
-            gross_loss_usd = (total_loss_pct_sum / 100.0) * TRADE_VALUE # This will be negative
 
-            # Calculate total fees for all closed trades
-            total_fees_winning = (total_winning_trades * TRADE_VALUE * BINANCE_FEE_RATE) + (total_exit_value_winning * BINANCE_FEE_RATE)
-            total_fees_losing = (total_losing_trades * TRADE_VALUE * BINANCE_FEE_RATE) + (total_exit_value_losing * BINANCE_FEE_RATE)
-            total_fees_usd = total_fees_winning + total_fees_losing
+            # Calculate total fees for closed trades
+            # Each trade has two legs: entry and exit. Fees apply to the value of each leg.
+            # Assuming TRADE_VALUE is the initial investment for each trade.
+            total_fees_usd = (total_closed * TRADE_VALUE * BINANCE_FEE_RATE) + (total_exit_value * BINANCE_FEE_RATE)
 
-            net_profit_usd = gross_profit_usd + gross_loss_usd - total_fees_usd # Add gross_loss_usd (which is negative)
-            net_profit_pct = (net_profit_usd / (total_closed_trades * TRADE_VALUE)) * 100 if total_closed_trades * TRADE_VALUE > 0 else 0.0
+            net_profit_usd = gross_profit_usd - total_fees_usd
+            net_profit_pct = (net_profit_usd / (total_closed * TRADE_VALUE)) * 100 if total_closed * TRADE_VALUE > 0 else 0.0
 
-            # Profit Factor: Total Gross Profit / Absolute Total Gross Loss
-            profit_factor = (gross_profit_usd / abs(gross_loss_usd)) if abs(gross_loss_usd) > 0 else float('inf')
+            gross_loss_pct_sum = 0.0
+            avg_loss_pct = 0.0
+
+
+            # 3. Calculate Derived Metrics
+            win_rate = 100.0 if total_closed > 0 else 0.0 # Win rate is 100% for target hits
+
+             # Profit Factor: Total Profit / Absolute Total Loss - Less meaningful without losses
+            profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
 
 
         # 4. Format the report in Arabic
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
-            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل صفقة)_ \n"
+            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل صفقة)_ \n" # Indicate assumed trade size and fee
             f"——————————————\n"
             f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
         )
@@ -1255,20 +1208,26 @@ def generate_performance_report() -> str:
 
         report += (
             f"——————————————\n"
-            f"📉 *إحصائيات الإشارات المغلقة:*\n"
-            f"  • إجمالي الإشارات المغلقة: *{total_closed_trades}*\n"
-            f"  ✅ إشارات رابحة: *{total_winning_trades}* ({win_rate:.2f}%)\n"
-            f"  ❌ إشارات خاسرة: *{total_losing_trades}* ({100 - win_rate:.2f}%)\n"
+            f"📉 *إحصائيات الإشارات المغلقة (تم تحقيق الهدف فقط):*\n" # Clarified
+            f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
+            f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n" # Add win rate here
+            f"  ❌ إشارات خاسرة: *{losing_signals}*\n" # Will be 0
             f"——————————————\n"
-            f"💰 *الربحية الإجمالية:*\n"
-            f"  • إجمالي الربح الإجمالي: *{total_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n"
-            f"  • إجمالي الخسارة الإجمالية: *{total_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*)\n"
+            f"💰 *الربحية الإجمالية (للصفقات التي حققت الهدف):*\n" # Clarified
+            f"  • إجمالي الربح الإجمالي: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n" # Show gross profit % and USD
             f"  • إجمالي الرسوم المدفوعة: *${total_fees_usd:,.2f}*\n"
-            f"  • *الربح الصافي:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)\n"
+            f"  • *الربح الصافي:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)\n" # Net Profit
             f"  • متوسط الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
-            f"  • متوسط الصفقة الخاسرة: *{avg_loss_pct:+.2f}%*\n"
-            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
+            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n" # Will be infinity
             f"——————————————\n"
+        )
+
+        # Add a placeholder or note about the detailed report if needed
+        report += "ℹ️ *ملاحظة: هذا التقرير يعرض فقط الصفقات التي حققت الهدف، حيث تم إزالة منطق وقف الخسارة.*" # Added note about SL removal
+        report += "\n——————————————\n"
+
+
+        report += (
             f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
 
@@ -1282,112 +1241,6 @@ def generate_performance_report() -> str:
     except Exception as e:
         logger.error(f"❌ [Report] Unexpected error generating performance report: {e}", exc_info=True)
         return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
-
-# ---------------------- Gemini AI Integration ----------------------
-def get_ai_recommendation(symbol: str, latest_data: pd.Series, timeframe: str, higher_tf_trend: str, btc_trend: str, fear_greed: str) -> Dict[str, str]:
-    """
-    Generates a trading recommendation using Gemini AI based on provided market data.
-    Returns a dictionary with 'recommendation' (شراء/احتفاظ/محايد) and 'reasoning' (in Arabic).
-    """
-    if not GEMINI_API_KEY:
-        logger.warning("⚠️ [Gemini AI] GEMINI_API_KEY is not configured. Skipping AI recommendation.")
-        return {"recommendation": "N/A", "reasoning": "API key missing."}
-
-    # Prepare data for the prompt
-    current_price = latest_data['close']
-    rsi = latest_data.get('rsi', np.nan)
-    macd_hist = latest_data.get('macd_hist', np.nan)
-    supertrend_val = latest_data.get('supertrend', np.nan)
-    supertrend_trend = "اتجاه صعودي" if latest_data.get('supertrend_trend') == 1 else ("اتجاه هبوطي" if latest_data.get('supertrend_trend') == -1 else "محايد")
-    ema_short = latest_data.get(f'ema_{EMA_SHORT_PERIOD}', np.nan)
-    ema_long = latest_data.get(f'ema_{EMA_LONG_PERIOD}', np.nan)
-    vwma = latest_data.get('vwma', np.nan)
-    adx = latest_data.get('adx', np.nan)
-    di_plus = latest_data.get('di_plus', np.nan)
-    di_minus = latest_data.get('di_minus', np.nan)
-    bullish_candle = "نعم" if latest_data.get('BullishCandleSignal') == 1 else "لا"
-    obv = latest_data.get('obv', np.nan)
-
-    # Construct the prompt for Gemini in Arabic
-    prompt_text = f"""
-    حلل بيانات سوق العملات المشفرة التالية لـ {symbol} على الرسم البياني للإطار الزمني {timeframe}.
-    قدم توصية تداول موجزة (شراء، احتفاظ، محايد) وتعليلاً موجزاً باللغة العربية بناءً على المؤشرات الفنية المقدمة.
-    يجب أن تكون التوصية إحدى الكلمات التالية فقط: 'شراء', 'احتفاظ', 'محايد'.
-    ضع في اعتبارك أيضاً اتجاه الإطار الزمني الأعلى ومعنويات السوق العامة.
-
-    **البيانات لـ {symbol} ({timeframe}):**
-    السعر الحالي: {current_price:.8g}
-    مؤشر القوة النسبية (RSI): {rsi:.2f}
-    هيستوجرام MACD: {macd_hist:.4f}
-    سوبر ترند: {supertrend_val:.4f} (الاتجاه: {supertrend_trend})
-    المتوسط المتحرك الأسي EMA{EMA_SHORT_PERIOD}: {ema_short:.4f}, المتوسط المتحرك الأسي EMA{EMA_LONG_PERIOD}: {ema_long:.4f}
-    متوسط السعر المرجح بالحجم (VWMA): {vwma:.4f}
-    مؤشر الاتجاه المتوسط (ADX): {adx:.2f}, DI+: {di_plus:.2f}, DI-: {di_minus:.2f}
-    نمط شمعة صعودي: {bullish_candle}
-    حجم التوازن (OBV): {obv:.2f}
-
-    **تأكيد اتجاه الإطار الزمني الأعلى ({HIGHER_TIMEFRAME}):** {higher_tf_trend}
-    **اتجاه البيتكوين (4 ساعات):** {btc_trend}
-    **مؤشر الخوف والجشع:** {fear_greed}
-
-    **تنسيق التوصية (JSON):**
-    ```json
-    {{
-      "recommendation": "شراء" | "احتفاظ" | "محايد",
-      "reasoning": "شرح موجز بناءً على المؤشرات والاتجاهات."
-    }}
-    ```
-    تأكد من أن JSON صالح ويحتوي فقط على الحقول المحددة.
-    """
-
-    # Gemini API endpoint and payload
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": {
-                "type": "OBJECT",
-                "properties": {
-                    "recommendation": {"type": "STRING", "enum": ["شراء", "احتفاظ", "محايد"]},
-                    "reasoning": {"type": "STRING"}
-                },
-                "propertyOrdering": ["recommendation", "reasoning"]
-            }
-        }
-    }
-
-    logger.debug(f"ℹ️ [Gemini AI] Sending request for {symbol}...")
-    try:
-        response = requests.post(api_url, json=payload, timeout=20) # Increased timeout slightly
-        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-        result = response.json()
-
-        if result.get('candidates') and result['candidates'][0].get('content') and result['candidates'][0]['content'].get('parts'):
-            # The API returns the JSON as a string within the 'text' field
-            json_str = result['candidates'][0]['content']['parts'][0]['text']
-            ai_response = json.loads(json_str)
-            recommendation = ai_response.get('recommendation', 'N/A')
-            reasoning = ai_response.get('reasoning', 'لا يوجد تعليل.')
-            logger.info(f"✅ [Gemini AI] Recommendation for {symbol}: {recommendation} - {reasoning}")
-            return {"recommendation": recommendation, "reasoning": reasoning}
-        else:
-            logger.warning(f"⚠️ [Gemini AI] No valid recommendation found in Gemini response for {symbol}: {result}")
-            return {"recommendation": "N/A", "reasoning": "هيكل استجابة الذكاء الاصطناعي غير صالح."}
-
-    except requests.exceptions.Timeout:
-        logger.error(f"❌ [Gemini AI] Request to Gemini API timed out for {symbol}.")
-        return {"recommendation": "N/A", "reasoning": "انتهت مهلة واجهة برمجة تطبيقات الذكاء الاصطناعي."}
-    except requests.exceptions.HTTPError as http_err:
-        logger.error(f"❌ [Gemini AI] HTTP error from Gemini API for {symbol}: {http_err.response.status_code} - {http_err.response.text}")
-        return {"recommendation": "N/A", "reasoning": f"خطأ HTTP في واجهة برمجة تطبيقات الذكاء الاصطناعي: {http_err.response.status_code}"}
-    except json.JSONDecodeError as json_err:
-        logger.error(f"❌ [Gemini AI] JSON decode error from Gemini API for {symbol}: {json_err} - Response: {response.text}")
-        return {"recommendation": "N/A", "reasoning": "استجابة الذكاء الاصطناعي ليست بتنسيق JSON صالح."}
-    except Exception as e:
-        logger.error(f"❌ [Gemini AI] Unexpected error getting AI recommendation for {symbol}: {e}", exc_info=True)
-        return {"recommendation": "N/A", "reasoning": "خطأ غير متوقع في الذكاء الاصطناعي."}
-
 
 # ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
 
@@ -1441,13 +1294,11 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # These conditions ensure we are looking for entries within a confirmed bullish context.
         # =====================================================================
         self.essential_conditions = [
-            'ai_recommendation_is_buy', # NEW: AI Recommendation must be 'شراء'
             'price_above_emas_and_vwma', # New: Price must be above Short EMA, Long EMA, AND VWMA
             'ema_short_above_ema_long', # New: Short EMA must be above Long EMA
             'supertrend_up', # SuperTrend must be in an uptrend
             'macd_positive_or_cross', # MACD must be bullish (positive hist or bullish cross)
             'adx_trending_bullish_strong', # ADX must confirm a strong bullish trend (DI+ > DI- and ADX > threshold)
-            'higher_timeframe_trend_confirm' # NEW: Trend confirmation on a higher timeframe
         ]
         # =====================================================================
 
@@ -1474,7 +1325,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         try:
             df_calc = df.copy()
             # ATR is required for SuperTrend and Stop Loss/Target
-            # Use the ATR period specific to SuperTrend here (ENTRY_ATR_PERIOD)
+            # Use the ATR period designated for entry/tracking (ENTRY_ATR_PERIOD)
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
             # SuperTrend needs ATR calculated with its own period (SUPERTREND_PERIOD)
             # Recalculate SuperTrend with its specific period
@@ -1546,7 +1397,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         """
         Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
         Adjusted for Scalping and targeting early upward momentum.
-        Includes initial Stop Loss calculation and multi-timeframe trend confirmation.
+        Stop-loss logic is removed.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal...")
 
@@ -1559,7 +1410,7 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         # Adjust required columns list based on the new EMA names and added supertrend value
         required_cols_buy_signal_adjusted = [
-            'close', 'low', # Added 'low' for SL calculation
+            'close',
             f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
             'rsi', 'atr',
             'macd', 'macd_signal', 'macd_hist',
@@ -1603,59 +1454,6 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         failed_essential_conditions = []
         signal_details = {} # To store details of checked conditions (mandatory and optional)
 
-        # NEW Mandatory Condition: Higher Timeframe Trend Confirmation - Calculate this first
-        higher_tf_df = fetch_historical_data(self.symbol, interval=HIGHER_TIMEFRAME, days=HIGHER_TIMEFRAME_LOOKBACK_DAYS)
-        higher_tf_trend_ok = False
-        # Initialize higher_tf_trend_status with a default value
-        higher_tf_trend_status = "N/A (بيانات الإطار الزمني الأعلى غير متوفرة)" # Default status
-        if higher_tf_df is not None and not higher_tf_df.empty:
-            # Calculate SuperTrend for higher timeframe
-            higher_tf_df = calculate_supertrend(higher_tf_df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            # Calculate EMAs for higher timeframe
-            higher_tf_df[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_SHORT_PERIOD)
-            higher_tf_df[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(higher_tf_df['close'], EMA_LONG_PERIOD)
-
-            latest_higher_tf = higher_tf_df.iloc[-1]
-
-            if (pd.notna(latest_higher_tf['supertrend_trend']) and latest_higher_tf['supertrend_trend'] == 1 and # SuperTrend is uptrend
-                pd.notna(latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']) and
-                latest_higher_tf[f'ema_{EMA_SHORT_PERIOD}'] > latest_higher_tf[f'ema_{EMA_LONG_PERIOD}']): # Short EMA > Long EMA
-                higher_tf_trend_ok = True
-                higher_tf_trend_status = "صعودي قوي (SuperTrend و EMAs)"
-            else:
-                higher_tf_trend_status = "غير صعودي"
-        
-        if not higher_tf_trend_ok:
-            essential_passed = False
-            failed_essential_conditions.append(f'Higher Timeframe ({HIGHER_TIMEFRAME}) Trend Confirmation')
-            signal_details['Higher_TF_Trend'] = f'فشل: لا يوجد تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME} ({higher_tf_trend_status})'
-        else:
-            signal_details['Higher_TF_Trend'] = f'نجاح: تم تأكيد اتجاه صعودي على {HIGHER_TIMEFRAME}'
-
-
-        # NEW Mandatory Condition: AI Recommendation (must be "شراء")
-        ai_recommendation_data = get_ai_recommendation(
-            symbol=self.symbol,
-            latest_data=last_row,
-            timeframe=SIGNAL_GENERATION_TIMEFRAME,
-            higher_tf_trend=higher_tf_trend_status, # Now this variable is guaranteed to be defined
-            btc_trend=btc_trend,
-            fear_greed=get_fear_greed_index()
-        )
-        ai_recommendation = ai_recommendation_data.get('recommendation', 'N/A')
-        ai_reasoning = ai_recommendation_data.get('reasoning', 'لا يوجد تعليل.')
-        
-        signal_details['AI_Recommendation'] = ai_recommendation
-        signal_details['AI_Reasoning'] = ai_reasoning
-
-        if ai_recommendation != "شراء":
-            essential_passed = False
-            failed_essential_conditions.append('AI Recommendation (Must be "شراء")')
-            signal_details['AI_Recommendation_Status'] = f'فشل: الذكاء الاصطناعي أوصى بـ "{ai_recommendation}"'
-        else:
-            signal_details['AI_Recommendation_Status'] = f'نجاح: الذكاء الاصطناعي أوصى بـ "{ai_recommendation}"'
-
-
         # Mandatory Condition: Price must be above Short EMA, Long EMA, AND VWMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
                 last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
@@ -1664,9 +1462,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             essential_passed = False
             failed_essential_conditions.append('Price Above EMAs and VWMA')
             detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
-            signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق كل المتوسطات المتحركة ({detail_ma})'
+            signal_details['Price_MA_Alignment'] = f'Failed: Price not above all MAs ({detail_ma})'
         else:
-            signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق كل المتوسطات المتحركة'
+            signal_details['Price_MA_Alignment'] = f'Passed: Price above all MAs'
 
         # Mandatory Condition: Short EMA must be above Long EMA
         if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
@@ -1674,9 +1472,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('Short EMA Above Long EMA')
              detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
-             signal_details['EMA_Order'] = f'فشل: المتوسط المتحرك الأسي القصير ليس فوق المتوسط المتحرك الأسي الطويل ({detail_ema_cross})'
+             signal_details['EMA_Order'] = f'Failed: Short EMA not above Long EMA ({detail_ema_cross})'
         else:
-             signal_details['EMA_Order'] = f'نجاح: المتوسط المتحرك الأسي القصير فوق المتوسط المتحرك الأسي الطويل'
+             signal_details['EMA_Order'] = f'Passed: Short EMA above Long EMA'
 
 
         # Mandatory Condition: SuperTrend must be in an uptrend and Price closes above SuperTrend
@@ -1684,9 +1482,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('SuperTrend (Up Trend & Price Above)')
              detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-             signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوق سوبر ترند ({detail_st})'
+             signal_details['SuperTrend'] = f'Failed: Not Up Trend or Price Not Above ({detail_st})'
         else:
-            signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوق سوبر ترند'
+            signal_details['SuperTrend'] = f'Passed: Up Trend & Price Above'
 
 
         # Mandatory Condition: MACD must be bullish (Positive histogram or bullish cross)
@@ -1694,12 +1492,12 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append('MACD (Hist Positive or Bullish Cross)')
              detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي و/أو لا يوجد تقاطع صعودي ({detail_macd})'
+             signal_details['MACD'] = f'Failed: Not Positive Hist AND No Bullish Cross ({detail_macd})'
         else:
-             detail_macd = f'هيستوجرام > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
+             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
              detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-             detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
-             signal_details['MACD'] = f'نجاح: {detail_macd}'
+             detail_macd += 'Bullish Cross' if last_row['macd'] > last_row['macd_signal'] else ''
+             signal_details['MACD'] = f'Passed: {detail_macd}'
 
 
         # Mandatory Condition: Stronger ADX and DI+ above DI- condition (ADX threshold increased)
@@ -1707,9 +1505,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
              essential_passed = False
              failed_essential_conditions.append(f'ADX/DI (Strong Trending Bullish, ADX > {MIN_ADX_TREND_STRENGTH})')
              detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-             signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
+             signal_details['ADX/DI'] = f'Failed: Not Strong Trending Bullish (ADX <= {MIN_ADX_TREND_STRENGTH} or DI+ <= DI-) ({detail_adx})'
         else:
-             signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
+             signal_details['ADX/DI'] = f'Passed: Strong Trending Bullish (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
 
         # If any mandatory condition failed, reject the signal immediately
@@ -1730,60 +1528,60 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
         # Price above VWAP (Original VWAP, daily reset) - Still optional
         if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
             current_score += self.condition_weights.get('above_vwap', 0)
-            signal_details['VWAP_Daily'] = f'فوق متوسط السعر المرجح بالحجم اليومي (+{self.condition_weights.get("above_vwap", 0)})'
+            signal_details['VWAP_Daily'] = f'Above Daily VWAP (+{self.condition_weights.get("above_vwap", 0)})'
         else:
-             signal_details['VWAP_Daily'] = f'تحت متوسط السعر المرجح بالحجم اليومي (0)'
+             signal_details['VWAP_Daily'] = f'Below Daily VWAP (0)'
 
 
         # RSI in acceptable zone (not extreme overbought)
         if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
             current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['RSI_Basic'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
+            signal_details['RSI_Basic'] = f'OK ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
         else:
-             signal_details['RSI_Basic'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) ليس مقبولاً (0)'
+             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) Not OK (0)'
 
 
         # Bullish engulfing or hammer candle present (Increased weight)
         if last_row.get('BullishCandleSignal', 0) == 1:
             current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Candle'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle", 0)})'
+            signal_details['Candle'] = f'Bullish Pattern (+{self.condition_weights.get("bullish_candle", 0)})'
         else:
-             signal_details['Candle'] = f'لا يوجد نمط شمعة صعودي (0)'
+             signal_details['Candle'] = f'No Bullish Pattern (0)'
 
 
         # Price not at upper Bollinger Band (still useful for some strategies)
         # This helps avoid entering right at a potential resistance level.
         if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995: # Small tolerance
              current_score += self.condition_weights.get('not_bb_extreme', 0)
-             signal_details['Bollinger_Basic'] = f'ليس عند الحد العلوي لبولينجر (+{self.condition_weights.get("not_bb_extreme", 0)})'
+             signal_details['Bollinger_Basic'] = f'Not at Upper Band (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
-             signal_details['Bollinger_Basic'] = f'عند أو فوق الحد العلوي لبولينجر (0)'
+             signal_details['Bollinger_Basic'] = f'At or Above Upper Band (0)'
 
 
         # OBV is rising (Increased weight)
         # Check OBV only if the previous value is valid
         if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']:
             current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV_Last'] = f'يرتفع في الشمعة الأخيرة (+{self.condition_weights.get("obv_rising", 0)})'
+            signal_details['OBV_Last'] = f'Rising on last candle (+{self.condition_weights.get("obv_rising", 0)})'
         else:
-             signal_details['OBV_Last'] = f'لا يرتفع في الشمعة الأخيرة (0)'
+             signal_details['OBV_Last'] = f'Not Rising on last candle (0)'
 
         # RSI filter for breakout (optional): RSI in a bullish range (e.g., between 55 and 75)
         # This helps confirm momentum is building.
         if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80: # Adjusted range slightly for scalping
              current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
+             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) in Bullish Range (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
         else:
-             signal_details['RSI_Filter_Breakout'] = f'مؤشر القوة النسبية ({last_row["rsi"]:.1f}) ليس في النطاق الصعودي (0)'
+             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) Not in Bullish Range (0)'
 
 
         # MACD filter for breakout (optional): MACD histogram is positive
         # Confirms bullish momentum is dominant.
         if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
              current_score += self.condition_weights.get('macd_filter_breakout', 0)
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
+             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Positive ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
         else:
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD ليس إيجابياً (0)'
+             signal_details['MACD_Filter_Breakout'] = f'MACD Hist Not Positive (0)'
 
         # MACD histogram is increasing over the last X candles (strong momentum)
         # This is a key condition for targeting the *beginning* of upward moves.
@@ -1799,9 +1597,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         if macd_hist_increasing:
              current_score += self.condition_weights.get('macd_hist_increasing', 0)
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("macd_hist_increasing", 0)})'
+             signal_details['MACD_Hist_Increasing'] = f'MACD Hist increasing over last {MACD_HIST_INCREASE_CANDLES} candles (+{self.condition_weights.get("macd_hist_increasing", 0)})'
         else:
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD لا يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (0)'
+             signal_details['MACD_Hist_Increasing'] = f'MACD Hist not increasing over last {MACD_HIST_INCREASE_CANDLES} candles (0)'
 
 
         # OBV is increasing over the last X candles (volume confirmation of momentum)
@@ -1818,9 +1616,9 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
 
         if obv_increasing_recent:
              current_score += self.condition_weights.get('obv_increasing_recent', 0)
-             signal_details['OBV_Increasing_Recent'] = f'حجم التوازن (OBV) يتزايد مؤخراً خلال آخر {OBV_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("obv_increasing_recent", 0)})'
+             signal_details['OBV_Increasing_Recent'] = f'OBV increasing over last {OBV_INCREASE_CANDLES} candles (+{self.condition_weights.get("obv_increasing_recent", 0)})'
         else:
-             signal_details['OBV_Increasing_Recent'] = f'حجم التوازن (OBV) لا يتزايد مؤخراً خلال آخر {OBV_INCREASE_CANDLES} شمعات (0)'
+             signal_details['OBV_Increasing_Recent'] = f'OBV not increasing over last {OBV_INCREASE_CANDLES} candles (0)'
 
         # ------------------------------------------
 
@@ -1836,37 +1634,26 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) is below the minimum threshold ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected.")
             return None
 
-        # Calculate initial target and stop loss based on ATR
+        # Calculate initial target based on ATR (Stop loss calculation removed)
         current_price = last_row['close']
         current_atr = last_row.get('atr')
 
         # Ensure ATR is not NaN before using it
         if pd.isna(current_atr) or current_atr <= 0:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR value ({current_atr}) for calculating target/stop loss.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR value ({current_atr}) for calculating target.")
              return None
 
-        # Target calculation
-        initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
-
-        # Initial Stop Loss calculation
-        # Use the low of the current candle or a recent low as a reference point for SL
-        # A common approach is to place SL below the lowest low of the last X candles or below a key support level.
-        # For simplicity, we'll use ATR below entry, or below the low of the signal candle if lower.
-        initial_stop_loss = current_price - (SL_ATR_MULTIPLIER * current_atr)
-        # Ensure SL is not above the entry price
-        initial_stop_loss = min(initial_stop_loss, current_price * 0.99) # Ensure it's at least 1% below entry
+        # Target calculation (Stop loss calculation removed)
+        target_multiplier = ENTRY_ATR_MULTIPLIER
+        initial_target = current_price + (target_multiplier * current_atr)
 
         # Check minimum profit margin (after calculating final target) - still a mandatory filter
+        # This ensures the potential reward is sufficient.
+        # MODIFIED: Check against the updated MIN_PROFIT_MARGIN_PCT (1.0%)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below the minimum required ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
             return None
-
-        # Calculate potential risk-reward ratio (for logging/analysis, not a filter here)
-        risk_amount = current_price - initial_stop_loss
-        reward_amount = initial_target - current_price
-        risk_reward_ratio = reward_amount / risk_amount if risk_amount > 0 else float('inf')
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Risk-Reward Ratio: {risk_reward_ratio:.2f}")
 
         # Compile final signal data
         signal_output = {
@@ -1874,22 +1661,17 @@ class ScalpingTradingStrategy: # Renamed strategy for clarity
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial
-            'initial_stop_loss': float(f"{initial_stop_loss:.8g}"), # Added
-            'current_stop_loss': float(f"{initial_stop_loss:.8g}"), # Added
-            'hit_stop_loss': False, # Added
-            'profitable_stop_loss': False, # Added
-            'is_trailing_active': False, # Added
-            'last_trailing_update_price': None, # Added
+            # Removed initial_stop_loss, current_stop_loss
             'r2_score': float(f"{current_score:.2f}"), # Weighted score of optional conditions
             'strategy_name': 'Scalping_Momentum_Trend', # Changed strategy name
-            'signal_details': signal_details, # Now contains details of checked conditions including AI
+            'signal_details': signal_details, # Now contains details of checked conditions
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}") # Total points for optional conditions
             # entry_time and time_to_target will be handled in DB insertion/tracking
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Target: {initial_target:.6f}, SL: {initial_stop_loss:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, AI Rec: {ai_recommendation_data.get('recommendation', 'N/A')}")
+        logger.info(f"✅ [Strategy {self.symbol}] Confirmed buy signal. Price: {current_price:.6f}, Score (Optional): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}")
         return signal_output
 
 
@@ -1941,7 +1723,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     try:
         entry_price = float(signal_data['entry_price'])
         target_price = float(signal_data['initial_target'])
-        stop_loss_price = float(signal_data['initial_stop_loss']) # Re-added
+        # Removed stop_loss_price
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
         signal_score = signal_data.get('r2_score', 0.0) # Weighted score for optional conditions
@@ -1951,20 +1733,16 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         signal_details = signal_data.get('signal_details', {})
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-        loss_pct = ((stop_loss_price / entry_price) - 1) * 100 if entry_price > 0 else 0 # Re-added
+        # Removed loss_pct calculation
 
         # Calculate fees for this specific trade
         entry_fee = trade_value_signal * BINANCE_FEE_RATE
-        exit_value_target = trade_value_signal * (1 + profit_pct / 100.0)
-        exit_value_sl = trade_value_signal * (1 + loss_pct / 100.0) # For SL calculation
-        total_trade_fees_target = entry_fee + (exit_value_target * BINANCE_FEE_RATE)
-        total_trade_fees_sl = entry_fee + (exit_value_sl * BINANCE_FEE_RATE) # For SL calculation
+        exit_value = trade_value_signal * (1 + profit_pct / 100.0)
+        exit_fee = exit_value * BINANCE_FEE_RATE
+        total_trade_fees = entry_fee + exit_fee
 
         profit_usdt_gross = trade_value_signal * (profit_pct / 100)
-        profit_usdt_net = profit_usdt_gross - total_trade_fees_target
-
-        loss_usdt_gross = trade_value_signal * (loss_pct / 100) # This will be negative
-        loss_usdt_net = loss_usdt_gross - total_trade_fees_sl
+        profit_usdt_net = profit_usdt_gross - total_trade_fees
 
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1973,10 +1751,6 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
 
         fear_greed = get_fear_greed_index()
         btc_trend = get_btc_trend_4h()
-
-        # Get AI recommendation details
-        ai_recommendation = signal_details.get('AI_Recommendation', 'N/A')
-        ai_reasoning = signal_details.get('AI_Reasoning', 'لا يوجد تعليل.')
 
         # Build the message in Arabic with weighted score and condition details
         message = (
@@ -1991,35 +1765,28 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}`\n"
-            f"🛑 **وقف الخسارة الأولي:** `${stop_loss_price:,.8g}`\n" # Re-added
             f"💰 **الربح المتوقع (إجمالي):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})\n"
-            f"📉 **الخسارة المتوقعة (إجمالي):** ({loss_pct:+.2f}% / ≈ ${loss_usdt_gross:+.2f})\n" # Re-added
-            f"💸 **الرسوم المتوقعة (عند الهدف):** ${total_trade_fees_target:,.2f}\n"
+            f"💸 **الرسوم المتوقعة:** ${total_trade_fees:,.2f}\n"
             f"📈 **الربح الصافي المتوقع:** ${profit_usdt_net:+.2f}\n"
-            f"——————————————\n"
-            f"🤖 *توصية الذكاء الاصطناعي (Gemini):*\n" # NEW AI Recommendation section
-            f"  • **التوصية:** *{ai_recommendation}*\n"
-            f"  • **التعليل:** {ai_reasoning}\n"
+            # Removed Stop Loss line
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - توصية الذكاء الاصطناعي: {'شراء ✅' if signal_details.get('AI_Recommendation_Status', '').startswith('نجاح') else 'فشل ❌'}\n" # NEW
-            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'نجاح' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n"
-            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'نجاح' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n"
-            f"  - سوبر ترند: {'صعودي ✅' if 'نجاح' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
-            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'نجاح' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'نجاح' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
-            f"  - تأكيد الاتجاه ({HIGHER_TIMEFRAME}): {'صعودي ✅' if 'نجاح' in signal_details.get('Higher_TF_Trend', '') else 'غير صعودي ❌'}\n"
+            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'Passed: Price above all MAs' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n" # Updated text
+            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'Passed: Short EMA above Long EMA' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n" # Added text
+            f"  - سوبر ترند: {'صعودي ✅' if 'Passed' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
+            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'Passed' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
+            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'Passed' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
             f"——————————————\n"
             f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
             f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
             f"  - مؤشر القوة النسبية (RSI): {signal_details.get('RSI_Basic', 'N/A')}\n"
             f"  - نمط شمعة صعودي: {signal_details.get('Candle', 'N/A')}\n"
             f"  - ليس عند الحد العلوي لبولينجر: {signal_details.get('Bollinger_Basic', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يرتفع (شمعة أخيرة): {signal_details.get('OBV_Last', 'N/A')}\n"
+            f"  - حجم التوازن (OBV) يرتفع (شمعة أخيرة): {signal_details.get('OBV_Last', 'N/A')}\n" # Clarified
             f"  - فلتر RSI للاختراق: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
             f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
-            f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n"
+            f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n" # Added & Clarified
+            f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n" # Added & Clarified
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -2050,12 +1817,10 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
-    time_to_target = details.get('time_to_target', 'N/A')
-    old_target = details.get('old_target', 0.0)
-    new_target = details.get('new_target', 0.0)
-    old_sl = details.get('old_sl', 0.0) # Re-added
-    new_sl = details.get('new_sl', 0.0) # Re-added
-    profitable_sl = details.get('profitable_sl', False) # Re-added
+    # Removed atr_value, new_stop_loss, old_stop_loss, profitable_sl
+    time_to_target = details.get('time_to_target', 'N/A') # Added time_to_target
+    old_target = details.get('old_target', 0.0) # Added for target update notification
+    new_target = details.get('new_target', 0.0) # Added for target update notification
 
 
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
@@ -2067,39 +1832,10 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
             f"💰 **الربح المحقق:** {profit_pct:+.2f}%\n"
-            f"⏱️ **الوقت المستغرق:** {time_to_target}"
+            f"⏱️ **الوقت المستغرق:** {time_to_target}" # Added time to target
         )
-    elif notification_type == 'stop_loss_hit': # Re-added
-        status_emoji = "✅" if profitable_sl else "❌"
-        status_text = "رابحة (بوقف الخسارة المتحرك)" if profitable_sl else "خاسرة"
-        message = (
-            f"{status_emoji} *تم ضرب وقف الخسارة (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🛑 **سعر الإغلاق (وقف الخسارة):** `${closing_price:,.8g}`\n"
-            f"💰 **الربح/الخسارة المحققة:** {profit_pct:+.2f}%\n"
-            f"ℹ️ *الصفقة: {status_text}*"
-        )
-    elif notification_type == 'trailing_activated': # Re-added
-        message = (
-            f"🔒 *تفعيل وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"🛑 **وقف الخسارة الأولي الجديد:** `${new_sl:,.8g}`\n"
-            f"ℹ️ *تم الوصول إلى ربح {TRAILING_STOP_ACTIVATION_PROFIT_PCT*100:.2f}%، جني الأرباح الآن محمي.*"
-        )
-    elif notification_type == 'trailing_updated': # Re-added
-        message = (
-            f"⬆️ *تحديث وقف الخسارة المتحرك (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-            f"🛑 **وقف الخسارة السابق:** `${old_sl:,.8g}`\n"
-            f"🛑 **وقف الخسارة الجديد:** `${new_sl:,.8g}`\n"
-            f"ℹ️ *يتحرك وقف الخسارة لحماية الأرباح مع صعود السعر.*"
-        )
-    elif notification_type == 'target_updated':
+    # Removed 'stop_loss_hit', 'trailing_activated', 'trailing_updated' notification types
+    elif notification_type == 'target_updated': # New notification type for target updates
          message = (
              f"↗️ *تم تحديث الهدف (ID: {signal_id})*\n"
              f"——————————————\n"
@@ -2134,25 +1870,19 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, current_target,
-                 initial_stop_loss, current_stop_loss, hit_stop_loss, profitable_stop_loss, is_trailing_active, last_trailing_update_price,
-                 r2_score, strategy_name, signal_details, volume_15m, entry_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
+                 r2_score, strategy_name, signal_details, volume_15m, entry_time) -- Added entry_time
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW()); -- Set entry_time to NOW()
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
                 signal_prepared['entry_price'],
                 signal_prepared['initial_target'],
                 signal_prepared['current_target'],
-                signal_prepared['initial_stop_loss'], # Added
-                signal_prepared['current_stop_loss'], # Added
-                signal_prepared['hit_stop_loss'], # Added
-                signal_prepared['profitable_stop_loss'], # Added
-                signal_prepared['is_trailing_active'], # Added
-                signal_prepared['last_trailing_update_price'], # Added
-                signal_prepared.get('r2_score'),
+                signal_prepared.get('r2_score'), # Weighted score
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
                 signal_prepared.get('volume_15m')
+                # entry_time is set by NOW() in the query
             ))
         conn.commit()
         logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (Score: {signal_prepared.get('r2_score')}).")
@@ -2172,7 +1902,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
-    """Tracks open signals and checks targets/stop losses. Calculates time to target upon hit."""
+    """Tracks open signals and checks targets. Calculates time to target upon hit."""
     logger.info("ℹ️ [Tracker] Starting open signal tracking process...")
     while True:
         active_signals_summary: List[str] = []
@@ -2185,12 +1915,11 @@ def track_signals() -> None:
 
             # Use a cursor with context manager to fetch open signals
             with conn.cursor() as track_cur: # Uses RealDictCursor
+                 # Adjusted query to reflect removal of hit_stop_loss
                  track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_target, current_target,
-                           initial_stop_loss, current_stop_loss, is_trailing_active,
-                           profitable_stop_loss, last_trailing_update_price, entry_time
+                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time
                     FROM signals
-                    WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;
+                    WHERE achieved_target = FALSE;
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -2212,11 +1941,6 @@ def track_signals() -> None:
                     entry_price = float(signal_row['entry_price'])
                     entry_time = signal_row['entry_time'] # Get entry time
                     current_target = float(signal_row['current_target'])
-                    initial_stop_loss = float(signal_row['initial_stop_loss'])
-                    current_stop_loss = float(signal_row['current_stop_loss'])
-                    is_trailing_active = bool(signal_row['is_trailing_active'])
-                    profitable_stop_loss = bool(signal_row['profitable_stop_loss'])
-                    last_trailing_update_price = signal_row['last_trailing_update_price'] # Can be None initially
 
                     # Get current price from WebSocket Ticker data
                     current_price = ticker_data.get(symbol)
@@ -2225,7 +1949,7 @@ def track_signals() -> None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in Ticker data.")
                          continue # Skip this signal in this cycle
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f}")
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}") # Removed SL from summary
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
@@ -2238,88 +1962,20 @@ def track_signals() -> None:
                     if current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
                         closed_at = datetime.now() # Record closing time
+                        # Calculate time to target
                         time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
+                        # Format timedelta for storage/display (e.g., '0 days 01:23:45')
+                        # PostgreSQL INTERVAL type stores this directly, but for display/logging, format is good.
+                        # Let's store as INTERVAL in DB and format for notification.
                         time_to_target_str = str(time_to_target_duration)
 
-                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
-                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%, Time: {time_to_target_str})."
-                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str})
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") # Added time_to_target
+                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id) # Pass timedelta object
+                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%, Time: {time_to_target_str})." # Added time
+                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str}) # Added time
                         update_executed = True
 
-                    # 2. Check for Stop Loss Hit (Only if Target not hit)
-                    elif current_price <= current_stop_loss:
-                        profit_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        closed_at = datetime.now()
-                        time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0) # Time until SL hit
-                        time_to_target_str = str(time_to_target_duration)
-
-                        update_query = sql.SQL("UPDATE signals SET hit_stop_loss = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s, profitable_stop_loss = %s WHERE id = %s;")
-                        update_params = (current_stop_loss, closed_at, profit_pct, time_to_target_duration, profitable_stop_loss, signal_id)
-                        log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit at {current_stop_loss:.8g} (Result: {profit_pct:+.2f}%, Profitable SL: {profitable_stop_loss})."
-                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': current_stop_loss, 'profit_pct': profit_pct, 'profitable_sl': profitable_stop_loss})
-                        update_executed = True
-
-                    # 3. Trailing Stop Loss Logic (Only if Target or SL not hit)
-                    if not update_executed:
-                        current_profit_pct = ((current_price / entry_price) - 1)
-                        df_tracking = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
-                        if df_tracking is None or df_tracking.empty:
-                            logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Insufficient data for trailing stop calculation.")
-                            continue # Skip trailing stop update for this cycle
-
-                        df_tracking = calculate_supertrend(df_tracking, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-                        df_tracking[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_tracking['close'], EMA_SHORT_PERIOD)
-
-                        latest_tracking_data = df_tracking.iloc[-1]
-                        trailing_indicator_value = np.nan
-
-                        if TRAILING_STOP_INDICATOR == 'supertrend':
-                            # Use SuperTrend lower band if in uptrend, or the SuperTrend value itself
-                            if latest_tracking_data.get('supertrend_trend') == 1: # If SuperTrend is indicating uptrend
-                                trailing_indicator_value = latest_tracking_data.get('supertrend')
-                            else: # If SuperTrend is not in uptrend, use its value as a potential stop
-                                trailing_indicator_value = latest_tracking_data.get('supertrend')
-                        elif TRAILING_STOP_INDICATOR == 'ema_short':
-                            trailing_indicator_value = latest_tracking_data.get(f'ema_{EMA_SHORT_PERIOD}')
-
-                        if pd.isna(trailing_indicator_value):
-                            logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Trailing stop indicator value is NaN. Skipping trailing update.")
-                            continue
-
-                        calculated_trailing_sl = trailing_indicator_value * (1 - TRAILING_STOP_BUFFER_PCT)
-
-                        # Activation of Trailing Stop
-                        if not is_trailing_active and current_profit_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PCT:
-                            # Ensure the calculated trailing SL is above the initial SL
-                            new_sl_value = max(calculated_trailing_sl, initial_stop_loss)
-                            # Also ensure it's below current price (to be a stop, not a target)
-                            new_sl_value = min(new_sl_value, current_price * 0.99) # Keep it below current price
-
-                            if new_sl_value > current_stop_loss: # Only activate if it moves SL up
-                                update_query = sql.SQL("UPDATE signals SET is_trailing_active = TRUE, current_stop_loss = %s, last_trailing_update_price = %s, profitable_stop_loss = TRUE WHERE id = %s;")
-                                update_params = (new_sl_value, current_price, signal_id)
-                                log_message = f"🔒 [Tracker] {symbol}(ID:{signal_id}): Trailing SL activated at {new_sl_value:.8g} (Current Price: {current_price:.8g})."
-                                notification_details.update({'type': 'trailing_activated', 'new_sl': new_sl_value})
-                                update_executed = True
-                                is_trailing_active = True # Update in memory for this cycle
-
-                        # Update of Trailing Stop (if already active)
-                        elif is_trailing_active:
-                            # Only move SL up if the new calculated SL is higher than the current SL
-                            # And ensure it's below current price
-                            new_sl_value = max(calculated_trailing_sl, current_stop_loss)
-                            new_sl_value = min(new_sl_value, current_price * 0.99) # Keep it below current price
-
-                            # Only update if the SL has actually moved up significantly
-                            if new_sl_value > current_stop_loss * (1 + 0.0001): # Small buffer to avoid frequent tiny updates
-                                update_query = sql.SQL("UPDATE signals SET current_stop_loss = %s, last_trailing_update_price = %s WHERE id = %s;")
-                                update_params = (new_sl_value, current_price, signal_id)
-                                log_message = f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing SL updated from {current_stop_loss:.8g} to {new_sl_value:.8g} (Current Price: {current_price:.8g})."
-                                notification_details.update({'type': 'trailing_updated', 'old_sl': current_stop_loss, 'new_sl': new_sl_value})
-                                update_executed = True
-
-                    # 4. Check for Target Extension (Only if Target or SL not hit, and no trailing update)
+                    # 2. Check for Target Extension (Only if Target not hit)
                     if not update_executed:
                         # Check if price is close to the current target
                         if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
@@ -2335,9 +1991,6 @@ def track_signals() -> None:
                                  df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
 
                                  if df_continuation_indicators is not None:
-                                     # Generate a signal, but only consider it for target extension if it's a valid 'continuation'
-                                     # This means it must pass the mandatory conditions again.
-                                     # Note: We pass dummy AI recommendation data here as it's not relevant for target extension logic
                                      continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
 
                                      if continuation_signal:
@@ -2549,7 +2202,8 @@ def handle_status_command(chat_id_msg: int) -> None:
         open_count = 0
         if check_db_connection() and conn:
             with conn.cursor() as status_cur:
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                # Adjusted query to reflect removal of hit_stop_loss
+                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
         # Check if variables exist before accessing them
@@ -2628,7 +2282,8 @@ def main_loop() -> None:
             open_count = 0
             try:
                  with conn.cursor() as cur_check:
-                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                    # Adjusted query to reflect removal of hit_stop_loss
+                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err:
                  logger.error(f"❌ [Main] DB error checking open signal count: {db_err}. Skipping cycle.")
@@ -2659,7 +2314,8 @@ def main_loop() -> None:
                  try:
                     # a. Check if there is already an open signal for this symbol
                     with conn.cursor() as symbol_cur:
-                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE AND hit_stop_loss = FALSE LIMIT 1;", (symbol,))
+                        # Adjusted query to reflect removal of hit_stop_loss
+                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone():
                             continue
 
@@ -2680,7 +2336,8 @@ def main_loop() -> None:
                     if potential_signal:
                         logger.info(f"✨ [Main] Potential signal found for {symbol}! (Score: {potential_signal.get('r2_score', 0):.2f}) Final check and insertion...")
                         with conn.cursor() as final_check_cur:
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE AND hit_stop_loss = FALSE;")
+                             # Adjusted query to reflect removal of hit_stop_loss
+                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
 
                              if final_open_count < MAX_OPEN_TRADES:
