@@ -90,7 +90,7 @@ SUPERTREND_MULTIPLIER: float = 2.5 # SuperTrend Multiplier (Slightly reduced or 
 # Additional Signal Conditions (Adjusted)
 # MODIFIED: Minimum required profit margin percentage (Changed to 1.0% as requested)
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 20000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
+MIN_VOLUME_15M_USDT: float = 250000.0 # Minimum liquidity in the last 15 minutes in USDT (Increased slightly for 5m)
 
 # --- New/Adjusted Parameters for Entry Logic (Adjusted for 5m) ---
 RECENT_EMA_CROSS_LOOKBACK: int = 2 # Check for EMA cross within the last X candles (Reduced)
