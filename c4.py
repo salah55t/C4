@@ -36,6 +36,7 @@ try:
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
+    # WEBHOOK_URL is optional, but Flask will always run for Render compatibility
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
@@ -45,7 +46,7 @@ logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
 logger.info(f"Telegram Token: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
 logger.info(f"Telegram Chat ID: {CHAT_ID}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
-logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
+logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Flask will always run for Render)")
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
@@ -78,7 +79,7 @@ SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 50000.0
+MIN_VOLUME_15M_USDT: float = 250000.0
 
 RECENT_EMA_CROSS_LOOKBACK: int = 2
 MIN_ADX_TREND_STRENGTH: int = 20
@@ -850,7 +851,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
              if close[i] > final_ub[i]:
                  st[i] = final_lb[i]
                  st_trend[i] = 1
-             elif close[i] < final_lb[i]:
+             elif close[i] < final_ub[i]:
                   st[i] = final_ub[i]
                   st_trend[i] = -1
              else:
@@ -1147,7 +1148,7 @@ class ScalpingTradingStrategy:
             'macd_hist_increasing': 3.0,
             'obv_increasing_recent': 3.0,
             'above_vwap': 1.0,
-            'ml_prediction_bullish': 2.5 # NEW: Weight for ML model's bullish prediction (adjust as needed)
+            # 'ml_prediction_bullish': 2.5 # Removed from weights, now a mandatory override
         }
 
         self.essential_conditions = [
@@ -1224,8 +1225,8 @@ class ScalpingTradingStrategy:
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        Generates a buy signal based on the processed DataFrame, mandatory conditions, and scoring system.
-        Includes prediction from the ML model as an optional condition.
+        Generates a buy signal based on the processed DataFrame.
+        If the ML model predicts bullish, it overrides all other essential conditions.
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء...")
 
@@ -1243,13 +1244,6 @@ class ScalpingTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
             return None
 
-        btc_trend = get_btc_trend_4h()
-        if "هبوط" in btc_trend:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف بسبب اتجاه البيتكوين الهابط ({btc_trend}).")
-            return None
-        elif "N/A" in btc_trend:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد اتجاه البيتكوين، سيتم تجاهل هذا الشرط.")
-
         last_row = df_processed.iloc[-1]
         recent_df = df_processed.iloc[-min_signal_data_len:]
 
@@ -1257,61 +1251,100 @@ class ScalpingTradingStrategy:
              logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات الحديثة تحتوي على قيم NaN في أعمدة الإشارة المطلوبة. لا يمكن إنشاء إشارة.")
              return None
 
-        # --- Check Mandatory Conditions First ---
+        # --- ML Model Prediction (NEW: Mandatory Override) ---
+        ml_overrides_essentials = False
+        ml_prediction_result_text = "N/A (نموذج غير محمل)"
+        if ml_model:
+            try:
+                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
+                ml_pred = ml_model.predict(features_for_prediction)[0]
+                if ml_pred == 1: # If ML model predicts upward movement
+                    ml_overrides_essentials = True
+                    ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
+                    logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي. تجاوز الشروط الأساسية الأخرى.")
+                else:
+                    ml_prediction_result_text = 'هابط (لا يوجد تجاوز)'
+            except Exception as ml_err:
+                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
+                ml_prediction_result_text = "خطأ في التنبؤ (0)"
+        signal_details = {'ML_Prediction': ml_prediction_result_text} # Initialize signal_details with ML prediction
+
+        # --- Check BTC Trend (Still applies even with ML override, as a general market filter) ---
+        btc_trend = get_btc_trend_4h()
+        if "هبوط" in btc_trend:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف بسبب اتجاه البيتكوين الهابط ({btc_trend}).")
+            signal_details['BTC_Trend'] = f'هبوط ({btc_trend}) ❌'
+            return None
+        elif "N/A" in btc_trend:
+             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد اتجاه البيتكوين، سيتم تجاهل هذا الشرط.")
+             signal_details['BTC_Trend'] = 'غير متاح (تجاهل)'
+        else:
+             signal_details['BTC_Trend'] = f'صعود أو استقرار ({btc_trend}) ✅'
+
+
+        # --- Check Mandatory Conditions (Bypassed if ML overrides) ---
         essential_passed = True
         failed_essential_conditions = []
-        signal_details = {}
 
-        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
-                last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
-                last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
-                last_row['close'] > last_row['vwma']):
-            essential_passed = False
-            failed_essential_conditions.append('Price Above EMAs and VWMA')
-            detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
-            signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق جميع المتوسطات ({detail_ma})'
-        else:
-            signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق جميع المتوسطات'
+        if not ml_overrides_essentials: # Only check if ML model did NOT override
+            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
+                    last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
+                    last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
+                    last_row['close'] > last_row['vwma']):
+                essential_passed = False
+                failed_essential_conditions.append('Price Above EMAs and VWMA')
+                detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
+                signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق جميع المتوسطات ({detail_ma})'
+            else:
+                signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق جميع المتوسطات'
 
-        if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
-                last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
-             essential_passed = False
-             failed_essential_conditions.append('Short EMA Above Long EMA')
-             detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
-             signal_details['EMA_Order'] = f'فشل: EMA القصير ليس فوق EMA الطويل ({detail_ema_cross})'
-        else:
-             signal_details['EMA_Order'] = f'نجاح: EMA القصير فوق EMA الطويل'
+            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
+                    last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
+                 essential_passed = False
+                 failed_essential_conditions.append('Short EMA Above Long EMA')
+                 detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
+                 signal_details['EMA_Order'] = f'فشل: EMA القصير ليس فوق EMA الطويل ({detail_ema_cross})'
+            else:
+                 signal_details['EMA_Order'] = f'نجاح: EMA القصير فوق EMA الطويل'
 
-        if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-             essential_passed = False
-             failed_essential_conditions.append('SuperTrend (اتجاه صعودي والسعر فوقه)')
-             detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-             signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوقه ({detail_st})'
-        else:
-            signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوقه'
+            if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
+                 essential_passed = False
+                 failed_essential_conditions.append('SuperTrend (اتجاه صعودي والسعر فوقه)')
+                 detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
+                 signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوقه ({detail_st})'
+            else:
+                signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوقه'
 
-        if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
-             essential_passed = False
-             failed_essential_conditions.append('MACD (هيستوجرام إيجابي أو تقاطع صعودي)')
-             detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-             signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي ولا يوجد تقاطع صعودي ({detail_macd})'
-        else:
-             detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
-             detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-             detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
-             signal_details['MACD'] = f'نجاح: {detail_macd}'
+            if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
+                 essential_passed = False
+                 failed_essential_conditions.append('MACD (هيستوجرام إيجابي أو تقاطع صعودي)')
+                 detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
+                 signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي ولا يوجد تقاطع صعودي ({detail_macd})'
+            else:
+                 detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
+                 detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
+                 detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
+                 signal_details['MACD'] = f'نجاح: {detail_macd}'
 
-        if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
-             essential_passed = False
-             failed_essential_conditions.append(f'ADX/DI (اتجاه صعودي قوي، ADX > {MIN_ADX_TREND_STRENGTH})')
-             detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-             signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
-        else:
-             signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
+            if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
+                 essential_passed = False
+                 failed_essential_conditions.append(f'ADX/DI (اتجاه صعودي قوي، ADX > {MIN_ADX_TREND_STRENGTH})')
+                 detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
+                 signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
+            else:
+                 signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
 
-        if not essential_passed:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] فشلت الشروط الإلزامية: {', '.join(failed_essential_conditions)}. تم رفض الإشارة.")
+        # If ML did not override AND essential conditions failed, then no signal
+        if not essential_passed and not ml_overrides_essentials:
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] فشلت الشروط الإلزامية (ولم يتم تجاوزها بواسطة ML): {', '.join(failed_essential_conditions)}. تم رفض الإشارة.")
             return None
+        elif ml_overrides_essentials:
+            logger.info(f"✅ [Strategy {self.symbol}] تم تجاوز الشروط الأساسية بواسطة تنبؤ ML الصعودي.")
+            # If ML overrides, set essential conditions to "ML Override" in details for clarity
+            for cond_name in self.essential_conditions:
+                if cond_name not in signal_details:
+                    signal_details[cond_name.replace(' ', '_')] = 'تم تجاوزها بواسطة ML' # Add a placeholder for overridden conditions
+
 
         # --- Calculate Score for Optional Conditions ---
         current_score = 0.0
@@ -1380,25 +1413,8 @@ class ScalpingTradingStrategy:
         else:
              signal_details['OBV_Increasing_Recent'] = f'OBV لا يتزايد خلال آخر {OBV_INCREASE_CANDLES} شمعات (0)'
 
-        # NEW: ML Model Prediction
-        ml_prediction_result = "N/A (نموذج غير محمل)"
-        if ml_model:
-            try:
-                # Prepare features for the ML model from the last row
-                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
-                ml_pred = ml_model.predict(features_for_prediction)[0]
-                if ml_pred == 1: # If ML model predicts upward movement
-                    current_score += self.condition_weights.get('ml_prediction_bullish', 0)
-                    ml_prediction_result = f'صعودي (+{self.condition_weights.get("ml_prediction_bullish", 0)})'
-                else:
-                    ml_prediction_result = 'هابط (0)'
-            except Exception as ml_err:
-                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
-                ml_prediction_result = "خطأ في التنبؤ (0)"
-        signal_details['ML_Prediction'] = ml_prediction_result
-        # END NEW ML Model Prediction
 
-        if current_score < self.min_signal_score:
+        if current_score < self.min_signal_score and not ml_overrides_essentials: # Score check still applies if ML didn't override
             logger.debug(f"ℹ️ [Strategy {self.symbol}] لم يتم استيفاء درجة الإشارة المطلوبة من الشروط الاختيارية (الدرجة: {current_score:.2f} / {self.total_possible_score:.2f}, الحد الأدنى: {self.min_signal_score:.2f}). تم رفض الإشارة.")
             return None
 
@@ -1428,14 +1444,14 @@ class ScalpingTradingStrategy:
             'initial_target': float(f"{initial_target:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
             'r2_score': float(f"{current_score:.2f}"),
-            'strategy_name': 'Scalping_Momentum_Trend_ML', # Updated strategy name
+            'strategy_name': 'Scalping_Momentum_Trend_ML_Override', # Updated strategy name
             'signal_details': signal_details,
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}")
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء. السعر: {current_price:.6f}, الدرجة (اختياري): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء. السعر: {current_price:.6f}, الدرجة (اختياري): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}")
         return signal_output
 
 
@@ -1508,7 +1524,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
         fear_greed = get_fear_greed_index()
-        btc_trend = get_btc_trend_4h()
+        btc_trend = signal_details.get('BTC_Trend', 'N/A') # Get BTC trend from signal_details
+        ml_prediction_status = signal_details.get('ML_Prediction', 'N/A') # Get ML prediction status
 
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
@@ -1525,12 +1542,13 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"💸 **الرسوم المتوقعة:** ${total_trade_fees:,.2f}\n"
             f"📈 **الربح الصافي المتوقع:** ${profit_usdt_net:+.2f}\n"
             f"——————————————\n"
+            f"🤖 *تنبؤ نموذج ML:* *{ml_prediction_status}*\n" # Highlight ML prediction
             f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {'تم ✅' if 'نجاح: السعر فوق جميع المتوسطات' in signal_details.get('Price_MA_Alignment', '') else 'فشل ❌'}\n"
-            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {'تم ✅' if 'نجاح: EMA القصير فوق EMA الطويل' in signal_details.get('EMA_Order', '') else 'فشل ❌'}\n"
-            f"  - سوبر ترند: {'صعودي ✅' if 'نجاح' in signal_details.get('SuperTrend', '') else 'غير صعودي ❌'}\n"
-            f"  - ماكد: {'إيجابي أو تقاطع صعودي ✅' if 'نجاح' in signal_details.get('MACD', '') else 'غير إيجابي ❌'}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {'اتجاه صعودي قوي ✅' if 'نجاح' in signal_details.get('ADX/DI', '') else 'ليس اتجاه صعودي قوي ❌'}\n"
+            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {signal_details.get('Price_MA_Alignment', 'N/A')}\n"
+            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {signal_details.get('EMA_Order', 'N/A')}\n"
+            f"  - سوبر ترند: {signal_details.get('SuperTrend', 'N/A')}\n"
+            f"  - ماكد: {signal_details.get('MACD', 'N/A')}\n"
+            f"  - مؤشر الاتجاه (ADX/DI): {signal_details.get('ADX/DI', 'N/A')}\n"
             f"——————————————\n"
             f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
             f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
@@ -1542,7 +1560,6 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
             f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n"
             f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n"
-            f"  - *تنبؤ نموذج ML:* {signal_details.get('ML_Prediction', 'N/A')} \n" # NEW ML Prediction detail
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -1815,7 +1832,8 @@ def home() -> Response:
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
     tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
-    status = "running" if ws_alive and tracker_alive else "partially running"
+    main_bot_alive = main_bot_thread.is_alive() if 'main_bot_thread' in globals() and main_bot_thread else False
+    status = "running" if ws_alive and tracker_alive and main_bot_alive else "partially running"
     return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
@@ -1826,6 +1844,11 @@ def favicon() -> Response:
 @app.route('/webhook', methods=['POST'])
 def webhook() -> Tuple[str, int]:
     """Handles incoming requests from Telegram (like button presses and commands)."""
+    # Only process webhook if WEBHOOK_URL is configured
+    if not WEBHOOK_URL:
+        logger.warning("⚠️ [Flask] تم استلام طلب webhook، ولكن WEBHOOK_URL غير مهيأ. تجاهل الطلب.")
+        return "Webhook not configured", 200 # Return OK to Telegram to avoid repeated attempts
+
     if not request.is_json:
         logger.warning("⚠️ [Flask] تم استلام طلب webhook غير JSON.")
         return "Invalid request format", 400
@@ -1933,10 +1956,12 @@ def handle_status_command(chat_id_msg: int) -> None:
 
         ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
         tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
+        main_bot_alive = 'نشط ✅' if 'main_bot_thread' in globals() and main_bot_thread and main_bot_thread.is_alive() else 'غير نشط ❌'
         final_status_msg = (
             f"🤖 *حالة البوت:*\n"
             f"- تتبع الأسعار (WS): {ws_status}\n"
             f"- تتبع الإشارات: {tracker_status}\n"
+            f"- حلقة البوت الرئيسية: {main_bot_alive}\n" # Added main bot loop status
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
             f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
         )
@@ -1958,12 +1983,8 @@ def handle_status_command(chat_id_msg: int) -> None:
 
 def run_flask() -> None:
     """Runs the Flask application to listen for the Webhook using a production server if available."""
-    if not WEBHOOK_URL:
-        logger.info("ℹ️ [Flask] عنوان URL للـ Webhook غير مهيأ. لن يبدأ خادم Flask.")
-        return
-
     host = "0.0.0.0"
-    port = int(config('PORT', default=10000))
+    port = int(os.environ.get('PORT', 10000)) # Use PORT environment variable or default value
     logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...")
     try:
         from waitress import serve
@@ -2120,6 +2141,7 @@ if __name__ == "__main__":
     ws_thread: Optional[Thread] = None
     tracker_thread: Optional[Thread] = None
     flask_thread: Optional[Thread] = None
+    main_bot_thread: Optional[Thread] = None # New thread for main_loop
 
     try:
         # 1. Initialize the database first
@@ -2128,7 +2150,7 @@ if __name__ == "__main__":
         # 2. Load the ML model from the database
         load_ml_model_from_db()
         if ml_model is None:
-            logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي.")
+            logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
 
         # 3. Start WebSocket Ticker
         ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
@@ -2147,16 +2169,18 @@ if __name__ == "__main__":
         tracker_thread.start()
         logger.info("✅ [Main] تم بدء مؤشر الإشارة.")
 
-        # 5. Start Flask Server (if Webhook configured)
-        if WEBHOOK_URL:
-            flask_thread = Thread(target=run_flask, daemon=True, name="FlaskThread")
-            flask_thread.start()
-            logger.info("✅ [Main] تم بدء خادم Flask Webhook.")
-        else:
-             logger.info("ℹ️ [Main] عنوان URL للـ Webhook غير مهيأ، لن يبدأ خادم Flask.")
+        # 5. Start the main bot logic in a separate thread
+        main_bot_thread = Thread(target=main_loop, daemon=True, name="MainBotLoopThread")
+        main_bot_thread.start()
+        logger.info("✅ [Main] تم بدء حلقة البوت الرئيسية في خيط منفصل.")
 
-        # 6. Start the main loop
-        main_loop()
+        # 6. Start Flask Server (ALWAYS run, daemon=False so it keeps the main program alive)
+        flask_thread = Thread(target=run_flask, daemon=False, name="FlaskThread")
+        flask_thread.start()
+        logger.info("✅ [Main] تم بدء خادم Flask.")
+
+        # Wait for the Flask thread to finish (it usually won't unless there's an error)
+        flask_thread.join()
 
     except Exception as startup_err:
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True)
