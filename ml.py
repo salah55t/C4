@@ -1,54 +1,51 @@
 import os
 import json
 import logging
-import requests
-import numpy as np
-import pandas as pd
-import psycopg2
-import pickle # For serializing/deserializing the model
-from psycopg2 import sql, OperationalError
-from psycopg2.extras import RealDictCursor
+import time
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, request
+from threading import Thread
+from apscheduler.schedulers.background import BackgroundScheduler
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
-from datetime import datetime, timedelta
+import psycopg2
+from psycopg2 import sql, OperationalError
+from psycopg2.extras import RealDictCursor
+import pandas as pd
+import numpy as np
+import pickle
 from decouple import config
-from typing import List, Dict, Optional, Tuple, Any, Union
 
-# Scikit-learn imports for the ML model
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-
-# ---------------------- إعداد التسجيل ----------------------
+# ---------------------- Logging Setup ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_training.log', encoding='utf-8'),
+        logging.FileHandler('app.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer')
+logger = logging.getLogger('FlaskAppML')
 
-# ---------------------- تحميل المتغيرات البيئية ----------------------
+# ---------------------- Load Environment Variables ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
+    FLASK_PORT: int = int(os.environ.get('PORT', 5000)) # Default to 5000, use environment variable if set
 except Exception as e:
-     logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
-     exit(1)
+    logger.critical(f"❌ Failed to load essential environment variables: {e}")
+    exit(1)
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# Parameters for data collection for ML training
-ML_TRAINING_TIMEFRAME: str = '5m' # Use the same timeframe as signal generation
-ML_TRAINING_LOOKBACK_DAYS: int = 30 # Fetch more historical data for training (e.g., 30-90 days)
-ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Name for the ML model in DB
+# ---------------------- Global Constants and Variables ----------------------
+ML_TRAINING_TIMEFRAME: str = '5m'
+ML_TRAINING_LOOKBACK_DAYS: int = 30
+ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 
-# Indicator parameters (should match those in c4.py)
+# Indicator parameters (should match those in ml.py and c4.py)
 RSI_PERIOD: int = 9
 EMA_SHORT_PERIOD: int = 8
 EMA_LONG_PERIOD: int = 21
@@ -63,104 +60,136 @@ ADX_PERIOD: int = 10
 SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
-# Global variables
-client: Optional[Client] = None
-conn: Optional[psycopg2.extensions.connection] = None
-cur: Optional[psycopg2.extensions.cursor] = None
+# Global variables for Binance client and DB connection
+binance_client: Client = None
+db_conn: psycopg2.extensions.connection = None
+
+# Define the features that will be used for the ML model
+FEATURE_COLUMNS = [
+    f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+    'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+    'macd', 'macd_signal', 'macd_hist',
+    'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+    'supertrend', 'supertrend_trend'
+]
 
 # ---------------------- Binance Client Setup ----------------------
 def init_binance_client() -> None:
     """Initializes Binance client."""
-    global client
+    global binance_client
     try:
-        logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
-        client = Client(API_KEY, API_SECRET)
-        client.ping()
-        server_time = client.get_server_time()
-        logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
+        if binance_client is None:
+            logger.info("ℹ️ [Binance] Initializing Binance client...")
+            binance_client = Client(API_KEY, API_SECRET)
+            binance_client.ping()
+            server_time = binance_client.get_server_time()
+            logger.info(f"✅ [Binance] Binance client initialized. Server time: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
     except BinanceRequestException as req_err:
-         logger.critical(f"❌ [Binance] خطأ في طلب Binance (مشكلة في الشبكة أو الطلب): {req_err}")
-         exit(1)
+        logger.critical(f"❌ [Binance] Binance request error (network or request issue): {req_err}")
+        binance_client = None # Reset client on failure
     except BinanceAPIException as api_err:
-         logger.critical(f"❌ [Binance] خطأ في واجهة برمجة تطبيقات Binance (مفاتيح غير صالحة أو مشكلة في الخادم): {api_err}")
-         exit(1)
+        logger.critical(f"❌ [Binance] Binance API error (invalid keys or server issue): {api_err}")
+        binance_client = None # Reset client on failure
     except Exception as e:
-        logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}", exc_info=True)
-        exit(1)
+        logger.critical(f"❌ [Binance] Unexpected failure in Binance client initialization: {e}", exc_info=True)
+        binance_client = None # Reset client on failure
+
+def get_exchange_info() -> dict:
+    """Fetches exchange information from Binance."""
+    init_binance_client()
+    if binance_client:
+        try:
+            logger.info("ℹ️ [Binance] Fetching exchange information...")
+            info = binance_client.get_exchange_info()
+            logger.info("✅ [Binance] Exchange information fetched successfully.")
+            return info
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Binance] Error fetching exchange info: {e}")
+        except BinanceRequestException as e:
+            logger.error(f"❌ [Binance] Network error fetching exchange info: {e}")
+        except Exception as e:
+            logger.error(f"❌ [Binance] Unexpected error fetching exchange info: {e}", exc_info=True)
+    return {}
+
+def get_all_trading_symbols() -> list[str]:
+    """Retrieves all currently trading symbols from Binance."""
+    exchange_info = get_exchange_info()
+    if exchange_info and 'symbols' in exchange_info:
+        trading_symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
+        return trading_symbols
+    return []
 
 # ---------------------- Database Connection Setup ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     """Initializes database connection and creates ml_models table if it doesn't exist."""
-    global conn, cur
-    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    global db_conn
+    logger.info("[DB] Starting database initialization...")
     for attempt in range(retries):
         try:
-            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
-            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
-            conn.autocommit = False
-            cur = conn.cursor()
-            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
-
-            # --- Create ml_models table ---
-            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ml_models (
-                    id SERIAL PRIMARY KEY,
-                    model_name TEXT NOT NULL UNIQUE,
-                    model_data BYTEA NOT NULL,
-                    trained_at TIMESTAMP DEFAULT NOW(),
-                    metrics JSONB
-                );""")
-            conn.commit()
-            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
-            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            logger.info(f"[DB] Attempting to connect to database (Attempt {attempt + 1}/{retries})...")
+            db_conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            db_conn.autocommit = False
+            with db_conn.cursor() as cur:
+                logger.info("✅ [DB] Successfully connected to database.")
+                # --- Create ml_models table ---
+                logger.info("[DB] Checking for/creating 'ml_models' table...")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ml_models (
+                        id SERIAL PRIMARY KEY,
+                        model_name TEXT NOT NULL UNIQUE,
+                        model_data BYTEA NOT NULL,
+                        trained_at TIMESTAMP DEFAULT NOW(),
+                        metrics JSONB
+                    );""")
+                db_conn.commit()
+                logger.info("✅ [DB] 'ml_models' table exists or created.")
+                logger.info("✅ [DB] Database initialized successfully.")
             return
         except OperationalError as op_err:
-            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
-            if conn: conn.rollback()
+            logger.error(f"❌ [DB] Operational error connecting to DB (Attempt {attempt + 1}): {op_err}")
+            if db_conn: db_conn.rollback()
             if attempt == retries - 1:
-                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
-                 raise op_err
+                logger.critical("❌ [DB] All database connection attempts failed.")
+                raise op_err
             time.sleep(delay)
         except Exception as e:
-            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
-            if conn: conn.rollback()
+            logger.critical(f"❌ [DB] Unexpected failure in database initialization (Attempt {attempt + 1}): {e}", exc_info=True)
+            if db_conn: db_conn.rollback()
             if attempt == retries - 1:
-                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
-                 raise e
+                logger.critical("❌ [DB] All database connection attempts failed.")
+                raise e
             time.sleep(delay)
-
-    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    logger.critical("❌ [DB] Failed to connect to database after multiple attempts.")
     exit(1)
 
 def cleanup_resources() -> None:
     """Closes database connection."""
-    global conn
-    logger.info("ℹ️ [Cleanup] إغلاق الموارد...")
-    if conn:
+    global db_conn
+    logger.info("ℹ️ [Cleanup] Closing resources...")
+    if db_conn:
         try:
-            conn.close()
-            logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
+            db_conn.close()
+            db_conn = None # Set to None after closing
+            logger.info("✅ [DB] Database connection closed.")
         except Exception as close_err:
-            logger.error(f"⚠️ [DB] خطأ أثناء إغلاق اتصال قاعدة البيانات: {close_err}")
+            logger.error(f"⚠️ [DB] Error closing database connection: {close_err}")
 
 # ---------------------- Data Fetching and Indicator Calculation Functions ----------------------
-# Replicating necessary functions from c4.py for self-containment of the training script
-def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+def fetch_historical_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
     """Fetches historical candlestick data from Binance."""
-    if not client:
-        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
-        return None
+    if not binance_client:
+        logger.error("❌ [Data] Binance client not initialized for data fetching.")
+        return pd.DataFrame()
     try:
         start_dt = datetime.utcnow() - timedelta(days=days + 1)
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+        logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} since {start_str} (limit 1000 candles)...")
 
-        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+        klines = binance_client.get_historical_klines(symbol, interval, start_str, limit=1000)
 
         if not klines:
-            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
-            return None
+            logger.warning(f"⚠️ [Data] No historical data ({interval}) for {symbol} for the requested period.")
+            return pd.DataFrame()
 
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -177,21 +206,21 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df.dropna(subset=numeric_cols, inplace=True)
 
         if df.empty:
-            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
-            return None
+            logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after dropping essential NaN values.")
+            return pd.DataFrame()
 
-        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        logger.debug(f"✅ [Data] Fetched and processed {len(df)} historical candles ({interval}) for {symbol}.")
         return df
 
     except BinanceAPIException as api_err:
-         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
-         return None
+        logger.error(f"❌ [Data] Binance API error while fetching data for {symbol}: {api_err}")
+        return pd.DataFrame()
     except BinanceRequestException as req_err:
-         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
-         return None
+        logger.error(f"❌ [Data] Request or network error while fetching data for {symbol}: {req_err}")
+        return pd.DataFrame()
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
-        return None
+        logger.error(f"❌ [Data] Unexpected error while fetching historical data for {symbol}: {e}", exc_info=True)
+        return pd.DataFrame()
 
 def calculate_ema(series: pd.Series, span: int) -> pd.Series:
     """Calculates Exponential Moving Average (EMA)."""
@@ -261,10 +290,10 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, 
         df['bb_lower'] = np.nan
         return df
     if len(df) < window:
-         df['bb_middle'] = np.nan
-         df['bb_upper'] = np.nan
-         df['bb_lower'] = np.nan
-         return df
+        df['bb_middle'] = np.nan
+        df['bb_upper'] = np.nan
+        df['bb_lower'] = np.nan
+        return df
 
     df['bb_middle'] = df['close'].rolling(window=window).mean()
     df['bb_std'] = df['close'].rolling(window=window).std()
@@ -392,9 +421,9 @@ def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
         if close_diff[i] > 0:
             obv[i] = obv[i-1] + volume[i]
         elif close_diff[i] < 0:
-             obv[i] = obv[i-1] - volume[i]
+            obv[i] = obv[i-1] - volume[i]
         else:
-             obv[i] = obv[i-1]
+            obv[i] = obv[i-1]
 
     df['obv'] = obv
     return df
@@ -411,9 +440,9 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st = calculate_atr_indicator(df_st, period=SUPERTREND_PERIOD)
 
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-         df_st['supertrend'] = np.nan
-         df_st['supertrend_trend'] = 0
-         return df_st
+        df_st['supertrend'] = np.nan
+        df_st['supertrend_trend'] = 0
+        return df_st
     if len(df_st) < SUPERTREND_PERIOD:
         df_st['supertrend'] = np.nan
         df_st['supertrend_trend'] = 0
@@ -469,15 +498,15 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
                 st[i] = final_ub[i]
                 st_trend[i] = -1
         else:
-             if close[i] > final_ub[i]:
-                 st[i] = final_lb[i]
-                 st_trend[i] = 1
-             elif close[i] < final_lb[i]:
-                  st[i] = final_ub[i]
-                  st_trend[i] = -1
-             else:
-                  st[i] = np.nan
-                  st_trend[i] = 0
+            if close[i] > final_ub[i]:
+                st[i] = final_lb[i]
+                st_trend[i] = 1
+            elif close[i] < final_lb[i]:
+                st[i] = final_ub[i]
+                st_trend[i] = -1
+            else:
+                st[i] = np.nan
+                st_trend[i] = 0
 
     df_st['final_ub'] = final_ub
     df_st['final_lb'] = final_lb
@@ -486,10 +515,10 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
     return df_st
 
-def populate_all_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
+def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calculates all required indicators for the strategy."""
-    if df is None or df.empty:
-        return None
+    if df.empty:
+        return pd.DataFrame()
 
     df_calc = df.copy()
     try:
@@ -506,40 +535,33 @@ def populate_all_indicators(df: pd.DataFrame) -> Optional[pd.DataFrame]:
         df_calc = calculate_vwap(df_calc)
         df_calc = calculate_obv(df_calc)
     except Exception as e:
-        logger.error(f"❌ خطأ أثناء حساب المؤشرات: {e}", exc_info=True)
-        return None
-
-    # Define the features that will be used for the ML model
-    # These should be the same as the ones used in c4.py for prediction
-    feature_columns = [
-        f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-        'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-        'macd', 'macd_signal', 'macd_hist',
-        'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-        'supertrend', 'supertrend_trend'
-    ]
+        logger.error(f"❌ Error calculating indicators: {e}", exc_info=True)
+        return pd.DataFrame()
 
     # Ensure all feature columns exist and are numeric
-    for col in feature_columns:
+    for col in FEATURE_COLUMNS:
         if col not in df_calc.columns:
-            logger.warning(f"⚠️ عمود الميزة المفقود: {col}")
+            logger.warning(f"⚠️ Missing feature column: {col}")
             df_calc[col] = np.nan # Add missing column as NaN
         else:
             df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
     # Drop rows with NaN values in feature columns
     initial_len = len(df_calc)
-    df_cleaned = df_calc.dropna(subset=feature_columns).copy()
+    df_cleaned = df_calc.dropna(subset=FEATURE_COLUMNS).copy()
     if len(df_cleaned) < initial_len:
-        logger.debug(f"ℹ️ تم إسقاط {initial_len - len(df_cleaned)} صفًا بسبب قيم NaN في المؤشرات.")
+        logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators.")
 
     return df_cleaned
 
 # ---------------------- Main Training Logic ----------------------
-def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    """Reads the list of currency symbols from a text file."""
-    raw_symbols: List[str] = []
-    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> list[str]:
+    """
+    Reads the list of currency symbols from a text file (assumes base symbol per line, e.g., 'BTC'),
+    appends 'USDT' to each, and validates them against Binance.
+    """
+    base_symbols: list[str] = []
+    logger.info(f"ℹ️ [Data] Reading base symbol list from '{filename}'...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
@@ -547,19 +569,33 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         if not os.path.exists(file_path):
             file_path = os.path.abspath(filename)
             if not os.path.exists(file_path):
-                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
-                 return []
+                logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
+                return []
             else:
-                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+                logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
 
         with open(file_path, 'r', encoding='utf-8') as f:
-            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+            # Read each line, strip whitespace, convert to uppercase, and append 'USDT'
+            base_symbols = [f"{line.strip().upper()}USDT"
                            for line in f if line.strip() and not line.startswith('#')]
-        raw_symbols = sorted(list(set(raw_symbols)))
-        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
-        return raw_symbols
+        base_symbols = sorted(list(set(base_symbols)))
+        logger.info(f"ℹ️ [Data] Read {len(base_symbols)} initial symbols (with USDT appended) from '{file_path}'.")
+
+        # Validate symbols against Binance
+        logger.info("ℹ️ [Binance] Validating symbols against Binance available trading pairs...")
+        all_binance_symbols = get_all_trading_symbols()
+        valid_symbols = [s for s in base_symbols if s in all_binance_symbols]
+        invalid_symbols = [s for s in base_symbols if s not in all_binance_symbols]
+
+        if invalid_symbols:
+            logger.warning(f"⚠️ The following symbols (after appending USDT) from '{filename}' are not active trading pairs on Binance and will be skipped: {', '.join(invalid_symbols)}")
+        if not valid_symbols:
+            logger.critical("❌ No valid trading symbols found after Binance validation. Please check your 'crypto_list.txt'.")
+
+        logger.info(f"✅ [Data] {len(valid_symbols)} valid symbols found for training.")
+        return valid_symbols
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
         return []
 
 def train_and_save_model() -> None:
@@ -567,142 +603,223 @@ def train_and_save_model() -> None:
     Fetches data, calculates indicators, trains a Decision Tree Classifier,
     and saves the model and its metrics to the database.
     """
-    logger.info("🚀 بدء عملية تدريب نموذج تعلم الآلة...")
+    logger.info("🚀 Starting ML model training process...")
     init_binance_client()
-    init_db()
+    init_db() # Ensure DB connection is established for this thread
 
     symbols = get_crypto_symbols()
     if not symbols:
-        logger.critical("❌ لا توجد رموز صالحة للتدريب. إنهاء.")
+        logger.critical("❌ No valid symbols for training. Exiting training process.")
+        cleanup_resources()
         return
 
     all_features = []
     all_targets = []
     processed_symbols_count = 0
 
-    # Define the features that will be used for the ML model
-    # This list MUST match what's expected by the model in c4.py
-    feature_columns = [
-        f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-        'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-        'macd', 'macd_signal', 'macd_hist',
-        'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-        'supertrend', 'supertrend_trend'
-    ]
-
     for symbol in symbols:
-        logger.info(f"ℹ️ جلب البيانات وحساب المؤشرات لـ {symbol}...")
+        logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
         df = fetch_historical_data(symbol, ML_TRAINING_TIMEFRAME, ML_TRAINING_LOOKBACK_DAYS)
-        if df is None or df.empty:
-            logger.warning(f"⚠️ تخطي {symbol} بسبب عدم كفاية البيانات.")
+        if df.empty:
+            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data.")
             continue
 
         df_processed = populate_all_indicators(df)
-        if df_processed is None or df_processed.empty:
-            logger.warning(f"⚠️ تخطي {symbol} بسبب عدم كفاية البيانات بعد حساب المؤشرات.")
+        if df_processed.empty:
+            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation.")
             continue
 
         # Create the target variable: 1 if next close > current close, 0 otherwise
-        # Shift(-1) means the close price of the *next* candle
         df_processed['target'] = (df_processed['close'].shift(-1) > df_processed['close']).astype(int)
 
-        # Drop the last row as its target will be NaN
-        df_processed.dropna(subset=['target'] + feature_columns, inplace=True)
+        # Drop the last row as its target will be NaN, and any rows with NaN in features
+        df_processed.dropna(subset=['target'] + FEATURE_COLUMNS, inplace=True)
 
         if df_processed.empty:
-            logger.warning(f"⚠️ تخطي {symbol} بسبب عدم كفاية البيانات بعد إعداد الهدف وإزالة NaN.")
+            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
             continue
 
         # Ensure all feature columns are present before appending
-        missing_features = [col for col in feature_columns if col not in df_processed.columns]
+        missing_features = [col for col in FEATURE_COLUMNS if col not in df_processed.columns]
         if missing_features:
-            logger.error(f"❌ الميزات المفقودة لـ {symbol}: {missing_features}. تخطي هذا الرمز.")
+            logger.error(f"❌ Missing features for {symbol}: {missing_features}. Skipping this symbol.")
             continue
 
-        all_features.append(df_processed[feature_columns])
+        all_features.append(df_processed[FEATURE_COLUMNS])
         all_targets.append(df_processed['target'])
         processed_symbols_count += 1
 
     if not all_features:
-        logger.critical("❌ لا توجد بيانات كافية لتدريب النموذج بعد معالجة الرموز.")
+        logger.critical("❌ No sufficient data to train the model after processing symbols. Exiting training.")
+        cleanup_resources()
         return
 
     X = pd.concat(all_features)
     y = pd.concat(all_targets)
 
     if X.empty or y.empty:
-        logger.critical("❌ مجموعات الميزات أو الأهداف فارغة بعد التجميع. لا يمكن التدريب.")
+        logger.critical("❌ Feature or target sets are empty after concatenation. Cannot train.")
+        cleanup_resources()
         return
 
-    logger.info(f"✅ تم تجميع بيانات التدريب من {processed_symbols_count} رمزًا. حجم البيانات: {len(X)} عينة.")
+    logger.info(f"✅ Aggregated training data from {processed_symbols_count} symbols. Data size: {len(X)} samples.")
 
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    logger.info(f"ℹ️ حجم بيانات التدريب: {len(X_train)}، حجم بيانات الاختبار: {len(X_test)}")
+    logger.info(f"ℹ️ Training data size: {len(X_train)}, Test data size: {len(X_test)}")
 
     # Train the Decision Tree Classifier
-    logger.info("ℹ️ تدريب نموذج Decision Tree...")
-    model = DecisionTreeClassifier(random_state=42, max_depth=10, min_samples_leaf=5) # Add some regularization
+    logger.info("ℹ️ Training Decision Tree model...")
+    model = DecisionTreeClassifier(random_state=42, max_depth=10, min_samples_leaf=5)
     model.fit(X_train, y_train)
-    logger.info("✅ تم تدريب النموذج.")
+    logger.info("✅ Model trained.")
 
     # Evaluate the model
-    logger.info("ℹ️ تقييم أداء النموذج...")
+    logger.info("ℹ️ Evaluating model performance...")
     y_pred = model.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
     report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-    conf_matrix = confusion_matrix(y_test, y_pred).tolist() # Convert to list for JSONB
+    conf_matrix = confusion_matrix(y_test, y_pred).tolist()
 
-    logger.info(f"✅ دقة النموذج: {accuracy:.4f}")
-    logger.info(f"تقرير التصنيف:\n{json.dumps(report, indent=2)}")
-    logger.info(f"مصفوفة الارتباك:\n{json.dumps(conf_matrix, indent=2)}")
+    logger.info(f"✅ Model Accuracy: {accuracy:.4f}")
+    logger.info(f"Classification Report:\n{json.dumps(report, indent=2)}")
+    logger.info(f"Confusion Matrix:\n{json.dumps(conf_matrix, indent=2)}")
 
     # Prepare metrics for storage
     model_metrics = {
         'accuracy': accuracy,
         'classification_report': report,
         'confusion_matrix': conf_matrix,
-        'features': feature_columns, # Store feature names for consistency
-        'training_symbols_count': processed_symbols_count
+        'features': FEATURE_COLUMNS, # Store feature names for consistency
+        'training_symbols_count': processed_symbols_count,
+        'last_trained_utc': datetime.utcnow().isoformat()
     }
 
     # Serialize the model
     pickled_model = pickle.dumps(model)
-    logger.info(f"ℹ️ حجم النموذج المختار: {len(pickled_model) / (1024*1024):.2f} MB")
+    logger.info(f"ℹ️ Pickled model size: {len(pickled_model) / (1024*1024):.2f} MB")
 
     # Save to database
     try:
-        with conn.cursor() as db_cur:
-            # Check if a model with this name already exists
-            db_cur.execute("SELECT id FROM ml_models WHERE model_name = %s;", (ML_MODEL_NAME,))
-            existing_model = db_cur.fetchone()
+        if db_conn: # Ensure db_conn is not None before using
+            with db_conn.cursor() as db_cur:
+                # Check if a model with this name already exists
+                db_cur.execute("SELECT id FROM ml_models WHERE model_name = %s;", (ML_MODEL_NAME,))
+                existing_model = db_cur.fetchone()
 
-            if existing_model:
-                logger.info(f"ℹ️ تحديث النموذج الحالي '{ML_MODEL_NAME}' في قاعدة البيانات.")
-                update_query = sql.SQL("""
-                    UPDATE ml_models
-                    SET model_data = %s, trained_at = NOW(), metrics = %s
-                    WHERE model_name = %s;
-                """)
-                db_cur.execute(update_query, (psycopg2.Binary(pickled_model), json.dumps(model_metrics), ML_MODEL_NAME))
-            else:
-                logger.info(f"ℹ️ إدراج نموذج جديد '{ML_MODEL_NAME}' في قاعدة البيانات.")
-                insert_query = sql.SQL("""
-                    INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
-                    VALUES (%s, %s, NOW(), %s);
-                """)
-                db_cur.execute(insert_query, (ML_MODEL_NAME, psycopg2.Binary(pickled_model), json.dumps(model_metrics)))
-        conn.commit()
-        logger.info("✅ تم حفظ النموذج ومقاييسه في قاعدة البيانات بنجاح.")
+                if existing_model:
+                    logger.info(f"ℹ️ Updating existing model '{ML_MODEL_NAME}' in database.")
+                    update_query = sql.SQL("""
+                        UPDATE ml_models
+                        SET model_data = %s, trained_at = NOW(), metrics = %s
+                        WHERE model_name = %s;
+                    """)
+                    db_cur.execute(update_query, (psycopg2.Binary(pickled_model), json.dumps(model_metrics), ML_MODEL_NAME))
+                else:
+                    logger.info(f"ℹ️ Inserting new model '{ML_MODEL_NAME}' into database.")
+                    insert_query = sql.SQL("""
+                        INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
+                        VALUES (%s, %s, NOW(), %s);
+                    """)
+                    db_cur.execute(insert_query, (ML_MODEL_NAME, psycopg2.Binary(pickled_model), json.dumps(model_metrics)))
+            db_conn.commit()
+            logger.info("✅ Model and its metrics saved to database successfully.")
+        else:
+            logger.error("❌ Database connection is not active. Cannot save model.")
     except psycopg2.Error as db_err:
-        logger.error(f"❌ خطأ في قاعدة البيانات أثناء حفظ النموذج: {db_err}", exc_info=True)
-        if conn: conn.rollback()
+        logger.error(f"❌ Database error while saving model: {db_err}", exc_info=True)
+        if db_conn: db_conn.rollback()
     except Exception as e:
-        logger.error(f"❌ خطأ غير متوقع أثناء حفظ النموذج: {e}", exc_info=True)
-        if conn: conn.rollback()
+        logger.error(f"❌ Unexpected error while saving model: {e}", exc_info=True)
+        if db_conn: db_conn.rollback()
 
     cleanup_resources()
-    logger.info("🏁 انتهت عملية تدريب نموذج تعلم الآلة.")
+    logger.info("🏁 ML model training process finished.")
 
-if __name__ == "__main__":
-    train_and_save_model()
+# ---------------------- Flask Application ----------------------
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    """Basic home route to keep the service alive."""
+    logger.info("✅ Home route accessed.")
+    return "ML Training Service is Running!"
+
+@app.route('/status')
+def status():
+    """Provides status of the service and last training run."""
+    logger.info("ℹ️ Status route accessed.")
+    status_info = {
+        "service_status": "Running",
+        "last_training_attempt_utc": "N/A",
+        "next_training_schedule_utc": "N/A",
+        "binance_client_initialized": binance_client is not None,
+        "database_connection_active": db_conn is not None
+    }
+    scheduler_jobs = scheduler.get_jobs()
+    if scheduler_jobs:
+        for job in scheduler_jobs:
+            if job.id == 'daily_ml_training':
+                status_info["next_training_schedule_utc"] = job.next_run_time.isoformat() if job.next_run_time else "N/A"
+                break
+
+    # Fetch last training time from DB
+    try:
+        init_db() # Ensure connection is open
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT trained_at, metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (ML_MODEL_NAME,))
+            result = cur.fetchone()
+            if result:
+                status_info["last_training_attempt_utc"] = result['trained_at'].isoformat()
+                status_info["last_training_metrics"] = result['metrics']
+            else:
+                status_info["last_training_metrics"] = "No model trained yet."
+    except Exception as e:
+        logger.error(f"❌ Error fetching last training status from DB: {e}", exc_info=True)
+        status_info["last_training_attempt_utc"] = "Error fetching from DB"
+        status_info["last_training_metrics"] = "Error fetching from DB"
+    finally:
+        cleanup_resources() # Close connection after use
+
+    return jsonify(status_info)
+
+@app.route('/trigger_training', methods=['POST'])
+def trigger_training_manual():
+    """Manually triggers the ML model training."""
+    logger.info("ℹ️ Manual training trigger received.")
+    try:
+        # Run training in a separate thread to avoid blocking the Flask app
+        training_thread = Thread(target=train_and_save_model)
+        training_thread.start()
+        return jsonify({"message": "ML training initiated in background.", "status": "success"}), 202
+    except Exception as e:
+        logger.error(f"❌ Error initiating manual training: {e}", exc_info=True)
+        return jsonify({"message": f"Failed to initiate training: {e}", "status": "error"}), 500
+
+# ---------------------- Scheduler Setup ----------------------
+scheduler = BackgroundScheduler()
+
+def start_scheduler():
+    """Starts the APScheduler."""
+    # Schedule the training to run daily at a specific time (e.g., 00:00 UTC)
+    # This time can be adjusted based on when you want the training to occur.
+    # 'cron' allows for precise scheduling.
+    scheduler.add_job(train_and_save_model, 'cron', hour=0, minute=0, id='daily_ml_training', replace_existing=True)
+    logger.info("✅ Scheduled daily ML training for 00:00 UTC.")
+    scheduler.start()
+    logger.info("✅ Scheduler started.")
+
+# ---------------------- Application Entry Point ----------------------
+if __name__ == '__main__':
+    # Initialize Binance client and DB connection on app startup
+    # These will be used by the scheduler and manual trigger
+    init_binance_client()
+    init_db()
+
+    # Start the scheduler in a separate thread to avoid blocking the Flask app
+    # This is crucial for Render's free tier, as the web server needs to respond.
+    scheduler_thread = Thread(target=start_scheduler)
+    scheduler_thread.start()
+
+    logger.info(f"🚀 Starting Flask app on port {FLASK_PORT}...")
+    app.run(host='0.0.0.0', port=FLASK_PORT, debug=False) # debug=False for production
