@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 5
+MAX_OPEN_TRADES: int = 20
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
 SIGNAL_TRACKING_TIMEFRAME: str = '5m'
