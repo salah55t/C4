@@ -16,6 +16,11 @@ import numpy as np
 import pickle
 from decouple import config
 
+# Scikit-learn imports for the ML model
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import GridSearchCV # For hyperparameter tuning
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -44,6 +49,8 @@ logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 ML_TRAINING_TIMEFRAME: str = '5m'
 ML_TRAINING_LOOKBACK_DAYS: int = 30
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
+TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
+TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
 
 # Indicator parameters (should match those in ml.py and c4.py)
 RSI_PERIOD: int = 9
@@ -65,6 +72,7 @@ binance_client: Client = None
 db_conn: psycopg2.extensions.connection = None
 
 # Define the features that will be used for the ML model
+# This list will be dynamically extended with lagged features
 FEATURE_COLUMNS = [
     f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
     'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
@@ -516,7 +524,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     return df_st
 
 def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates all required indicators for the strategy."""
+    """Calculates all required indicators and adds lagged features for the strategy."""
     if df.empty:
         return pd.DataFrame()
 
@@ -534,12 +542,30 @@ def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df_calc = df_calc.join(adx_df)
         df_calc = calculate_vwap(df_calc)
         df_calc = calculate_obv(df_calc)
+
+        # Add lagged features
+        for lag in range(1, 4): # Lags 1, 2, 3
+            df_calc[f'close_lag{lag}'] = df_calc['close'].shift(lag)
+        for lag in range(1, 3): # Lags 1, 2
+            df_calc[f'rsi_lag{lag}'] = df_calc['rsi'].shift(lag)
+            df_calc[f'macd_lag{lag}'] = df_calc['macd'].shift(lag)
+            df_calc[f'supertrend_trend_lag{lag}'] = df_calc['supertrend_trend'].shift(lag)
+
     except Exception as e:
-        logger.error(f"❌ Error calculating indicators: {e}", exc_info=True)
+        logger.error(f"❌ Error calculating indicators or lagged features: {e}", exc_info=True)
         return pd.DataFrame()
 
+    # Update FEATURE_COLUMNS to include lagged features
+    updated_feature_columns = list(FEATURE_COLUMNS) # Start with original features
+    for lag in range(1, 4):
+        updated_feature_columns.append(f'close_lag{lag}')
+    for lag in range(1, 3):
+        updated_feature_columns.append(f'rsi_lag{lag}')
+        updated_feature_columns.append(f'macd_lag{lag}')
+        updated_feature_columns.append(f'supertrend_trend_lag{lag}')
+
     # Ensure all feature columns exist and are numeric
-    for col in FEATURE_COLUMNS:
+    for col in updated_feature_columns:
         if col not in df_calc.columns:
             logger.warning(f"⚠️ Missing feature column: {col}")
             df_calc[col] = np.nan # Add missing column as NaN
@@ -548,9 +574,9 @@ def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # Drop rows with NaN values in feature columns
     initial_len = len(df_calc)
-    df_cleaned = df_calc.dropna(subset=FEATURE_COLUMNS).copy()
+    df_cleaned = df_calc.dropna(subset=updated_feature_columns).copy()
     if len(df_cleaned) < initial_len:
-        logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators.")
+        logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators or lagged features.")
 
     return df_cleaned
 
@@ -600,7 +626,7 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> list[str]:
 
 def train_and_save_model() -> None:
     """
-    Fetches data, calculates indicators, trains a Decision Tree Classifier,
+    Fetches data, calculates indicators, trains a Decision Tree Classifier with hyperparameter tuning,
     and saves the model and its metrics to the database.
     """
     logger.info("🚀 Starting ML model training process...")
@@ -613,9 +639,19 @@ def train_and_save_model() -> None:
         cleanup_resources()
         return
 
-    all_features = []
-    all_targets = []
+    all_features_df = pd.DataFrame()
+    all_targets_series = pd.Series(dtype=int)
     processed_symbols_count = 0
+
+    # Dynamically build the list of feature columns
+    current_feature_columns = list(FEATURE_COLUMNS)
+    for lag in range(1, 4):
+        current_feature_columns.append(f'close_lag{lag}')
+    for lag in range(1, 3):
+        current_feature_columns.append(f'rsi_lag{lag}')
+        current_feature_columns.append(f'macd_lag{lag}')
+        current_feature_columns.append(f'supertrend_trend_lag{lag}')
+
 
     for symbol in symbols:
         logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
@@ -629,70 +665,111 @@ def train_and_save_model() -> None:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation.")
             continue
 
-        # Create the target variable: 1 if next close > current close, 0 otherwise
-        df_processed['target'] = (df_processed['close'].shift(-1) > df_processed['close']).astype(int)
+        # Define the target variable: 1 if close price increases by TARGET_PERCENT_CHANGE
+        # within the next TARGET_LOOKAHEAD_CANDLES, 0 otherwise.
+        # We look for the maximum close price in the future window.
+        future_max_close = df_processed['close'].rolling(window=TARGET_LOOKAHEAD_CANDLES, min_periods=1).max().shift(-(TARGET_LOOKAHEAD_CANDLES - 1))
+        df_processed['target'] = ((future_max_close / df_processed['close']) >= (1 + TARGET_PERCENT_CHANGE)).astype(int)
 
-        # Drop the last row as its target will be NaN, and any rows with NaN in features
-        df_processed.dropna(subset=['target'] + FEATURE_COLUMNS, inplace=True)
+        # Drop rows with NaN values in target or feature columns
+        df_processed.dropna(subset=['target'] + current_feature_columns, inplace=True)
 
         if df_processed.empty:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
             continue
 
         # Ensure all feature columns are present before appending
-        missing_features = [col for col in FEATURE_COLUMNS if col not in df_processed.columns]
+        missing_features = [col for col in current_feature_columns if col not in df_processed.columns]
         if missing_features:
             logger.error(f"❌ Missing features for {symbol}: {missing_features}. Skipping this symbol.")
             continue
 
-        all_features.append(df_processed[FEATURE_COLUMNS])
-        all_targets.append(df_processed['target'])
+        all_features_df = pd.concat([all_features_df, df_processed[current_feature_columns]])
+        all_targets_series = pd.concat([all_targets_series, df_processed['target']])
         processed_symbols_count += 1
 
-    if not all_features:
+    if all_features_df.empty or all_targets_series.empty:
         logger.critical("❌ No sufficient data to train the model after processing symbols. Exiting training.")
         cleanup_resources()
         return
 
-    X = pd.concat(all_features)
-    y = pd.concat(all_targets)
+    # Ensure data is sorted by index (timestamp) for time-series aware splitting
+    all_features_df.sort_index(inplace=True)
+    all_targets_series.sort_index(inplace=True)
 
-    if X.empty or y.empty:
-        logger.critical("❌ Feature or target sets are empty after concatenation. Cannot train.")
-        cleanup_resources()
-        return
+    X = all_features_df
+    y = all_targets_series
 
     logger.info(f"✅ Aggregated training data from {processed_symbols_count} symbols. Data size: {len(X)} samples.")
 
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # Time-series aware split: 80% for training, 20% for testing
+    split_index = int(len(X) * 0.8)
+    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
+    y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
+
     logger.info(f"ℹ️ Training data size: {len(X_train)}, Test data size: {len(X_test)}")
 
-    # Train the Decision Tree Classifier
-    logger.info("ℹ️ Training Decision Tree model...")
-    model = DecisionTreeClassifier(random_state=42, max_depth=10, min_samples_leaf=5)
-    model.fit(X_train, y_train)
-    logger.info("✅ Model trained.")
+    if X_train.empty or y_train.empty:
+        logger.critical("❌ Training sets are empty after time-series split. Cannot train.")
+        cleanup_resources()
+        return
+    if X_test.empty or y_test.empty:
+        logger.warning("⚠️ Test sets are empty after time-series split. Model will be evaluated on training data only.")
+        # In a real scenario, you might want to skip evaluation or log a critical error.
+        # For now, we'll proceed but note the issue.
 
-    # Evaluate the model
-    logger.info("ℹ️ Evaluating model performance...")
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-    conf_matrix = confusion_matrix(y_test, y_pred).tolist()
+    # Hyperparameter tuning for Decision Tree Classifier
+    logger.info("ℹ️ Performing Grid Search for Decision Tree hyperparameters...")
+    param_grid = {
+        'max_depth': [5, 10, 15, 20],
+        'min_samples_leaf': [1, 5, 10, 20],
+        'criterion': ['gini', 'entropy']
+    }
+    grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42), param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=1)
+    grid_search.fit(X_train, y_train)
 
-    logger.info(f"✅ Model Accuracy: {accuracy:.4f}")
-    logger.info(f"Classification Report:\n{json.dumps(report, indent=2)}")
-    logger.info(f"Confusion Matrix:\n{json.dumps(conf_matrix, indent=2)}")
+    model = grid_search.best_estimator_
+    best_params = grid_search.best_params_
+    best_score = grid_search.best_score_
+
+    logger.info(f"✅ Best Decision Tree parameters found: {best_params}")
+    logger.info(f"✅ Best cross-validation accuracy: {best_score:.4f}")
+    logger.info("✅ Model trained with best parameters.")
+
+    # Evaluate the model on the test set
+    logger.info("ℹ️ Evaluating model performance on test set...")
+    if not X_test.empty:
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        conf_matrix = confusion_matrix(y_test, y_pred).tolist()
+    else:
+        # Fallback to training data evaluation if test set is empty
+        logger.warning("⚠️ Test set is empty, evaluating on training data instead.")
+        y_pred = model.predict(X_train)
+        accuracy = accuracy_score(y_train, y_pred)
+        report = classification_report(y_train, y_pred, output_dict=True, zero_division=0)
+        conf_matrix = confusion_matrix(y_train, y_pred).tolist()
+
+
+    logger.info(f"✅ Model Accuracy (Test/Train): {accuracy:.4f}")
+    logger.info(f"Classification Report (Test/Train):\n{json.dumps(report, indent=2)}")
+    logger.info(f"Confusion Matrix (Test/Train):\n{json.dumps(conf_matrix, indent=2)}")
 
     # Prepare metrics for storage
     model_metrics = {
         'accuracy': accuracy,
         'classification_report': report,
         'confusion_matrix': conf_matrix,
-        'features': FEATURE_COLUMNS, # Store feature names for consistency
+        'features': current_feature_columns, # Store feature names for consistency
         'training_symbols_count': processed_symbols_count,
-        'last_trained_utc': datetime.utcnow().isoformat()
+        'last_trained_utc': datetime.utcnow().isoformat(),
+        'target_definition': {
+            'percent_change': TARGET_PERCENT_CHANGE,
+            'lookahead_candles': TARGET_LOOKAHEAD_CANDLES
+        },
+        'best_hyperparameters': best_params,
+        'best_cv_score': best_score
     }
 
     # Serialize the model
