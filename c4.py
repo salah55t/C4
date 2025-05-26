@@ -612,7 +612,7 @@ def run_ticker_socket_manager() -> None:
             if not ticker_data:
                 logger.warning("⚠️ [WS] لم يتم استلام أي بيانات تيكر بعد الانتظار. قد تكون هناك مشكلة في اتصال WebSocket أو لا توجد رموز نشطة.")
             else:
-                logger.info(f"✅ [WS] تم استلام بيانات تيكر لـ {len(ticker_data)} رمزًا. متابعة.")
+                logger.info(f"✅ [WS] تم استلام بيانات تيكر لـ {len(ticker_data)} رمزًا.")
 
 
             twm.join()  # Wait for the socket manager to finish (blocks until stop or error)
@@ -1116,8 +1116,6 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
         window = prices[i - order : i + order + 1]
         center_val = prices[i]
 
-        if np.isnan(window).any(): continue # Skip if NaN in window
-
         if np.all(center_val >= window):
             # Optional: ensure it's not too close to a previous max
             if not maxima_indices or i > maxima_indices[-1] + order: # Simple distance check
@@ -1482,7 +1480,8 @@ class ScalpingTradingStrategy:
 
         if ml_model and ml_model_features: # Global ml_model loaded from DB and features are known
             try:
-                # Ensure features are in the correct order and format using ml_model_features
+                # CRITICAL FIX: Ensure features are in the correct order and format using ml_model_features
+                # Create a DataFrame with only the required features, in the correct order
                 features_for_prediction_df = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
                 
                 # Log the exact features being sent to the model
@@ -1666,7 +1665,7 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).")
         try:
             error_details = http_err.response.json() # Try to get error details from Telegram API
-            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_err_details}")
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
         except json.JSONDecodeError: # If response is not JSON
             logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ: {http_err.response.text}")
         return None
