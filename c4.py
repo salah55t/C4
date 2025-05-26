@@ -1878,7 +1878,8 @@ def track_signals() -> None:
                 try:
                     entry_price = float(signal_row['entry_price'])
                     entry_time = signal_row['entry_time'] # Already datetime object from DB
-                    current_target_db = float(signal_row['current_target']) # Target from DB
+                    # CRITICAL FIX: Ensure current_target_db is converted to a native float
+                    current_target_db = convert_np_values(signal_row['current_target']) 
 
                     current_price_ws = ticker_data.get(symbol) # Get live price from WebSocket data
 
@@ -1911,7 +1912,7 @@ def track_signals() -> None:
 
 
                         update_query_sql = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
-                        update_params_tuple = (current_target_db, closed_at_dt, profit_pct_calc, time_to_target_td, signal_id)
+                        update_params_tuple = (convert_np_values(current_target_db), closed_at_dt, convert_np_values(profit_pct_calc), time_to_target_td, signal_id)
                         log_message_str = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target_db:.8g} (الربح: {profit_pct_calc:+.2f}%, الوقت: {time_to_target_formatted_str})."
                         notification_details_dict.update({'type': 'target_hit', 'closing_price': current_target_db, 'profit_pct': profit_pct_calc, 'time_to_target': time_to_target_formatted_str})
                         update_executed_in_loop = True
@@ -1940,7 +1941,7 @@ def track_signals() -> None:
                                              old_target_val = current_target_db
                                              new_target_val = potential_new_target_val
                                              update_query_sql = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
-                                             update_params_tuple = (new_target_val, signal_id)
+                                             update_params_tuple = (convert_np_values(new_target_val), signal_id)
                                              log_message_str = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target_val:.8g} إلى {new_target_val:.8g} بناءً على إعادة تقييم ATR."
                                              notification_details_dict.update({'type': 'target_updated', 'old_target': old_target_val, 'new_target': new_target_val})
                                              update_executed_in_loop = True
@@ -2079,7 +2080,6 @@ def webhook() -> Tuple[str, int]:
                  except Exception as ack_err:
                      logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال غير الصالح {callback_id}: {ack_err}")
                  return "OK", 200
-
             # message_id = message_info_dict['message_id'] # If needed to edit the original message
             user_info_dict = callback_query.get('from', {})
             user_id_callback = user_info_dict.get('id')
