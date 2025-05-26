@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Should be enough for indicators, ML model uses more
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # For tracking, not primary signal generation
@@ -98,6 +98,7 @@ cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 ticker_data: Dict[str, float] = {}
 ml_model: Optional[Any] = None # Global variable to hold the loaded ML model
+ml_model_features: List[str] = [] # Global variable to hold the feature names the ML model was trained on
 
 # ---------------------- Binance Client Setup ----------------------
 try:
@@ -405,7 +406,7 @@ def check_db_connection() -> bool:
 
 def load_ml_model_from_db() -> Optional[Any]:
     """Loads the latest trained ML model from the database."""
-    global ml_model # To update the global variable
+    global ml_model, ml_model_features # To update the global variables
     if not check_db_connection() or not conn: # Ensure conn is not None
         logger.error("❌ [ML Model] لا يمكن تحميل نموذج ML بسبب مشكلة في اتصال قاعدة البيانات.")
         return None
@@ -418,27 +419,36 @@ def load_ml_model_from_db() -> Optional[Any]:
                 loaded_model = pickle.loads(result['model_data'])
                 metrics = result.get('metrics', {})
                 features_in_model = metrics.get('features', []) # Get features from stored metrics
+                
+                # CRITICAL: Assign loaded features to global variable
+                ml_model_features.clear() # Clear existing list
+                ml_model_features.extend(features_in_model) # Add new features
+                
                 logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{ML_MODEL_NAME}' من قاعدة البيانات بنجاح.")
-                logger.info(f"ℹ️ [ML Model] النموذج تم تدريبه باستخدام السمات: {features_in_model}")
+                logger.info(f"ℹ️ [ML Model] النموذج تم تدريبه باستخدام السمات: {ml_model_features}")
                 logger.info(f"ℹ️ [ML Model] مقاييس النموذج المحمل: {json.dumps(metrics, indent=2, ensure_ascii=False)}")
                 ml_model = loaded_model # Assign to global ml_model
                 return ml_model
             else:
                 logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{ML_MODEL_NAME}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
                 ml_model = None # Ensure global ml_model is None if not found
+                ml_model_features.clear() # Clear features if model not found
                 return None
     except psycopg2.Error as db_err:
         logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML: {db_err}", exc_info=True)
         if conn: conn.rollback() # Rollback any transaction
         ml_model = None
+        ml_model_features.clear()
         return None
     except pickle.UnpicklingError as unpickle_err:
         logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
         ml_model = None
+        ml_model_features.clear()
         return None
     except Exception as e:
         logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML: {e}", exc_info=True)
         ml_model = None
+        ml_model_features.clear()
         return None
 
 
@@ -450,14 +460,12 @@ def convert_np_values(obj: Any) -> Any:
         return [convert_np_values(item) for item in obj]
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    # Removed np.int_ as it's deprecated in NumPy 2.0
-    elif isinstance(obj, (np.integer, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
-                           np.uint8, np.uint16, np.uint32, np.uint64)): 
+    # Use np.integer for all integer types and np.floating for all float types
+    elif isinstance(obj, np.integer):
         return int(obj)
-    # Removed np.float_ as it's deprecated in NumPy 2.0
-    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)): 
+    elif isinstance(obj, np.floating):
         return float(obj)
-    elif isinstance(obj, (np.bool_)):
+    elif isinstance(obj, np.bool_):
         return bool(obj)
     elif pd.isna(obj): # Check for pandas NaN
         return None
@@ -549,8 +557,11 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 if symbol and 'USDT' in symbol and price_str: # Ensure it's a USDT pair and price exists
                     try:
                         ticker_data[symbol] = float(price_str)
+                        logger.debug(f"✅ [WS] تم تحديث سعر {symbol}: {price_str}")
                     except ValueError:
                          logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: '{price_str}'")
+                else:
+                    logger.debug(f"ℹ️ [WS] رسالة تيكر مصفوفة غير مكتملة أو غير ذات صلة: {ticker_item}")
         elif isinstance(msg, dict): # For individual streams or error messages
              if msg.get('e') == 'error': # Check for error message from WebSocket
                  logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا توجد تفاصيل خطأ')}")
@@ -563,10 +574,16 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                     if symbol and 'USDT' in symbol and price_str:
                         try:
                             ticker_data[symbol] = float(price_str)
+                            logger.debug(f"✅ [WS] تم تحديث سعر {symbol} في البث المجمع: {price_str}")
                         except ValueError:
                              logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol} في البث المجمع: '{price_str}'")
+                    else:
+                        logger.debug(f"ℹ️ [WS] رسالة تيكر مجمعة غير مكتملة أو غير ذات صلة: {data_content}")
+             else:
+                 logger.debug(f"ℹ️ [WS] رسالة WebSocket بتنسيق غير متوقع (قاموس): {msg}")
         else:
-             logger.warning(f"⚠️ [WS] تم استلام رسالة WebSocket بتنسيق غير متوقع: {type(msg)}")
+             logger.warning(f"⚠️ [WS] تم استلام رسالة WebSocket بتنسيق غير متوقع: {type(msg)} - المحتوى: {str(msg)[:100]}...")
+
 
     except Exception as e:
         logger.error(f"❌ [WS] خطأ في معالجة رسالة التيكر: {e}", exc_info=True)
@@ -583,6 +600,20 @@ def run_ticker_socket_manager() -> None:
 
             stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
             logger.info(f"✅ [WS] تم بدء بث WebSocket: {stream_name}")
+
+            # Wait for ticker_data to be populated
+            wait_attempts = 0
+            max_wait_attempts = 30 # 30 * 1 second = 30 seconds
+            while not ticker_data and wait_attempts < max_wait_attempts:
+                logger.info(f"ℹ️ [WS] انتظار بيانات التيكر من WebSocket... ({len(ticker_data)} رموز حتى الآن)")
+                time.sleep(1)
+                wait_attempts += 1
+            
+            if not ticker_data:
+                logger.warning("⚠️ [WS] لم يتم استلام أي بيانات تيكر بعد الانتظار. قد تكون هناك مشكلة في اتصال WebSocket أو لا توجد رموز نشطة.")
+            else:
+                logger.info(f"✅ [WS] تم استلام بيانات تيكر لـ {len(ticker_data)} رمزًا. متابعة.")
+
 
             twm.join()  # Wait for the socket manager to finish (blocks until stop or error)
             # If join returns, it means the TWM stopped.
@@ -949,8 +980,9 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st['supertrend_trend'] = supertrend_trend_np
     
     # Fill initial NaNs for supertrend and trend (e.g., first 'period' rows)
-    df_st['supertrend'].fillna(method='bfill', inplace=True)
-    df_st['supertrend_trend'].fillna(method='bfill', inplace=True)
+    # Updated to use .bfill() directly to avoid FutureWarning
+    df_st['supertrend'] = df_st['supertrend'].bfill()
+    df_st['supertrend_trend'] = df_st['supertrend_trend'].bfill()
 
 
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
@@ -1072,7 +1104,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 # These are not directly used by the ML model features but are part of the original bot's logic.
 # They can be kept if the bot uses them for other purposes or if future ML models might use them.
 
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]]]:
+def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
     if n < 2 * order + 1: return [], [] # Not enough data to find swings of given order
@@ -1086,18 +1118,11 @@ def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tu
 
         if np.isnan(window).any(): continue # Skip if NaN in window
 
-        is_max = np.all(center_val >= window)
-        is_min = np.all(center_val <= window)
-        
-        # Ensure it's a unique max/min in the window to avoid plateaus if desired
-        is_unique_max = is_max and (np.sum(window == center_val) == 1)
-        is_unique_min = is_min and (np.sum(window == center_val) == 1)
-
-        if is_unique_max:
+        if np.all(center_val >= window):
             # Optional: ensure it's not too close to a previous max
             if not maxima_indices or i > maxima_indices[-1] + order: # Simple distance check
                  maxima_indices.append(i)
-        elif is_unique_min:
+        elif np.all(center_val <= window):
             if not minima_indices or i > minima_indices[-1] + order:
                 minima_indices.append(i)
 
@@ -1281,21 +1306,27 @@ class ScalpingTradingStrategy:
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # **CRITICAL**: This list MUST match the features the ML model was trained on,
-        # including the order and names, and including lagged features.
-        # This list is now updated to match ml.py's feature generation.
-        self.feature_columns_for_ml = [
-            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-            'macd', 'macd_signal', 'macd_hist',
-            'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-            'supertrend', 'supertrend_trend',
-            # Lagged features as defined in ml.py
-            'close_lag1', 'close_lag2', 'close_lag3',
-            'rsi_lag1', 'rsi_lag2',
-            'macd_lag1', 'macd_lag2',
-            'supertrend_trend_lag1', 'supertrend_trend_lag2'
-        ]
+        # CRITICAL: This list MUST match the features the ML model was trained on.
+        # It is now dynamically set from ml_model_features loaded from DB,
+        # or falls back to a hardcoded list if the model isn't loaded yet.
+        if ml_model_features:
+            self.feature_columns_for_ml = ml_model_features
+            logger.info(f"📈 [Strategy {self.symbol}] Using ML model features from DB: {self.feature_columns_for_ml}")
+        else:
+            # Fallback hardcoded list (should ideally be avoided in production if ML is critical)
+            self.feature_columns_for_ml = [
+                f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+                'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+                'macd', 'macd_signal', 'macd_hist',
+                'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+                'supertrend', 'supertrend_trend',
+                'close_lag1', 'close_lag2', 'close_lag3',
+                'rsi_lag1', 'rsi_lag2',
+                'macd_lag1', 'macd_lag2',
+                'supertrend_trend_lag1', 'supertrend_trend_lag2'
+            ]
+            logger.warning(f"⚠️ [Strategy {self.symbol}] ML model features not loaded. Falling back to hardcoded list: {self.feature_columns_for_ml}")
+
         # Log the features this strategy instance expects
         logger.debug(f"📈 [Strategy {self.symbol}] Initialized. Expecting {len(self.feature_columns_for_ml)} ML features: {self.feature_columns_for_ml}")
 
@@ -1449,9 +1480,9 @@ class ScalpingTradingStrategy:
         ml_prediction_result_text = "N/A (نموذج غير محمل أو خطأ)"
         ml_pred_proba_bullish = 0.0 # Store bullish probability
 
-        if ml_model: # Global ml_model loaded from DB
+        if ml_model and ml_model_features: # Global ml_model loaded from DB and features are known
             try:
-                # Ensure features are in the correct order and format
+                # Ensure features are in the correct order and format using ml_model_features
                 features_for_prediction_df = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
                 
                 # Log the exact features being sent to the model
@@ -1473,7 +1504,7 @@ class ScalpingTradingStrategy:
                 logger.error(f"❌ [Strategy {symbol_name}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
                 ml_prediction_result_text = "خطأ في التنبؤ"
         else:
-            ml_prediction_result_text = "نموذج ML غير محمل"
+            ml_prediction_result_text = "نموذج ML غير محمل أو لا توجد سمات"
         
         signal_details['ML_Prediction_Raw'] = ml_prediction_result_text # Store raw text for alert
         signal_details['ML_Model_Used'] = ML_MODEL_NAME if ml_model else "None"
@@ -1635,7 +1666,7 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).")
         try:
             error_details = http_err.response.json() # Try to get error details from Telegram API
-            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_err_details}")
         except json.JSONDecodeError: # If response is not JSON
             logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ: {http_err.response.text}")
         return None
@@ -2169,9 +2200,10 @@ def handle_status_command(chat_id_for_status: int) -> None:
         ml_model_status_str = "محمل ✅" if ml_model else "غير محمل ⚠️"
         if ml_model:
             try: # Get model name from stored metrics if possible
-                if hasattr(ml_model, 'metrics_') and 'model_name' in ml_model.metrics_: # Example, depends on how metrics are stored
-                    ml_model_status_str += f" ({ml_model.metrics_['model_name']})"
-                else: # Fallback to configured name
+                # Check if ml_model_features is populated to indicate successful loading of features
+                if ml_model_features:
+                    ml_model_status_str += f" (بـ {len(ml_model_features)} سمة)"
+                else:
                     ml_model_status_str += f" ({ML_MODEL_NAME})"
             except: pass # Ignore errors fetching detailed model name
 
@@ -2408,7 +2440,7 @@ if __name__ == "__main__":
 
         # 2. Load the ML model from the database
         # This should be done after DB init and before starting main_loop or tracker that might use it.
-        load_ml_model_from_db() # Populates global ml_model
+        load_ml_model_from_db() # Populates global ml_model and ml_model_features
         if ml_model is None:
             logger.warning("⚠️ [Main Startup] لم يتم تحميل نموذج تعلم الآلة. ستعمل الاستراتيجية بوضع احتياطي إذا تم تكوينه لذلك.")
         else:
