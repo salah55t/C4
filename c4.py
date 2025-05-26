@@ -450,10 +450,9 @@ def convert_np_values(obj: Any) -> Any:
         return [convert_np_values(item) for item in obj]
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    elif isinstance(obj, (np.integer, np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
-                           np.uint8, np.uint16, np.uint32, np.uint64)): # More comprehensive integer types
+    elif isinstance(obj, (np.integer, np.int64)): # Replaced np.int_ with np.int64
         return int(obj)
-    elif isinstance(obj, (np.floating, np.float_, np.float16, np.float32, np.float64)): # More comprehensive float types
+    elif isinstance(obj, (np.floating, np.float64)): # Replaced np.float_ with np.float64
         return float(obj)
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
