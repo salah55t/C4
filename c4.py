@@ -450,9 +450,12 @@ def convert_np_values(obj: Any) -> Any:
         return [convert_np_values(item) for item in obj]
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
-    elif isinstance(obj, (np.integer, np.int64)): # Replaced np.int_ with np.int64
+    # Removed np.int_ as it's deprecated in NumPy 2.0
+    elif isinstance(obj, (np.integer, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
+                           np.uint8, np.uint16, np.uint32, np.uint64)): 
         return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)): # Replaced np.float_ with np.float64
+    # Removed np.float_ as it's deprecated in NumPy 2.0
+    elif isinstance(obj, (np.floating, np.float16, np.float32, np.float64)): 
         return float(obj)
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
@@ -1069,7 +1072,7 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 # These are not directly used by the ML model features but are part of the original bot's logic.
 # They can be kept if the bot uses them for other purposes or if future ML models might use them.
 
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
+def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]]]:
     """Detects swing points (peaks and troughs) in a time series (numpy array)."""
     n = len(prices)
     if n < 2 * order + 1: return [], [] # Not enough data to find swings of given order
