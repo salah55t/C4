@@ -572,40 +572,35 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
 
 def run_ticker_socket_manager() -> None:
     """Runs and manages the WebSocket connection for mini-ticker."""
-    while True: # Keep trying to connect
+    while True:
+        twm = None  # Initialize twm to None at the start of each loop iteration
         try:
             logger.info("ℹ️ [WS] بدء إدارة WebSocket لأسعار التيكر...")
             twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-            twm.start() # Start the manager
+            twm.start()  # This sets twm._running to True internally
 
-            # Use the array stream for all mini-tickers for efficiency
             stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
-            # Or, if you want to subscribe to specific symbols from crypto_list.txt:
-            # symbols_for_ws = get_crypto_symbols() # Get validated symbols
-            # streams = [f"{s.lower()}@miniTicker" for s in symbols_for_ws]
-            # if streams:
-            #    stream_name = twm.start_multiplex_socket(callback=handle_ticker_message, streams=streams)
-            #    logger.info(f"✅ [WS] تم بدء بث WebSocket متعدد لـ {len(streams)} رمزًا: {stream_name}")
-            # else:
-            #    logger.warning("⚠️ [WS] لا توجد رموز لبدء بث WebSocket متعدد.")
-            #    twm.stop()
-            #    time.sleep(60) # Wait before retrying if no symbols
-            #    continue
             logger.info(f"✅ [WS] تم بدء بث WebSocket: {stream_name}")
 
-            twm.join() # Wait for the socket manager to finish (it runs in a loop)
-            logger.warning("⚠️ [WS] توقفت إدارة WebSocket. إعادة التشغيل...")
+            twm.join()  # Wait for the socket manager to finish (blocks until stop or error)
+            # If join returns, it means the TWM stopped.
+            logger.warning("⚠️ [WS] توقفت إدارة WebSocket (join completed). إعادة التشغيل...")
 
-        except Exception as e:
+        except Exception as e:  # Catches exceptions from twm.start(), start_miniticker_socket(), or twm.join()
             logger.error(f"❌ [WS] خطأ فادح في إدارة WebSocket: {e}. إعادة التشغيل في 15 ثانية...", exc_info=True)
+        finally:
+            if twm:  # Check if twm object was created
+                # Check the internal _running flag before attempting to stop
+                # Use getattr for safer access to a private attribute
+                is_running = getattr(twm, '_running', False)
+                logger.info(f"ℹ️ [WS] Attempting to stop TWM in finally block. Assumed TWM running state: {is_running}")
+                try:
+                    twm.stop()  # stop() should be idempotent
+                    logger.info("✅ [WS] TWM stop called successfully in finally block.")
+                except Exception as stop_err:
+                    logger.error(f"❌ [WS] خطأ أثناء إيقاف TWM في finally block: {stop_err}", exc_info=True)
         
-        # Ensure TWM is stopped if an exception occurs before join, to clean up resources
-        if 'twm' in locals() and twm._ υψηλή_TM_started: # Check if twm was started
-            try:
-                twm.stop()
-            except Exception as stop_err:
-                logger.error(f"❌ [WS] خطأ أثناء إيقاف TWM بعد فشل: {stop_err}")
-        time.sleep(15) # Wait before retrying
+        time.sleep(15)  # Wait before retrying the loop
 
 # ---------------------- Technical Indicator Functions ----------------------
 
@@ -1450,6 +1445,7 @@ class ScalpingTradingStrategy:
         ml_prediction_made = False
         ml_prediction_is_bullish = False
         ml_prediction_result_text = "N/A (نموذج غير محمل أو خطأ)"
+        ml_pred_proba_bullish = 0.0 # Store bullish probability
 
         if ml_model: # Global ml_model loaded from DB
             try:
@@ -1459,18 +1455,17 @@ class ScalpingTradingStrategy:
                 # Log the exact features being sent to the model
                 logger.debug(f"ℹ️ [Strategy {symbol_name}] سمات تُرسل إلى نموذج ML للتنبؤ: {features_for_prediction_df.iloc[0].to_dict()}")
 
-                ml_pred_proba = ml_model.predict_proba(features_for_prediction_df)[0] # Get probabilities [prob_class_0, prob_class_1]
-                ml_pred = np.argmax(ml_pred_proba) # Get the class with the highest probability
+                ml_pred_proba_array = ml_model.predict_proba(features_for_prediction_df)[0] # Get probabilities [prob_class_0, prob_class_1]
+                ml_pred_class = np.argmax(ml_pred_proba_array) # Get the class with the highest probability
+                ml_pred_proba_bullish = ml_pred_proba_array[1] # Probability of class 1 (bullish)
                 
-                # ml_pred = ml_model.predict(features_for_prediction_df)[0] # Original: just predict class
-
-                logger.info(f"✨ [Strategy {symbol_name}] تنبؤ نموذج ML: الفئة={ml_pred}, الاحتمالات={ml_pred_proba}")
+                logger.info(f"✨ [Strategy {symbol_name}] تنبؤ نموذج ML: الفئة={ml_pred_class}, الاحتمالات={ml_pred_proba_array}")
                 
-                if ml_pred == 1: # Assuming 1 is the "bullish" or "target will be hit" class
+                if ml_pred_class == 1: # Assuming 1 is the "bullish" or "target will be hit" class
                     ml_prediction_is_bullish = True
-                    ml_prediction_result_text = f'صعودي (فئة 1، ثقة: {ml_pred_proba[1]:.2%}) ✅'
+                    ml_prediction_result_text = f'صعودي (فئة 1، ثقة: {ml_pred_proba_bullish:.2%}) ✅'
                 else:
-                    ml_prediction_result_text = f'هبوطي/محايد (فئة 0، ثقة: {ml_pred_proba[0]:.2%}) ❌'
+                    ml_prediction_result_text = f'هبوطي/محايد (فئة 0، ثقة: {ml_pred_proba_array[0]:.2%}) ❌'
                 ml_prediction_made = True
             except Exception as ml_err:
                 logger.error(f"❌ [Strategy {symbol_name}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
@@ -1480,6 +1475,7 @@ class ScalpingTradingStrategy:
         
         signal_details['ML_Prediction_Raw'] = ml_prediction_result_text # Store raw text for alert
         signal_details['ML_Model_Used'] = ML_MODEL_NAME if ml_model else "None"
+        signal_details['ML_Bullish_Probability'] = f"{ml_pred_proba_bullish:.4f}" if ml_prediction_made else "N/A"
 
 
         # --- BTC Trend Filter (General Market Condition) ---
@@ -1499,33 +1495,54 @@ class ScalpingTradingStrategy:
         if ml_prediction_made and ml_prediction_is_bullish:
             logger.info(f"✅ [Strategy {symbol_name}] إشارة شراء مؤكدة بناءً على تنبؤ ML الصعودي.")
             final_signal_decision = True
-            # Optionally, still check some very basic conditions like volume or if price is not extremely overbought
-            # For now, ML bullish prediction is the primary driver.
             signal_details['Decision_Basis'] = "ML Prediction Bullish"
 
-        elif not ml_model or not ml_prediction_made: # Fallback if ML model is not available or prediction failed
+        elif not ml_model or not ml_prediction_made: 
             logger.warning(f"⚠️ [Strategy {symbol_name}] نموذج ML غير متاح أو فشل التنبؤ. الرجوع إلى الاستراتيجية التقليدية.")
             strategy_name_used = "Traditional_Scalp_Fallback"
             signal_details['Decision_Basis'] = "Fallback: Traditional Logic"
 
-            # Check traditional essential conditions
             essential_passed_trad = True
             failed_essential_conditions_trad = []
-            # (Re-implement traditional essential checks here if needed for fallback)
-            # Example:
-            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
-                essential_passed_trad = False; failed_essential_conditions_trad.append('Price Above EMAs')
-            # ... add other traditional essential checks ...
+            
+            # Price vs EMAs and VWMA
+            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
+                    last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
+                    last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
+                    last_row['close'] > last_row['vwma']):
+                essential_passed_trad = False; failed_essential_conditions_trad.append('Price Not Above EMAs/VWMA')
+            signal_details['Trad_Price_MA_Alignment'] = 'Pass' if 'Price Not Above EMAs/VWMA' not in failed_essential_conditions_trad else 'Fail'
+
+            # EMA Order
+            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
+                    last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
+                 essential_passed_trad = False; failed_essential_conditions_trad.append('Short EMA Not Above Long EMA')
+            signal_details['Trad_EMA_Order'] = 'Pass' if 'Short EMA Not Above Long EMA' not in failed_essential_conditions_trad else 'Fail'
+            
+            # Supertrend
+            if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
+                 essential_passed_trad = False; failed_essential_conditions_trad.append('SuperTrend Not Bullish')
+            signal_details['Trad_SuperTrend'] = 'Pass' if 'SuperTrend Not Bullish' not in failed_essential_conditions_trad else 'Fail'
+
+            # MACD
+            if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
+                 essential_passed_trad = False; failed_essential_conditions_trad.append('MACD Not Bullish')
+            signal_details['Trad_MACD'] = 'Pass' if 'MACD Not Bullish' not in failed_essential_conditions_trad else 'Fail'
+
+            # ADX/DI
+            if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
+                 essential_passed_trad = False; failed_essential_conditions_trad.append('ADX/DI Not Bullish Strong')
+            signal_details['Trad_ADX_DI'] = 'Pass' if 'ADX/DI Not Bullish Strong' not in failed_essential_conditions_trad else 'Fail'
+
 
             if not essential_passed_trad:
                 logger.debug(f"ℹ️ [Strategy {symbol_name}] (Fallback) فشلت الشروط الإلزامية التقليدية: {', '.join(failed_essential_conditions_trad)}. تم رفض الإشارة.")
                 return None
             
-            # Calculate optional score for traditional fallback
             current_score_optional = 0.0
-            # (Re-implement optional scoring logic here if needed for fallback)
-            # Example:
-            if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD : current_score_optional += self.condition_weights['rsi_ok']
+            if pd.notna(last_row['rsi']) and RSI_OVERSOLD < last_row['rsi'] < RSI_OVERBOUGHT : current_score_optional += self.condition_weights['rsi_ok']; signal_details['Fallback_RSI_OK'] = 'Pass'
+            if last_row.get('BullishCandleSignal', 0) == 1: current_score_optional += self.condition_weights['bullish_candle']; signal_details['Fallback_BullishCandle'] = 'Pass'
+            # ... (add other optional conditions for fallback scoring and signal_details) ...
 
             min_total_score_needed = self.total_possible_score_optional * self.min_score_threshold_pct_optional
             if current_score_optional >= min_total_score_needed:
@@ -1535,13 +1552,13 @@ class ScalpingTradingStrategy:
             else:
                 logger.debug(f"ℹ️ [Strategy {symbol_name}] (Fallback) لم يتم استيفاء درجة الشروط الاختيارية التقليدية ({current_score_optional:.2f} < {min_total_score_needed:.2f}). تم رفض الإشارة.")
                 return None
-        else: # ML prediction was made but was not bullish
+        else: 
             logger.info(f"ℹ️ [Strategy {symbol_name}] تنبؤ نموذج ML ليس صعوديًا. تم رفض الإشارة.")
             return None
 
 
         if not final_signal_decision:
-            return None # Should have already returned if no decision
+            return None 
 
         # --- Final Checks (Volume, Profit Margin) ---
         volume_recent = fetch_recent_volume(self.symbol)
@@ -1565,22 +1582,19 @@ class ScalpingTradingStrategy:
             logger.info(f"ℹ️ [Strategy {symbol_name}] هامش الربح المحسوب ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
             return None
 
-        # Store all collected details
-        # Convert signal_details to JSON compatible types before returning
         final_signal_details_serializable = convert_np_values(signal_details)
-
 
         signal_output = {
             'symbol': self.symbol,
-            'entry_price': float(f"{current_price:.8g}"), # Ensure proper float formatting
+            'entry_price': float(f"{current_price:.8g}"), 
             'initial_target': float(f"{initial_target:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"), # Initially same as initial
-            'r2_score': last_row.get('ML_Confidence_Score', 0.0) if 'ML_Confidence_Score' in last_row else (ml_pred_proba[1] if ml_prediction_made and ml_prediction_is_bullish else 0.0), # Use ML confidence if available
+            'current_target': float(f"{initial_target:.8g}"), 
+            'r2_score': ml_pred_proba_bullish if ml_prediction_made else signal_details.get('Fallback_Score', 0.0), # Use ML bullish prob as score
             'strategy_name': strategy_name_used,
-            'signal_details': final_signal_details_serializable, # Store all details
+            'signal_details': final_signal_details_serializable, 
             'volume_15m': volume_recent,
-            'trade_value': TRADE_VALUE, # Assumed trade value for PnL display
-            'total_possible_score': 0 # Not using traditional score if ML driven
+            'trade_value': TRADE_VALUE, 
+            'total_possible_score': self.total_possible_score_optional if "Fallback" in strategy_name_used else 1.0 # 1.0 for ML prob
         }
 
         logger.info(f"✅ [Strategy {symbol_name}] تم تأكيد إشارة الشراء النهائية. السعر: {current_price:.6f}, التفاصيل: {json.dumps(final_signal_details_serializable, ensure_ascii=False)}")
@@ -1674,6 +1688,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         btc_trend_text = signal_details_dict.get('BTC_Trend_4H', 'N/A')
         decision_basis_text = signal_details_dict.get('Decision_Basis', 'غير محدد')
         model_used_text = signal_details_dict.get('ML_Model_Used', 'N/A')
+        ml_confidence_text = signal_details_dict.get('ML_Bullish_Probability', 'N/A')
+
 
         message = (
             f"💡 *إشارة تداول جديدة ({strategy_name_display})* 💡\n"
@@ -1684,6 +1700,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"📊 **أساس القرار:** *{decision_basis_text}*\n"
             f"🧠 **نموذج ML المستخدم:** `{model_used_text}`\n"
             f"💬 **تنبؤ النموذج:** *{ml_prediction_text}*\n"
+            f"🎯 **احتمالية الصعود (ML):** *{ml_confidence_text}*\n"
             f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
@@ -1700,8 +1717,11 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         # Add a small sample of other signal details if they exist
         other_details_to_show = {
             k: v for k, v in signal_details_dict.items() 
-            if k not in ['ML_Prediction_Raw', 'BTC_Trend_4H', 'Decision_Basis', 'ML_Model_Used', 'Volume_15m_USDT', 'Calculated_Target_ATR_Based']
+            if k not in ['ML_Prediction_Raw', 'BTC_Trend_4H', 'Decision_Basis', 'ML_Model_Used', 'Volume_15m_USDT', 'Calculated_Target_ATR_Based', 'ML_Bullish_Probability']
         }
+        if "Fallback" in strategy_name_raw and 'Fallback_Score' in signal_details_dict:
+             message += f"คะแนน الاستراتيجية التقليدية: {signal_details_dict['Fallback_Score']}\n" # Arabic: Traditional Strategy Score
+
         if other_details_to_show:
             message += "📋 *تفاصيل إضافية من الاستراتيجية:*\n"
             for key, value in list(other_details_to_show.items())[:3]: # Show first 3 other details
