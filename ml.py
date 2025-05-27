@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import pickle
 from decouple import config
-from typing import List, Tuple, Any # Import Tuple and Any for type hints
+from typing import List, Tuple, Any, Optional # Import Optional for type hints
 
 # Scikit-learn imports for the ML model
 from sklearn.tree import DecisionTreeClassifier
@@ -49,7 +49,7 @@ logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
 # ---------------------- Global Constants and Variables ----------------------
 ML_TRAINING_TIMEFRAME: str = '5m'
-ML_TRAINING_LOOKBACK_DAYS: int = 30
+ML_TRAINING_LOOKBACK_DAYS: int = 90 # Increased to fetch more data
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
 TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
@@ -70,8 +70,8 @@ SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
 # Global variables for Binance client and DB connection
-binance_client: Client = None
-db_conn: psycopg2.extensions.connection = None
+binance_client: Optional[Client] = None # Changed to Optional
+db_conn: Optional[psycopg2.extensions.connection] = None # Changed to Optional
 
 # Define the features that will be used for the ML model
 # This list will be dynamically extended with lagged features
@@ -186,51 +186,118 @@ def cleanup_resources() -> None:
 
 # ---------------------- Data Fetching and Indicator Calculation Functions ----------------------
 def fetch_historical_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
-    """Fetches historical candlestick data from Binance."""
+    """
+    Fetches historical candlestick data from Binance, fetching in chunks if needed.
+    Attempts to fetch data for the specified 'days' or up to a maximum of 10,000 klines.
+    """
     if not binance_client:
         logger.error("❌ [Data] Binance client not initialized for data fetching.")
         return pd.DataFrame()
-    try:
-        start_dt = datetime.utcnow() - timedelta(days=days + 1)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} since {start_str} (limit 1000 candles)...")
 
-        klines = binance_client.get_historical_klines(symbol, interval, start_str, limit=1000)
-
-        if not klines:
-            logger.warning(f"⚠️ [Data] No historical data ({interval}) for {symbol} for the requested period.")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
-
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df = df[numeric_cols]
-        df.dropna(subset=numeric_cols, inplace=True)
-
-        if df.empty:
-            logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after dropping essential NaN values.")
-            return pd.DataFrame()
-
-        logger.debug(f"✅ [Data] Fetched and processed {len(df)} historical candles ({interval}) for {symbol}.")
-        return df
-
-    except BinanceAPIException as api_err:
-        logger.error(f"❌ [Data] Binance API error while fetching data for {symbol}: {api_err}")
+    all_klines = []
+    end_time = datetime.utcnow()
+    # Calculate interval in milliseconds
+    interval_ms_map = {
+        '1m': 60 * 1000, '3m': 3 * 60 * 1000, '5m': 5 * 60 * 1000, '15m': 15 * 60 * 1000,
+        '30m': 30 * 60 * 1000, '1h': 60 * 60 * 1000, '2h': 2 * 60 * 60 * 1000,
+        '4h': 4 * 60 * 60 * 1000, '6h': 6 * 60 * 60 * 1000, '8h': 8 * 60 * 60 * 1000,
+        '12h': 12 * 60 * 60 * 1000, '1d': 24 * 60 * 60 * 1000, '3d': 3 * 24 * 60 * 60 * 1000,
+        '1w': 7 * 24 * 60 * 60 * 1000, '1M': 30 * 24 * 60 * 60 * 1000 # Approximation for month
+    }
+    interval_ms = interval_ms_map.get(interval)
+    if not interval_ms:
+        logger.error(f"❌ [Data] Invalid interval specified: {interval}")
         return pd.DataFrame()
-    except BinanceRequestException as req_err:
-        logger.error(f"❌ [Data] Request or network error while fetching data for {symbol}: {req_err}")
+
+    # Max klines per single API call
+    BINANCE_KLINES_LIMIT = 1000
+    # Max total klines to fetch to prevent excessive API calls
+    MAX_TOTAL_KLINES = 10000 # This is about 34 days for 5m, 100 days for 15m
+
+    # Calculate how many klines are in 'days'
+    total_klines_for_days = int((days * 24 * 60 * 60 * 1000) / interval_ms)
+    klines_to_fetch = min(total_klines_for_days, MAX_TOTAL_KLINES)
+
+    logger.debug(f"ℹ️ [Data] Attempting to fetch up to {klines_to_fetch} klines for {symbol} ({interval}) over {days} days.")
+
+    fetched_count = 0
+    while fetched_count < klines_to_fetch:
+        # Calculate start_time for the current chunk. We fetch backwards.
+        # The 'start_str' parameter for get_historical_klines is a timestamp in milliseconds.
+        current_chunk_start_time = end_time - timedelta(milliseconds=BINANCE_KLINES_LIMIT * interval_ms)
+        
+        # Ensure we don't go beyond the requested 'days' for the very first chunk
+        if fetched_count == 0:
+            earliest_requested_time = datetime.utcnow() - timedelta(days=days)
+            if current_chunk_start_time < earliest_requested_time:
+                current_chunk_start_time = earliest_requested_time
+
+        start_str_ms = int(current_chunk_start_time.timestamp() * 1000)
+        end_str_ms = int(end_time.timestamp() * 1000)
+
+        # Break if the start time for this chunk is too far in the past (beyond requested days)
+        if (datetime.utcnow() - datetime.fromtimestamp(start_str_ms / 1000)).days > days + 1: # Add a buffer
+            logger.debug(f"ℹ️ [Data] Reached requested lookback period for {symbol}.")
+            break
+
+        try:
+            logger.debug(f"ℹ️ [Data] Fetching chunk for {symbol} from {datetime.fromtimestamp(start_str_ms/1000)} to {datetime.fromtimestamp(end_str_ms/1000)} (limit {BINANCE_KLINES_LIMIT})...")
+            klines = binance_client.get_historical_klines(
+                symbol=symbol,
+                interval=interval,
+                start_str=start_str_ms,
+                end_str=end_str_ms,
+                limit=BINANCE_KLINES_LIMIT
+            )
+
+            if not klines:
+                logger.debug(f"ℹ️ [Data] No more historical data for {symbol} before {datetime.fromtimestamp(start_str_ms/1000)}.")
+                break # No more data available
+
+            # Prepend new klines to maintain chronological order
+            all_klines = klines + all_klines
+            fetched_count += len(klines)
+
+            # Set end_time for the next iteration to the start_time of the current chunk
+            end_time = current_chunk_start_time
+
+            # Avoid hitting API limits too fast
+            time.sleep(0.1) # Small delay between requests
+
+        except BinanceAPIException as api_err:
+            logger.error(f"❌ [Data] Binance API error while fetching data for {symbol}: {api_err}")
+            break
+        except BinanceRequestException as req_err:
+            logger.error(f"❌ [Data] Request or network error while fetching data for {symbol}: {req_err}")
+            break
+        except Exception as e:
+            logger.error(f"❌ [Data] Unexpected error while fetching historical data for {symbol}: {e}", exc_info=True)
+            break
+
+    if not all_klines:
+        logger.warning(f"⚠️ [Data] No historical data ({interval}) for {symbol} after multiple attempts.")
         return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"❌ [Data] Unexpected error while fetching historical data for {symbol}: {e}", exc_info=True)
+
+    df = pd.DataFrame(all_klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+    ])
+
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df[numeric_cols]
+    df.dropna(subset=numeric_cols, inplace=True)
+
+    if df.empty:
+        logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after dropping essential NaN values.")
         return pd.DataFrame()
+
+    logger.info(f"✅ [Data] Fetched and processed {len(df)} historical candles ({interval}) for {symbol} over {days} days (or up to {MAX_TOTAL_KLINES} klines).")
+    return df
 
 def calculate_ema(series: pd.Series, span: int) -> pd.Series:
     """Calculates Exponential Moving Average (EMA)."""
