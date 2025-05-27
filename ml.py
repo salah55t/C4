@@ -46,7 +46,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 
