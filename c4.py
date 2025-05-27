@@ -51,9 +51,9 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
 MAX_OPEN_TRADES: int = 5
-SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '5m'
+SIGNAL_TRACKING_TIMEFRAME: str = '15m'
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
 # Indicator Parameters
@@ -79,7 +79,7 @@ SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 250000.0
+MIN_VOLUME_15M_USDT: float = 100000.0
 
 RECENT_EMA_CROSS_LOOKBACK: int = 2
 MIN_ADX_TREND_STRENGTH: int = 20
