@@ -20,7 +20,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Keep INFO for now, can be changed to WARNING later if still memory issues
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
@@ -50,9 +50,9 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 14 # **CRITICAL CHANGE: Matched with ML_TRAINING_LOOKBACK_DAYS in ml.py**
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Keep this for consistency, though tracking uses current price
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1 # Keep this for consistency, though tracking uses current price
 
