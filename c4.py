@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Keep this for consistency, though tracking uses current price
@@ -93,6 +93,21 @@ TARGET_REACH_THRESHOLD_PCT: float = 0.001 # How close to target to consider it h
 BINANCE_FEE_RATE: float = 0.001
 
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the name used in train_ml_model.py
+
+# GLOBAL CONSTANT: Define the exact feature columns expected by the ML model
+# THIS LIST MUST EXACTLY MATCH THE FEATURE_COLUMNS USED IN YOUR ML TRAINING SCRIPT (ml.py)
+ML_FEATURE_COLUMNS = [
+    f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+    'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+    'macd', 'macd_signal', 'macd_hist',
+    'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+    'supertrend', 'supertrend_trend',
+    'close_lag1', 'close_lag2', 'close_lag3',
+    'rsi_lag1', 'rsi_lag2',
+    'macd_lag1', 'macd_lag2',
+    'supertrend_trend_lag1', 'supertrend_trend_lag2'
+]
+
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
@@ -1132,17 +1147,8 @@ class ScalpingTradingStrategy:
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.feature_columns_for_ml = [ # Features expected by the ML model
-            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-            'macd', 'macd_signal', 'macd_hist',
-            'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-            'supertrend', 'supertrend_trend',
-            'close_lag1', 'close_lag2', 'close_lag3',
-            'rsi_lag1', 'rsi_lag2',
-            'macd_lag1', 'macd_lag2',
-            'supertrend_trend_lag1', 'supertrend_trend_lag2'
-        ]
+        # Use the global ML_FEATURE_COLUMNS to ensure consistency with the ML model
+        self.feature_columns_for_ml = ML_FEATURE_COLUMNS
 
         self.condition_weights = {
             'rsi_ok': 0.5,
@@ -1210,13 +1216,14 @@ class ScalpingTradingStrategy:
             # Ensure all feature columns for ML exist and are numeric
             for col in self.feature_columns_for_ml:
                 if col not in df_calc.columns:
-                    logger.warning(f"⚠️ [Strategy {self.symbol}] عمود الميزة المفقود لنموذج ML: {col}")
+                    logger.warning(f"⚠️ [Strategy {self.symbol}] عمود الميزة المفقود لنموذج ML: {col}. سيتم إضافته كـ NaN.")
                     df_calc[col] = np.nan # Add missing column as NaN
                 else:
                     df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
             initial_len = len(df_calc)
             # Use all required columns for dropna, including ML features
+            # Ensure we have enough data for the last row after dropping NaNs
             all_required_cols = list(set(self.feature_columns_for_ml + [
                 'open', 'high', 'low', 'close', 'volume', 'BullishCandleSignal', 'BearishCandleSignal'
             ]))
@@ -1262,12 +1269,13 @@ class ScalpingTradingStrategy:
         ]))
         missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
         if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}. لا يمكن المتابعة.")
             return None
 
         last_row = df_processed.iloc[-1]
         recent_df = df_processed.iloc[-min_signal_data_len:]
 
+        # Check for NaN values in the last row for essential signal conditions
         if recent_df[required_cols_for_signal].isnull().values.any():
              logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات الحديثة تحتوي على قيم NaN في أعمدة الإشارة المطلوبة. لا يمكن إنشاء إشارة.")
              return None
@@ -1275,19 +1283,33 @@ class ScalpingTradingStrategy:
         # --- ML Model Prediction (NEW: Mandatory Override) ---
         ml_overrides_essentials = False
         ml_prediction_result_text = "N/A (نموذج غير محمل)"
+        ml_pred = 0 # Default to non-bullish prediction if model not loaded or prediction fails
+
         if ml_model:
-            try:
-                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
-                ml_pred = ml_model.predict(features_for_prediction)[0]
-                if ml_pred == 1: # If ML model predicts upward movement
-                    ml_overrides_essentials = True
-                    ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
-                    logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي. تجاوز الشروط الأساسية الأخرى.")
-                else:
-                    ml_prediction_result_text = 'هابط (لا يوجد تجاوز)'
-            except Exception as ml_err:
-                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
-                ml_prediction_result_text = "خطأ في التنبؤ (0)"
+            # Check if all ML features are present and not NaN in the last_row
+            missing_or_nan_ml_features = [
+                col for col in self.feature_columns_for_ml
+                if col not in last_row or pd.isna(last_row[col])
+            ]
+            if missing_or_nan_ml_features:
+                logger.warning(f"⚠️ [Strategy {self.symbol}] الميزات المطلوبة لنموذج ML مفقودة أو تحتوي على قيم NaN في الشمعة الأخيرة: {missing_or_nan_ml_features}. لا يمكن إجراء التنبؤ.")
+                ml_prediction_result_text = "غير متاح (ميزات مفقودة/NaN)"
+            else:
+                try:
+                    # Create a DataFrame with the exact columns and order expected by the ML model
+                    # This ensures the order matches ML_FEATURE_COLUMNS
+                    features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
+                    ml_pred = ml_model.predict(features_for_prediction)[0]
+                    if ml_pred == 1: # If ML model predicts upward movement
+                        ml_overrides_essentials = True
+                        ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
+                        logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي. تجاوز الشروط الأساسية الأخرى.")
+                    else:
+                        ml_prediction_result_text = 'هابط (لا يوجد تجاوز)'
+                except Exception as ml_err:
+                    logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
+                    ml_prediction_result_text = "خطأ في التنبؤ (0)"
+                    ml_pred = 0 # Default to non-bullish if prediction fails
         signal_details = {'ML_Prediction': ml_prediction_result_text} # Initialize signal_details with ML prediction
 
         # --- Check BTC Trend (Still applies even with ML override, as a general market filter) ---
@@ -2110,7 +2132,7 @@ def main_loop() -> None:
                       if conn: conn.rollback()
                       continue
                  except Exception as symbol_proc_err:
-                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
+                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_proc_err}", exc_info=True)
                       continue
 
                  time.sleep(0.1)
