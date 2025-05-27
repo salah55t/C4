@@ -16,12 +16,7 @@ import numpy as np
 import pickle
 from decouple import config
 from typing import List, Tuple, Any, Optional # Import Optional for type hints
-
-# Scikit-learn imports for the ML model
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import GridSearchCV # For hyperparameter tuning
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-from sklearn.utils import class_weight # For calculating class weights manually if needed
+from waitress import serve # Import waitress for production server
 
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
@@ -70,8 +65,8 @@ SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
 # Global variables for Binance client and DB connection
-binance_client: Optional[Client] = None # Changed to Optional
-db_conn: Optional[psycopg2.extensions.connection] = None # Changed to Optional
+binance_client: Optional[Client] = None
+db_conn: Optional[psycopg2.extensions.connection] = None
 
 # Define the features that will be used for the ML model
 # This list will be dynamically extended with lagged features
@@ -723,7 +718,8 @@ def train_and_save_model() -> None:
         return
 
     all_features_df = pd.DataFrame()
-    all_targets_series = pd.Series(dtype=int)
+    # Fix for FutureWarning: The behavior of array concatenation with empty entries is deprecated.
+    all_targets_series = pd.Series(dtype=int) 
     processed_symbols_count = 0
     
     # This will hold the final list of feature columns used for training
@@ -778,7 +774,8 @@ def train_and_save_model() -> None:
 
         # Now, select only the features for X. This ensures X has only the expected columns.
         all_features_df = pd.concat([all_features_df, df_processed[final_feature_columns_for_model]])
-        all_targets_series = pd.concat([all_targets_series, df_processed['target']])
+        # Use .copy() to avoid FutureWarning with concat and empty series
+        all_targets_series = pd.concat([all_targets_series, df_processed['target'].copy()]) 
         processed_symbols_count += 1
 
     if all_features_df.empty or all_targets_series.empty:
@@ -945,8 +942,10 @@ def status():
 
     # Fetch last training time from DB
     try:
-        init_db() # Ensure connection is open
-        with db_conn.cursor() as cur:
+        # Ensure connection is open for status check (it will be closed by finally)
+        # This is a temporary connection for status, not the global one used by training/scheduler.
+        temp_db_conn = psycopg2.connect(DB_URL, connect_timeout=5, cursor_factory=RealDictCursor)
+        with temp_db_conn.cursor() as cur:
             cur.execute("SELECT trained_at, metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (ML_MODEL_NAME,))
             result = cur.fetchone()
             if result:
@@ -960,7 +959,11 @@ def status():
         status_info["last_training_attempt_utc"] = "Error fetching from DB"
         status_info["last_training_metrics"] = "Error fetching from DB"
     finally:
-        cleanup_resources() # Close connection after use
+        if 'temp_db_conn' in locals() and temp_db_conn:
+            try:
+                temp_db_conn.close()
+            except Exception as close_err:
+                logger.error(f"⚠️ Error closing temporary DB connection in status route: {close_err}")
 
     return jsonify(status_info)
 
@@ -970,7 +973,8 @@ def trigger_training_manual():
     logger.info("ℹ️ Manual training trigger received.")
     try:
         # Run training in a separate thread to avoid blocking the Flask app
-        training_thread = Thread(target=train_and_save_model)
+        # Ensure it's a daemon thread so it doesn't prevent Flask from exiting if needed.
+        training_thread = Thread(target=train_and_save_model, daemon=True)
         training_thread.start()
         return jsonify({"message": "ML training initiated in background.", "status": "success"}), 202
     except Exception as e:
@@ -990,21 +994,59 @@ def start_scheduler():
     scheduler.start()
     logger.info("✅ Scheduler started.")
 
+# ---------------------- Flask Server Runner ----------------------
+def run_flask() -> None:
+    """Runs the Flask application using Waitress production server."""
+    host = "0.0.0.0" # Listen on all available interfaces
+    port = FLASK_PORT # Use the port from environment variables
+
+    logger.info(f"ℹ️ [Flask] Starting Flask application with Waitress on {host}:{port}...")
+    try:
+        serve(app, host=host, port=port, threads=6) # Adjust threads as needed
+    except Exception as serve_err:
+        logger.critical(f"❌ [Flask] Failed to start Waitress server: {serve_err}", exc_info=True)
+        # If Waitress fails, try Flask's development server as a last resort (not recommended for production)
+        logger.warning("⚠️ [Flask] Waitress failed. Falling back to Flask development server (NOT recommended for production).")
+        try:
+            app.run(host=host, port=port, debug=False)
+        except Exception as flask_run_err:
+            logger.critical(f"❌ [Flask] Failed to start Flask development server: {flask_run_err}", exc_info=True)
+
 # ---------------------- Application Entry Point ----------------------
 if __name__ == '__main__':
-    # Initialize Binance client and DB connection on app startup
-    # These will be used by the scheduler and manual trigger
+    # Initialize Binance client and DB connection (these are fast operations)
     init_binance_client()
     init_db()
 
-    # MODIFICATION: Run training immediately on startup
-    logger.info("🚀 Running ML model training on startup...")
-    train_and_save_model() # This will train and save the model to DB
+    # 1. Start Flask server in a separate thread FIRST.
+    # This ensures the port is bound immediately, allowing Render to detect it.
+    flask_server_thread = Thread(target=run_flask, daemon=False, name="FlaskServerThread")
+    flask_server_thread.start()
+    logger.info("✅ [Main Startup] Flask server thread initiated.")
 
-    # Start the scheduler in a separate thread to avoid blocking the Flask app
-    # This is crucial for Render's free tier, as the web server needs to respond.
-    scheduler_thread = Thread(target=start_scheduler)
+    # Give Flask a moment to bind the port and become responsive.
+    # This is a small buffer to help Render's port scan.
+    time.sleep(5) 
+    logger.info("ℹ️ [Main Startup] Giving Flask server 5 seconds to initialize...")
+
+    # 2. Now, initiate the long-running ML training and scheduler in background (daemon) threads.
+    # These threads will run as long as the main (non-daemon) Flask thread is alive.
+    logger.info("🚀 Running ML model training on startup in background thread...")
+    training_startup_thread = Thread(target=train_and_save_model, daemon=True, name="MLTrainingStartupThread")
+    training_startup_thread.start()
+
+    logger.info("✅ Starting scheduler in background thread...")
+    scheduler_thread = Thread(target=start_scheduler, daemon=True, name="SchedulerThread")
     scheduler_thread.start()
 
-    logger.info(f"🚀 Starting Flask app on port {FLASK_PORT}...")
-    app.run(host='0.0.0.0', port=FLASK_PORT, debug=False) # debug=False for production
+    # The main thread will now wait for the Flask server thread to complete.
+    # Since flask_server_thread is non-daemon and runs indefinitely,
+    # this keeps the main process alive as long as the web service is running.
+    flask_server_thread.join()
+    logger.info("ℹ️ [Main] Flask server thread finished. Initiating shutdown process...")
+
+    # Cleanup resources (DB connection)
+    cleanup_resources()
+    logger.info("👋 [Main] ML training service stopped.")
+    # Force exit to ensure all daemon threads are terminated, especially important on Render.
+    os._exit(0)
