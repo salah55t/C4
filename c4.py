@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 20
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Should be enough for indicators, ML model uses more
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # For tracking, not primary signal generation
@@ -91,6 +91,7 @@ TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 BINANCE_FEE_RATE: float = 0.001
 
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the name used in train_ml_model.py
+ML_BULLISH_PROBABILITY_THRESHOLD: float = 0.51 # New: Minimum probability for ML to consider a signal bullish
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
@@ -1482,6 +1483,7 @@ class ScalpingTradingStrategy:
             try:
                 # CRITICAL FIX: Ensure features are in the correct order and format using ml_model_features
                 # Create a DataFrame with only the required features, in the correct order
+                # This explicitly reorders columns to match ml_model_features
                 features_for_prediction_df = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
                 
                 # Log the exact features being sent to the model
@@ -1493,7 +1495,8 @@ class ScalpingTradingStrategy:
                 
                 logger.info(f"✨ [Strategy {symbol_name}] تنبؤ نموذج ML: الفئة={ml_pred_class}, الاحتمالات={ml_pred_proba_array}")
                 
-                if ml_pred_class == 1: # Assuming 1 is the "bullish" or "target will be hit" class
+                # MODIFICATION: Accept signal if bullish probability is above threshold
+                if ml_pred_proba_bullish >= ML_BULLISH_PROBABILITY_THRESHOLD: 
                     ml_prediction_is_bullish = True
                     ml_prediction_result_text = f'صعودي (فئة 1، ثقة: {ml_pred_proba_bullish:.2%}) ✅'
                 else:
@@ -1508,6 +1511,7 @@ class ScalpingTradingStrategy:
         signal_details['ML_Prediction_Raw'] = ml_prediction_result_text # Store raw text for alert
         signal_details['ML_Model_Used'] = ML_MODEL_NAME if ml_model else "None"
         signal_details['ML_Bullish_Probability'] = f"{ml_pred_proba_bullish:.4f}" if ml_prediction_made else "N/A"
+        signal_details['ML_Threshold_Used'] = ML_BULLISH_PROBABILITY_THRESHOLD # Store the threshold used
 
 
         # --- BTC Trend Filter (General Market Condition) ---
@@ -1525,9 +1529,9 @@ class ScalpingTradingStrategy:
         strategy_name_used = "ML_Driven_Scalp"
 
         if ml_prediction_made and ml_prediction_is_bullish:
-            logger.info(f"✅ [Strategy {symbol_name}] إشارة شراء مؤكدة بناءً على تنبؤ ML الصعودي.")
+            logger.info(f"✅ [Strategy {symbol_name}] إشارة شراء مؤكدة بناءً على تنبؤ ML الصعودي (احتمالية >= {ML_BULLISH_PROBABILITY_THRESHOLD}).")
             final_signal_decision = True
-            signal_details['Decision_Basis'] = "ML Prediction Bullish"
+            signal_details['Decision_Basis'] = "ML Prediction Bullish (Threshold Met)"
 
         elif not ml_model or not ml_prediction_made: 
             logger.warning(f"⚠️ [Strategy {symbol_name}] نموذج ML غير متاح أو فشل التنبؤ. الرجوع إلى الاستراتيجية التقليدية.")
@@ -1585,7 +1589,7 @@ class ScalpingTradingStrategy:
                 logger.debug(f"ℹ️ [Strategy {symbol_name}] (Fallback) لم يتم استيفاء درجة الشروط الاختيارية التقليدية ({current_score_optional:.2f} < {min_total_score_needed:.2f}). تم رفض الإشارة.")
                 return None
         else: 
-            logger.info(f"ℹ️ [Strategy {symbol_name}] تنبؤ نموذج ML ليس صعوديًا. تم رفض الإشارة.")
+            logger.info(f"ℹ️ [Strategy {symbol_name}] تنبؤ نموذج ML ليس صعوديًا (أقل من العتبة {ML_BULLISH_PROBABILITY_THRESHOLD}). تم رفض الإشارة.")
             return None
 
 
@@ -1721,6 +1725,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         decision_basis_text = signal_details_dict.get('Decision_Basis', 'غير محدد')
         model_used_text = signal_details_dict.get('ML_Model_Used', 'N/A')
         ml_confidence_text = signal_details_dict.get('ML_Bullish_Probability', 'N/A')
+        ml_threshold_text = signal_details_dict.get('ML_Threshold_Used', 'N/A')
 
 
         message = (
@@ -1732,7 +1737,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"📊 **أساس القرار:** *{decision_basis_text}*\n"
             f"🧠 **نموذج ML المستخدم:** `{model_used_text}`\n"
             f"💬 **تنبؤ النموذج:** *{ml_prediction_text}*\n"
-            f"🎯 **احتمالية الصعود (ML):** *{ml_confidence_text}*\n"
+            f"🎯 **احتمالية الصعود (ML):** *{ml_confidence_text}* (العتبة: {ml_threshold_text})\n"
             f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
@@ -1749,7 +1754,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         # Add a small sample of other signal details if they exist
         other_details_to_show = {
             k: v for k, v in signal_details_dict.items() 
-            if k not in ['ML_Prediction_Raw', 'BTC_Trend_4H', 'Decision_Basis', 'ML_Model_Used', 'Volume_15m_USDT', 'Calculated_Target_ATR_Based', 'ML_Bullish_Probability']
+            if k not in ['ML_Prediction_Raw', 'BTC_Trend_4H', 'Decision_Basis', 'ML_Model_Used', 'Volume_15m_USDT', 'Calculated_Target_ATR_Based', 'ML_Bullish_Probability', 'ML_Threshold_Used']
         }
         if "Fallback" in strategy_name_raw and 'Fallback_Score' in signal_details_dict:
              message += f"คะแนน الاستراتيجية التقليدية: {signal_details_dict['Fallback_Score']}\n" # Arabic: Traditional Strategy Score
