@@ -1294,11 +1294,18 @@ class ScalpingTradingStrategy:
             if missing_or_nan_ml_features:
                 logger.warning(f"⚠️ [Strategy {self.symbol}] الميزات المطلوبة لنموذج ML مفقودة أو تحتوي على قيم NaN في الشمعة الأخيرة: {missing_or_nan_ml_features}. لا يمكن إجراء التنبؤ.")
                 ml_prediction_result_text = "غير متاح (ميزات مفقودة/NaN)"
+                ml_pred = 0 # Default to non-bullish if features are bad
             else:
                 try:
                     # Create a DataFrame with the exact columns and order expected by the ML model
                     # This ensures the order matches ML_FEATURE_COLUMNS
                     features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
+
+                    # --- DEBUGGING AID: Log the features being sent to the model ---
+                    logger.debug(f"ℹ️ [ML Prediction Debug] {self.symbol}: Features being sent to ML model: {features_for_prediction.columns.tolist()}")
+                    logger.debug(f"ℹ️ [ML Prediction Debug] {self.symbol}: Feature values: {features_for_prediction.values.tolist()}")
+                    # --- END DEBUGGING AID ---
+
                     ml_pred = ml_model.predict(features_for_prediction)[0]
                     if ml_pred == 1: # If ML model predicts upward movement
                         ml_overrides_essentials = True
@@ -2132,7 +2139,7 @@ def main_loop() -> None:
                       if conn: conn.rollback()
                       continue
                  except Exception as symbol_proc_err:
-                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_proc_err}", exc_info=True)
+                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
                       continue
 
                  time.sleep(0.1)
