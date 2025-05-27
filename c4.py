@@ -50,11 +50,11 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 5
+MAX_OPEN_TRADES: int = 10
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '5m'
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
+SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Keep this for consistency, though tracking uses current price
+SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1 # Keep this for consistency, though tracking uses current price
 
 # Indicator Parameters
 RSI_PERIOD: int = 9
@@ -68,7 +68,8 @@ FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
 FIB_TOLERANCE: float = 0.005
 LOOKBACK_FOR_SWINGS: int = 50
 ENTRY_ATR_PERIOD: int = 10
-ENTRY_ATR_MULTIPLIER: float = 1.5
+ENTRY_ATR_MULTIPLIER: float = 1.5 # Initial target multiplier
+TARGET_EXTENSION_ATR_MULTIPLIER: float = 0.75 # Multiplier for extending target
 BOLLINGER_WINDOW: int = 20
 BOLLINGER_STD_DEV: int = 2
 MACD_FAST: int = 9
@@ -86,7 +87,8 @@ MIN_ADX_TREND_STRENGTH: int = 20
 MACD_HIST_INCREASE_CANDLES: int = 3
 OBV_INCREASE_CANDLES: int = 3
 
-TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
+TARGET_APPROACH_THRESHOLD_PCT: float = 0.005 # How close to target before re-evaluation
+TARGET_REACH_THRESHOLD_PCT: float = 0.001 # How close to target to consider it hit
 
 BINANCE_FEE_RATE: float = 0.001
 
@@ -1135,7 +1137,11 @@ class ScalpingTradingStrategy:
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-            'supertrend', 'supertrend_trend'
+            'supertrend', 'supertrend_trend',
+            'close_lag1', 'close_lag2', 'close_lag3',
+            'rsi_lag1', 'rsi_lag2',
+            'macd_lag1', 'macd_lag2',
+            'supertrend_trend_lag1', 'supertrend_trend_lag2'
         ]
 
         self.condition_weights = {
@@ -1165,9 +1171,12 @@ class ScalpingTradingStrategy:
 
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Calculates all required indicators for the strategy."""
+        """Calculates all required indicators for the strategy, including lagged features."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
         min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 5
+
+        # Add buffer for lagged features (max lag is 3 for close, 2 for others)
+        min_len_required += 3
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -1188,6 +1197,15 @@ class ScalpingTradingStrategy:
             df_calc = calculate_vwap(df_calc)
             df_calc = calculate_obv(df_calc)
             df_calc = detect_candlestick_patterns(df_calc)
+
+            # Add lagged features
+            for lag in range(1, 4): # Lags 1, 2, 3
+                df_calc[f'close_lag{lag}'] = df_calc['close'].shift(lag)
+            for lag in range(1, 3): # Lags 1, 2
+                df_calc[f'rsi_lag{lag}'] = df_calc['rsi'].shift(lag)
+                df_calc[f'macd_lag{lag}'] = df_calc['macd'].shift(lag)
+                df_calc[f'supertrend_trend_lag{lag}'] = df_calc['supertrend_trend'].shift(lag)
+
 
             # Ensure all feature columns for ML exist and are numeric
             for col in self.feature_columns_for_ml:
@@ -1231,6 +1249,9 @@ class ScalpingTradingStrategy:
         logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء...")
 
         min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 1
+        # Add buffer for lagged features (max lag is 3 for close)
+        min_signal_data_len += 3
+
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.")
             return None
@@ -1342,7 +1363,8 @@ class ScalpingTradingStrategy:
             logger.info(f"✅ [Strategy {self.symbol}] تم تجاوز الشروط الأساسية بواسطة تنبؤ ML الصعودي.")
             # If ML overrides, set essential conditions to "ML Override" in details for clarity
             for cond_name in self.essential_conditions:
-                if cond_name not in signal_details:
+                # This check ensures we don't overwrite if ML_Prediction already added a specific message
+                if cond_name.replace(' ', '_') not in signal_details:
                     signal_details[cond_name.replace(' ', '_')] = 'تم تجاوزها بواسطة ML' # Add a placeholder for overridden conditions
 
 
@@ -1367,7 +1389,7 @@ class ScalpingTradingStrategy:
         else:
              signal_details['Candle'] = f'لا يوجد نمط شمعة صعودي (0)'
 
-        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995:
+        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * (1 - TARGET_REACH_THRESHOLD_PCT): # Adjusted threshold for BB
              current_score += self.condition_weights.get('not_bb_extreme', 0)
              signal_details['Bollinger_Basic'] = f'ليس عند الحد العلوي لبولينجر (+{self.condition_weights.get("not_bb_extreme", 0)})'
         else:
@@ -1430,8 +1452,8 @@ class ScalpingTradingStrategy:
              logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف.")
              return None
 
-        target_multiplier = ENTRY_ATR_MULTIPLIER
-        initial_target = current_price + (target_multiplier * current_atr)
+        # Initial target based on ATR
+        initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
 
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
@@ -1442,7 +1464,7 @@ class ScalpingTradingStrategy:
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"),
+            'current_target': float(f"{initial_target:.8g}"), # Current target starts as initial
             'r2_score': float(f"{current_score:.2f}"),
             'strategy_name': 'Scalping_Momentum_Trend_ML_Override', # Updated strategy name
             'signal_details': signal_details,
@@ -1715,68 +1737,65 @@ def track_signals() -> None:
 
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}")
 
-                    update_query: Optional[sql.SQL] = None
-                    update_params: Tuple = ()
-                    log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'current_price': current_price}
 
-
-                    # --- Check and Update Logic ---
-                    # 1. Check for Target Hit
-                    if current_price >= current_target:
+                    # 1. Check for Target Hit (with a small tolerance)
+                    if current_price >= current_target * (1 - TARGET_REACH_THRESHOLD_PCT):
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
                         closed_at = datetime.now()
                         time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
-                        time_to_target_str = str(time_to_target_duration)
+                        time_to_target_str = str(time_to_target_duration).split('.')[0] # Remove microseconds
 
                         update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
                         update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
                         log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%, الوقت: {time_to_target_str})."
-                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str})
+                        notification_details = {'type': 'target_hit', 'symbol': symbol, 'id': signal_id, 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str}
                         update_executed = True
 
-                    # 2. Check for Target Extension (Only if Target not hit)
-                    if not update_executed:
-                        if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
-                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرار...")
+                    # 2. Check for Target Extension (Only if Target not hit and price is approaching target)
+                    if not update_executed and current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
+                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرار...")
 
-                             df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+                         # Fetch fresh data for re-evaluation
+                         df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
 
-                             if df_continuation is not None and not df_continuation.empty:
-                                 continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
+                         if df_continuation is not None and not df_continuation.empty:
+                             continuation_strategy = ScalpingTradingStrategy(symbol)
+                             df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
 
-                                 if df_continuation_indicators is not None:
-                                     continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
+                             if df_continuation_indicators is not None:
+                                 # Re-evaluate using the same signal generation logic, including ML prediction
+                                 continuation_signal_check = continuation_strategy.generate_buy_signal(df_continuation_indicators)
 
-                                     if continuation_signal:
-                                         latest_row = df_continuation_indicators.iloc[-1]
-                                         current_atr_for_new_target = latest_row.get('atr')
+                                 if continuation_signal_check and continuation_signal_check['signal_details'].get('ML_Prediction') == 'صعودي (تجاوز الشروط الأساسية) ✅':
+                                     # If ML still predicts bullish AND other conditions are good, extend target
+                                     latest_row = df_continuation_indicators.iloc[-1]
+                                     current_atr_for_new_target = latest_row.get('atr')
 
-                                         if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
-                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_new_target)
+                                     if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
+                                         # Calculate new target based on current price + ATR multiplier
+                                         potential_new_target = current_price + (TARGET_EXTENSION_ATR_MULTIPLIER * current_atr_for_new_target)
 
-                                             if potential_new_target > current_target:
-                                                 old_target = current_target
-                                                 new_target = potential_new_target
-                                                 update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
-                                                 update_params = (new_target, signal_id)
-                                                 log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target:.8g} إلى {new_target:.8g} بناءً على إشارة الاستمرار."
-                                                 notification_details.update({'type': 'target_updated', 'old_target': old_target, 'new_target': new_target})
-                                                 update_executed = True
-                                             else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) ليس أعلى من الهدف الحالي ({current_target:.8g}). عدم تحديث الهدف.")
+                                         if potential_new_target > current_target:
+                                             old_target = current_target
+                                             new_target = potential_new_target
+                                             update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
+                                             update_params = (new_target, signal_id)
+                                             log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target:.8g} إلى {new_target:.8g} بناءً على إشارة الاستمرار (بما في ذلك ML)."
+                                             notification_details = {'type': 'target_updated', 'symbol': symbol, 'id': signal_id, 'current_price': current_price, 'old_target': old_target, 'new_target': new_target}
+                                             update_executed = True
                                          else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف الجديد بسبب ATR غير صالح ({current_atr_for_new_target}) من بيانات الاستمرار.")
+                                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) ليس أعلى من الهدف الحالي ({current_target:.8g}). عدم تحديث الهدف.")
                                      else:
-                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم إنشاء إشارة استمرار.")
+                                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف الجديد بسبب ATR غير صالح ({current_atr_for_new_target}) من بيانات الاستمرار.")
                                  else:
-                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في ملء المؤشرات للتحقق من الاستمرار.")
+                                     logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم إنشاء إشارة استمرار قوية (أو ML ليس صعوديًا).")
                              else:
-                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب البيانات التاريخية للتحقق من الاستمرار.")
+                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في ملء المؤشرات للتحقق من الاستمرار.")
+                         else:
+                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب البيانات التاريخية للتحقق من الاستمرار.")
 
 
-                    if update_executed and update_query:
+                    if update_executed: # Only commit and notify if an update was actually performed
                         try:
                              with conn.cursor() as update_cur:
                                   update_cur.execute(update_query, update_params)
@@ -1963,7 +1982,7 @@ def handle_status_command(chat_id_msg: int) -> None:
             f"- تتبع الإشارات: {tracker_status}\n"
             f"- حلقة البوت الرئيسية: {main_bot_alive}\n" # Added main bot loop status
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%H-%m-%d %H:%M:%S')}"
         )
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
