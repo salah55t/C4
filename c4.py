@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'}")
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة (معدلة للسكالبينج على إطار 5 دقائق) ----------------------
 TRADE_VALUE: float = 10.0         # Default trade value in USDT (Keep small for testing)
-MAX_OPEN_TRADES: int = 15         # Maximum number of open trades simultaneously (Increased slightly for scalping)
+MAX_OPEN_TRADES: int = 5          # Maximum number of open trades simultaneously (Increased slightly for scalping)
 SIGNAL_GENERATION_TIMEFRAME: str = '5m' # Timeframe for signal generation (Changed to 5m)
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3 # Reduced historical data lookback for shorter timeframe
 SIGNAL_TRACKING_TIMEFRAME: str = '5m' # Timeframe for signal tracking and stop loss updates (Changed to 5m)
@@ -100,9 +100,6 @@ OBV_INCREASE_CANDLES: int = 3 # Check if OBV is increasing over the last X candl
 
 # --- Target Extension Parameter ---
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005 # Percentage threshold to consider price "close" to target (0.5%)
-
-# --- Binance Fees ---
-BINANCE_FEE_RATE: float = 0.001 # 0.1% fee rate for maker/taker on Binance Spot
 # =============================================================================
 # --- End Indicator Parameters ---
 # =============================================================================
@@ -710,11 +707,11 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     alpha = 1 / period
     df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
     df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
-    df_calc['di_minus_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean() # Corrected variable name
+    df_calc['-dm_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
 
     # Calculate Directional Indicators (DI+, DI-) and avoid division by zero
     df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['di_minus_smooth'] / df_calc['tr_smooth']), 0) # Corrected variable name
+    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['-dm_smooth'] / df_calc['tr_smooth']), 0)
 
     # Calculate Directional Movement Index (DX)
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
@@ -1139,9 +1136,8 @@ def generate_performance_report() -> str:
         with conn.cursor() as report_cur: # Uses RealDictCursor
             # 1. Open Signals
             # Adjusted query to reflect removal of hit_stop_loss
-            report_cur.execute("SELECT id, symbol, entry_price, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
-            open_signals = report_cur.fetchall()
-            open_signals_count = len(open_signals)
+            report_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
+            open_signals_count = (report_cur.fetchone() or {}).get('count', 0)
 
             # 2. Closed Signals Statistics (Only Target Hits)
             # Adjusted query to only count achieved targets as closed
@@ -1151,8 +1147,7 @@ def generate_performance_report() -> str:
                     COUNT(*) AS winning_signals, -- All closed signals are winning (target hit)
                     COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum, -- Sum of percentages
                     COALESCE(AVG(profit_percentage), 0) AS avg_profit_pct,
-                    COALESCE(AVG(profit_percentage), 0) AS avg_win_pct, -- Avg win is same as avg profit
-                    COALESCE(SUM(entry_price * (1 + profit_percentage/100.0)), 0) AS total_exit_value -- Total value at exit for fee calculation
+                    COALESCE(AVG(profit_percentage), 0) AS avg_win_pct -- Avg win is same as avg profit
                 FROM signals
                 WHERE achieved_target = TRUE;
             """)
@@ -1160,27 +1155,24 @@ def generate_performance_report() -> str:
 
             total_closed = closed_stats.get('total_closed', 0)
             winning_signals = closed_stats.get('winning_signals', 0)
+            # Losing signals are now considered as signals that didn't hit target or SL (which is removed)
+            # We can report on signals that were open for a long time without hitting target if needed,
+            # but for simplicity, we'll only report on successful trades (target hits).
             losing_signals = 0 # No losing signals based on this simplified logic
             total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0) # Sum of percentages
-            gross_profit_pct_sum = total_profit_pct_sum # <--- ADDED THIS LINE
-            avg_win_pct = closed_stats.get('avg_profit_pct', 0.0) # Corrected to use avg_profit_pct from query
-            total_exit_value = closed_stats.get('total_exit_value', 0.0)
+            avg_win_pct = closed_stats.get('avg_win_pct', 0.0)
 
-            # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
-            # Gross profit is based on percentage gain on initial TRADE_VALUE
-            gross_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
-
-            # Calculate total fees for closed trades
-            # Each trade has two legs: entry and exit. Fees apply to the value of each leg.
-            # Assuming TRADE_VALUE is the initial investment for each trade.
-            total_fees_usd = (total_closed * TRADE_VALUE * BINANCE_FEE_RATE) + (total_exit_value * BINANCE_FEE_RATE)
-
-            net_profit_usd = gross_profit_usd - total_fees_usd
-            net_profit_pct = (net_profit_usd / (total_closed * TRADE_VALUE)) * 100 if total_closed * TRADE_VALUE > 0 else 0.0
-
+            # Gross profit/loss calculations are less meaningful without stop-loss,
+            # total profit is the sum of profits from target hits.
+            gross_profit_pct_sum = total_profit_pct_sum
             gross_loss_pct_sum = 0.0
             avg_loss_pct = 0.0
 
+
+            # Calculate total profit/loss in USD based on TRADE_VALUE for each closed trade
+            total_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
+            gross_profit_usd = (gross_profit_pct_sum / 100.0) * TRADE_VALUE
+            gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE # Will be zero
 
             # 3. Calculate Derived Metrics
             win_rate = 100.0 if total_closed > 0 else 0.0 # Win rate is 100% for target hits
@@ -1192,21 +1184,9 @@ def generate_performance_report() -> str:
         # 4. Format the report in Arabic
         report = (
             f"📊 *تقرير الأداء الشامل:*\n"
-            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل صفقة)_ \n" # Indicate assumed trade size and fee
+            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f})_\n" # Indicate assumed trade size
             f"——————————————\n"
             f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
-        )
-
-        if open_signals:
-            report += "  • التفاصيل:\n"
-            for signal in open_signals:
-                safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-                entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
-                report += f"    - `{safe_symbol}` (دخول: ${signal['entry_price']:.8g} | فتح: {entry_time_str})\n"
-        else:
-            report += "  • لا توجد إشارات مفتوحة حالياً.\n"
-
-        report += (
             f"——————————————\n"
             f"📉 *إحصائيات الإشارات المغلقة (تم تحقيق الهدف فقط):*\n" # Clarified
             f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
@@ -1214,9 +1194,7 @@ def generate_performance_report() -> str:
             f"  ❌ إشارات خاسرة: *{losing_signals}*\n" # Will be 0
             f"——————————————\n"
             f"💰 *الربحية الإجمالية (للصفقات التي حققت الهدف):*\n" # Clarified
-            f"  • إجمالي الربح الإجمالي: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n" # Show gross profit % and USD
-            f"  • إجمالي الرسوم المدفوعة: *${total_fees_usd:,.2f}*\n"
-            f"  • *الربح الصافي:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)\n" # Net Profit
+            f"  • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n" # Show gross profit % and USD
             f"  • متوسط الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
             f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n" # Will be infinity
             f"——————————————\n"
@@ -1734,16 +1712,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
 
         profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
         # Removed loss_pct calculation
-
-        # Calculate fees for this specific trade
-        entry_fee = trade_value_signal * BINANCE_FEE_RATE
-        exit_value = trade_value_signal * (1 + profit_pct / 100.0)
-        exit_fee = exit_value * BINANCE_FEE_RATE
-        total_trade_fees = entry_fee + exit_fee
-
-        profit_usdt_gross = trade_value_signal * (profit_pct / 100)
-        profit_usdt_net = profit_usdt_gross - total_trade_fees
-
+        profit_usdt = trade_value_signal * (profit_pct / 100)
+        # Removed loss_usdt calculation
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         # Escape special characters for Markdown
@@ -1764,10 +1734,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
-            f"🎯 **الهدف الأولي:** `${target_price:,.8g}`\n"
-            f"💰 **الربح المتوقع (إجمالي):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})\n"
-            f"💸 **الرسوم المتوقعة:** ${total_trade_fees:,.2f}\n"
-            f"📈 **الربح الصافي المتوقع:** ${profit_usdt_net:+.2f}\n"
+            f"🎯 **الهدف الأولي:** `${target_price:,.8g}` ({profit_pct:+.2f}% / ≈ ${profit_usdt:+.2f})\n"
             # Removed Stop Loss line
             f"——————————————\n"
             f"✅ *الشروط الإلزامية المحققة:*\n"
