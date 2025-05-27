@@ -18,6 +18,11 @@ from decouple import config
 from typing import List, Tuple, Any, Optional # Import Optional for type hints
 from waitress import serve # Import waitress for production server
 
+# Import scikit-learn components for ML
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -829,6 +834,19 @@ def train_and_save_model() -> None:
     model = grid_search.best_estimator_
     best_params = grid_search.best_params_
     best_score = grid_search.best_score_
+
+    # CRITICAL FIX: Explicitly set feature_names_in_ for the model before pickling
+    # This ensures the model retains the feature names it was trained with.
+    # Check if the attribute already exists (e.g., if a future sklearn version adds it automatically)
+    if hasattr(model, 'feature_names_in_') and model.feature_names_in_ is not None and len(model.feature_names_in_) > 0:
+        logger.info("ℹ️ Model already has 'feature_names_in_'. Skipping explicit assignment.")
+    else:
+        try:
+            model.feature_names_in_ = X_train.columns.tolist()
+            logger.info("✅ Explicitly set 'feature_names_in_' for the model before pickling.")
+        except AttributeError:
+            logger.warning("⚠️ Model does not support 'feature_names_in_'. This might cause issues with future validation.")
+
 
     logger.info(f"✅ Best Decision Tree parameters found: {best_params}")
     logger.info(f"✅ Best cross-validation accuracy: {best_score:.4f}")
