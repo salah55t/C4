@@ -20,6 +20,7 @@ from decouple import config
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import GridSearchCV # For hyperparameter tuning
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.utils import class_weight # For calculating class weights manually if needed
 
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
@@ -47,7 +48,7 @@ logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
 # ---------------------- Global Constants and Variables ----------------------
 ML_TRAINING_TIMEFRAME: str = '5m'
-ML_TRAINING_LOOKBACK_DAYS: int = 60
+ML_TRAINING_LOOKBACK_DAYS: int = 30
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
 TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
@@ -501,11 +502,11 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
         elif st_trend[i-1] == 1:
             if close[i] >= final_lb[i]:
                 st[i] = final_lb[i]
-                st_trend[i] = 1
+                st_trend[i] = -1
             else:
                 st[i] = final_ub[i]
                 st_trend[i] = -1
-        else:
+        else: # Initial state or no strong trend
             if close[i] > final_ub[i]:
                 st[i] = final_lb[i]
                 st_trend[i] = 1
@@ -513,13 +514,18 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
                 st[i] = final_ub[i]
                 st_trend[i] = -1
             else:
-                st[i] = np.nan
-                st_trend[i] = 0
+                st[i] = np.nan # Or previous value if you want to maintain
+                st_trend[i] = 0 # No trend
 
     df_st['final_ub'] = final_ub
     df_st['final_lb'] = final_lb
     df_st['supertrend'] = st
     df_st['supertrend_trend'] = st_trend
+    
+    # Fill initial NaNs for supertrend and trend (e.g., first 'period' rows)
+    df_st['supertrend'] = df_st['supertrend'].bfill()
+    df_st['supertrend_trend'] = df_st['supertrend_trend'].bfill()
+
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
     return df_st
 
@@ -556,28 +562,35 @@ def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     # Update FEATURE_COLUMNS to include lagged features
-    updated_feature_columns = list(FEATURE_COLUMNS) # Start with original features
+    # This part is crucial to ensure the feature list passed to the model matches
+    # what's actually generated here.
+    # We will pass this list to the model's metadata.
+    current_feature_columns_generated = list(FEATURE_COLUMNS) # Start with original features
     for lag in range(1, 4):
-        updated_feature_columns.append(f'close_lag{lag}')
+        current_feature_columns_generated.append(f'close_lag{lag}')
     for lag in range(1, 3):
-        updated_feature_columns.append(f'rsi_lag{lag}')
-        updated_feature_columns.append(f'macd_lag{lag}')
-        updated_feature_columns.append(f'supertrend_trend_lag{lag}')
+        current_feature_columns_generated.append(f'rsi_lag{lag}')
+        current_feature_columns_generated.append(f'macd_lag{lag}')
+        current_feature_columns_generated.append(f'supertrend_trend_lag{lag}')
+
 
     # Ensure all feature columns exist and are numeric
-    for col in updated_feature_columns:
+    for col in current_feature_columns_generated:
         if col not in df_calc.columns:
-            logger.warning(f"⚠️ Missing feature column: {col}")
+            logger.warning(f"⚠️ Missing feature column after calculation: {col}. Adding as NaN.")
             df_calc[col] = np.nan # Add missing column as NaN
         else:
             df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
     # Drop rows with NaN values in feature columns
     initial_len = len(df_calc)
-    df_cleaned = df_calc.dropna(subset=updated_feature_columns).copy()
+    df_cleaned = df_calc.dropna(subset=current_feature_columns_generated).copy()
     if len(df_cleaned) < initial_len:
         logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators or lagged features.")
 
+    # Attach the list of actual feature columns to the DataFrame for later use
+    df_cleaned.ml_feature_columns = current_feature_columns_generated
+    
     return df_cleaned
 
 # ---------------------- Main Training Logic ----------------------
@@ -642,16 +655,9 @@ def train_and_save_model() -> None:
     all_features_df = pd.DataFrame()
     all_targets_series = pd.Series(dtype=int)
     processed_symbols_count = 0
-
-    # Dynamically build the list of feature columns
-    current_feature_columns = list(FEATURE_COLUMNS)
-    for lag in range(1, 4):
-        current_feature_columns.append(f'close_lag{lag}')
-    for lag in range(1, 3):
-        current_feature_columns.append(f'rsi_lag{lag}')
-        current_feature_columns.append(f'macd_lag{lag}')
-        current_feature_columns.append(f'supertrend_trend_lag{lag}')
-
+    
+    # This will hold the final list of feature columns used for training
+    final_feature_columns_for_model = []
 
     for symbol in symbols:
         logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
@@ -664,6 +670,25 @@ def train_and_save_model() -> None:
         if df_processed.empty:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation.")
             continue
+        
+        # Get the feature columns that were actually generated and cleaned
+        if not hasattr(df_processed, 'ml_feature_columns') or not df_processed.ml_feature_columns:
+            logger.error(f"❌ Feature columns metadata missing for {symbol}. Skipping.")
+            continue
+        
+        # Set the final_feature_columns_for_model based on the first successfully processed symbol
+        # This ensures consistency across all symbols and for saving with the model.
+        if not final_feature_columns_for_model:
+            final_feature_columns_for_model = df_processed.ml_feature_columns
+            logger.info(f"ℹ️ Set final feature columns for model training: {final_feature_columns_for_model}")
+        else:
+            # Optional: Add a check here to ensure subsequent symbols have the same features
+            if set(final_feature_columns_for_model) != set(df_processed.ml_feature_columns):
+                logger.warning(f"⚠️ Feature columns mismatch for {symbol}. Expected {len(final_feature_columns_for_model)}, got {len(df_processed.ml_feature_columns)}. Skipping.")
+                continue
+            # Also ensure the order is consistent if needed by the model later (though pandas handles names)
+            df_processed = df_processed[final_feature_columns_for_model] # Reorder to match
+
 
         # Define the target variable: 1 if close price increases by TARGET_PERCENT_CHANGE
         # within the next TARGET_LOOKAHEAD_CANDLES, 0 otherwise.
@@ -672,19 +697,13 @@ def train_and_save_model() -> None:
         df_processed['target'] = ((future_max_close / df_processed['close']) >= (1 + TARGET_PERCENT_CHANGE)).astype(int)
 
         # Drop rows with NaN values in target or feature columns
-        df_processed.dropna(subset=['target'] + current_feature_columns, inplace=True)
+        df_processed.dropna(subset=['target'] + final_feature_columns_for_model, inplace=True)
 
         if df_processed.empty:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
             continue
 
-        # Ensure all feature columns are present before appending
-        missing_features = [col for col in current_feature_columns if col not in df_processed.columns]
-        if missing_features:
-            logger.error(f"❌ Missing features for {symbol}: {missing_features}. Skipping this symbol.")
-            continue
-
-        all_features_df = pd.concat([all_features_df, df_processed[current_feature_columns]])
+        all_features_df = pd.concat([all_features_df, df_processed[final_feature_columns_for_model]])
         all_targets_series = pd.concat([all_targets_series, df_processed['target']])
         processed_symbols_count += 1
 
@@ -701,6 +720,13 @@ def train_and_save_model() -> None:
     y = all_targets_series
 
     logger.info(f"✅ Aggregated training data from {processed_symbols_count} symbols. Data size: {len(X)} samples.")
+    
+    # Log class distribution
+    class_distribution = y.value_counts(normalize=True)
+    logger.info(f"ℹ️ Target Class Distribution:\n{class_distribution.to_string()}")
+    if 1 not in class_distribution or class_distribution[1] < 0.05: # Warn if bullish class is less than 5%
+        logger.warning("⚠️ Warning: Bullish class (1) is severely underrepresented in the training data. Consider data augmentation or more aggressive class weighting.")
+
 
     # Time-series aware split: 80% for training, 20% for testing
     split_index = int(len(X) * 0.8)
@@ -725,7 +751,8 @@ def train_and_save_model() -> None:
         'min_samples_leaf': [1, 5, 10, 20],
         'criterion': ['gini', 'entropy']
     }
-    grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42), param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=1)
+    # MODIFICATION: Add class_weight='balanced' to handle class imbalance
+    grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42, class_weight='balanced'), param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=1)
     grid_search.fit(X_train, y_train)
 
     model = grid_search.best_estimator_
@@ -741,27 +768,29 @@ def train_and_save_model() -> None:
     if not X_test.empty:
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-        conf_matrix = confusion_matrix(y_test, y_pred).tolist()
+        # Ensure classification_report includes all labels (0 and 1) even if one is missing in y_pred
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0, labels=[0, 1])
+        conf_matrix = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
     else:
         # Fallback to training data evaluation if test set is empty
         logger.warning("⚠️ Test set is empty, evaluating on training data instead.")
         y_pred = model.predict(X_train)
         accuracy = accuracy_score(y_train, y_pred)
-        report = classification_report(y_train, y_pred, output_dict=True, zero_division=0)
-        conf_matrix = confusion_matrix(y_train, y_pred).tolist()
+        report = classification_report(y_train, y_pred, output_dict=True, zero_division=0, labels=[0, 1])
+        conf_matrix = confusion_matrix(y_train, y_pred, labels=[0, 1]).tolist()
 
 
     logger.info(f"✅ Model Accuracy (Test/Train): {accuracy:.4f}")
-    logger.info(f"Classification Report (Test/Train):\n{json.dumps(report, indent=2)}")
-    logger.info(f"Confusion Matrix (Test/Train):\n{json.dumps(conf_matrix, indent=2)}")
+    # Log classification report in a more readable JSON format
+    logger.info(f"Classification Report (Test/Train):\n{json.dumps(report, indent=2, ensure_ascii=False)}")
+    logger.info(f"Confusion Matrix (Test/Train):\n{json.dumps(conf_matrix, indent=2, ensure_ascii=False)}")
 
     # Prepare metrics for storage
     model_metrics = {
         'accuracy': accuracy,
         'classification_report': report,
         'confusion_matrix': conf_matrix,
-        'features': current_feature_columns, # Store feature names for consistency
+        'features': final_feature_columns_for_model, # Store feature names for consistency
         'training_symbols_count': processed_symbols_count,
         'last_trained_utc': datetime.utcnow().isoformat(),
         'target_definition': {
@@ -791,14 +820,14 @@ def train_and_save_model() -> None:
                         SET model_data = %s, trained_at = NOW(), metrics = %s
                         WHERE model_name = %s;
                     """)
-                    db_cur.execute(update_query, (psycopg2.Binary(pickled_model), json.dumps(model_metrics), ML_MODEL_NAME))
+                    db_cur.execute(update_query, (psycopg2.Binary(pickled_model), json.dumps(model_metrics, ensure_ascii=False), ML_MODEL_NAME))
                 else:
                     logger.info(f"ℹ️ Inserting new model '{ML_MODEL_NAME}' into database.")
                     insert_query = sql.SQL("""
                         INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
                         VALUES (%s, %s, NOW(), %s);
                     """)
-                    db_cur.execute(insert_query, (ML_MODEL_NAME, psycopg2.Binary(pickled_model), json.dumps(model_metrics)))
+                    db_cur.execute(insert_query, (ML_MODEL_NAME, psycopg2.Binary(pickled_model), json.dumps(model_metrics, ensure_ascii=False)))
             db_conn.commit()
             logger.info("✅ Model and its metrics saved to database successfully.")
         else:
@@ -848,7 +877,8 @@ def status():
             result = cur.fetchone()
             if result:
                 status_info["last_training_attempt_utc"] = result['trained_at'].isoformat()
-                status_info["last_training_metrics"] = result['metrics']
+                # Ensure metrics are JSON serializable (e.g., handle numpy types)
+                status_info["last_training_metrics"] = json.loads(result['metrics']) if isinstance(result['metrics'], str) else result['metrics']
             else:
                 status_info["last_training_metrics"] = "No model trained yet."
     except Exception as e:
