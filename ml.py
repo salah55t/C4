@@ -49,6 +49,8 @@ except Exception as e:
      exit(1)
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
+logger.info(f"Telegram Token: {'Available' if 'TELEGRAM_BOT_TOKEN' in os.environ else 'Not available'}") # Added for completeness, though not used in trainer
+logger.info(f"Telegram Chat ID: {'Available' if 'TELEGRAM_CHAT_ID' in os.environ else 'Not available'}") # Added for completeness
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
@@ -300,35 +302,32 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """Fetches historical candlestick data from Binance. (نسخ من c4.py)"""
+    """
+    Fetches historical candlestick data from Binance for a specified number of days.
+    This function relies on python-binance's get_historical_klines to handle
+    internal pagination for large data ranges.
+    """
     if not client:
         logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
         return None
     try:
+        # Calculate the start date for the entire data range needed
         start_dt = datetime.utcnow() - timedelta(days=days + 1)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+        start_str_overall = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Binance API limit is 1000 klines per request. For longer periods, we need to loop.
-        all_klines = []
-        end_time = datetime.utcnow()
-        # Fetch data in chunks until we get enough for 'days'
-        while True:
-            klines = client.get_historical_klines(symbol, interval, start_str, endTime=int(end_time.timestamp() * 1000), limit=1000)
-            if not klines:
-                break
-            all_klines.extend(klines)
-            # Set new end_time to the start of the earliest kline fetched in this batch
-            end_time = datetime.fromtimestamp(klines[0][0] / 1000)
-            if end_time < start_dt: # Stop if we've gone back far enough
-                break
-            time.sleep(0.1) # Be kind to the API
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} حتى الآن...")
 
-        if not all_klines:
+        # Call get_historical_klines for the entire period.
+        # The python-binance library is designed to handle internal pagination
+        # if the requested range exceeds the API's single-request limit (e.g., 1000 klines).
+        # The error "unexpected keyword argument 'endTime'" is resolved by not using it.
+        klines = client.get_historical_klines(symbol, interval, start_str_overall)
+
+        if not klines:
             logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
             return None
 
-        df = pd.DataFrame(all_klines, columns=[
+        df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
         ])
@@ -833,8 +832,12 @@ def prepare_data_for_ml(df: pd.DataFrame, target_period: int = 5) -> Optional[pd
     # إنشاء عمود الهدف: هل السعر سيصعد بنسبة معينة في الشموع القادمة؟
     # على سبيل المثال، إذا كان السعر سيصعد بنسبة 0.5% خلال الشموع الخمس القادمة
     price_change_threshold = 0.005 # 0.5%
-    df_calc['future_max_close'] = df_calc['close'].rolling(window=target_period, min_periods=1).max().shift(-target_period + 1)
+    # Ensure 'close' column is numeric before shifting
+    df_calc['close'] = pd.to_numeric(df_calc['close'], errors='coerce')
+    df_calc['future_max_close'] = df_calc['close'].shift(-target_period).rolling(window=target_period, min_periods=1).max()
+    # Corrected target calculation: check if future max close is significantly higher than current close
     df_calc['target'] = ((df_calc['future_max_close'] / df_calc['close']) - 1 > price_change_threshold).astype(int)
+
 
     # إسقاط الصفوف التي تحتوي على قيم NaN بعد حساب المؤشرات والهدف
     initial_len = len(df_calc)
@@ -869,7 +872,13 @@ def train_and_evaluate_model(data: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
         return None, {}
 
     # تقسيم البيانات إلى مجموعات تدريب واختبار
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    # استخدام stratify=y لضمان توزيع متوازن للفئات في مجموعات التدريب والاختبار
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    except ValueError as ve:
+        logger.warning(f"⚠️ [ML Train] لا يمكن استخدام stratify بسبب وجود فئة واحدة في الهدف: {ve}. سيتم المتابعة بدون stratify.")
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
 
     # التحجيم (Scaling) للميزات (مهم لبعض النماذج، وليس بالضرورة لـ Decision Tree ولكن ممارسة جيدة)
     scaler = StandardScaler()
@@ -947,7 +956,7 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
         conn.commit()
         return True
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ نموذج ML: {db_err}", exc_info=True)
+        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ نموذج ML: {db_err}")
         if conn: conn.rollback()
         return False
     except pickle.PicklingError as pickle_err:
@@ -993,6 +1002,8 @@ if __name__ == "__main__":
         # 3. جلب البيانات التاريخية لجميع الرموز ودمجها
         for symbol in symbols:
             logger.info(f"⏳ [Main] جلب البيانات لـ {symbol}...")
+            # تم إصلاح دالة fetch_historical_data بحيث تعتمد على get_historical_klines
+            # لتقسيم الطلبات داخليًا بدلاً من الحلقة اليدوية الخاطئة.
             df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
             if df_hist is not None and not df_hist.empty:
                 df_hist['symbol'] = symbol # إضافة عمود الرمز لتحديد مصدر البيانات
