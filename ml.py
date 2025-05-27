@@ -15,6 +15,7 @@ import pandas as pd
 import numpy as np
 import pickle
 from decouple import config
+from typing import List, Tuple, Any # Import Tuple and Any for type hints
 
 # Scikit-learn imports for the ML model
 from sklearn.tree import DecisionTreeClassifier
@@ -476,46 +477,49 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
 
     for i in range(1, len(df_st)):
         if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]):
-            final_ub[i] = final_ub[i-1]
-            final_lb[i] = final_lb[i-1]
-            st[i] = st[i-1]
-            st_trend[i] = st_trend[i-1]
+            final_ub[i] = final_ub[i-1] if i > 0 else np.nan
+            final_lb[i] = final_lb[i-1] if i > 0 else np.nan
+            st[i] = st[i-1] if i > 0 else np.nan
+            st_trend[i] = st_trend[i-1] if i > 0 else 0
             continue
 
+        # Update final_ub
         if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
             final_ub[i] = basic_ub[i]
         else:
             final_ub[i] = final_ub[i-1]
 
+        # Update final_lb
         if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
             final_lb[i] = basic_lb[i]
         else:
             final_lb[i] = final_lb[i-1]
 
-        if st_trend[i-1] == -1:
-            if close[i] <= final_ub[i]:
-                st[i] = final_ub[i]
-                st_trend[i] = -1
-            else:
-                st[i] = final_lb[i]
+        # Determine SuperTrend and Trend Direction
+        if st_trend[i-1] == -1: # If previous trend was downtrend
+            if close[i] > final_ub[i]: # Price crosses above final_ub, trend changes to uptrend
                 st_trend[i] = 1
-        elif st_trend[i-1] == 1:
-            if close[i] >= final_lb[i]:
                 st[i] = final_lb[i]
-                st_trend[i] = 1
-            else:
-                st[i] = final_ub[i]
+            else: # Price remains below final_ub, trend remains downtrend
                 st_trend[i] = -1
-        else: # Initial state or no strong trend
+                st[i] = final_ub[i]
+        elif st_trend[i-1] == 1: # If previous trend was uptrend
+            if close[i] < final_lb[i]: # Price crosses below final_lb, trend changes to downtrend
+                st_trend[i] = -1
+                st[i] = final_ub[i]
+            else: # Price remains above final_lb, trend remains uptrend
+                st_trend[i] = 1
+                st[i] = final_lb[i]
+        else: # Initial state or no strong previous trend (can be 0 or NaN)
             if close[i] > final_ub[i]:
-                st[i] = final_lb[i]
                 st_trend[i] = 1
+                st[i] = final_lb[i]
             elif close[i] < final_lb[i]:
-                st[i] = final_ub[i]
                 st_trend[i] = -1
+                st[i] = final_ub[i]
             else:
-                st[i] = np.nan # Or previous value if you want to maintain
-                st_trend[i] = 0 # No trend
+                st_trend[i] = 0 # No clear trend
+                st[i] = np.nan # Keep as NaN or previous value if desired
 
     df_st['final_ub'] = final_ub
     df_st['final_lb'] = final_lb
@@ -529,10 +533,13 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
     return df_st
 
-def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates all required indicators and adds lagged features for the strategy."""
+def populate_all_indicators(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Calculates all required indicators and adds lagged features for the strategy.
+    Returns the processed DataFrame and the list of feature columns used.
+    """
     if df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
     df_calc = df.copy()
     try:
@@ -559,12 +566,9 @@ def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     except Exception as e:
         logger.error(f"❌ Error calculating indicators or lagged features: {e}", exc_info=True)
-        return pd.DataFrame()
+        return pd.DataFrame(), []
 
-    # Update FEATURE_COLUMNS to include lagged features
-    # This part is crucial to ensure the feature list passed to the model matches
-    # what's actually generated here.
-    # We will pass this list to the model's metadata.
+    # Dynamically build the list of feature columns that will be used for the ML model
     current_feature_columns_generated = list(FEATURE_COLUMNS) # Start with original features
     for lag in range(1, 4):
         current_feature_columns_generated.append(f'close_lag{lag}')
@@ -588,10 +592,8 @@ def populate_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     if len(df_cleaned) < initial_len:
         logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators or lagged features.")
 
-    # Attach the list of actual feature columns to the DataFrame for later use
-    df_cleaned.ml_feature_columns = current_feature_columns_generated
-    
-    return df_cleaned
+    # Return the cleaned DataFrame and the list of features
+    return df_cleaned, current_feature_columns_generated
 
 # ---------------------- Main Training Logic ----------------------
 def get_crypto_symbols(filename: str = 'crypto_list.txt') -> list[str]:
@@ -658,7 +660,7 @@ def train_and_save_model() -> None:
     processed_symbols_count = 0
     
     # This will hold the final list of feature columns used for training
-    final_feature_columns_for_model = []
+    final_feature_columns_for_model: List[str] = []
 
     for symbol in symbols:
         logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
@@ -667,28 +669,31 @@ def train_and_save_model() -> None:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data.")
             continue
 
-        df_processed = populate_all_indicators(df)
+        df_processed, current_features_for_this_symbol = populate_all_indicators(df)
+        
+        # CRITICAL DEBUGGING STEP: Add explicit checks before proceeding
+        if df_processed is None:
+            logger.error(f"FATAL ERROR: populate_all_indicators returned None for {symbol}. Skipping.")
+            continue
         if df_processed.empty:
-            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation.")
+            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation (df_processed is empty).")
             continue
-        
-        # Get the feature columns that were actually generated and cleaned
-        if not hasattr(df_processed, 'ml_feature_columns') or not df_processed.ml_feature_columns:
-            logger.error(f"❌ Feature columns metadata missing for {symbol}. Skipping.")
+        if 'close' not in df_processed.columns:
+            logger.error(f"FATAL ERROR: 'close' column missing from df_processed for {symbol}. Columns: {df_processed.columns.tolist()}. Skipping.")
             continue
-        
+        # End CRITICAL DEBUGGING STEP
+
         # Set the final_feature_columns_for_model based on the first successfully processed symbol
-        # This ensures consistency across all symbols and for saving with the model.
         if not final_feature_columns_for_model:
-            final_feature_columns_for_model = df_processed.ml_feature_columns
+            final_feature_columns_for_model = current_features_for_this_symbol
             logger.info(f"ℹ️ Set final feature columns for model training: {final_feature_columns_for_model}")
         else:
             # Optional: Add a check here to ensure subsequent symbols have the same features
-            if set(final_feature_columns_for_model) != set(df_processed.ml_feature_columns):
-                logger.warning(f"⚠️ Feature columns mismatch for {symbol}. Expected {len(final_feature_columns_for_model)}, got {len(df_processed.ml_feature_columns)}. Skipping.")
+            if set(final_feature_columns_for_model) != set(current_features_for_this_symbol):
+                logger.warning(f"⚠️ Feature columns mismatch for {symbol}. Expected {len(final_feature_columns_for_model)}, got {len(current_features_for_this_symbol)}. Skipping.")
                 continue
-            # Also ensure the order is consistent if needed by the model later (though pandas handles names)
-            df_processed = df_processed[final_feature_columns_for_model] # Reorder to match
+            # No need to reorder df_processed here, as it retains all original columns + new ones.
+            # We will select the features explicitly for X later.
 
 
         # Define the target variable: 1 if close price increases by TARGET_PERCENT_CHANGE
@@ -704,6 +709,7 @@ def train_and_save_model() -> None:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
             continue
 
+        # Now, select only the features for X. This ensures X has only the expected columns.
         all_features_df = pd.concat([all_features_df, df_processed[final_feature_columns_for_model]])
         all_targets_series = pd.concat([all_targets_series, df_processed['target']])
         processed_symbols_count += 1
