@@ -49,7 +49,7 @@ logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
 # ---------------------- Global Constants and Variables ----------------------
 ML_TRAINING_TIMEFRAME: str = '5m'
-ML_TRAINING_LOOKBACK_DAYS: int = 90 # Increased to fetch more data
+ML_TRAINING_LOOKBACK_DAYS: int = 60 # Increased to fetch more data
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
 TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
