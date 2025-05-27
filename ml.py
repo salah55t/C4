@@ -71,6 +71,7 @@ cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 
 # متغيرات لتتبع حالة التدريب
+# تم تعريفها هنا كمتغيرات عامة
 training_status: str = "Idle"
 last_training_time: Optional[datetime] = None
 last_training_metrics: Dict[str, Any] = {}
@@ -1045,10 +1046,11 @@ if __name__ == "__main__":
         symbols = get_crypto_symbols()
         if not symbols:
             logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. يرجى التحقق من 'crypto_list.txt'.")
+            # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغير عام
             training_status = "Failed: No valid symbols"
             exit(1)
 
-        global training_status, last_training_time, last_training_metrics, training_error
+        # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغيرات عامة
         training_status = "In Progress: Fetching Data"
         training_error = None # Reset error
 
@@ -1126,6 +1128,7 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب: {e}", exc_info=True)
+        # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغيرات عامة
         training_status = "Failed: Unhandled exception"
         training_error = str(e)
     finally:
