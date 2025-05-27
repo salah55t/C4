@@ -17,6 +17,7 @@ import pickle
 from decouple import config
 from typing import List, Tuple, Any, Optional # Import Optional for type hints
 from waitress import serve # Import waitress for production server
+import random # Import for random sampling of symbols
 
 # Import scikit-learn components for ML
 from sklearn.tree import DecisionTreeClassifier
@@ -25,7 +26,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Keep INFO for now, can be changed to WARNING later if still memory issues
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('app.log', encoding='utf-8'),
@@ -49,10 +50,13 @@ logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
 # ---------------------- Global Constants and Variables ----------------------
 ML_TRAINING_TIMEFRAME: str = '5m'
-ML_TRAINING_LOOKBACK_DAYS: int = 60 # Increased to fetch more data
+ML_TRAINING_LOOKBACK_DAYS: int = 14 # **CRITICAL CHANGE: Reduced to 14 days to save memory**
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
 TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
+
+# **NEW CONSTANT: Maximum number of symbols to train on per run**
+MAX_SYMBOLS_FOR_TRAINING: int = 10 # **CRITICAL CHANGE: Limits memory usage during training**
 
 # Indicator parameters (should match those in ml.py and c4.py)
 RSI_PERIOD: int = 9
@@ -712,25 +716,29 @@ def train_and_save_model() -> None:
     and saves the model and its metrics to the database.
     """
     logger.info("🚀 Starting ML model training process...")
-    # Ensure init_binance_client and init_db are called before this function
-    # if this function is called directly on startup.
-    # If called by scheduler, they are already handled.
-
-    symbols = get_crypto_symbols()
-    if not symbols:
+    
+    all_available_symbols = get_crypto_symbols()
+    if not all_available_symbols:
         logger.critical("❌ No valid symbols for training. Exiting training process.")
         cleanup_resources()
         return
 
+    # **CRITICAL CHANGE: Randomly select a subset of symbols for training**
+    if len(all_available_symbols) > MAX_SYMBOLS_FOR_TRAINING:
+        symbols_for_this_run = random.sample(all_available_symbols, MAX_SYMBOLS_FOR_TRAINING)
+        logger.info(f"ℹ️ Randomly selected {MAX_SYMBOLS_FOR_TRAINING} symbols for this training run.")
+    else:
+        symbols_for_this_run = all_available_symbols
+        logger.info(f"ℹ️ Using all {len(symbols_for_this_run)} available symbols for this training run.")
+
+
     all_features_df = pd.DataFrame()
-    # Fix for FutureWarning: The behavior of array concatenation with empty entries is deprecated.
     all_targets_series = pd.Series(dtype=int) 
     processed_symbols_count = 0
     
-    # This will hold the final list of feature columns used for training
     final_feature_columns_for_model: List[str] = []
 
-    for symbol in symbols:
+    for symbol in symbols_for_this_run: # **Using the sampled subset**
         logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
         df = fetch_historical_data(symbol, ML_TRAINING_TIMEFRAME, ML_TRAINING_LOOKBACK_DAYS)
         if df.empty:
@@ -739,7 +747,6 @@ def train_and_save_model() -> None:
 
         df_processed, current_features_for_this_symbol = populate_all_indicators(df)
         
-        # CRITICAL DEBUGGING STEP: Add explicit checks before proceeding
         if df_processed is None:
             logger.error(f"FATAL ERROR: populate_all_indicators returned None for {symbol}. Skipping.")
             continue
@@ -749,46 +756,43 @@ def train_and_save_model() -> None:
         if 'close' not in df_processed.columns:
             logger.error(f"FATAL ERROR: 'close' column missing from df_processed for {symbol}. Columns: {df_processed.columns.tolist()}. Skipping.")
             continue
-        # End CRITICAL DEBUGGING STEP
-
-        # Set the final_feature_columns_for_model based on the first successfully processed symbol
+        
         if not final_feature_columns_for_model:
             final_feature_columns_for_model = current_features_for_this_symbol
             logger.info(f"ℹ️ Set final feature columns for model training: {final_feature_columns_for_model}")
         else:
-            # Optional: Add a check here to ensure subsequent symbols have the same features
             if set(final_feature_columns_for_model) != set(current_features_for_this_symbol):
                 logger.warning(f"⚠️ Feature columns mismatch for {symbol}. Expected {len(final_feature_columns_for_model)}, got {len(current_features_for_this_symbol)}. Skipping.")
                 continue
-            # No need to reorder df_processed here, as it retains all original columns + new ones.
-            # We will select the features explicitly for X later.
-
 
         # Define the target variable: 1 if close price increases by TARGET_PERCENT_CHANGE
         # within the next TARGET_LOOKAHEAD_CANDLES, 0 otherwise.
-        # We look for the maximum close price in the future window.
         future_max_close = df_processed['close'].rolling(window=TARGET_LOOKAHEAD_CANDLES, min_periods=1).max().shift(-(TARGET_LOOKAHEAD_CANDLES - 1))
         df_processed['target'] = ((future_max_close / df_processed['close']) >= (1 + TARGET_PERCENT_CHANGE)).astype(int)
 
-        # Drop rows with NaN values in target or feature columns
         df_processed.dropna(subset=['target'] + final_feature_columns_for_model, inplace=True)
 
         if df_processed.empty:
             logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
             continue
 
-        # Now, select only the features for X. This ensures X has only the expected columns.
         all_features_df = pd.concat([all_features_df, df_processed[final_feature_columns_for_model]])
-        # Use .copy() to avoid FutureWarning with concat and empty series
         all_targets_series = pd.concat([all_targets_series, df_processed['target'].copy()]) 
         processed_symbols_count += 1
+
+        # **CRITICAL CHANGE: Explicitly delete DataFrame to free memory after processing each symbol**
+        del df
+        del df_processed
+        # Force garbage collection (optional, but can help in memory-constrained environments)
+        import gc
+        gc.collect()
+
 
     if all_features_df.empty or all_targets_series.empty:
         logger.critical("❌ No sufficient data to train the model after processing symbols. Exiting training.")
         cleanup_resources()
         return
 
-    # Ensure data is sorted by index (timestamp) for time-series aware splitting
     all_features_df.sort_index(inplace=True)
     all_targets_series.sort_index(inplace=True)
 
@@ -797,14 +801,12 @@ def train_and_save_model() -> None:
 
     logger.info(f"✅ Aggregated training data from {processed_symbols_count} symbols. Data size: {len(X)} samples.")
     
-    # Log class distribution
     class_distribution = y.value_counts(normalize=True)
     logger.info(f"ℹ️ Target Class Distribution:\n{class_distribution.to_string()}")
-    if 1 not in class_distribution or class_distribution[1] < 0.05: # Warn if bullish class is less than 5%
+    if 1 not in class_distribution or class_distribution[1] < 0.05:
         logger.warning("⚠️ Warning: Bullish class (1) is severely underrepresented in the training data. Consider data augmentation or more aggressive class weighting.")
 
 
-    # Time-series aware split: 80% for training, 20% for testing
     split_index = int(len(X) * 0.8)
     X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
     y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
@@ -817,17 +819,13 @@ def train_and_save_model() -> None:
         return
     if X_test.empty or y_test.empty:
         logger.warning("⚠️ Test sets are empty after time-series split. Model will be evaluated on training data only.")
-        # In a real scenario, you might want to skip evaluation or log a critical error.
-        # For now, we'll proceed but note the issue.
-
-    # Hyperparameter tuning for Decision Tree Classifier
+        
     logger.info("ℹ️ Performing Grid Search for Decision Tree hyperparameters...")
     param_grid = {
-        'max_depth': [5, 10, 15, 20],
-        'min_samples_leaf': [1, 5, 10, 20],
+        'max_depth': [5, 10, 15], # Reduced max_depth for potentially smaller models
+        'min_samples_leaf': [1, 5, 10], # Reduced options
         'criterion': ['gini', 'entropy']
     }
-    # MODIFICATION: Add class_weight='balanced' to handle class imbalance
     grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42, class_weight='balanced'), param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=1)
     grid_search.fit(X_train, y_train)
 
@@ -836,8 +834,6 @@ def train_and_save_model() -> None:
     best_score = grid_search.best_score_
 
     # CRITICAL FIX: Explicitly set feature_names_in_ for the model before pickling
-    # This ensures the model retains the feature names it was trained with.
-    # Check if the attribute already exists (e.g., if a future sklearn version adds it automatically)
     if hasattr(model, 'feature_names_in_') and model.feature_names_in_ is not None and len(model.feature_names_in_) > 0:
         logger.info("ℹ️ Model already has 'feature_names_in_'. Skipping explicit assignment.")
     else:
@@ -852,16 +848,13 @@ def train_and_save_model() -> None:
     logger.info(f"✅ Best cross-validation accuracy: {best_score:.4f}")
     logger.info("✅ Model trained with best parameters.")
 
-    # Evaluate the model on the test set
     logger.info("ℹ️ Evaluating model performance on test set...")
     if not X_test.empty:
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-        # Ensure classification_report includes all labels (0 and 1) even if one is missing in y_pred
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0, labels=[0, 1])
         conf_matrix = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
     else:
-        # Fallback to training data evaluation if test set is empty
         logger.warning("⚠️ Test set is empty, evaluating on training data instead.")
         y_pred = model.predict(X_train)
         accuracy = accuracy_score(y_train, y_pred)
@@ -870,11 +863,9 @@ def train_and_save_model() -> None:
 
 
     logger.info(f"✅ Model Accuracy (Test/Train): {accuracy:.4f}")
-    # Log classification report in a more readable JSON format
     logger.info(f"Classification Report (Test/Train):\n{json.dumps(report, indent=2, ensure_ascii=False)}")
     logger.info(f"Confusion Matrix (Test/Train):\n{json.dumps(conf_matrix, indent=2, ensure_ascii=False)}")
 
-    # Prepare metrics for storage
     model_metrics = {
         'accuracy': accuracy,
         'classification_report': report,
@@ -890,15 +881,12 @@ def train_and_save_model() -> None:
         'best_cv_score': best_score
     }
 
-    # Serialize the model
     pickled_model = pickle.dumps(model)
     logger.info(f"ℹ️ Pickled model size: {len(pickled_model) / (1024*1024):.2f} MB")
 
-    # Save to database
     try:
-        if db_conn: # Ensure db_conn is not None before using
+        if db_conn:
             with db_conn.cursor() as db_cur:
-                # Check if a model with this name already exists
                 db_cur.execute("SELECT id FROM ml_models WHERE model_name = %s;", (ML_MODEL_NAME,))
                 existing_model = db_cur.fetchone()
 
@@ -960,15 +948,12 @@ def status():
 
     # Fetch last training time from DB
     try:
-        # Ensure connection is open for status check (it will be closed by finally)
-        # This is a temporary connection for status, not the global one used by training/scheduler.
         temp_db_conn = psycopg2.connect(DB_URL, connect_timeout=5, cursor_factory=RealDictCursor)
         with temp_db_conn.cursor() as cur:
             cur.execute("SELECT trained_at, metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (ML_MODEL_NAME,))
             result = cur.fetchone()
             if result:
                 status_info["last_training_attempt_utc"] = result['trained_at'].isoformat()
-                # Ensure metrics are JSON serializable (e.g., handle numpy types)
                 status_info["last_training_metrics"] = json.loads(result['metrics']) if isinstance(result['metrics'], str) else result['metrics']
             else:
                 status_info["last_training_metrics"] = "No model trained yet."
@@ -990,8 +975,6 @@ def trigger_training_manual():
     """Manually triggers the ML model training."""
     logger.info("ℹ️ Manual training trigger received.")
     try:
-        # Run training in a separate thread to avoid blocking the Flask app
-        # Ensure it's a daemon thread so it doesn't prevent Flask from exiting if needed.
         training_thread = Thread(target=train_and_save_model, daemon=True)
         training_thread.start()
         return jsonify({"message": "ML training initiated in background.", "status": "success"}), 202
@@ -1004,9 +987,6 @@ scheduler = BackgroundScheduler()
 
 def start_scheduler():
     """Starts the APScheduler."""
-    # Schedule the training to run daily at a specific time (e.g., 00:00 UTC)
-    # This time can be adjusted based on when you want the training to occur.
-    # 'cron' allows for precise scheduling.
     scheduler.add_job(train_and_save_model, 'cron', hour=0, minute=0, id='daily_ml_training', replace_existing=True)
     logger.info("✅ Scheduled daily ML training for 00:00 UTC.")
     scheduler.start()
@@ -1020,10 +1000,9 @@ def run_flask() -> None:
 
     logger.info(f"ℹ️ [Flask] Starting Flask application with Waitress on {host}:{port}...")
     try:
-        serve(app, host=host, port=port, threads=6) # Adjust threads as needed
+        serve(app, host=host, port=port, threads=6)
     except Exception as serve_err:
         logger.critical(f"❌ [Flask] Failed to start Waitress server: {serve_err}", exc_info=True)
-        # If Waitress fails, try Flask's development server as a last resort (not recommended for production)
         logger.warning("⚠️ [Flask] Waitress failed. Falling back to Flask development server (NOT recommended for production).")
         try:
             app.run(host=host, port=port, debug=False)
@@ -1032,23 +1011,16 @@ def run_flask() -> None:
 
 # ---------------------- Application Entry Point ----------------------
 if __name__ == '__main__':
-    # Initialize Binance client and DB connection (these are fast operations)
     init_binance_client()
     init_db()
 
-    # 1. Start Flask server in a separate thread FIRST.
-    # This ensures the port is bound immediately, allowing Render to detect it.
     flask_server_thread = Thread(target=run_flask, daemon=False, name="FlaskServerThread")
     flask_server_thread.start()
     logger.info("✅ [Main Startup] Flask server thread initiated.")
 
-    # Give Flask a moment to bind the port and become responsive.
-    # This is a small buffer to help Render's port scan.
     time.sleep(5) 
     logger.info("ℹ️ [Main Startup] Giving Flask server 5 seconds to initialize...")
 
-    # 2. Now, initiate the long-running ML training and scheduler in background (daemon) threads.
-    # These threads will run as long as the main (non-daemon) Flask thread is alive.
     logger.info("🚀 Running ML model training on startup in background thread...")
     training_startup_thread = Thread(target=train_and_save_model, daemon=True, name="MLTrainingStartupThread")
     training_startup_thread.start()
@@ -1057,14 +1029,9 @@ if __name__ == '__main__':
     scheduler_thread = Thread(target=start_scheduler, daemon=True, name="SchedulerThread")
     scheduler_thread.start()
 
-    # The main thread will now wait for the Flask server thread to complete.
-    # Since flask_server_thread is non-daemon and runs indefinitely,
-    # this keeps the main process alive as long as the web service is running.
     flask_server_thread.join()
     logger.info("ℹ️ [Main] Flask server thread finished. Initiating shutdown process...")
 
-    # Cleanup resources (DB connection)
     cleanup_resources()
     logger.info("👋 [Main] ML training service stopped.")
-    # Force exit to ensure all daemon threads are terminated, especially important on Render.
     os._exit(0)
