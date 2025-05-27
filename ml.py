@@ -1,64 +1,64 @@
+import time
 import os
 import json
 import logging
-import time
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, request
-from threading import Thread
-from apscheduler.schedulers.background import BackgroundScheduler
+import requests
+import numpy as np
+import pandas as pd
+import psycopg2
+import pickle
+from psycopg2 import sql, OperationalError, InterfaceError
+from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
-import psycopg2
-from psycopg2 import sql, OperationalError
-from psycopg2.extras import RealDictCursor
-import pandas as pd
-import numpy as np
-import pickle
+from datetime import datetime, timedelta
 from decouple import config
-from typing import List, Tuple, Any, Optional # Import Optional for type hints
-from waitress import serve # Import waitress for production server
-import random # Import for random sampling of symbols
+from typing import List, Dict, Optional, Any, Tuple
 
-# Import scikit-learn components for ML
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+# استيراد دوال المؤشرات من ملف c4.py
+# في بيئة حقيقية، قد تحتاج إلى تنظيم هذه الدوال في ملف منفصل أو التأكد من استيرادها بشكل صحيح.
+# لأغراض العرض هنا، سنفترض أنها متاحة أو تم نسخها.
+# (ملاحظة: لكي يعمل هذا السكريبت بشكل مستقل، يجب أن تكون جميع الدوال المساعدة المستوردة من c4.py
+# مثل fetch_historical_data, calculate_ema, calculate_vwma, calculate_rsi_indicator,
+# calculate_atr_indicator, calculate_bollinger_bands, calculate_macd, calculate_adx,
+# calculate_vwap, calculate_obv, calculate_supertrend, detect_candlestick_patterns,
+# get_crypto_symbols, init_db, check_db_connection, convert_np_values
+# متاحة في نفس البيئة أو تم نسخها هنا.)
 
-# ---------------------- Logging Setup ----------------------
+# لغرض هذا السكريبت، سأقوم بنسخ الدوال الأساسية التي أحتاجها من c4.py
+# في تطبيق حقيقي، ستضع هذه الدوال في ملفات مساعدة وتستوردها.
+
+# ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # Keep INFO for now, can be changed to WARNING later if still memory issues
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('app.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('FlaskAppML')
+logger = logging.getLogger('MLTrainer')
 
-# ---------------------- Load Environment Variables ----------------------
+# ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
-    FLASK_PORT: int = int(os.environ.get('PORT', 5000)) # Default to 5000, use environment variable if set
 except Exception as e:
-    logger.critical(f"❌ Failed to load essential environment variables: {e}")
-    exit(1)
+     logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
+     exit(1)
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 
-# ---------------------- Global Constants and Variables ----------------------
-ML_TRAINING_TIMEFRAME: str = '5m'
-ML_TRAINING_LOOKBACK_DAYS: int = 30 # **CRITICAL CHANGE: Reduced to 14 days to save memory**
-ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
-TARGET_PERCENT_CHANGE: float = 0.01 # 1% price increase
-TARGET_LOOKAHEAD_CANDLES: int = 3 # Look 3 candles ahead for target
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+# يجب أن تتطابق هذه الثوابت مع تلك المستخدمة في c4.py لضمان اتساق البيانات
+SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+# زيادة أيام البحث عن البيانات لضمان كفاية البيانات للتدريب
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
+ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # يجب أن يتطابق مع الاسم في c4.py
 
-# **NEW CONSTANT: Maximum number of symbols to train on per run**
-MAX_SYMBOLS_FOR_TRAINING: int = 10 # **CRITICAL CHANGE: Limits memory usage during training**
-
-# Indicator parameters (should match those in ml.py and c4.py)
+# Indicator Parameters (نسخ من c4.py لضمان الاتساق)
 RSI_PERIOD: int = 9
 EMA_SHORT_PERIOD: int = 8
 EMA_LONG_PERIOD: int = 21
@@ -73,236 +73,300 @@ ADX_PERIOD: int = 10
 SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
 
-# Global variables for Binance client and DB connection
-binance_client: Optional[Client] = None
-db_conn: Optional[psycopg2.extensions.connection] = None
-
-# Define the features that will be used for the ML model
-# This list will be dynamically extended with lagged features
-FEATURE_COLUMNS = [
-    f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-    'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-    'macd', 'macd_signal', 'macd_hist',
-    'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-    'supertrend', 'supertrend_trend'
-]
+# Global variables
+conn: Optional[psycopg2.extensions.connection] = None
+cur: Optional[psycopg2.extensions.cursor] = None
+client: Optional[Client] = None
 
 # ---------------------- Binance Client Setup ----------------------
-def init_binance_client() -> None:
-    """Initializes Binance client."""
-    global binance_client
-    try:
-        if binance_client is None:
-            logger.info("ℹ️ [Binance] Initializing Binance client...")
-            binance_client = Client(API_KEY, API_SECRET)
-            binance_client.ping()
-            server_time = binance_client.get_server_time()
-            logger.info(f"✅ [Binance] Binance client initialized. Server time: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
-    except BinanceRequestException as req_err:
-        logger.critical(f"❌ [Binance] Binance request error (network or request issue): {req_err}")
-        binance_client = None # Reset client on failure
-    except BinanceAPIException as api_err:
-        logger.critical(f"❌ [Binance] Binance API error (invalid keys or server issue): {api_err}")
-        binance_client = None # Reset client on failure
-    except Exception as e:
-        logger.critical(f"❌ [Binance] Unexpected failure in Binance client initialization: {e}", exc_info=True)
-        binance_client = None # Reset client on failure
-
-def get_exchange_info() -> dict:
-    """Fetches exchange information from Binance."""
-    init_binance_client()
-    if binance_client:
-        try:
-            logger.info("ℹ️ [Binance] Fetching exchange information...")
-            info = binance_client.get_exchange_info()
-            logger.info("✅ [Binance] Exchange information fetched successfully.")
-            return info
-        except BinanceAPIException as e:
-            logger.error(f"❌ [Binance] Error fetching exchange info: {e}")
-        except BinanceRequestException as e:
-            logger.error(f"❌ [Binance] Network error fetching exchange info: {e}")
-        except Exception as e:
-            logger.error(f"❌ [Binance] Unexpected error fetching exchange info: {e}", exc_info=True)
-    return {}
-
-def get_all_trading_symbols() -> list[str]:
-    """Retrieves all currently trading symbols from Binance."""
-    exchange_info = get_exchange_info()
-    if exchange_info and 'symbols' in exchange_info:
-        trading_symbols = [s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING']
-        return trading_symbols
-    return []
-
-# ---------------------- Database Connection Setup ----------------------
-def init_db(retries: int = 5, delay: int = 5) -> None:
-    """Initializes database connection and creates ml_models table if it doesn't exist."""
-    global db_conn
-    logger.info("[DB] Starting database initialization...")
-    for attempt in range(retries):
-        try:
-            logger.info(f"[DB] Attempting to connect to database (Attempt {attempt + 1}/{retries})...")
-            db_conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
-            db_conn.autocommit = False
-            with db_conn.cursor() as cur:
-                logger.info("✅ [DB] Successfully connected to database.")
-                # --- Create ml_models table ---
-                logger.info("[DB] Checking for/creating 'ml_models' table...")
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS ml_models (
-                        id SERIAL PRIMARY KEY,
-                        model_name TEXT NOT NULL UNIQUE,
-                        model_data BYTEA NOT NULL,
-                        trained_at TIMESTAMP DEFAULT NOW(),
-                        metrics JSONB
-                    );""")
-                db_conn.commit()
-                logger.info("✅ [DB] 'ml_models' table exists or created.")
-                logger.info("✅ [DB] Database initialized successfully.")
-            return
-        except OperationalError as op_err:
-            logger.error(f"❌ [DB] Operational error connecting to DB (Attempt {attempt + 1}): {op_err}")
-            if db_conn: db_conn.rollback()
-            if attempt == retries - 1:
-                logger.critical("❌ [DB] All database connection attempts failed.")
-                raise op_err
-            time.sleep(delay)
-        except Exception as e:
-            logger.critical(f"❌ [DB] Unexpected failure in database initialization (Attempt {attempt + 1}): {e}", exc_info=True)
-            if db_conn: db_conn.rollback()
-            if attempt == retries - 1:
-                logger.critical("❌ [DB] All database connection attempts failed.")
-                raise e
-            time.sleep(delay)
-    logger.critical("❌ [DB] Failed to connect to database after multiple attempts.")
+try:
+    logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
+    client = Client(API_KEY, API_SECRET)
+    client.ping()
+    server_time = client.get_server_time()
+    logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
+except BinanceRequestException as req_err:
+     logger.critical(f"❌ [Binance] خطأ في طلب Binance (مشكلة في الشبكة أو الطلب): {req_err}")
+     exit(1)
+except BinanceAPIException as api_err:
+     logger.critical(f"❌ [Binance] خطأ في واجهة برمجة تطبيقات Binance (مفاتيح غير صالحة أو مشكلة في الخادم): {api_err}")
+     exit(1)
+except Exception as e:
+    logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
     exit(1)
 
-def cleanup_resources() -> None:
-    """Closes database connection."""
-    global db_conn
-    logger.info("ℹ️ [Cleanup] Closing resources...")
-    if db_conn:
+# ---------------------- Database Connection Setup (نسخ من c4.py) ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
         try:
-            db_conn.close()
-            db_conn = None # Set to None after closing
-            logger.info("✅ [DB] Database connection closed.")
-        except Exception as close_err:
-            logger.error(f"⚠️ [DB] Error closing database connection: {close_err}")
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
 
-# ---------------------- Data Fetching and Indicator Calculation Functions ----------------------
-def fetch_historical_data(symbol: str, interval: str, days: int) -> pd.DataFrame:
-    """
-    Fetches historical candlestick data from Binance, fetching in chunks if needed.
-    Attempts to fetch data for the specified 'days' or up to a maximum of 10,000 klines.
-    """
-    if not binance_client:
-        logger.error("❌ [Data] Binance client not initialized for data fetching.")
-        return pd.DataFrame()
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
 
-    all_klines = []
-    end_time = datetime.utcnow()
-    # Calculate interval in milliseconds
-    interval_ms_map = {
-        '1m': 60 * 1000, '3m': 3 * 60 * 1000, '5m': 5 * 60 * 1000, '15m': 15 * 60 * 1000,
-        '30m': 30 * 60 * 1000, '1h': 60 * 60 * 1000, '2h': 2 * 60 * 60 * 1000,
-        '4h': 4 * 60 * 60 * 1000, '6h': 6 * 60 * 60 * 1000, '8h': 8 * 60 * 60 * 1000,
-        '12h': 12 * 60 * 60 * 1000, '1d': 24 * 60 * 60 * 1000, '3d': 3 * 24 * 60 * 60 * 1000,
-        '1w': 7 * 24 * 60 * 60 * 1000, '1M': 30 * 24 * 60 * 60 * 1000 # Approximation for month
-    }
-    interval_ms = interval_ms_map.get(interval)
-    if not interval_ms:
-        logger.error(f"❌ [Data] Invalid interval specified: {interval}")
-        return pd.DataFrame()
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
 
-    # Max klines per single API call
-    BINANCE_KLINES_LIMIT = 1000
-    # Max total klines to fetch to prevent excessive API calls
-    MAX_TOTAL_KLINES = 10000 # This is about 34 days for 5m, 100 days for 15m
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
 
-    # Calculate how many klines are in 'days'
-    total_klines_for_days = int((days * 24 * 60 * 60 * 1000) / interval_ms)
-    klines_to_fetch = min(total_klines_for_days, MAX_TOTAL_KLINES)
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
 
-    logger.debug(f"ℹ️ [Data] Attempting to fetch up to {klines_to_fetch} klines for {symbol} ({interval}) over {days} days.")
-
-    fetched_count = 0
-    while fetched_count < klines_to_fetch:
-        # Calculate start_time for the current chunk. We fetch backwards.
-        # The 'start_str' parameter for get_historical_klines is a timestamp in milliseconds.
-        current_chunk_start_time = end_time - timedelta(milliseconds=BINANCE_KLINES_LIMIT * interval_ms)
-        
-        # Ensure we don't go beyond the requested 'days' for the very first chunk
-        if fetched_count == 0:
-            earliest_requested_time = datetime.utcnow() - timedelta(days=days)
-            if current_chunk_start_time < earliest_requested_time:
-                current_chunk_start_time = earliest_requested_time
-
-        start_str_ms = int(current_chunk_start_time.timestamp() * 1000)
-        end_str_ms = int(end_time.timestamp() * 1000)
-
-        # Break if the start time for this chunk is too far in the past (beyond requested days)
-        if (datetime.utcnow() - datetime.fromtimestamp(start_str_ms / 1000)).days > days + 1: # Add a buffer
-            logger.debug(f"ℹ️ [Data] Reached requested lookback period for {symbol}.")
-            break
-
-        try:
-            logger.debug(f"ℹ️ [Data] Fetching chunk for {symbol} from {datetime.fromtimestamp(start_str_ms/1000)} to {datetime.fromtimestamp(end_str_ms/1000)} (limit {BINANCE_KLINES_LIMIT})...")
-            klines = binance_client.get_historical_klines(
-                symbol=symbol,
-                interval=interval,
-                start_str=start_str_ms,
-                end_str=end_str_ms,
-                limit=BINANCE_KLINES_LIMIT
-            )
-
-            if not klines:
-                logger.debug(f"ℹ️ [Data] No more historical data for {symbol} before {datetime.fromtimestamp(start_str_ms/1000)}.")
-                break # No more data available
-
-            # Prepend new klines to maintain chronological order
-            all_klines = klines + all_klines
-            fetched_count += len(klines)
-
-            # Set end_time for the next iteration to the start_time of the current chunk
-            end_time = current_chunk_start_time
-
-            # Avoid hitting API limits too fast
-            time.sleep(0.1) # Small delay between requests
-
-        except BinanceAPIException as api_err:
-            logger.error(f"❌ [Data] Binance API error while fetching data for {symbol}: {api_err}")
-            break
-        except BinanceRequestException as req_err:
-            logger.error(f"❌ [Data] Request or network error while fetching data for {symbol}: {req_err}")
-            break
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
         except Exception as e:
-            logger.error(f"❌ [Data] Unexpected error while fetching historical data for {symbol}: {e}", exc_info=True)
-            break
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
 
-    if not all_klines:
-        logger.warning(f"⚠️ [Data] No historical data ({interval}) for {symbol} after multiple attempts.")
-        return pd.DataFrame()
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
 
-    df = pd.DataFrame(all_klines, columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
-    ])
 
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
 
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    df = df[numeric_cols]
-    df.dropna(subset=numeric_cols, inplace=True)
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
 
-    if df.empty:
-        logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after dropping essential NaN values.")
-        return pd.DataFrame()
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance. (نسخ من c4.py)
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
 
-    logger.info(f"✅ [Data] Fetched and processed {len(df)} historical candles ({interval}) for {symbol} over {days} days (or up to {MAX_TOTAL_KLINES} klines).")
-    return df
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
 
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance. (نسخ من c4.py)"""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        # Binance API limit is 1000 klines per request. For longer periods, we need to loop.
+        all_klines = []
+        end_time = datetime.utcnow()
+        # Fetch data in chunks until we get enough for 'days'
+        while True:
+            klines = client.get_historical_klines(symbol, interval, start_str, endTime=int(end_time.timestamp() * 1000), limit=1000)
+            if not klines:
+                break
+            all_klines.extend(klines)
+            # Set new end_time to the start of the earliest kline fetched in this batch
+            end_time = datetime.fromtimestamp(klines[0][0] / 1000)
+            if end_time < start_dt: # Stop if we've gone back far enough
+                break
+            time.sleep(0.1) # Be kind to the API
+
+        if not all_klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(all_klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        # Sort by index (timestamp) to ensure chronological order
+        df.sort_index(inplace=True)
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+# ---------------------- Technical Indicator Functions (نسخ من c4.py) ----------------------
 def calculate_ema(series: pd.Series, span: int) -> pd.Series:
     """Calculates Exponential Moving Average (EMA)."""
     if series is None or series.isnull().all() or len(series) < span:
@@ -314,34 +378,43 @@ def calculate_vwma(df: pd.DataFrame, period: int) -> pd.Series:
     df_calc = df.copy()
     required_cols = ['close', 'volume']
     if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator VWMA] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
         return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
     if len(df_calc) < period:
+        logger.warning(f"⚠️ [Indicator VWMA] بيانات غير كافية ({len(df_calc)} < {period}) لحساب VWMA.")
         return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
 
     df_calc['price_volume'] = df_calc['close'] * df_calc['volume']
     rolling_price_volume_sum = df_calc['price_volume'].rolling(window=period, min_periods=period).sum()
     rolling_volume_sum = df_calc['volume'].rolling(window=period, min_periods=period).sum()
     vwma = rolling_price_volume_sum / rolling_volume_sum.replace(0, np.nan)
+    df_calc.drop(columns=['price_volume'], inplace=True, errors='ignore')
     return vwma
 
 def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
     """Calculates Relative Strength Index (RSI)."""
     df = df.copy()
     if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
         df['rsi'] = np.nan
         return df
     if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
         df['rsi'] = np.nan
         return df
 
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
     rs = avg_gain / avg_loss.replace(0, np.nan)
+
     rsi_series = 100 - (100 / (1 + rs))
     df['rsi'] = rsi_series.ffill().fillna(50)
+
     return df
 
 def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
@@ -349,16 +422,20 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
     df = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
         df['atr'] = np.nan
         return df
     if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
         df['atr'] = np.nan
         return df
 
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
     df['atr'] = tr.ewm(span=period, adjust=False).mean()
     return df
 
@@ -366,15 +443,17 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, 
     """Calculates Bollinger Bands."""
     df = df.copy()
     if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator BB] عمود 'close' مفقود أو فارغ.")
         df['bb_middle'] = np.nan
         df['bb_upper'] = np.nan
         df['bb_lower'] = np.nan
         return df
     if len(df) < window:
-        df['bb_middle'] = np.nan
-        df['bb_upper'] = np.nan
-        df['bb_lower'] = np.nan
-        return df
+         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.")
+         df['bb_middle'] = np.nan
+         df['bb_upper'] = np.nan
+         df['bb_lower'] = np.nan
+         return df
 
     df['bb_middle'] = df['close'].rolling(window=window).mean()
     df['bb_std'] = df['close'].rolling(window=window).std()
@@ -386,12 +465,14 @@ def calculate_macd(df: pd.DataFrame, fast: int = MACD_FAST, slow: int = MACD_SLO
     """Calculates MACD, Signal Line, and Histogram."""
     df = df.copy()
     if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator MACD] عمود 'close' مفقود أو فارغ.")
         df['macd'] = np.nan
         df['macd_signal'] = np.nan
         df['macd_hist'] = np.nan
         return df
     min_len = max(fast, slow, signal)
     if len(df) < min_len:
+        logger.warning(f"⚠️ [Indicator MACD] بيانات غير كافية ({len(df)} < {min_len}) لحساب MACD.")
         df['macd'] = np.nan
         df['macd_signal'] = np.nan
         df['macd_hist'] = np.nan
@@ -409,11 +490,13 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ADX] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
         df_calc['adx'] = np.nan
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
         return df_calc
     if len(df_calc) < period * 2:
+        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df_calc)} < {period * 2}) لحساب ADX.")
         df_calc['adx'] = np.nan
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
@@ -439,27 +522,34 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
 
     di_sum = df_calc['di_plus'] + df_calc['di_minus']
     df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
+
     df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
 
     return df_calc[['adx', 'di_plus', 'di_minus']]
 
 def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates Volume Weighted Average Price (VWAP) - Resets daily."""
+    """Calculates Volume Weighted Average Price (VWAP) - Resets daily. (نسخ من c4.py)"""
     df = df.copy()
     required_cols = ['high', 'low', 'close', 'volume']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator VWAP] أعمدة 'high', 'low', 'close' أو 'volume' مفقودة أو فارغة.")
         df['vwap'] = np.nan
         return df
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index)
+            logger.warning("⚠️ [Indicator VWAP] تم تحويل الفهرس إلى DatetimeIndex.")
         except Exception:
+            logger.error("❌ [Indicator VWAP] فشل تحويل الفهرس إلى DatetimeIndex، لا يمكن حساب VWAP اليومي.")
             df['vwap'] = np.nan
             return df
     if df.index.tz is not None:
         df.index = df.index.tz_convert('UTC')
+        logger.debug("ℹ️ [Indicator VWAP] تم تحويل الفهرس إلى UTC لإعادة الضبط اليومي.")
     else:
         df.index = df.index.tz_localize('UTC')
+        logger.debug("ℹ️ [Indicator VWAP] تم توطين الفهرس إلى UTC لإعادة الضبط اليومي.")
+
 
     df['date'] = df.index.date
     df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
@@ -468,30 +558,42 @@ def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
     try:
         df['cum_tp_vol'] = df.groupby('date')['tp_vol'].cumsum()
         df['cum_volume'] = df.groupby('date')['volume'].cumsum()
-    except KeyError:
+    except KeyError as e:
+        logger.error(f"❌ [Indicator VWAP] خطأ في تجميع البيانات حسب التاريخ: {e}. قد يكون الفهرس غير صحيح.")
         df['vwap'] = np.nan
         df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
         return df
+    except Exception as e:
+         logger.error(f"❌ [Indicator VWAP] خطأ غير متوقع في حساب VWAP: {e}", exc_info=True)
+         df['vwap'] = np.nan
+         df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
+         return df
+
 
     df['vwap'] = np.where(df['cum_volume'] > 0, df['cum_tp_vol'] / df['cum_volume'], np.nan)
+
     df['vwap'] = df['vwap'].bfill()
+
     df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
     return df
 
 def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates On-Balance Volume (OBV)."""
+    """Calculates On-Balance Volume (OBV). (نسخ من c4.py)"""
     df = df.copy()
     required_cols = ['close', 'volume']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator OBV] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
         df['obv'] = np.nan
         return df
     if not pd.api.types.is_numeric_dtype(df['close']) or not pd.api.types.is_numeric_dtype(df['volume']):
+        logger.warning("⚠️ [Indicator OBV] أعمدة 'close' أو 'volume' ليست رقمية.")
         df['obv'] = np.nan
         return df
 
     obv = np.zeros(len(df), dtype=np.float64)
     close = df['close'].values
     volume = df['volume'].values
+
     close_diff = df['close'].diff().values
 
     for i in range(1, len(df)):
@@ -502,29 +604,33 @@ def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
         if close_diff[i] > 0:
             obv[i] = obv[i-1] + volume[i]
         elif close_diff[i] < 0:
-            obv[i] = obv[i-1] - volume[i]
+             obv[i] = obv[i-1] - volume[i]
         else:
-            obv[i] = obv[i-1]
+             obv[i] = obv[i-1]
 
     df['obv'] = obv
     return df
 
 def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, multiplier: float = SUPERTREND_MULTIPLIER) -> pd.DataFrame:
-    """Calculates the SuperTrend indicator."""
+    """Calculates the SuperTrend indicator. (نسخ من c4.py)"""
     df_st = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df_st.columns for col in required_cols) or df_st[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator SuperTrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
         df_st['supertrend'] = np.nan
         df_st['supertrend_trend'] = 0
         return df_st
 
     df_st = calculate_atr_indicator(df_st, period=SUPERTREND_PERIOD)
 
+
     if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-        df_st['supertrend'] = np.nan
-        df_st['supertrend_trend'] = 0
-        return df_st
+         logger.warning("⚠️ [Indicator SuperTrend] لا يمكن حساب SuperTrend بسبب قيم ATR غير صالحة أو مفقودة.")
+         df_st['supertrend'] = np.nan
+         df_st['supertrend_trend'] = 0
+         return df_st
     if len(df_st) < SUPERTREND_PERIOD:
+        logger.warning(f"⚠️ [Indicator SuperTrend] بيانات غير كافية ({len(df_st)} < {SUPERTREND_PERIOD}) لحساب SuperTrend.")
         df_st['supertrend'] = np.nan
         df_st['supertrend_trend'] = 0
         return df_st
@@ -548,490 +654,404 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
 
     for i in range(1, len(df_st)):
         if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]):
-            final_ub[i] = final_ub[i-1] if i > 0 else np.nan
-            final_lb[i] = final_lb[i-1] if i > 0 else np.nan
-            st[i] = st[i-1] if i > 0 else np.nan
-            st_trend[i] = st_trend[i-1] if i > 0 else 0
+            final_ub[i] = final_ub[i-1]
+            final_lb[i] = final_lb[i-1]
+            st[i] = st[i-1]
+            st_trend[i] = st_trend[i-1]
             continue
 
-        # Update final_ub
         if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
             final_ub[i] = basic_ub[i]
         else:
             final_ub[i] = final_ub[i-1]
 
-        # Update final_lb
         if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
             final_lb[i] = basic_lb[i]
         else:
             final_lb[i] = final_lb[i-1]
 
-        # Determine SuperTrend and Trend Direction
-        if st_trend[i-1] == -1: # If previous trend was downtrend
-            if close[i] > final_ub[i]: # Price crosses above final_ub, trend changes to uptrend
-                st_trend[i] = 1
-                st[i] = final_lb[i]
-            else: # Price remains below final_ub, trend remains downtrend
-                st_trend[i] = -1
+        if st_trend[i-1] == -1:
+            if close[i] <= final_ub[i]:
                 st[i] = final_ub[i]
-        elif st_trend[i-1] == 1: # If previous trend was uptrend
-            if close[i] < final_lb[i]: # Price crosses below final_lb, trend changes to downtrend
                 st_trend[i] = -1
-                st[i] = final_ub[i]
-            else: # Price remains above final_lb, trend remains uptrend
-                st_trend[i] = 1
-                st[i] = final_lb[i]
-        else: # Initial state or no strong previous trend (can be 0 or NaN)
-            if close[i] > final_ub[i]:
-                st_trend[i] = 1
-                st[i] = final_lb[i]
-            elif close[i] < final_lb[i]:
-                st_trend[i] = -1
-                st[i] = final_ub[i]
             else:
-                st_trend[i] = 0 # No clear trend
-                st[i] = np.nan # Keep as NaN or previous value if desired
+                st[i] = final_lb[i]
+                st_trend[i] = 1
+        elif st_trend[i-1] == 1:
+            if close[i] >= final_lb[i]:
+                st[i] = final_lb[i]
+                st_trend[i] = 1
+            else:
+                st[i] = final_ub[i]
+                st_trend[i] = -1
+        else:
+             if close[i] > final_ub[i]:
+                 st[i] = final_lb[i]
+                 st_trend[i] = 1
+             elif close[i] < final_ub[i]:
+                  st[i] = final_ub[i]
+                  st_trend[i] = -1
+             else:
+                  st[i] = np.nan
+                  st_trend[i] = 0
+
 
     df_st['final_ub'] = final_ub
     df_st['final_lb'] = final_lb
     df_st['supertrend'] = st
     df_st['supertrend_trend'] = st_trend
-    
-    # Fill initial NaNs for supertrend and trend (e.g., first 'period' rows)
-    df_st['supertrend'] = df_st['supertrend'].bfill()
-    df_st['supertrend_trend'] = df_st['supertrend_trend'].bfill()
 
     df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
+
     return df_st
 
-def populate_all_indicators(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+def is_hammer(row: pd.Series) -> int:
+    """Checks for Hammer pattern (bullish signal). (نسخ من c4.py)"""
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    body = abs(c - o)
+    candle_range = h - l
+    if candle_range == 0: return 0
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    is_small_body = body < (candle_range * 0.35)
+    is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
+    is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
+    return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow else 0
+
+def is_shooting_star(row: pd.Series) -> int:
+    """Checks for Shooting Star pattern (bearish signal). (نسخ من c4.py)"""
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    body = abs(c - o)
+    candle_range = h - l
+    if candle_range == 0: return 0
+    lower_shadow = min(o, c) - l
+    upper_shadow = h - max(o, c)
+    is_small_body = body < (candle_range * 0.35)
+    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
+    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
+    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0
+
+def is_doji(row: pd.Series) -> int:
+    """Checks for Doji pattern (uncertainty). (نسخ من c4.py)"""
+    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
+    if pd.isna([o, h, l, c]).any(): return 0
+    candle_range = h - l
+    if candle_range == 0: return 0
+    return 100 if abs(c - o) <= (candle_range * 0.1) else 0
+
+def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
+    """Checks for Bullish or Bearish Engulfing pattern. (نسخ من c4.py)"""
+    if idx == 0: return 0
+    prev = df.iloc[idx - 1]
+    curr = df.iloc[idx]
+    if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
+        return 0
+    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1:
+        return 0
+
+    is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
+                  curr['open'] <= prev['close'] and curr['close'] >= prev['open'])
+    is_bearish = (prev['close'] > prev['open'] and curr['close'] < curr['open'] and
+                  curr['open'] >= prev['close'] and curr['close'] <= prev['open'])
+
+    if is_bullish: return 100
+    if is_bearish: return -100
+    return 0
+
+def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds candlestick pattern signals to the DataFrame. (نسخ من c4.py)"""
+    df = df.copy()
+    logger.debug("ℹ️ [Indicators] كشف أنماط الشموع...")
+    df['Hammer'] = df.apply(is_hammer, axis=1)
+    df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
+    df['Doji'] = df.apply(is_doji, axis=1)
+    engulfing_values = [compute_engulfing(df, i) for i in range(len(df))]
+    df['Engulfing'] = engulfing_values
+    df['BullishCandleSignal'] = df.apply(lambda row: 1 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
+    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
+    logger.debug("✅ [Indicators] تم كشف أنماط الشموع.")
+    return df
+
+
+# ---------------------- وظائف تدريب وحفظ النموذج ----------------------
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.preprocessing import StandardScaler
+
+def prepare_data_for_ml(df: pd.DataFrame, target_period: int = 5) -> Optional[pd.DataFrame]:
     """
-    Calculates all required indicators and adds lagged features for the strategy.
-    Returns the processed DataFrame and the list of feature columns used.
+    يجهز البيانات لتدريب نموذج التعلم الآلي.
+    يضيف المؤشرات ويزيل الصفوف التي تحتوي على قيم NaN.
+    يضيف عمود الهدف 'target' الذي يشير إلى ما إذا كان السعر سيرتفع في الشموع القادمة.
     """
-    if df.empty:
-        return pd.DataFrame(), []
+    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي...")
+
+    min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + target_period + 5
+
+    if len(df) < min_len_required:
+        logger.warning(f"⚠️ [ML Prep] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
+        return None
 
     df_calc = df.copy()
-    try:
-        df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
-        df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-        df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
-        df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
-        df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
-        df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-        df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-        df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-        adx_df = calculate_adx(df_calc, ADX_PERIOD)
-        df_calc = df_calc.join(adx_df)
-        df_calc = calculate_vwap(df_calc)
-        df_calc = calculate_obv(df_calc)
 
-        # Add lagged features
-        for lag in range(1, 4): # Lags 1, 2, 3
-            df_calc[f'close_lag{lag}'] = df_calc['close'].shift(lag)
-        for lag in range(1, 3): # Lags 1, 2
-            df_calc[f'rsi_lag{lag}'] = df_calc['rsi'].shift(lag)
-            df_calc[f'macd_lag{lag}'] = df_calc['macd'].shift(lag)
-            df_calc[f'supertrend_trend_lag{lag}'] = df_calc['supertrend_trend'].shift(lag)
+    # حساب جميع المؤشرات
+    df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+    df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+    df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
+    df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
+    df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
+    df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
+    df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+    df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+    adx_df = calculate_adx(df_calc, ADX_PERIOD)
+    df_calc = df_calc.join(adx_df)
+    df_calc = calculate_vwap(df_calc)
+    df_calc = calculate_obv(df_calc)
+    df_calc = detect_candlestick_patterns(df_calc)
 
-    except Exception as e:
-        logger.error(f"❌ Error calculating indicators or lagged features: {e}", exc_info=True)
-        return pd.DataFrame(), []
+    # تعريف أعمدة الميزات التي سيستخدمها النموذج
+    feature_columns = [
+        f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+        'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+        'macd', 'macd_signal', 'macd_hist',
+        'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+        'supertrend', 'supertrend_trend',
+        'BullishCandleSignal', 'BearishCandleSignal' # إضافة أنماط الشموع كميزات
+    ]
 
-    # Dynamically build the list of feature columns that will be used for the ML model
-    current_feature_columns_generated = list(FEATURE_COLUMNS) # Start with original features
-    for lag in range(1, 4):
-        current_feature_columns_generated.append(f'close_lag{lag}')
-    for lag in range(1, 3):
-        current_feature_columns_generated.append(f'rsi_lag{lag}')
-        current_feature_columns_generated.append(f'macd_lag{lag}')
-        current_feature_columns_generated.append(f'supertrend_trend_lag{lag}')
-
-
-    # Ensure all feature columns exist and are numeric
-    for col in current_feature_columns_generated:
+    # التأكد من وجود جميع أعمدة الميزات وتحويلها إلى أرقام
+    for col in feature_columns:
         if col not in df_calc.columns:
-            logger.warning(f"⚠️ Missing feature column after calculation: {col}. Adding as NaN.")
-            df_calc[col] = np.nan # Add missing column as NaN
+            logger.warning(f"⚠️ [ML Prep] عمود الميزة المفقود: {col}. سيتم إضافته كـ NaN.")
+            df_calc[col] = np.nan
         else:
             df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
-    # Drop rows with NaN values in feature columns
+    # إنشاء عمود الهدف: هل السعر سيصعد بنسبة معينة في الشموع القادمة؟
+    # على سبيل المثال، إذا كان السعر سيصعد بنسبة 0.5% خلال الشموع الخمس القادمة
+    price_change_threshold = 0.005 # 0.5%
+    df_calc['future_max_close'] = df_calc['close'].rolling(window=target_period, min_periods=1).max().shift(-target_period + 1)
+    df_calc['target'] = ((df_calc['future_max_close'] / df_calc['close']) - 1 > price_change_threshold).astype(int)
+
+    # إسقاط الصفوف التي تحتوي على قيم NaN بعد حساب المؤشرات والهدف
     initial_len = len(df_calc)
-    df_cleaned = df_calc.dropna(subset=current_feature_columns_generated).copy()
-    if len(df_cleaned) < initial_len:
-        logger.debug(f"ℹ️ Dropped {initial_len - len(df_cleaned)} rows due to NaN values in indicators or lagged features.")
+    df_cleaned = df_calc.dropna(subset=feature_columns + ['target']).copy()
+    dropped_count = initial_len - len(df_cleaned)
 
-    # Return the cleaned DataFrame and the list of features
-    return df_cleaned, current_feature_columns_generated
+    if dropped_count > 0:
+        logger.info(f"ℹ️ [ML Prep] تم إسقاط {dropped_count} صفًا بسبب قيم NaN بعد حساب المؤشرات والهدف.")
+    if df_cleaned.empty:
+        logger.warning(f"⚠️ [ML Prep] DataFrame فارغ بعد إزالة قيم NaN لتجهيز ML.")
+        return None
 
-# ---------------------- Main Training Logic ----------------------
-def get_crypto_symbols(filename: str = 'crypto_list.txt') -> list[str]:
+    logger.info(f"✅ [ML Prep] تم تجهيز البيانات بنجاح. عدد الصفوف: {len(df_cleaned)}")
+    return df_cleaned[feature_columns + ['target']]
+
+
+def train_and_evaluate_model(data: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
     """
-    Reads the list of currency symbols from a text file (assumes base symbol per line, e.g., 'BTC'),
-    appends 'USDT' to each, and validates them against Binance.
+    يقوم بتدريب نموذج Decision Tree ويقيم أداءه.
     """
-    base_symbols: list[str] = []
-    logger.info(f"ℹ️ [Data] Reading base symbol list from '{filename}'...")
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(script_dir, filename)
+    logger.info("ℹ️ [ML Train] بدء تدريب وتقييم النموذج...")
 
-        if not os.path.exists(file_path):
-            file_path = os.path.abspath(filename)
-            if not os.path.exists(file_path):
-                logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
-                return []
-            else:
-                logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
+    if data.empty:
+        logger.error("❌ [ML Train] DataFrame فارغ للتدريب.")
+        return None, {}
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            # Read each line, strip whitespace, convert to uppercase, and append 'USDT'
-            base_symbols = [f"{line.strip().upper()}USDT"
-                           for line in f if line.strip() and not line.startswith('#')]
-        base_symbols = sorted(list(set(base_symbols)))
-        logger.info(f"ℹ️ [Data] Read {len(base_symbols)} initial symbols (with USDT appended) from '{file_path}'.")
+    X = data.drop('target', axis=1)
+    y = data['target']
 
-        # Validate symbols against Binance
-        logger.info("ℹ️ [Binance] Validating symbols against Binance available trading pairs...")
-        all_binance_symbols = get_all_trading_symbols()
-        valid_symbols = [s for s in base_symbols if s in all_binance_symbols]
-        invalid_symbols = [s for s in base_symbols if s not in all_binance_symbols]
+    if X.empty or y.empty:
+        logger.error("❌ [ML Train] ميزات أو أهداف فارغة للتدريب.")
+        return None, {}
 
-        if invalid_symbols:
-            logger.warning(f"⚠️ The following symbols (after appending USDT) from '{filename}' are not active trading pairs on Binance and will be skipped: {', '.join(invalid_symbols)}")
-        if not valid_symbols:
-            logger.critical("❌ No valid trading symbols found after Binance validation. Please check your 'crypto_list.txt'.")
+    # تقسيم البيانات إلى مجموعات تدريب واختبار
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-        logger.info(f"✅ [Data] {len(valid_symbols)} valid symbols found for training.")
-        return valid_symbols
-    except Exception as e:
-        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
-        return []
+    # التحجيم (Scaling) للميزات (مهم لبعض النماذج، وليس بالضرورة لـ Decision Tree ولكن ممارسة جيدة)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
 
-def train_and_save_model() -> None:
-    """
-    Fetches data, calculates indicators, trains a Decision Tree Classifier with hyperparameter tuning,
-    and saves the model and its metrics to the database.
-    """
-    logger.info("🚀 Starting ML model training process...")
-    
-    all_available_symbols = get_crypto_symbols()
-    if not all_available_symbols:
-        logger.critical("❌ No valid symbols for training. Exiting training process.")
-        cleanup_resources()
-        return
+    # تدريب نموذج Decision Tree Classifier
+    model = DecisionTreeClassifier(random_state=42, max_depth=10) # يمكن تعديل المعلمات
+    model.fit(X_train_scaled, y_train)
+    logger.info("✅ [ML Train] تم تدريب النموذج بنجاح.")
 
-    # **CRITICAL CHANGE: Randomly select a subset of symbols for training**
-    if len(all_available_symbols) > MAX_SYMBOLS_FOR_TRAINING:
-        symbols_for_this_run = random.sample(all_available_symbols, MAX_SYMBOLS_FOR_TRAINING)
-        logger.info(f"ℹ️ Randomly selected {MAX_SYMBOLS_FOR_TRAINING} symbols for this training run.")
-    else:
-        symbols_for_this_run = all_available_symbols
-        logger.info(f"ℹ️ Using all {len(symbols_for_this_run)} available symbols for this training run.")
+    # التقييم
+    y_pred = model.predict(X_test_scaled)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
+    f1 = f1_score(y_test, y_pred, zero_division=0)
 
-
-    all_features_df = pd.DataFrame()
-    all_targets_series = pd.Series(dtype=int) 
-    processed_symbols_count = 0
-    
-    final_feature_columns_for_model: List[str] = []
-
-    for symbol in symbols_for_this_run: # **Using the sampled subset**
-        logger.info(f"ℹ️ Fetching data and calculating indicators for {symbol}...")
-        df = fetch_historical_data(symbol, ML_TRAINING_TIMEFRAME, ML_TRAINING_LOOKBACK_DAYS)
-        if df.empty:
-            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data.")
-            continue
-
-        df_processed, current_features_for_this_symbol = populate_all_indicators(df)
-        
-        if df_processed is None:
-            logger.error(f"FATAL ERROR: populate_all_indicators returned None for {symbol}. Skipping.")
-            continue
-        if df_processed.empty:
-            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after indicator calculation (df_processed is empty).")
-            continue
-        if 'close' not in df_processed.columns:
-            logger.error(f"FATAL ERROR: 'close' column missing from df_processed for {symbol}. Columns: {df_processed.columns.tolist()}. Skipping.")
-            continue
-        
-        if not final_feature_columns_for_model:
-            final_feature_columns_for_model = current_features_for_this_symbol
-            logger.info(f"ℹ️ Set final feature columns for model training: {final_feature_columns_for_model}")
-        else:
-            if set(final_feature_columns_for_model) != set(current_features_for_this_symbol):
-                logger.warning(f"⚠️ Feature columns mismatch for {symbol}. Expected {len(final_feature_columns_for_model)}, got {len(current_features_for_this_symbol)}. Skipping.")
-                continue
-
-        # Define the target variable: 1 if close price increases by TARGET_PERCENT_CHANGE
-        # within the next TARGET_LOOKAHEAD_CANDLES, 0 otherwise.
-        future_max_close = df_processed['close'].rolling(window=TARGET_LOOKAHEAD_CANDLES, min_periods=1).max().shift(-(TARGET_LOOKAHEAD_CANDLES - 1))
-        df_processed['target'] = ((future_max_close / df_processed['close']) >= (1 + TARGET_PERCENT_CHANGE)).astype(int)
-
-        df_processed.dropna(subset=['target'] + final_feature_columns_for_model, inplace=True)
-
-        if df_processed.empty:
-            logger.warning(f"⚠️ Skipping {symbol} due to insufficient data after target setup and NaN removal.")
-            continue
-
-        all_features_df = pd.concat([all_features_df, df_processed[final_feature_columns_for_model]])
-        all_targets_series = pd.concat([all_targets_series, df_processed['target'].copy()]) 
-        processed_symbols_count += 1
-
-        # **CRITICAL CHANGE: Explicitly delete DataFrame to free memory after processing each symbol**
-        del df
-        del df_processed
-        # Force garbage collection (optional, but can help in memory-constrained environments)
-        import gc
-        gc.collect()
-
-
-    if all_features_df.empty or all_targets_series.empty:
-        logger.critical("❌ No sufficient data to train the model after processing symbols. Exiting training.")
-        cleanup_resources()
-        return
-
-    all_features_df.sort_index(inplace=True)
-    all_targets_series.sort_index(inplace=True)
-
-    X = all_features_df
-    y = all_targets_series
-
-    logger.info(f"✅ Aggregated training data from {processed_symbols_count} symbols. Data size: {len(X)} samples.")
-    
-    class_distribution = y.value_counts(normalize=True)
-    logger.info(f"ℹ️ Target Class Distribution:\n{class_distribution.to_string()}")
-    if 1 not in class_distribution or class_distribution[1] < 0.05:
-        logger.warning("⚠️ Warning: Bullish class (1) is severely underrepresented in the training data. Consider data augmentation or more aggressive class weighting.")
-
-
-    split_index = int(len(X) * 0.8)
-    X_train, X_test = X.iloc[:split_index], X.iloc[split_index:]
-    y_train, y_test = y.iloc[:split_index], y.iloc[split_index:]
-
-    logger.info(f"ℹ️ Training data size: {len(X_train)}, Test data size: {len(X_test)}")
-
-    if X_train.empty or y_train.empty:
-        logger.critical("❌ Training sets are empty after time-series split. Cannot train.")
-        cleanup_resources()
-        return
-    if X_test.empty or y_test.empty:
-        logger.warning("⚠️ Test sets are empty after time-series split. Model will be evaluated on training data only.")
-        
-    logger.info("ℹ️ Performing Grid Search for Decision Tree hyperparameters...")
-    param_grid = {
-        'max_depth': [5, 10, 15], # Reduced max_depth for potentially smaller models
-        'min_samples_leaf': [1, 5, 10], # Reduced options
-        'criterion': ['gini', 'entropy']
-    }
-    grid_search = GridSearchCV(DecisionTreeClassifier(random_state=42, class_weight='balanced'), param_grid, cv=3, scoring='accuracy', n_jobs=-1, verbose=1)
-    grid_search.fit(X_train, y_train)
-
-    model = grid_search.best_estimator_
-    best_params = grid_search.best_params_
-    best_score = grid_search.best_score_
-
-    # CRITICAL FIX: Explicitly set feature_names_in_ for the model before pickling
-    if hasattr(model, 'feature_names_in_') and model.feature_names_in_ is not None and len(model.feature_names_in_) > 0:
-        logger.info("ℹ️ Model already has 'feature_names_in_'. Skipping explicit assignment.")
-    else:
-        try:
-            model.feature_names_in_ = X_train.columns.tolist()
-            logger.info("✅ Explicitly set 'feature_names_in_' for the model before pickling.")
-        except AttributeError:
-            logger.warning("⚠️ Model does not support 'feature_names_in_'. This might cause issues with future validation.")
-
-
-    logger.info(f"✅ Best Decision Tree parameters found: {best_params}")
-    logger.info(f"✅ Best cross-validation accuracy: {best_score:.4f}")
-    logger.info("✅ Model trained with best parameters.")
-
-    logger.info("ℹ️ Evaluating model performance on test set...")
-    if not X_test.empty:
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
-        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0, labels=[0, 1])
-        conf_matrix = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
-    else:
-        logger.warning("⚠️ Test set is empty, evaluating on training data instead.")
-        y_pred = model.predict(X_train)
-        accuracy = accuracy_score(y_train, y_pred)
-        report = classification_report(y_train, y_pred, output_dict=True, zero_division=0, labels=[0, 1])
-        conf_matrix = confusion_matrix(y_train, y_pred, labels=[0, 1]).tolist()
-
-
-    logger.info(f"✅ Model Accuracy (Test/Train): {accuracy:.4f}")
-    logger.info(f"Classification Report (Test/Train):\n{json.dumps(report, indent=2, ensure_ascii=False)}")
-    logger.info(f"Confusion Matrix (Test/Train):\n{json.dumps(conf_matrix, indent=2, ensure_ascii=False)}")
-
-    model_metrics = {
+    metrics = {
         'accuracy': accuracy,
-        'classification_report': report,
-        'confusion_matrix': conf_matrix,
-        'features': final_feature_columns_for_model, # Store feature names for consistency
-        'training_symbols_count': processed_symbols_count,
-        'last_trained_utc': datetime.utcnow().isoformat(),
-        'target_definition': {
-            'percent_change': TARGET_PERCENT_CHANGE,
-            'lookahead_candles': TARGET_LOOKAHEAD_CANDLES
-        },
-        'best_hyperparameters': best_params,
-        'best_cv_score': best_score
+        'precision': precision,
+        'recall': recall,
+        'f1_score': f1,
+        'num_samples_trained': len(X_train),
+        'num_samples_tested': len(X_test),
+        'feature_names': X.columns.tolist() # حفظ أسماء الميزات لضمان التناسق عند التحميل
     }
 
-    pickled_model = pickle.dumps(model)
-    logger.info(f"ℹ️ Pickled model size: {len(pickled_model) / (1024*1024):.2f} MB")
+    logger.info(f"📊 [ML Train] مقاييس أداء النموذج:")
+    logger.info(f"  - الدقة (Accuracy): {accuracy:.4f}")
+    logger.info(f"  - الدقة (Precision): {precision:.4f}")
+    logger.info(f"  - الاستدعاء (Recall): {recall:.4f}")
+    logger.info(f"  - مقياس F1: {f1:.4f}")
 
+    return model, metrics
+
+def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) -> bool:
+    """
+    يحفظ النموذج المدرب وبياناته الوصفية (المقاييس) في قاعدة البيانات.
+    """
+    if not check_db_connection() or not conn:
+        logger.error("❌ [DB Save] لا يمكن حفظ نموذج ML بسبب مشكلة في اتصال قاعدة البيانات.")
+        return False
+
+    logger.info(f"ℹ️ [DB Save] محاولة حفظ نموذج ML '{model_name}' في قاعدة البيانات...")
     try:
-        if db_conn:
-            with db_conn.cursor() as db_cur:
-                db_cur.execute("SELECT id FROM ml_models WHERE model_name = %s;", (ML_MODEL_NAME,))
-                existing_model = db_cur.fetchone()
+        # تسلسل النموذج باستخدام pickle
+        model_binary = pickle.dumps(model)
 
-                if existing_model:
-                    logger.info(f"ℹ️ Updating existing model '{ML_MODEL_NAME}' in database.")
-                    update_query = sql.SQL("""
-                        UPDATE ml_models
-                        SET model_data = %s, trained_at = NOW(), metrics = %s
-                        WHERE model_name = %s;
-                    """)
-                    db_cur.execute(update_query, (psycopg2.Binary(pickled_model), json.dumps(model_metrics, ensure_ascii=False), ML_MODEL_NAME))
-                else:
-                    logger.info(f"ℹ️ Inserting new model '{ML_MODEL_NAME}' into database.")
-                    insert_query = sql.SQL("""
-                        INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
-                        VALUES (%s, %s, NOW(), %s);
-                    """)
-                    db_cur.execute(insert_query, (ML_MODEL_NAME, psycopg2.Binary(pickled_model), json.dumps(model_metrics, ensure_ascii=False)))
-            db_conn.commit()
-            logger.info("✅ Model and its metrics saved to database successfully.")
-        else:
-            logger.error("❌ Database connection is not active. Cannot save model.")
-    except psycopg2.Error as db_err:
-        logger.error(f"❌ Database error while saving model: {db_err}", exc_info=True)
-        if db_conn: db_conn.rollback()
-    except Exception as e:
-        logger.error(f"❌ Unexpected error while saving model: {e}", exc_info=True)
-        if db_conn: db_conn.rollback()
+        # تحويل المقاييس إلى JSONB
+        metrics_json = json.dumps(convert_np_values(metrics))
 
-    cleanup_resources()
-    logger.info("🏁 ML model training process finished.")
+        with conn.cursor() as db_cur:
+            # التحقق مما إذا كان النموذج موجودًا بالفعل (للتحديث أو الإدراج)
+            db_cur.execute("SELECT id FROM ml_models WHERE model_name = %s;", (model_name,))
+            existing_model = db_cur.fetchone()
 
-# ---------------------- Flask Application ----------------------
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """Basic home route to keep the service alive."""
-    logger.info("✅ Home route accessed.")
-    return "ML Training Service is Running!"
-
-@app.route('/status')
-def status():
-    """Provides status of the service and last training run."""
-    logger.info("ℹ️ Status route accessed.")
-    status_info = {
-        "service_status": "Running",
-        "last_training_attempt_utc": "N/A",
-        "next_training_schedule_utc": "N/A",
-        "binance_client_initialized": binance_client is not None,
-        "database_connection_active": db_conn is not None
-    }
-    scheduler_jobs = scheduler.get_jobs()
-    if scheduler_jobs:
-        for job in scheduler_jobs:
-            if job.id == 'daily_ml_training':
-                status_info["next_training_schedule_utc"] = job.next_run_time.isoformat() if job.next_run_time else "N/A"
-                break
-
-    # Fetch last training time from DB
-    try:
-        temp_db_conn = psycopg2.connect(DB_URL, connect_timeout=5, cursor_factory=RealDictCursor)
-        with temp_db_conn.cursor() as cur:
-            cur.execute("SELECT trained_at, metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (ML_MODEL_NAME,))
-            result = cur.fetchone()
-            if result:
-                status_info["last_training_attempt_utc"] = result['trained_at'].isoformat()
-                status_info["last_training_metrics"] = json.loads(result['metrics']) if isinstance(result['metrics'], str) else result['metrics']
+            if existing_model:
+                # تحديث النموذج الموجود
+                update_query = sql.SQL("""
+                    UPDATE ml_models
+                    SET model_data = %s, trained_at = NOW(), metrics = %s
+                    WHERE id = %s;
+                """)
+                db_cur.execute(update_query, (model_binary, metrics_json, existing_model['id']))
+                logger.info(f"✅ [DB Save] تم تحديث نموذج ML '{model_name}' في قاعدة البيانات بنجاح.")
             else:
-                status_info["last_training_metrics"] = "No model trained yet."
+                # إدراج نموذج جديد
+                insert_query = sql.SQL("""
+                    INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
+                    VALUES (%s, %s, NOW(), %s);
+                """)
+                db_cur.execute(insert_query, (model_name, model_binary, metrics_json))
+                logger.info(f"✅ [DB Save] تم حفظ نموذج ML '{model_name}' جديد في قاعدة البيانات بنجاح.")
+        conn.commit()
+        return True
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ نموذج ML: {db_err}", exc_info=True)
+        if conn: conn.rollback()
+        return False
+    except pickle.PicklingError as pickle_err:
+        logger.error(f"❌ [DB Save] خطأ في تسلسل نموذج ML: {pickle_err}", exc_info=True)
+        if conn: conn.rollback()
+        return False
     except Exception as e:
-        logger.error(f"❌ Error fetching last training status from DB: {e}", exc_info=True)
-        status_info["last_training_attempt_utc"] = "Error fetching from DB"
-        status_info["last_training_metrics"] = "Error fetching from DB"
-    finally:
-        if 'temp_db_conn' in locals() and temp_db_conn:
-            try:
-                temp_db_conn.close()
-            except Exception as close_err:
-                logger.error(f"⚠️ Error closing temporary DB connection in status route: {close_err}")
+        logger.error(f"❌ [DB Save] خطأ غير متوقع أثناء حفظ نموذج ML: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return False
 
-    return jsonify(status_info)
-
-@app.route('/trigger_training', methods=['POST'])
-def trigger_training_manual():
-    """Manually triggers the ML model training."""
-    logger.info("ℹ️ Manual training trigger received.")
-    try:
-        training_thread = Thread(target=train_and_save_model, daemon=True)
-        training_thread.start()
-        return jsonify({"message": "ML training initiated in background.", "status": "success"}), 202
-    except Exception as e:
-        logger.error(f"❌ Error initiating manual training: {e}", exc_info=True)
-        return jsonify({"message": f"Failed to initiate training: {e}", "status": "error"}), 500
-
-# ---------------------- Scheduler Setup ----------------------
-scheduler = BackgroundScheduler()
-
-def start_scheduler():
-    """Starts the APScheduler."""
-    scheduler.add_job(train_and_save_model, 'cron', hour=0, minute=0, id='daily_ml_training', replace_existing=True)
-    logger.info("✅ Scheduled daily ML training for 00:00 UTC.")
-    scheduler.start()
-    logger.info("✅ Scheduler started.")
-
-# ---------------------- Flask Server Runner ----------------------
-def run_flask() -> None:
-    """Runs the Flask application using Waitress production server."""
-    host = "0.0.0.0" # Listen on all available interfaces
-    port = FLASK_PORT # Use the port from environment variables
-
-    logger.info(f"ℹ️ [Flask] Starting Flask application with Waitress on {host}:{port}...")
-    try:
-        serve(app, host=host, port=port, threads=6)
-    except Exception as serve_err:
-        logger.critical(f"❌ [Flask] Failed to start Waitress server: {serve_err}", exc_info=True)
-        logger.warning("⚠️ [Flask] Waitress failed. Falling back to Flask development server (NOT recommended for production).")
+def cleanup_resources() -> None:
+    """Closes used resources like the database connection."""
+    global conn
+    logger.info("ℹ️ [Cleanup] إغلاق الموارد...")
+    if conn:
         try:
-            app.run(host=host, port=port, debug=False)
-        except Exception as flask_run_err:
-            logger.critical(f"❌ [Flask] Failed to start Flask development server: {flask_run_err}", exc_info=True)
+            conn.close()
+            logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
+        except Exception as close_err:
+            logger.error(f"⚠️ [DB] خطأ في إغلاق اتصال قاعدة البيانات: {close_err}")
+    logger.info("✅ [Cleanup] اكتمل تنظيف الموارد.")
 
-# ---------------------- Application Entry Point ----------------------
-if __name__ == '__main__':
-    init_binance_client()
-    init_db()
 
-    flask_server_thread = Thread(target=run_flask, daemon=False, name="FlaskServerThread")
-    flask_server_thread.start()
-    logger.info("✅ [Main Startup] Flask server thread initiated.")
+# ---------------------- نقطة الدخول الرئيسية ----------------------
+if __name__ == "__main__":
+    logger.info("🚀 بدء سكريبت تدريب نموذج التعلم الآلي...")
+    logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    time.sleep(5) 
-    logger.info("ℹ️ [Main Startup] Giving Flask server 5 seconds to initialize...")
+    try:
+        # 1. تهيئة قاعدة البيانات
+        init_db()
 
-    logger.info("🚀 Running ML model training on startup in background thread...")
-    training_startup_thread = Thread(target=train_and_save_model, daemon=True, name="MLTrainingStartupThread")
-    training_startup_thread.start()
+        # 2. جلب قائمة الرموز
+        symbols = get_crypto_symbols()
+        if not symbols:
+            logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. يرجى التحقق من 'crypto_list.txt'.")
+            exit(1)
 
-    logger.info("✅ Starting scheduler in background thread...")
-    scheduler_thread = Thread(target=start_scheduler, daemon=True, name="SchedulerThread")
-    scheduler_thread.start()
+        all_data_for_training = pd.DataFrame()
+        logger.info(f"ℹ️ [Main] جلب بيانات تاريخية لـ {len(symbols)} رمزًا للتدريب...")
 
-    flask_server_thread.join()
-    logger.info("ℹ️ [Main] Flask server thread finished. Initiating shutdown process...")
+        # 3. جلب البيانات التاريخية لجميع الرموز ودمجها
+        for symbol in symbols:
+            logger.info(f"⏳ [Main] جلب البيانات لـ {symbol}...")
+            df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
+            if df_hist is not None and not df_hist.empty:
+                df_hist['symbol'] = symbol # إضافة عمود الرمز لتحديد مصدر البيانات
+                all_data_for_training = pd.concat([all_data_for_training, df_hist])
+                logger.info(f"✅ [Main] تم جلب {len(df_hist)} شمعة لـ {symbol}.")
+            else:
+                logger.warning(f"⚠️ [Main] لم يتمكن من جلب بيانات كافية لـ {symbol}. تخطي.")
+            time.sleep(0.5) # تأخير لتجنب حدود معدل API
 
-    cleanup_resources()
-    logger.info("👋 [Main] ML training service stopped.")
-    os._exit(0)
+        if all_data_for_training.empty:
+            logger.critical("❌ [Main] لم يتم جلب أي بيانات كافية للتدريب من أي رمز. لا يمكن المتابعة.")
+            exit(1)
+
+        logger.info(f"✅ [Main] تم جلب إجمالي {len(all_data_for_training)} صفًا من البيانات الخام لجميع الرموز.")
+
+        # 4. تجهيز البيانات لنموذج التعلم الآلي
+        # بما أننا نجمع بيانات من رموز متعددة، سنقوم بتطبيق prepare_data_for_ml على كل رمز على حدة
+        # أو يمكننا تطبيقها على DataFrame المدمج إذا كانت المؤشرات لا تتأثر بالرمز (وهو الحال هنا).
+        # ولكن لضمان الدقة، من الأفضل معالجة كل رمز بشكل منفصل ثم دمج النتائج النظيفة.
+
+        processed_dfs = []
+        for symbol in symbols:
+            symbol_data = all_data_for_training[all_data_for_training['symbol'] == symbol].copy()
+            if not symbol_data.empty:
+                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol'])) # إزالة عمود الرمز قبل المعالجة
+                if df_processed is not None and not df_processed.empty:
+                    processed_dfs.append(df_processed)
+            else:
+                logger.warning(f"⚠️ [Main] لا توجد بيانات خام لـ {symbol} بعد الدمج الأولي.")
+
+        if not processed_dfs:
+            logger.critical("❌ [Main] لا توجد بيانات جاهزة للتدريب بعد المعالجة المسبقة للمؤشرات.")
+            exit(1)
+
+        final_training_data = pd.concat(processed_dfs).reset_index(drop=True)
+        logger.info(f"✅ [Main] تم تجهيز إجمالي {len(final_training_data)} صفًا من البيانات للتدريب.")
+
+        if final_training_data.empty:
+            logger.critical("❌ [Main] DataFrame التدريب النهائي فارغ. لا يمكن تدريب النموذج.")
+            exit(1)
+
+        # 5. تدريب وتقييم النموذج
+        trained_model, model_metrics = train_and_evaluate_model(final_training_data)
+
+        if trained_model is None:
+            logger.critical("❌ [Main] فشل تدريب النموذج. لا يمكن حفظه.")
+            exit(1)
+
+        # 6. حفظ النموذج في قاعدة البيانات
+        if save_ml_model_to_db(trained_model, ML_MODEL_NAME, model_metrics):
+            logger.info(f"✅ [Main] تم حفظ النموذج '{ML_MODEL_NAME}' بنجاح في قاعدة البيانات.")
+        else:
+            logger.error(f"❌ [Main] فشل حفظ النموذج '{ML_MODEL_NAME}' في قاعدة البيانات.")
+
+    except Exception as e:
+        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب: {e}", exc_info=True)
+    finally:
+        logger.info("🛑 [Main] يتم إيقاف تشغيل سكريبت التدريب...")
+        cleanup_resources()
+        logger.info("👋 [Main] تم إيقاف سكريبت تدريب نموذج التعلم الآلي.")
+        os._exit(0)
+
