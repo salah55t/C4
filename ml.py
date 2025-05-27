@@ -15,18 +15,9 @@ from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
 
-# استيراد دوال المؤشرات من ملف c4.py
-# في بيئة حقيقية، قد تحتاج إلى تنظيم هذه الدوال في ملف منفصل أو التأكد من استيرادها بشكل صحيح.
-# لأغراض العرض هنا، سنفترض أنها متاحة أو تم نسخها.
-# (ملاحظة: لكي يعمل هذا السكريبت بشكل مستقل، يجب أن تكون جميع الدوال المساعدة المستوردة من c4.py
-# مثل fetch_historical_data, calculate_ema, calculate_vwma, calculate_rsi_indicator,
-# calculate_atr_indicator, calculate_bollinger_bands, calculate_macd, calculate_adx,
-# calculate_vwap, calculate_obv, calculate_supertrend, detect_candlestick_patterns,
-# get_crypto_symbols, init_db, check_db_connection, convert_np_values
-# متاحة في نفس البيئة أو تم نسخها هنا.)
-
-# لغرض هذا السكريبت، سأقوم بنسخ الدوال الأساسية التي أحتاجها من c4.py
-# في تطبيق حقيقي، ستضع هذه الدوال في ملفات مساعدة وتستوردها.
+# استيراد مكتبات Flask والخيوط
+from flask import Flask, request, Response
+from threading import Thread
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
@@ -44,21 +35,20 @@ try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
+    WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None) # إضافة WEBHOOK_URL
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
      exit(1)
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
-logger.info(f"Telegram Token: {'Available' if 'TELEGRAM_BOT_TOKEN' in os.environ else 'Not available'}") # Added for completeness, though not used in trainer
-logger.info(f"Telegram Chat ID: {'Available' if 'TELEGRAM_CHAT_ID' in os.environ else 'Not available'}") # Added for completeness
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
+logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Flask will always run for Render)")
+
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# يجب أن تتطابق هذه الثوابت مع تلك المستخدمة في c4.py لضمان اتساق البيانات
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
-# زيادة أيام البحث عن البيانات لضمان كفاية البيانات للتدريب
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
-ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # يجب أن يتطابق مع الاسم في c4.py
+ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 
 # Indicator Parameters (نسخ من c4.py لضمان الاتساق)
 RSI_PERIOD: int = 9
@@ -79,6 +69,13 @@ SUPERTREND_MULTIPLIER: float = 2.5
 conn: Optional[psycopg2.extensions.connection] = None
 cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
+
+# متغيرات لتتبع حالة التدريب
+training_status: str = "Idle"
+last_training_time: Optional[datetime] = None
+last_training_metrics: Dict[str, Any] = {}
+training_error: Optional[str] = None
+
 
 # ---------------------- Binance Client Setup ----------------------
 try:
@@ -320,7 +317,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         # Call get_historical_klines for the entire period.
         # The python-binance library is designed to handle internal pagination
         # if the requested range exceeds the API's single-request limit (e.g., 1000 klines).
-        # The error "unexpected keyword argument 'endTime'" is resolved by not using it.
         klines = client.get_historical_klines(symbol, interval, start_str_overall)
 
         if not klines:
@@ -981,29 +977,87 @@ def cleanup_resources() -> None:
     logger.info("✅ [Cleanup] اكتمل تنظيف الموارد.")
 
 
+# ---------------------- Flask Service ----------------------
+app = Flask(__name__)
+
+@app.route('/')
+def home() -> Response:
+    """Simple home page to show the bot is running."""
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    status_message = (
+        f"🤖 *ML Trainer Service Status:*\n"
+        f"- Current Time: {now}\n"
+        f"- Training Status: *{training_status}*\n"
+    )
+    if last_training_time:
+        status_message += f"- Last Training Time: {last_training_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    if last_training_metrics:
+        status_message += f"- Last Training Metrics (Accuracy): {last_training_metrics.get('accuracy', 'N/A'):.4f}\n"
+    if training_error:
+        status_message += f"- Last Error: {training_error}\n"
+
+    return Response(status_message, status=200, mimetype='text/plain')
+
+@app.route('/favicon.ico')
+def favicon() -> Response:
+    """Handles favicon request to avoid 404 errors in logs."""
+    return Response(status=204)
+
+def run_flask_service() -> None:
+    """Runs the Flask application."""
+    host = "0.0.0.0"
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...")
+    try:
+        from waitress import serve
+        logger.info("✅ [Flask] استخدام خادم 'waitress'.")
+        serve(app, host=host, port=port, threads=6)
+    except ImportError:
+        logger.warning("⚠️ [Flask] 'waitress' غير مثبت. الرجوع إلى خادم تطوير Flask (لا يوصى به للإنتاج).")
+        try:
+            app.run(host=host, port=port)
+        except Exception as flask_run_err:
+            logger.critical(f"❌ [Flask] فشل بدء خادم التطوير: {flask_run_err}", exc_info=True)
+    except Exception as serve_err:
+        logger.critical(f"❌ [Flask] فشل بدء الخادم (waitress؟): {serve_err}", exc_info=True)
+
+
 # ---------------------- نقطة الدخول الرئيسية ----------------------
 if __name__ == "__main__":
     logger.info("🚀 بدء سكريبت تدريب نموذج التعلم الآلي...")
     logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
+    flask_thread: Optional[Thread] = None
+
     try:
-        # 1. تهيئة قاعدة البيانات
+        # 1. بدء خدمة Flask في خيط منفصل أولاً
+        # هذا يضمن أن الخدمة ستكون متاحة للاستجابة لطلبات Uptime Monitor
+        # بينما يتم تنفيذ عملية التدريب في الخيط الرئيسي.
+        flask_thread = Thread(target=run_flask_service, daemon=False, name="FlaskServiceThread")
+        flask_thread.start()
+        logger.info("✅ [Main] تم بدء خدمة Flask.")
+        time.sleep(2) # إعطاء بعض الوقت لـ Flask للبدء
+
+        # 2. تهيئة قاعدة البيانات
         init_db()
 
-        # 2. جلب قائمة الرموز
+        # 3. جلب قائمة الرموز
         symbols = get_crypto_symbols()
         if not symbols:
             logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. يرجى التحقق من 'crypto_list.txt'.")
+            training_status = "Failed: No valid symbols"
             exit(1)
+
+        global training_status, last_training_time, last_training_metrics, training_error
+        training_status = "In Progress: Fetching Data"
+        training_error = None # Reset error
 
         all_data_for_training = pd.DataFrame()
         logger.info(f"ℹ️ [Main] جلب بيانات تاريخية لـ {len(symbols)} رمزًا للتدريب...")
 
-        # 3. جلب البيانات التاريخية لجميع الرموز ودمجها
+        # 4. جلب البيانات التاريخية لجميع الرموز ودمجها
         for symbol in symbols:
             logger.info(f"⏳ [Main] جلب البيانات لـ {symbol}...")
-            # تم إصلاح دالة fetch_historical_data بحيث تعتمد على get_historical_klines
-            # لتقسيم الطلبات داخليًا بدلاً من الحلقة اليدوية الخاطئة.
             df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
             if df_hist is not None and not df_hist.empty:
                 df_hist['symbol'] = symbol # إضافة عمود الرمز لتحديد مصدر البيانات
@@ -1011,24 +1065,22 @@ if __name__ == "__main__":
                 logger.info(f"✅ [Main] تم جلب {len(df_hist)} شمعة لـ {symbol}.")
             else:
                 logger.warning(f"⚠️ [Main] لم يتمكن من جلب بيانات كافية لـ {symbol}. تخطي.")
-            time.sleep(0.5) # تأخير لتجنب حدود معدل API
+            time.sleep(0.1) # تأخير لتجنب حدود معدل API
 
         if all_data_for_training.empty:
             logger.critical("❌ [Main] لم يتم جلب أي بيانات كافية للتدريب من أي رمز. لا يمكن المتابعة.")
+            training_status = "Failed: No sufficient data"
             exit(1)
 
         logger.info(f"✅ [Main] تم جلب إجمالي {len(all_data_for_training)} صفًا من البيانات الخام لجميع الرموز.")
 
-        # 4. تجهيز البيانات لنموذج التعلم الآلي
-        # بما أننا نجمع بيانات من رموز متعددة، سنقوم بتطبيق prepare_data_for_ml على كل رمز على حدة
-        # أو يمكننا تطبيقها على DataFrame المدمج إذا كانت المؤشرات لا تتأثر بالرمز (وهو الحال هنا).
-        # ولكن لضمان الدقة، من الأفضل معالجة كل رمز بشكل منفصل ثم دمج النتائج النظيفة.
-
+        # 5. تجهيز البيانات لنموذج التعلم الآلي
+        training_status = "In Progress: Preparing Data"
         processed_dfs = []
         for symbol in symbols:
             symbol_data = all_data_for_training[all_data_for_training['symbol'] == symbol].copy()
             if not symbol_data.empty:
-                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol'])) # إزالة عمود الرمز قبل المعالجة
+                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol']))
                 if df_processed is not None and not df_processed.empty:
                     processed_dfs.append(df_processed)
             else:
@@ -1036,6 +1088,7 @@ if __name__ == "__main__":
 
         if not processed_dfs:
             logger.critical("❌ [Main] لا توجد بيانات جاهزة للتدريب بعد المعالجة المسبقة للمؤشرات.")
+            training_status = "Failed: No processed data"
             exit(1)
 
         final_training_data = pd.concat(processed_dfs).reset_index(drop=True)
@@ -1043,26 +1096,41 @@ if __name__ == "__main__":
 
         if final_training_data.empty:
             logger.critical("❌ [Main] DataFrame التدريب النهائي فارغ. لا يمكن تدريب النموذج.")
+            training_status = "Failed: Empty training data"
             exit(1)
 
-        # 5. تدريب وتقييم النموذج
+        # 6. تدريب وتقييم النموذج
+        training_status = "In Progress: Training Model"
         trained_model, model_metrics = train_and_evaluate_model(final_training_data)
 
         if trained_model is None:
             logger.critical("❌ [Main] فشل تدريب النموذج. لا يمكن حفظه.")
+            training_status = "Failed: Model training failed"
             exit(1)
 
-        # 6. حفظ النموذج في قاعدة البيانات
+        # 7. حفظ النموذج في قاعدة البيانات
+        training_status = "In Progress: Saving Model"
         if save_ml_model_to_db(trained_model, ML_MODEL_NAME, model_metrics):
             logger.info(f"✅ [Main] تم حفظ النموذج '{ML_MODEL_NAME}' بنجاح في قاعدة البيانات.")
+            training_status = "Completed Successfully"
+            last_training_time = datetime.now()
+            last_training_metrics = model_metrics
         else:
             logger.error(f"❌ [Main] فشل حفظ النموذج '{ML_MODEL_NAME}' في قاعدة البيانات.")
+            training_status = "Completed with Errors: Model save failed"
+            training_error = "Model save failed"
+
+        # انتظر خيط Flask لإنهاء (مما يبقي البرنامج قيد التشغيل)
+        if flask_thread:
+            flask_thread.join()
 
     except Exception as e:
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب: {e}", exc_info=True)
+        training_status = "Failed: Unhandled exception"
+        training_error = str(e)
     finally:
         logger.info("🛑 [Main] يتم إيقاف تشغيل سكريبت التدريب...")
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف سكريبت تدريب نموذج التعلم الآلي.")
-        os._exit(0)
+        # os._exit(0) # لا تستخدم os._exit(0) هنا إذا كنت تريد أن يبقى Flask يعمل
 
