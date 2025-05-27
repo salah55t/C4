@@ -502,7 +502,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, mult
         elif st_trend[i-1] == 1:
             if close[i] >= final_lb[i]:
                 st[i] = final_lb[i]
-                st_trend[i] = -1
+                st_trend[i] = 1
             else:
                 st[i] = final_ub[i]
                 st_trend[i] = -1
@@ -643,8 +643,9 @@ def train_and_save_model() -> None:
     and saves the model and its metrics to the database.
     """
     logger.info("🚀 Starting ML model training process...")
-    init_binance_client()
-    init_db() # Ensure DB connection is established for this thread
+    # Ensure init_binance_client and init_db are called before this function
+    # if this function is called directly on startup.
+    # If called by scheduler, they are already handled.
 
     symbols = get_crypto_symbols()
     if not symbols:
@@ -922,6 +923,10 @@ if __name__ == '__main__':
     # These will be used by the scheduler and manual trigger
     init_binance_client()
     init_db()
+
+    # MODIFICATION: Run training immediately on startup
+    logger.info("🚀 Running ML model training on startup...")
+    train_and_save_model() # This will train and save the model to DB
 
     # Start the scheduler in a separate thread to avoid blocking the Flask app
     # This is crucial for Render's free tier, as the web server needs to respond.
