@@ -46,7 +46,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-SIGNAL_GENERATION_TIMEFRAME: str = '15m' # تم التغيير إلى 15 دقيقة
+SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 
@@ -64,6 +64,8 @@ MACD_SIGNAL: int = 9
 ADX_PERIOD: int = 10
 SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
+VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
+RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
@@ -787,7 +789,7 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
     """
     logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol}...")
 
-    min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + target_period + 5
+    min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + target_period + 5
 
     if len(df) < min_len_required:
         logger.warning(f"⚠️ [ML Prep] DataFrame لـ {symbol} قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
@@ -810,6 +812,22 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
     df_calc = calculate_obv(df_calc)
     df_calc = detect_candlestick_patterns(df_calc)
 
+    # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
+    df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
+    logger.debug(f"ℹ️ [ML Prep] تم حساب متوسط حجم 15 دقيقة لـ {symbol}.")
+
+    # إضافة مؤشر زخم صعودي (RSI Momentum)
+    # تحقق مما إذا كان RSI يتزايد خلال الشمعات الأخيرة
+    df_calc['rsi_momentum_bullish'] = 0
+    if len(df_calc) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
+        # Check if RSI is increasing over the last N candles and is above 50 (bullish territory)
+        for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_calc)):
+            rsi_slice = df_calc['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
+            if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
+                df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
+    logger.debug(f"ℹ️ [ML Prep] تم حساب مؤشر زخم RSI الصعودي لـ {symbol}.")
+
+
     # تعريف أعمدة الميزات التي سيستخدمها النموذج
     feature_columns = [
         f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
@@ -817,7 +835,9 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
         'macd', 'macd_signal', 'macd_hist',
         'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
         'supertrend', 'supertrend_trend',
-        'BullishCandleSignal', 'BearishCandleSignal' # إضافة أنماط الشموع كميزات
+        'BullishCandleSignal', 'BearishCandleSignal',
+        'volume_15m_avg', # ميزة جديدة: متوسط حجم السيولة لآخر 15 دقيقة
+        'rsi_momentum_bullish' # ميزة جديدة: زخم RSI الصعودي
     ]
 
     # التأكد من وجود جميع أعمدة الميزات وتحويلها إلى أرقام
@@ -1083,15 +1103,15 @@ if __name__ == "__main__":
         # 5. تجهيز البيانات لنموذج التعلم الآلي
         training_status = "In Progress: Preparing Data"
         processed_dfs = []
-        for symbol in symbols:
-            # تمرير اسم الرمز إلى دالة prepare_data_for_ml لتحسين السجلات
-            symbol_data = all_data_for_training[all_data_for_training['symbol'] == symbol].copy()
-            if not symbol_data.empty:
-                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol']), symbol) # تمرير الرمز هنا
+        # Group by symbol and process each symbol's data independently
+        for symbol, group_df in all_data_for_training.groupby('symbol'):
+            if not group_df.empty:
+                df_processed = prepare_data_for_ml(group_df.drop(columns=['symbol']), symbol)
                 if df_processed is not None and not df_processed.empty:
                     processed_dfs.append(df_processed)
             else:
-                logger.warning(f"⚠️ [Main] لا توجد بيانات خام لـ {symbol} بعد الدمج الأولي.")
+                logger.warning(f"⚠️ [Main] لا توجد بيانات خام لـ {symbol} بعد التجميع الأولي.")
+
 
         if not processed_dfs:
             logger.critical("❌ [Main] لا توجد بيانات جاهزة للتدريب بعد المعالجة المسبقة للمؤشرات.")
