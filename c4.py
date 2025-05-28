@@ -92,14 +92,14 @@ TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
 BINANCE_FEE_RATE: float = 0.001
 
-ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the name used in train_ml_model.py
+BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the base name used in ml.py
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 ticker_data: Dict[str, float] = {}
-ml_model: Optional[Any] = None # Global variable to hold the loaded ML model
+ml_models: Dict[str, Any] = {} # Global dictionary to hold loaded ML models, keyed by symbol
 
 # ---------------------- Binance Client Setup ----------------------
 try:
@@ -377,32 +377,39 @@ def check_db_connection() -> bool:
              logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
              return False
 
-def load_ml_model_from_db() -> Optional[Any]:
-    """Loads the latest trained ML model from the database."""
-    global ml_model
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
     if not check_db_connection() or not conn:
-        logger.error("❌ [ML Model] لا يمكن تحميل نموذج ML بسبب مشكلة في اتصال قاعدة البيانات.")
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
         return None
 
     try:
         with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (ML_MODEL_NAME,))
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
             result = db_cur.fetchone()
             if result and result['model_data']:
-                ml_model = pickle.loads(result['model_data'])
-                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{ML_MODEL_NAME}' من قاعدة البيانات بنجاح.")
-                return ml_model
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
             else:
-                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{ML_MODEL_NAME}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
                 return None
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML: {db_err}", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
         return None
     except pickle.UnpicklingError as unpickle_err:
-        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
         return None
     except Exception as e:
-        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML: {e}", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
         return None
 
 
@@ -658,7 +665,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
         df_calc['di_minus'] = np.nan
         return df_calc
     if len(df_calc) < period * 2:
-        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df_calc)} < {period * 2}) لحساب ADX.")
+        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df)} < {period * 2}) لحساب ADX.")
         df_calc['adx'] = np.nan
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
@@ -1133,6 +1140,10 @@ class ScalpingTradingStrategy:
 
     def __init__(self, symbol: str):
         self.symbol = symbol
+        self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol
+        if self.ml_model is None:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
+
         self.feature_columns_for_ml = [ # Features expected by the ML model
             'volume_15m_avg', # New feature
             'rsi_momentum_bullish' # New feature
@@ -1273,10 +1284,10 @@ class ScalpingTradingStrategy:
         # --- ML Model Prediction (NEW: Mandatory Override) ---
         ml_overrides_essentials = False
         ml_prediction_result_text = "N/A (نموذج غير محمل)"
-        if ml_model:
+        if self.ml_model: # Use self.ml_model which is loaded per symbol
             try:
                 features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
-                ml_pred = ml_model.predict(features_for_prediction)[0]
+                ml_pred = self.ml_model.predict(features_for_prediction)[0]
                 if ml_pred == 1: # If ML model predicts upward movement
                     ml_overrides_essentials = True
                     ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
@@ -2033,7 +2044,7 @@ def main_loop() -> None:
     """Main loop to scan pairs and generate signals."""
     symbols_to_scan = get_crypto_symbols()
     if not symbols_to_scan:
-        logger.critical("❌ [Main] لا توجد رموز صالحة تم تحميلها أو التحقق منها. لا يمكن المتابعة.")
+        logger.critical("❌ [Main] لا توجد رموز صالحة تم تحميلها أو التحقق منها. لا يمكن المتابمة.")
         return
 
     logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمزًا صالحًا للمسح.")
@@ -2090,7 +2101,7 @@ def main_loop() -> None:
                     if df_hist is None or df_hist.empty:
                         continue
 
-                    strategy = ScalpingTradingStrategy(symbol)
+                    strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
                         continue
@@ -2176,10 +2187,10 @@ if __name__ == "__main__":
         # 1. Initialize the database first
         init_db()
 
-        # 2. Load the ML model from the database
-        load_ml_model_from_db()
-        if ml_model is None:
-            logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
+        # 2. No longer load all ML models at startup. They will be loaded on demand per symbol.
+        #    ml_model = load_ml_model_from_db()
+        #    if ml_model is None:
+        #        logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
 
         # 3. Start WebSocket Ticker
         ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
