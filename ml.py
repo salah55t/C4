@@ -498,9 +498,11 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
         df_calc['di_minus'] = np.nan
         return df_calc
 
-    df_calc['high-low'] = df_calc['high'] - df_calc['low']
-    df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
-    df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
+    # تم إصلاح الخطأ: تعريف المتغيرات بشكل صريح قبل استخدامها في pd.concat
+    high_low = df_calc['high'] - df_calc['low']
+    high_close_prev = (df_calc['high'] - df_calc['close'].shift(1)).abs()
+    low_close_prev = (df_calc['low'] - df_calc['close'].shift(1)).abs()
+
     df_calc['tr'] = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
 
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
