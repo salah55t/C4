@@ -51,9 +51,9 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
 MAX_OPEN_TRADES: int = 5
-SIGNAL_GENERATION_TIMEFRAME: str = '15m'
+SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '15m'
+SIGNAL_TRACKING_TIMEFRAME: str = '5m'
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
 # Indicator Parameters
@@ -77,9 +77,11 @@ MACD_SIGNAL: int = 9
 ADX_PERIOD: int = 10
 SUPERTREND_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 2.5
+VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
+RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 100000.0
+MIN_VOLUME_15M_USDT: float = 250000.0
 
 RECENT_EMA_CROSS_LOOKBACK: int = 2
 MIN_ADX_TREND_STRENGTH: int = 20
@@ -1006,20 +1008,21 @@ def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dic
     return waves
 
 
-def fetch_recent_volume(symbol: str) -> float:
-    """Fetches the trading volume in USDT for the last 15 minutes for the specified symbol."""
+def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
+    """Fetches the trading volume in USDT for the last `num_candles` of the specified `interval`."""
     if not client:
          logger.error(f"❌ [Data Volume] عميل Binance غير مهيأ لجلب الحجم لـ {symbol}.")
          return 0.0
     try:
-        logger.debug(f"ℹ️ [Data Volume] جلب حجم 15 دقيقة لـ {symbol}...")
-        klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_1MINUTE, limit=15)
-        if not klines or len(klines) < 15:
-             logger.warning(f"⚠️ [Data Volume] بيانات 1m غير كافية (أقل من 15 شمعة) لـ {symbol}.")
+        logger.debug(f"ℹ️ [Data Volume] جلب حجم آخر {num_candles} شمعات {interval} لـ {symbol}...")
+        klines = client.get_klines(symbol=symbol, interval=interval, limit=num_candles)
+        if not klines or len(klines) < num_candles:
+             logger.warning(f"⚠️ [Data Volume] بيانات {interval} غير كافية (أقل من {num_candles} شمعة) لـ {symbol}.")
              return 0.0
 
+        # k[7] is the quote asset volume (e.g., USDT volume)
         volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        logger.debug(f"✅ [Data Volume] سيولة آخر 15 دقيقة لـ {symbol}: {volume_usdt:.2f} USDT")
+        logger.debug(f"✅ [Data Volume] سيولة آخر {num_candles} شمعات {interval} لـ {symbol}: {volume_usdt:.2f} USDT")
         return volume_usdt
     except (BinanceAPIException, BinanceRequestException) as binance_err:
          logger.error(f"❌ [Data Volume] خطأ في Binance API أو الشبكة أثناء جلب الحجم لـ {symbol}: {binance_err}")
@@ -1135,7 +1138,9 @@ class ScalpingTradingStrategy:
             'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
             'macd', 'macd_signal', 'macd_hist',
             'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-            'supertrend', 'supertrend_trend'
+            'supertrend', 'supertrend_trend',
+            'volume_15m_avg', # New feature
+            'rsi_momentum_bullish' # New feature
         ]
 
         self.condition_weights = {
@@ -1167,7 +1172,7 @@ class ScalpingTradingStrategy:
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 5
+        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 5
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -1188,6 +1193,18 @@ class ScalpingTradingStrategy:
             df_calc = calculate_vwap(df_calc)
             df_calc = calculate_obv(df_calc)
             df_calc = detect_candlestick_patterns(df_calc)
+
+            # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
+            df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
+
+            # إضافة مؤشر زخم صعودي (RSI Momentum)
+            df_calc['rsi_momentum_bullish'] = 0
+            if len(df_calc) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
+                for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_calc)):
+                    rsi_slice = df_calc['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
+                    if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
+                        df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
+
 
             # Ensure all feature columns for ML exist and are numeric
             for col in self.feature_columns_for_ml:
@@ -1212,7 +1229,7 @@ class ScalpingTradingStrategy:
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. أحدث EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, SuperTrend: {latest.get('supertrend', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. أحدث EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, SuperTrend: {latest.get('supertrend', np.nan):.4f}, Volume 15m Avg: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1230,7 +1247,7 @@ class ScalpingTradingStrategy:
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء...")
 
-        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES) + 1
+        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 1
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.")
             return None
@@ -1342,8 +1359,17 @@ class ScalpingTradingStrategy:
             logger.info(f"✅ [Strategy {self.symbol}] تم تجاوز الشروط الأساسية بواسطة تنبؤ ML الصعودي.")
             # If ML overrides, set essential conditions to "ML Override" in details for clarity
             for cond_name in self.essential_conditions:
-                if cond_name not in signal_details:
-                    signal_details[cond_name.replace(' ', '_')] = 'تم تجاوزها بواسطة ML' # Add a placeholder for overridden conditions
+                # Check if the key already exists from a specific check, otherwise add generic override
+                if cond_name == 'price_above_emas_and_vwma' and 'Price_MA_Alignment' not in signal_details:
+                    signal_details['Price_MA_Alignment'] = 'تم تجاوزها بواسطة ML'
+                elif cond_name == 'ema_short_above_ema_long' and 'EMA_Order' not in signal_details:
+                    signal_details['EMA_Order'] = 'تم تجاوزها بواسطة ML'
+                elif cond_name == 'supertrend_up' and 'SuperTrend' not in signal_details:
+                    signal_details['SuperTrend'] = 'تم تجاوزها بواسطة ML'
+                elif cond_name == 'macd_positive_or_cross' and 'MACD' not in signal_details:
+                    signal_details['MACD'] = 'تم تجاوزها بواسطة ML'
+                elif cond_name == 'adx_trending_bullish_strong' and 'ADX/DI' not in signal_details:
+                    signal_details['ADX/DI'] = 'تم تجاوزها بواسطة ML'
 
 
         # --- Calculate Score for Optional Conditions ---
@@ -1418,7 +1444,8 @@ class ScalpingTradingStrategy:
             logger.debug(f"ℹ️ [Strategy {self.symbol}] لم يتم استيفاء درجة الإشارة المطلوبة من الشروط الاختيارية (الدرجة: {current_score:.2f} / {self.total_possible_score:.2f}, الحد الأدنى: {self.min_signal_score:.2f}). تم رفض الإشارة.")
             return None
 
-        volume_recent = fetch_recent_volume(self.symbol)
+        # استخدام fetch_recent_volume مع المعلمات الجديدة
+        volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
         if volume_recent < MIN_VOLUME_15M_USDT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
             return None
@@ -1446,7 +1473,7 @@ class ScalpingTradingStrategy:
             'r2_score': float(f"{current_score:.2f}"),
             'strategy_name': 'Scalping_Momentum_Trend_ML_Override', # Updated strategy name
             'signal_details': signal_details,
-            'volume_15m': volume_recent,
+            'volume_15m': volume_recent, # تحديث هنا ليعكس الحجم الجديد
             'trade_value': TRADE_VALUE,
             'total_possible_score': float(f"{self.total_possible_score:.2f}")
         }
@@ -1506,7 +1533,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         strategy_name = signal_data.get('strategy_name', 'N/A')
         signal_score = signal_data.get('r2_score', 0.0)
         total_possible_score = signal_data.get('total_possible_score', 10.0)
-        volume_15m = signal_data.get('volume_15m', 0.0)
+        volume_15m = signal_data.get('volume_15m', 0.0) # تم تحديث هذا ليعكس الحجم الجديد
         trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
         signal_details = signal_data.get('signal_details', {})
 
@@ -1534,7 +1561,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"📈 **نوع الإشارة:** شراء (طويل)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
             f"📊 **قوة الإشارة (النقاط - اختيارية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **السيولة (15 دقيقة):** {volume_15m:,.0f} USDT\n"
+            f"💧 **السيولة (آخر 15 دقيقة):** {volume_15m:,.0f} USDT\n" # تم تحديث النص هنا
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}`\n"
@@ -2189,3 +2216,4 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
         os._exit(0)
+
