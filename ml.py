@@ -46,7 +46,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-SIGNAL_GENERATION_TIMEFRAME: str = '15m'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # تم التغيير إلى 15 دقيقة
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
 ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
 
@@ -445,7 +445,7 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, 
         df['bb_lower'] = np.nan
         return df
     if len(df) < window:
-         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.")
+         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.)")
          df['bb_middle'] = np.nan
          df['bb_upper'] = np.nan
          df['bb_lower'] = np.nan
@@ -501,7 +501,7 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
     df_calc['high-low'] = df_calc['high'] - df_calc['low']
     df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
     df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
-    df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
+    df_calc['tr'] = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
 
     df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
     df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
@@ -777,18 +777,18 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
-def prepare_data_for_ml(df: pd.DataFrame, target_period: int = 5) -> Optional[pd.DataFrame]:
+def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -> Optional[pd.DataFrame]:
     """
     يجهز البيانات لتدريب نموذج التعلم الآلي.
     يضيف المؤشرات ويزيل الصفوف التي تحتوي على قيم NaN.
     يضيف عمود الهدف 'target' الذي يشير إلى ما إذا كان السعر سيرتفع في الشموع القادمة.
     """
-    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي...")
+    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol}...")
 
     min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD) + target_period + 5
 
     if len(df) < min_len_required:
-        logger.warning(f"⚠️ [ML Prep] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
+        logger.warning(f"⚠️ [ML Prep] DataFrame لـ {symbol} قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
         return None
 
     df_calc = df.copy()
@@ -842,12 +842,12 @@ def prepare_data_for_ml(df: pd.DataFrame, target_period: int = 5) -> Optional[pd
     dropped_count = initial_len - len(df_cleaned)
 
     if dropped_count > 0:
-        logger.info(f"ℹ️ [ML Prep] تم إسقاط {dropped_count} صفًا بسبب قيم NaN بعد حساب المؤشرات والهدف.")
+        logger.info(f"ℹ️ [ML Prep] لـ {symbol}: تم إسقاط {dropped_count} صفًا بسبب قيم NaN بعد حساب المؤشرات والهدف.")
     if df_cleaned.empty:
-        logger.warning(f"⚠️ [ML Prep] DataFrame فارغ بعد إزالة قيم NaN لتجهيز ML.")
+        logger.warning(f"⚠️ [ML Prep] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN لتجهيز ML.")
         return None
 
-    logger.info(f"✅ [ML Prep] تم تجهيز البيانات بنجاح. عدد الصفوف: {len(df_cleaned)}")
+    logger.info(f"✅ [ML Prep] تم تجهيز البيانات لـ {symbol} بنجاح. عدد الصفوف: {len(df_cleaned)}")
     return df_cleaned[feature_columns + ['target']]
 
 
@@ -916,6 +916,7 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
     """
     يحفظ النموذج المدرب وبياناته الوصفية (المقاييس) في قاعدة البيانات.
     """
+    logger.info(f"ℹ️ [DB Save] التحقق من اتصال قاعدة البيانات قبل الحفظ...")
     if not check_db_connection() or not conn:
         logger.error("❌ [DB Save] لا يمكن حفظ نموذج ML بسبب مشكلة في اتصال قاعدة البيانات.")
         return False
@@ -924,9 +925,11 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
     try:
         # تسلسل النموذج باستخدام pickle
         model_binary = pickle.dumps(model)
+        logger.info(f"✅ [DB Save] تم تسلسل النموذج بنجاح. حجم البيانات: {len(model_binary)} بايت.")
 
         # تحويل المقاييس إلى JSONB
         metrics_json = json.dumps(convert_np_values(metrics))
+        logger.info(f"✅ [DB Save] تم تحويل المقاييس إلى JSON بنجاح.")
 
         with conn.cursor() as db_cur:
             # التحقق مما إذا كان النموذج موجودًا بالفعل (للتحديث أو الإدراج)
@@ -934,7 +937,7 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
             existing_model = db_cur.fetchone()
 
             if existing_model:
-                # تحديث النموذج الموجود
+                logger.info(f"ℹ️ [DB Save] النموذج '{model_name}' موجود بالفعل. سيتم تحديثه.")
                 update_query = sql.SQL("""
                     UPDATE ml_models
                     SET model_data = %s, trained_at = NOW(), metrics = %s
@@ -943,7 +946,7 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
                 db_cur.execute(update_query, (model_binary, metrics_json, existing_model['id']))
                 logger.info(f"✅ [DB Save] تم تحديث نموذج ML '{model_name}' في قاعدة البيانات بنجاح.")
             else:
-                # إدراج نموذج جديد
+                logger.info(f"ℹ️ [DB Save] النموذج '{model_name}' غير موجود. سيتم إدراجه كنموذج جديد.")
                 insert_query = sql.SQL("""
                     INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
                     VALUES (%s, %s, NOW(), %s);
@@ -951,9 +954,10 @@ def save_ml_model_to_db(model: Any, model_name: str, metrics: Dict[str, Any]) ->
                 db_cur.execute(insert_query, (model_name, model_binary, metrics_json))
                 logger.info(f"✅ [DB Save] تم حفظ نموذج ML '{model_name}' جديد في قاعدة البيانات بنجاح.")
         conn.commit()
+        logger.info(f"✅ [DB Save] تم تنفيذ commit لقاعدة البيانات بنجاح.")
         return True
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ نموذج ML: {db_err}")
+        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ نموذج ML: {db_err}", exc_info=True)
         if conn: conn.rollback()
         return False
     except pickle.PicklingError as pickle_err:
@@ -1046,11 +1050,9 @@ if __name__ == "__main__":
         symbols = get_crypto_symbols()
         if not symbols:
             logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. يرجى التحقق من 'crypto_list.txt'.")
-            # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغير عام
             training_status = "Failed: No valid symbols"
             exit(1)
 
-        # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغيرات عامة
         training_status = "In Progress: Fetching Data"
         training_error = None # Reset error
 
@@ -1080,9 +1082,10 @@ if __name__ == "__main__":
         training_status = "In Progress: Preparing Data"
         processed_dfs = []
         for symbol in symbols:
+            # تمرير اسم الرمز إلى دالة prepare_data_for_ml لتحسين السجلات
             symbol_data = all_data_for_training[all_data_for_training['symbol'] == symbol].copy()
             if not symbol_data.empty:
-                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol']))
+                df_processed = prepare_data_for_ml(symbol_data.drop(columns=['symbol']), symbol) # تمرير الرمز هنا
                 if df_processed is not None and not df_processed.empty:
                     processed_dfs.append(df_processed)
             else:
@@ -1112,6 +1115,7 @@ if __name__ == "__main__":
 
         # 7. حفظ النموذج في قاعدة البيانات
         training_status = "In Progress: Saving Model"
+        logger.info(f"ℹ️ [Main] محاولة حفظ النموذج المدرب '{ML_MODEL_NAME}' في قاعدة البيانات...") # رسالة سجل إضافية هنا
         if save_ml_model_to_db(trained_model, ML_MODEL_NAME, model_metrics):
             logger.info(f"✅ [Main] تم حفظ النموذج '{ML_MODEL_NAME}' بنجاح في قاعدة البيانات.")
             training_status = "Completed Successfully"
@@ -1128,7 +1132,6 @@ if __name__ == "__main__":
 
     except Exception as e:
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب: {e}", exc_info=True)
-        # لا حاجة لـ 'global' هنا لأننا نقوم بالتعيين مباشرة لمتغيرات عامة
         training_status = "Failed: Unhandled exception"
         training_error = str(e)
     finally:
