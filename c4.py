@@ -609,7 +609,7 @@ def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, 
         df['bb_lower'] = np.nan
         return df
     if len(df) < window:
-         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.")
+         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.)")
          df['bb_middle'] = np.nan
          df['bb_upper'] = np.nan
          df['bb_lower'] = np.nan
@@ -1134,11 +1134,6 @@ class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.feature_columns_for_ml = [ # Features expected by the ML model
-            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'rsi', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-            'macd', 'macd_signal', 'macd_hist',
-            'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-            'supertrend', 'supertrend_trend',
             'volume_15m_avg', # New feature
             'rsi_momentum_bullish' # New feature
         ]
@@ -1172,6 +1167,7 @@ class ScalpingTradingStrategy:
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the strategy."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
+        # min_len_required should reflect all indicators used in the strategy (not just ML features)
         min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 5
 
         if len(df) < min_len_required:
@@ -1217,7 +1213,10 @@ class ScalpingTradingStrategy:
             initial_len = len(df_calc)
             # Use all required columns for dropna, including ML features
             all_required_cols = list(set(self.feature_columns_for_ml + [
-                'open', 'high', 'low', 'close', 'volume', 'BullishCandleSignal', 'BearishCandleSignal'
+                'open', 'high', 'low', 'close', 'volume', 'BullishCandleSignal', 'BearishCandleSignal',
+                f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', 'rsi', 'atr', 'bb_upper',
+                'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+                'supertrend', 'supertrend_trend' # Add all other indicators used in strategy conditions
             ]))
             df_cleaned = df_calc.dropna(subset=all_required_cols).copy()
             dropped_count = initial_len - len(df_cleaned)
@@ -1254,7 +1253,10 @@ class ScalpingTradingStrategy:
 
         # Ensure all required columns for signal generation, including ML features, are present
         required_cols_for_signal = list(set(self.feature_columns_for_ml + [
-            'close', 'rsi', 'atr', 'bb_upper', 'BullishCandleSignal'
+            'close', 'rsi', 'atr', 'bb_upper', 'BullishCandleSignal',
+            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
+            'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus',
+            'supertrend', 'supertrend_trend', 'vwap', 'obv'
         ]))
         missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
         if missing_cols:
