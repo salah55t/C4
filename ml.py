@@ -48,7 +48,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
-ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1'
+BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # اسم أساسي للنموذج، سيتم إضافة الرمز إليه
 
 # Indicator Parameters (نسخ من c4.py لضمان الاتساق)
 # تم الاحتفاظ فقط بالمعلمات المطلوبة لحساب الميزات الجديدة
@@ -487,10 +487,11 @@ def train_and_evaluate_model(data: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
     # تقسيم البيانات إلى مجموعات تدريب واختبار
     # استخدام stratify=y لضمان توزيع متوازن للفئات في مجموعات التدريب والاختبار
     try:
-        X_train, X_test, y_train = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     except ValueError as ve:
         logger.warning(f"⚠️ [ML Train] لا يمكن استخدام stratify بسبب وجود فئة واحدة في الهدف: {ve}. سيتم المتابعة بدون stratify.")
-        X_train, X_test, y_train = train_test_split(X, y, test_size=0.2, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
 
     # التحجيم (Scaling) للميزات (مهم لبعض النماذج، وليس بالضرورة لـ Decision Tree ولكن ممارسة جيدة)
     scaler = StandardScaler()
@@ -668,86 +669,106 @@ if __name__ == "__main__":
             training_status = "Failed: No valid symbols"
             exit(1)
 
-        training_status = "In Progress: Fetching Data"
+        training_status = "In Progress: Training Models"
         training_error = None # Reset error
+        
+        overall_metrics: Dict[str, Any] = {
+            'total_models_trained': 0,
+            'successful_models': 0,
+            'failed_models': 0,
+            'avg_accuracy': 0.0,
+            'avg_precision': 0.0,
+            'avg_recall': 0.0,
+            'avg_f1_score': 0.0,
+            'details_per_symbol': {}
+        }
+        
+        total_accuracy = 0.0
+        total_precision = 0.0
+        total_recall = 0.0
+        total_f1_score = 0.0
 
-        all_data_for_training = pd.DataFrame()
-        logger.info(f"ℹ️ [Main] جلب بيانات تاريخية لـ {len(symbols)} رمزًا للتدريب...")
 
-        # 4. جلب البيانات التاريخية لجميع الرموز ودمجها
+        # 4. تدريب نموذج لكل رمز بشكل منفصل
         for symbol in symbols:
-            logger.info(f"⏳ [Main] جلب البيانات لـ {symbol}...")
-            df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
-            if df_hist is not None and not df_hist.empty:
-                df_hist['symbol'] = symbol # إضافة عمود الرمز لتحديد مصدر البيانات
-                all_data_for_training = pd.concat([all_data_for_training, df_hist])
-                logger.info(f"✅ [Main] تم جلب {len(df_hist)} شمعة لـ {symbol}.")
-            else:
-                logger.warning(f"⚠️ [Main] لم يتمكن من جلب بيانات كافية لـ {symbol}. تخطي.")
-            time.sleep(0.1) # تأخير لتجنب حدود معدل API
+            current_model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+            overall_metrics['total_models_trained'] += 1
+            logger.info(f"\n--- ⏳ [Main] بدء تدريب النموذج لـ {symbol} ({current_model_name}) ---")
+            
+            try:
+                # جلب البيانات التاريخية للرمز الحالي
+                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
+                if df_hist is None or df_hist.empty:
+                    logger.warning(f"⚠️ [Main] لم يتمكن من جلب بيانات كافية لـ {symbol}. تخطي تدريب هذا النموذج.")
+                    overall_metrics['failed_models'] += 1
+                    overall_metrics['details_per_symbol'][symbol] = {'status': 'Failed: No data', 'error': 'No sufficient historical data'}
+                    continue
 
-        if all_data_for_training.empty:
-            logger.critical("❌ [Main] لم يتم جلب أي بيانات كافية للتدريب من أي رمز. لا يمكن المتابعة.")
-            training_status = "Failed: No sufficient data"
-            exit(1)
+                # تجهيز البيانات لنموذج التعلم الآلي
+                df_processed = prepare_data_for_ml(df_hist, symbol)
+                if df_processed is None or df_processed.empty:
+                    logger.warning(f"⚠️ [Main] لا توجد بيانات جاهزة للتدريب لـ {symbol} بعد المعالجة المسبقة للمؤشرات. تخطي.")
+                    overall_metrics['failed_models'] += 1
+                    overall_metrics['details_per_symbol'][symbol] = {'status': 'Failed: No processed data', 'error': 'No sufficient processed data'}
+                    continue
 
-        logger.info(f"✅ [Main] تم جلب إجمالي {len(all_data_for_training)} صفًا من البيانات الخام لجميع الرموز.")
+                # تدريب وتقييم النموذج
+                trained_model, model_metrics = train_and_evaluate_model(df_processed)
 
-        # 5. تجهيز البيانات لنموذج التعلم الآلي
-        training_status = "In Progress: Preparing Data"
-        processed_dfs = []
-        # Group by symbol and process each symbol's data independently
-        for symbol, group_df in all_data_for_training.groupby('symbol'):
-            if not group_df.empty:
-                df_processed = prepare_data_for_ml(group_df.drop(columns=['symbol']), symbol)
-                if df_processed is not None and not df_processed.empty:
-                    processed_dfs.append(df_processed)
-            else:
-                logger.warning(f"⚠️ [Main] لا توجد بيانات خام لـ {symbol} بعد التجميع الأولي.")
+                if trained_model is None:
+                    logger.error(f"❌ [Main] فشل تدريب النموذج لـ {symbol}. لا يمكن حفظه.")
+                    overall_metrics['failed_models'] += 1
+                    overall_metrics['details_per_symbol'][symbol] = {'status': 'Failed: Training failed', 'error': 'Model training returned None'}
+                    continue
 
+                # حفظ النموذج في قاعدة البيانات
+                if save_ml_model_to_db(trained_model, current_model_name, model_metrics):
+                    logger.info(f"✅ [Main] تم حفظ النموذج '{current_model_name}' بنجاح في قاعدة البيانات.")
+                    overall_metrics['successful_models'] += 1
+                    overall_metrics['details_per_symbol'][symbol] = {'status': 'Completed Successfully', 'metrics': model_metrics}
+                    
+                    total_accuracy += model_metrics.get('accuracy', 0.0)
+                    total_precision += model_metrics.get('precision', 0.0)
+                    total_recall += model_metrics.get('recall', 0.0)
+                    total_f1_score += model_metrics.get('f1_score', 0.0)
+                else:
+                    logger.error(f"❌ [Main] فشل حفظ النموذج '{current_model_name}' في قاعدة البيانات.")
+                    overall_metrics['failed_models'] += 1
+                    overall_metrics['details_per_symbol'][symbol] = {'status': 'Completed with Errors: Model save failed', 'error': 'Failed to save model to DB'}
 
-        if not processed_dfs:
-            logger.critical("❌ [Main] لا توجد بيانات جاهزة للتدريب بعد المعالجة المسبقة للمؤشرات.")
-            training_status = "Failed: No processed data"
-            exit(1)
+            except Exception as e:
+                logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تدريب النموذج لـ {symbol}: {e}", exc_info=True)
+                overall_metrics['failed_models'] += 1
+                overall_metrics['details_per_symbol'][symbol] = {'status': 'Failed: Unhandled exception', 'error': str(e)}
+            
+            logger.info(f"--- ✅ [Main] انتهى تدريب النموذج لـ {symbol} ---")
+            time.sleep(1) # تأخير بسيط بين تدريب النماذج
 
-        final_training_data = pd.concat(processed_dfs).reset_index(drop=True)
-        logger.info(f"✅ [Main] تم تجهيز إجمالي {len(final_training_data)} صفًا من البيانات للتدريب.")
+        # تحديث الحالة العامة للتدريب
+        if overall_metrics['successful_models'] > 0:
+            overall_metrics['avg_accuracy'] = total_accuracy / overall_metrics['successful_models']
+            overall_metrics['avg_precision'] = total_precision / overall_metrics['successful_models']
+            overall_metrics['avg_recall'] = total_recall / overall_metrics['successful_models']
+            overall_metrics['avg_f1_score'] = total_f1_score / overall_metrics['successful_models']
 
-        if final_training_data.empty:
-            logger.critical("❌ [Main] DataFrame التدريب النهائي فارغ. لا يمكن تدريب النموذج.")
-            training_status = "Failed: Empty training data"
-            exit(1)
-
-        # 6. تدريب وتقييم النموذج
-        training_status = "In Progress: Training Model"
-        trained_model, model_metrics = train_and_evaluate_model(final_training_data)
-
-        if trained_model is None:
-            logger.critical("❌ [Main] فشل تدريب النموذج. لا يمكن حفظه.")
-            training_status = "Failed: Model training failed"
-            exit(1)
-
-        # 7. حفظ النموذج في قاعدة البيانات
-        training_status = "In Progress: Saving Model"
-        logger.info(f"ℹ️ [Main] محاولة حفظ النموذج المدرب '{ML_MODEL_NAME}' في قاعدة البيانات...") # رسالة سجل إضافية هنا
-        if save_ml_model_to_db(trained_model, ML_MODEL_NAME, model_metrics):
-            logger.info(f"✅ [Main] تم حفظ النموذج '{ML_MODEL_NAME}' بنجاح في قاعدة البيانات.")
-            training_status = "Completed Successfully"
-            last_training_time = datetime.now()
-            last_training_metrics = model_metrics
+        if overall_metrics['successful_models'] == overall_metrics['total_models_trained']:
+            training_status = "Completed Successfully (All Models Trained)"
+        elif overall_metrics['successful_models'] > 0:
+            training_status = "Completed with Errors (Some Models Failed)"
         else:
-            logger.error(f"❌ [Main] فشل حفظ النموذج '{ML_MODEL_NAME}' في قاعدة البيانات.")
-            training_status = "Completed with Errors: Model save failed"
-            training_error = "Model save failed"
+            training_status = "Failed (No Models Trained Successfully)"
+        
+        last_training_time = datetime.now()
+        last_training_metrics = overall_metrics
+
 
         # انتظر خيط Flask لإنهاء (مما يبقي البرنامج قيد التشغيل)
         if flask_thread:
             flask_thread.join()
 
     except Exception as e:
-        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب: {e}", exc_info=True)
-        training_status = "Failed: Unhandled exception"
+        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب الرئيسي: {e}", exc_info=True)
+        training_status = "Failed: Unhandled exception in main loop"
         training_error = str(e)
     finally:
         logger.info("🛑 [Main] يتم إيقاف تشغيل سكريبت التدريب...")
