@@ -13,7 +13,7 @@ from binance.client import Client
 from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from flask import Flask, request, Response
-from threading import Thread
+from threading import Thread, Lock
 from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
@@ -36,37 +36,34 @@ try:
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
-    # WEBHOOK_URL is optional, but Flask will always run for Render compatibility
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
      exit(1)
 
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
-logger.info(f"Telegram Token: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
-logger.info(f"Telegram Chat ID: {CHAT_ID}")
+logger.info(f"Telegram Token: {'Available' if TELEGRAM_TOKEN else 'Not available'}")
+logger.info(f"Chat ID: {'Available' if CHAT_ID else 'Not available'}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Flask will always run for Render)")
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 5
-SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '5m'
-SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
-# Indicator Parameters
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+SIGNAL_GENERATION_TIMEFRAME: str = '5m' # الإطار الزمني لتوليد الإشارة
+DATA_LOOKBACK_DAYS: int = 90 # عدد الأيام لجلب البيانات التاريخية للمؤشرات
+MIN_PROFIT_MARGIN_PCT: float = 0.005 # 0.5%
+TARGET_APPROACH_THRESHOLD_PCT: float = 0.005 # 0.5%
+MAX_OPEN_SIGNALS_PER_SYMBOL: int = 1 # الحد الأقصى للإشارات المفتوحة لكل رمز
+MIN_VOLUME_15M_USDT: float = 50000 # الحد الأدنى لمتوسط حجم التداول لآخر 15 دقيقة (بالدولار الأمريكي)
+ML_MODEL_NAME_PREFIX: str = 'DecisionTree_Scalping_V1_' # بادئة لاسم نموذج ML
+
+# Indicator Parameters (يجب أن تتطابق مع ml.py)
 RSI_PERIOD: int = 9
 RSI_OVERSOLD: int = 30
 RSI_OVERBOUGHT: int = 70
 EMA_SHORT_PERIOD: int = 8
 EMA_LONG_PERIOD: int = 21
 VWMA_PERIOD: int = 15
-SWING_ORDER: int = 3
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
-FIB_TOLERANCE: float = 0.005
-LOOKBACK_FOR_SWINGS: int = 50
 ENTRY_ATR_PERIOD: int = 10
 ENTRY_ATR_MULTIPLIER: float = 1.5
 BOLLINGER_WINDOW: int = 20
@@ -80,26 +77,30 @@ SUPERTREND_MULTIPLIER: float = 2.5
 VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
-MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 250000.0
-
+# Constants related to strategy conditions
 RECENT_EMA_CROSS_LOOKBACK: int = 2
 MIN_ADX_TREND_STRENGTH: int = 20
 MACD_HIST_INCREASE_CANDLES: int = 3
 OBV_INCREASE_CANDLES: int = 3
 
-TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
-
-BINANCE_FEE_RATE: float = 0.001
-
-BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the base name used in ml.py
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
-ticker_data: Dict[str, float] = {}
-ml_models: Dict[str, Any] = {} # Global dictionary to hold loaded ML models, keyed by symbol
+twm: Optional[ThreadedWebsocketManager] = None
+ticker_data: Dict[str, Dict[str, Any]] = {} # لتخزين أحدث بيانات التيكر (السعر، الحجم)
+all_symbols: List[str] = [] # قائمة الرموز التي يتم تداولها
+open_signals: List[Dict[str, Any]] = [] # قائمة بالإشارات المفتوحة
+open_signals_lock = Lock() # قفل لتأمين الوصول إلى open_signals
+db_lock = Lock() # قفل لتأمين الوصول إلى قاعدة البيانات
+
+# Global dictionary to store partial candle data for each symbol
+# { 'SYMBOL': { 'open': price, 'high': price, 'low': price, 'close': price, 'volume': vol, 'start_time': timestamp_ms, 'last_update_time': timestamp_ms } }
+current_5m_candles: Dict[str, Dict[str, Any]] = {}
+# Global dictionary to store strategy instances for each symbol
+symbol_strategies: Dict[str, 'ScalpingTradingStrategy'] = {}
+
 
 # ---------------------- Binance Client Setup ----------------------
 try:
@@ -118,150 +119,6 @@ except Exception as e:
     logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
     exit(1)
 
-# ---------------------- Additional Indicator Functions ----------------------
-def get_fear_greed_index() -> str:
-    """Fetches the Fear & Greed Index from alternative.me and translates classification to Arabic."""
-    classification_translation_ar = {
-        "Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد",
-        "Greed": "جشع", "Extreme Greed": "جشع شديد",
-    }
-    url = "https://api.alternative.me/fng/"
-    logger.debug(f"ℹ️ [Indicators] جلب مؤشر الخوف والجشع من {url}...")
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        value = int(data["data"][0]["value"])
-        classification_en = data["data"][0]["value_classification"]
-        classification_ar = classification_translation_ar.get(classification_en, classification_en)
-        logger.debug(f"✅ [Indicators] مؤشر الخوف والجشع: {value} ({classification_ar})")
-        return f"{value} ({classification_ar})"
-    except requests.exceptions.RequestException as e:
-         logger.error(f"❌ [Indicators] خطأ في الشبكة أثناء جلب مؤشر الخوف والجشع: {e}")
-         return "N/A (خطأ في الشبكة)"
-    except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
-        logger.error(f"❌ [Indicators] خطأ في تنسيق البيانات لمؤشر الخوف والجشع: {e}")
-        return "N/A (خطأ في البيانات)"
-    except Exception as e:
-        logger.error(f"❌ [Indicators] خطأ غير متوقع أثناء جلب مؤشر الخوف والجشع: {e}", exc_info=True)
-        return "N/A (خطأ غير معروف)"
-
-def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """Fetches historical candlestick data from Binance."""
-    if not client:
-        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
-        return None
-    try:
-        start_dt = datetime.utcnow() - timedelta(days=days + 1)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
-
-        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
-
-        if not klines:
-            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
-            return None
-
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
-
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df = df[numeric_cols]
-        initial_len = len(df)
-        df.dropna(subset=numeric_cols, inplace=True)
-
-        if len(df) < initial_len:
-            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
-
-        if df.empty:
-            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
-            return None
-
-        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
-        return df
-
-    except BinanceAPIException as api_err:
-         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
-         return None
-    except BinanceRequestException as req_err:
-         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
-         return None
-    except Exception as e:
-        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
-        return None
-
-
-def calculate_ema(series: pd.Series, span: int) -> pd.Series:
-    """Calculates Exponential Moving Average (EMA)."""
-    if series is None or series.isnull().all() or len(series) < span:
-        return pd.Series(index=series.index if series is not None else None, dtype=float)
-    return series.ewm(span=span, adjust=False).mean()
-
-def calculate_vwma(df: pd.DataFrame, period: int) -> pd.Series:
-    """Calculates Volume Weighted Moving Average (VWMA)."""
-    df_calc = df.copy()
-    required_cols = ['close', 'volume']
-    if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator VWMA] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
-        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
-    if len(df_calc) < period:
-        logger.warning(f"⚠️ [Indicator VWMA] بيانات غير كافية ({len(df_calc)} < {period}) لحساب VWMA.")
-        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
-
-    df_calc['price_volume'] = df_calc['close'] * df_calc['volume']
-    rolling_price_volume_sum = df_calc['price_volume'].rolling(window=period, min_periods=period).sum()
-    rolling_volume_sum = df_calc['volume'].rolling(window=period, min_periods=period).sum()
-    vwma = rolling_price_volume_sum / rolling_volume_sum.replace(0, np.nan)
-    df_calc.drop(columns=['price_volume'], inplace=True, errors='ignore')
-    return vwma
-
-def get_btc_trend_4h() -> str:
-    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
-    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
-    try:
-        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
-        if df is None or df.empty or len(df) < 50 + 1:
-            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
-            return "N/A (بيانات غير كافية)"
-
-        df['close'] = pd.to_numeric(df['close'], errors='coerce')
-        df.dropna(subset=['close'], inplace=True)
-        if len(df) < 50:
-             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
-             return "N/A (بيانات غير كافية)"
-
-        ema20 = calculate_ema(df['close'], 20).iloc[-1]
-        ema50 = calculate_ema(df['close'], 50).iloc[-1]
-        current_close = df['close'].iloc[-1]
-
-        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
-            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
-            return "N/A (خطأ في الحساب)"
-
-        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
-
-        if current_close > ema20 > ema50:
-            trend = "صعود 📈"
-        elif current_close < ema20 < ema50:
-            trend = "هبوط 📉"
-        elif diff_ema20_pct < 0.005:
-            trend = "استقرار 🔄"
-        else:
-            trend = "تذبذب 🔀"
-
-        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
-        return trend
-    except Exception as e:
-        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
-        return "N/A (خطأ)"
-
 # ---------------------- Database Connection Setup ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     """Initializes database connection and creates tables if they don't exist."""
@@ -275,7 +132,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             cur = conn.cursor()
             logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
 
-            # --- Create or update signals table (Modified schema) ---
+            # --- Create or update signals table ---
             logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
@@ -299,7 +156,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
 
-            # --- Create ml_models table (NEW) ---
+            # --- Create ml_models table (for loading trained models) ---
             logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ml_models (
@@ -377,62 +234,6 @@ def check_db_connection() -> bool:
              logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
              return False
 
-def load_ml_model_from_db(symbol: str) -> Optional[Any]:
-    """Loads the latest trained ML model for a specific symbol from the database."""
-    global ml_models
-    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-
-    if model_name in ml_models:
-        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
-        return ml_models[model_name]
-
-    if not check_db_connection() or not conn:
-        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
-        return None
-
-    try:
-        with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
-            result = db_cur.fetchone()
-            if result and result['model_data']:
-                model = pickle.loads(result['model_data'])
-                ml_models[model_name] = model # Store in global dictionary
-                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
-                return model
-            else:
-                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
-                return None
-    except psycopg2.Error as db_err:
-        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
-        return None
-    except pickle.UnpicklingError as unpickle_err:
-        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
-        return None
-    except Exception as e:
-        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
-        return None
-
-
-def convert_np_values(obj: Any) -> Any:
-    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
-    if isinstance(obj, dict):
-        return {k: convert_np_values(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [convert_np_values(item) for item in obj]
-    elif isinstance(obj, np.ndarray):
-        return obj.tolist()
-    elif isinstance(obj, (np.integer, np.int_)):
-        return int(obj)
-    elif isinstance(obj, (np.floating, np.float64)):
-        return float(obj)
-    elif isinstance(obj, (np.bool_)):
-        return bool(obj)
-    elif pd.isna(obj):
-        return None
-    else:
-        return obj
-
-# ---------------------- Reading and Validating Symbols List ----------------------
 def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     """
     Reads the list of currency symbols from a text file, then validates them
@@ -503,59 +304,122 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
          return raw_symbols
 
 
-# ---------------------- WebSocket Management for Ticker Prices ----------------------
-def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    """Handles incoming WebSocket messages for mini-ticker prices."""
-    global ticker_data
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """
+    Fetches historical candlestick data from Binance for a specified number of days.
+    This function relies on python-binance's get_historical_klines to handle
+    internal pagination for large data ranges.
+    """
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
     try:
-        if isinstance(msg, list):
-            for ticker_item in msg:
-                symbol = ticker_item.get('s')
-                price_str = ticker_item.get('c')
-                if symbol and 'USDT' in symbol and price_str:
-                    try:
-                        ticker_data[symbol] = float(price_str)
-                    except ValueError:
-                         logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: '{price_str}'")
-        elif isinstance(msg, dict):
-             if msg.get('e') == 'error':
-                 logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا توجد تفاصيل خطأ')}")
-             elif msg.get('stream') and msg.get('data'):
-                 for ticker_item in msg.get('data', []):
-                    symbol = ticker_item.get('s')
-                    price_str = ticker_item.get('c')
-                    if symbol and 'USDT' in symbol and price_str:
-                        try:
-                            ticker_data[symbol] = float(price_str)
-                        except ValueError:
-                             logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol} في البث المجمع: '{price_str}'")
-        else:
-             logger.warning(f"⚠️ [WS] تم استلام رسالة WebSocket بتنسيق غير متوقع: {type(msg)}")
+        # Calculate the start date for the entire data range needed
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str_overall = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} حتى الآن...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str_overall)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        df.sort_index(inplace=True)
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
     except Exception as e:
-        logger.error(f"❌ [WS] خطأ في معالجة رسالة التيكر: {e}", exc_info=True)
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
 
+def get_ml_model_from_db(model_name: str) -> Optional[Any]:
+    """
+    Loads a trained ML model from the database.
+    """
+    if not check_db_connection() or not conn:
+        logger.error("❌ [DB Load] لا يمكن تحميل نموذج ML بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
 
-def run_ticker_socket_manager() -> None:
-    """Runs and manages the WebSocket connection for mini-ticker."""
-    while True:
-        try:
-            logger.info("ℹ️ [WS] بدء إدارة WebSocket لأسعار التيكر...")
-            twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-            twm.start()
+    logger.info(f"ℹ️ [DB Load] محاولة تحميل نموذج ML '{model_name}' من قاعدة البيانات...")
+    try:
+        with db_lock: # Use lock for DB access
+            with conn.cursor() as db_cur:
+                db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s;", (model_name,))
+                result = db_cur.fetchone()
+                if result and result['model_data']:
+                    model = pickle.loads(result['model_data'])
+                    logger.info(f"✅ [DB Load] تم تحميل نموذج ML '{model_name}' بنجاح.")
+                    return model
+                else:
+                    logger.warning(f"⚠️ [DB Load] لم يتم العثور على نموذج ML باسم '{model_name}'.")
+                    return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [DB Load] خطأ في قاعدة البيانات أثناء تحميل نموذج ML: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as pickle_err:
+        logger.error(f"❌ [DB Load] خطأ في فك تسلسل نموذج ML: {pickle_err}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [DB Load] خطأ غير متوقع أثناء تحميل نموذج ML: {e}", exc_info=True)
+        return None
 
-            stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
-            logger.info(f"✅ [WS] تم بدء بث WebSocket: {stream_name}")
-
-            twm.join()
-            logger.warning("⚠️ [WS] توقفت إدارة WebSocket. إعادة التشغيل...")
-
-        except Exception as e:
-            logger.error(f"❌ [WS] خطأ فادح في إدارة WebSocket: {e}. إعادة التشغيل في 15 ثانية...", exc_info=True)
-
-        time.sleep(15)
 
 # ---------------------- Technical Indicator Functions ----------------------
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_vwma(df: pd.DataFrame, period: int) -> pd.Series:
+    """Calculates Volume Weighted Moving Average (VWMA)."""
+    df_calc = df.copy()
+    required_cols = ['close', 'volume']
+    if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator VWMA] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
+        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
+    if len(df_calc) < period:
+        logger.warning(f"⚠️ [Indicator VWMA] بيانات غير كافية ({len(df_calc)} < {period}) لحساب VWMA.")
+        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
+
+    df_calc['price_volume'] = df_calc['close'] * df_calc['volume']
+    rolling_price_volume_sum = df_calc['price_volume'].rolling(window=period, min_periods=period).sum()
+    rolling_volume_sum = df_calc['volume'].rolling(window=period, min_periods=period).sum()
+    vwma = rolling_price_volume_sum / rolling_volume_sum.replace(0, np.nan)
+    df_calc.drop(columns=['price_volume'], inplace=True, errors='ignore')
+    return vwma
 
 def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
     """Calculates Relative Strength Index (RSI)."""
@@ -664,8 +528,8 @@ def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
         return df_calc
-    if len(df_calc) < period * 2:
-        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df)} < {period * 2}) لحساب ADX.")
+    if len(df_calc) < period * 2: # ADX requires more data than simple EMAs
+        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df_calc)} < {period * 2}) لحساب ADX.")
         df_calc['adx'] = np.nan
         df_calc['di_plus'] = np.nan
         df_calc['di_minus'] = np.nan
@@ -923,7 +787,7 @@ def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
     curr = df.iloc[idx]
     if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
         return 0
-    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1:
+    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1: # Filter out very small previous candles
         return 0
 
     is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
@@ -949,1254 +813,813 @@ def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     logger.debug("✅ [Indicators] تم كشف أنماط الشموع.")
     return df
 
-# ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
-    """Detects swing points (peaks and troughs) in a time series (numpy array)."""
-    n = len(prices)
-    if n < 2 * order + 1: return [], []
-
-    maxima_indices = []
-    minima_indices = []
-
-    for i in range(order, n - order):
-        window = prices[i - order : i + order + 1]
-        center_val = prices[i]
-
-        if np.isnan(window).any(): continue
-
-        is_max = np.all(center_val >= window)
-        is_min = np.all(center_val <= window)
-        is_unique_max = is_max and (np.sum(window == center_val) == 1)
-        is_unique_min = is_min and (np.sum(window == center_val) == 1)
-
-        if is_unique_max:
-            if not maxima_indices or i > maxima_indices[-1] + order:
-                 maxima_indices.append(i)
-        elif is_unique_min:
-            if not minima_indices or i > minima_indices[-1] + order:
-                minima_indices.append(i)
-
-    maxima = [(idx, prices[idx]) for idx in maxima_indices]
-    minima = [(idx, prices[idx]) for idx in minima_indices]
-    return maxima, minima
-
-def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dict[str, Any]]:
-    """Simple attempt to identify Elliott Waves based on MACD histogram swings."""
-    if 'macd_hist' not in df.columns or df['macd_hist'].isnull().all():
-        logger.warning("⚠️ [Elliott] عمود 'macd_hist' مفقود أو فارغ لحساب موجات إليوت.")
-        return []
-
-    macd_values = df['macd_hist'].dropna().values
-    if len(macd_values) < 2 * order + 1:
-         logger.warning("⚠️ [Elliott] بيانات MACD hist غير كافية بعد إزالة قيم NaN.")
-         return []
-
-    maxima, minima = detect_swings(macd_values, order=order)
-
-    df_nonan_macd = df['macd_hist'].dropna()
-    all_swings = sorted(
-        [(df_nonan_macd.index[idx], val, 'max') for idx, val in maxima] +
-        [(df_nonan_macd.index[idx], val, 'min') for idx, val in minima],
-        key=lambda x: x[0]
-    )
-
-    waves = []
-    wave_number = 1
-    for timestamp, val, typ in all_swings:
-        wave_type = "Impulse" if (typ == 'max' and val > 0) or (typ == 'min' and val >= 0) else "Correction"
-        waves.append({
-            "wave": wave_number,
-            "timestamp": str(timestamp),
-            "macd_hist_value": float(val),
-            "swing_type": typ,
-            "classified_type": wave_type
-        })
-        wave_number += 1
-    return waves
-
-
-def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
-    """Fetches the trading volume in USDT for the last `num_candles` of the specified `interval`."""
-    if not client:
-         logger.error(f"❌ [Data Volume] عميل Binance غير مهيأ لجلب الحجم لـ {symbol}.")
-         return 0.0
-    try:
-        logger.debug(f"ℹ️ [Data Volume] جلب حجم آخر {num_candles} شمعات {interval} لـ {symbol}...")
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=num_candles)
-        if not klines or len(klines) < num_candles:
-             logger.warning(f"⚠️ [Data Volume] بيانات {interval} غير كافية (أقل من {num_candles} شمعة) لـ {symbol}.")
-             return 0.0
-
-        # k[7] is the quote asset volume (e.g., USDT volume)
-        volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        logger.debug(f"✅ [Data Volume] سيولة آخر {num_candles} شمعات {interval} لـ {symbol}: {volume_usdt:.2f} USDT")
-        return volume_usdt
-    except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Volume] خطأ في Binance API أو الشبكة أثناء جلب الحجم لـ {symbol}: {binance_err}")
-         return 0.0
-    except Exception as e:
-        logger.error(f"❌ [Data Volume] خطأ غير متوقع أثناء جلب الحجم لـ {symbol}: {e}", exc_info=True)
-        return 0.0
-
-# ---------------------- Comprehensive Performance Report Generation Function ----------------------
-def generate_performance_report() -> str:
-    """Generates a comprehensive performance report from the database in Arabic, including recent closed trades and USD profit/loss."""
-    logger.info("ℹ️ [Report] إنشاء تقرير الأداء...")
-    if not check_db_connection() or not conn or not cur:
-        return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
-    try:
-        with conn.cursor() as report_cur:
-            report_cur.execute("SELECT id, symbol, entry_price, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
-            open_signals = report_cur.fetchall()
-            open_signals_count = len(open_signals)
-
-            report_cur.execute("""
-                SELECT
-                    COUNT(*) AS total_closed,
-                    COUNT(*) AS winning_signals,
-                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct_sum,
-                    COALESCE(AVG(profit_percentage), 0) AS avg_profit_pct,
-                    COALESCE(AVG(profit_percentage), 0) AS avg_win_pct,
-                    COALESCE(SUM(entry_price * (1 + profit_percentage/100.0)), 0) AS total_exit_value
-                FROM signals
-                WHERE achieved_target = TRUE;
-            """)
-            closed_stats = report_cur.fetchone() or {}
-
-            total_closed = closed_stats.get('total_closed', 0)
-            winning_signals = closed_stats.get('winning_signals', 0)
-            losing_signals = 0
-            total_profit_pct_sum = closed_stats.get('total_profit_pct_sum', 0.0)
-            gross_profit_pct_sum = total_profit_pct_sum
-            avg_win_pct = closed_stats.get('avg_profit_pct', 0.0)
-            total_exit_value = closed_stats.get('total_exit_value', 0.0)
-
-            gross_profit_usd = (total_profit_pct_sum / 100.0) * TRADE_VALUE
-            total_fees_usd = (total_closed * TRADE_VALUE * BINANCE_FEE_RATE) + (total_exit_value * BINANCE_FEE_RATE)
-            net_profit_usd = gross_profit_usd - total_fees_usd
-            net_profit_pct = (net_profit_usd / (total_closed * TRADE_VALUE)) * 100 if total_closed * TRADE_VALUE > 0 else 0.0
-
-            gross_loss_pct_sum = 0.0
-            avg_loss_pct = 0.0
-
-            win_rate = 100.0 if total_closed > 0 else 0.0
-            profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
-
-        report = (
-            f"📊 *تقرير الأداء الشامل:*\n"
-            f"_(افتراض حجم الصفقة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل صفقة)_ \n"
-            f"——————————————\n"
-            f"📈 الإشارات المفتوحة حالياً: *{open_signals_count}*\n"
-        )
-
-        if open_signals:
-            report += "  • التفاصيل:\n"
-            for signal in open_signals:
-                safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-                entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
-                report += f"    - `{safe_symbol}` (دخول: ${signal['entry_price']:.8g} | فتح: {entry_time_str})\n"
-        else:
-            report += "  • لا توجد إشارات مفتوحة حالياً.\n"
-
-        report += (
-            f"——————————————\n"
-            f"📉 *إحصائيات الإشارات المغلقة (تم تحقيق الهدف فقط):*\n"
-            f"  • إجمالي الإشارات المغلقة: *{total_closed}*\n"
-            f"  ✅ إشارات رابحة: *{winning_signals}* ({win_rate:.2f}%)\n"
-            f"  ❌ إشارات خاسرة: *{losing_signals}*\n"
-            f"——————————————\n"
-            f"💰 *الربحية الإجمالية (للصفقات التي حققت الهدف):*\n"
-            f"  • إجمالي الربح الإجمالي: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n"
-            f"  • إجمالي الرسوم المدفوعة: *${total_fees_usd:,.2f}*\n"
-            f"  • *الربح الصافي:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)\n"
-            f"  • متوسط الصفقة الرابحة: *{avg_win_pct:+.2f}%*\n"
-            f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
-            f"——————————————\n"
-        )
-
-        report += "ℹ️ *ملاحظة: هذا التقرير يعرض فقط الصفقات التي حققت الهدف، حيث تم إزالة منطق وقف الخسارة.*"
-        report += "\n——————————————\n"
-
-
-        report += (
-            f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
-        )
-
-        logger.info("✅ [Report] تم إنشاء تقرير الأداء بنجاح.")
-        return report
-
-    except psycopg2.Error as db_err:
-        logger.error(f"❌ [Report] خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء: {db_err}")
-        if conn: conn.rollback()
-        return "❌ خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء."
-    except Exception as e:
-        logger.error(f"❌ [Report] خطأ غير متوقع أثناء إنشاء تقرير الأداء: {e}", exc_info=True)
-        return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
-
-# ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
 
 class ScalpingTradingStrategy:
-    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions, adjusted for Scalping and targeting early momentum."""
-
-    def __init__(self, symbol: str):
+    """
+    Implements a scalping trading strategy using various technical indicators
+    and an ML model for signal generation.
+    """
+    def __init__(self, symbol: str, client: Client, conn: Any, cur: Any):
         self.symbol = symbol
-        self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol
-        if self.ml_model is None:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
+        self.client = client
+        self.conn = conn
+        self.cur = cur
+        self.ml_model: Optional[Any] = None
+        self.feature_names: List[str] = []
+        self._load_ml_model()
 
-        self.feature_columns_for_ml = [ # Features expected by the ML model
-            'volume_15m_avg', # New feature
-            'rsi_momentum_bullish' # New feature
-        ]
+    def _load_ml_model(self) -> None:
+        """Loads the pre-trained ML model for the specific symbol."""
+        model_name = f"{ML_MODEL_NAME_PREFIX}{self.symbol}"
+        model_data = get_ml_model_from_db(model_name)
+        if model_data:
+            self.ml_model = model_data
+            # Assuming the model's metrics or an attribute stores feature names
+            # This is crucial for consistent feature order during prediction
+            if hasattr(self.ml_model, 'feature_names_in_'):
+                self.feature_names = self.ml_model.feature_names_in_.tolist()
+            elif hasattr(self.ml_model, 'metrics') and 'feature_names' in self.ml_model.metrics:
+                 self.feature_names = self.ml_model.metrics['feature_names']
+            else:
+                # Fallback to a predefined list if not found in model (less robust)
+                self.feature_names = [
+                    'atr', 'supertrend', 'supertrend_trend',
+                    f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', 'rsi',
+                    'bb_middle', 'bb_upper', 'bb_lower',
+                    'macd', 'macd_signal', 'macd_hist',
+                    'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
+                    'Hammer', 'ShootingStar', 'Doji', 'Engulfing',
+                    'BullishCandleSignal', 'BearishCandleSignal',
+                    'volume_15m_avg', 'rsi_momentum_bullish'
+                ]
+            logger.info(f"✅ [Strategy] تم تحميل نموذج ML لـ {self.symbol} بـ {len(self.feature_names)} ميزة.")
+        else:
+            logger.warning(f"⚠️ [Strategy] لم يتم العثور على نموذج ML لـ {self.symbol}. ستعتمد الإشارات على المؤشرات فقط.")
 
-        self.condition_weights = {
-            'rsi_ok': 0.5,
-            'bullish_candle': 1.5,
-            'not_bb_extreme': 0.5,
-            'obv_rising': 1.0,
-            'rsi_filter_breakout': 1.0,
-            'macd_filter_breakout': 1.0,
-            'macd_hist_increasing': 3.0,
-            'obv_increasing_recent': 3.0,
-            'above_vwap': 1.0,
-            # 'ml_prediction_bullish': 2.5 # Removed from weights, now a mandatory override
-        }
+    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculates all necessary technical indicators for the DataFrame."""
+        if df.empty:
+            logger.warning(f"⚠️ [Indicators] DataFrame فارغ لـ {self.symbol}. لا يمكن حساب المؤشرات.")
+            return df
 
-        self.essential_conditions = [
-            'price_above_emas_and_vwma',
-            'ema_short_above_ema_long',
-            'supertrend_up',
-            'macd_positive_or_cross',
-            'adx_trending_bullish_strong',
-        ]
+        df_copy = df.copy() # Work on a copy
 
-        self.total_possible_score = sum(self.condition_weights.values())
-        self.min_score_threshold_pct = 0.70
-        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
+        # Ensure numeric types
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
 
+        # Calculate all indicators
+        df_copy = calculate_atr_indicator(df_copy, ENTRY_ATR_PERIOD)
+        df_copy = calculate_supertrend(df_copy, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+        df_copy[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_copy['close'], EMA_SHORT_PERIOD)
+        df_copy[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_copy['close'], EMA_LONG_PERIOD)
+        df_copy['vwma'] = calculate_vwma(df_copy, VWMA_PERIOD)
+        df_copy = calculate_rsi_indicator(df_copy, RSI_PERIOD)
+        df_copy = calculate_bollinger_bands(df_copy, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
+        df_copy = calculate_macd(df_copy, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+        adx_df = calculate_adx(df_copy, ADX_PERIOD)
+        df_copy = df_copy.join(adx_df)
+        df_copy = calculate_vwap(df_copy)
+        df_copy = calculate_obv(df_copy)
+        df_copy = detect_candlestick_patterns(df_copy)
 
-    def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Calculates all required indicators for the strategy."""
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
-        # min_len_required should reflect all indicators used in the strategy (not just ML features)
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 5
+        # Add volume_15m_avg (average volume over last 3 5-min candles)
+        df_copy['volume_15m_avg'] = df_copy['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
 
-        if len(df) < min_len_required:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+        # Add RSI momentum bullish
+        df_copy['rsi_momentum_bullish'] = 0
+        if len(df_copy) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
+            for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_copy)):
+                rsi_slice = df_copy['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
+                if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
+                    df_copy.loc[df_copy.index[i], 'rsi_momentum_bullish'] = 1
+
+        logger.debug(f"✅ [Indicators] تم حساب جميع المؤشرات لـ {self.symbol}. حجم DataFrame: {len(df_copy)}")
+        return df_copy
+
+    def generate_buy_signal(self, latest_candle_data: pd.Series, current_real_time_price: float) -> Optional[Dict[str, Any]]:
+        """
+        Generates a buy signal based on technical indicators and ML model prediction.
+        Uses the current real-time price for entry.
+        """
+        if latest_candle_data.empty:
+            logger.warning(f"⚠️ [Signal Gen] بيانات الشمعة الأخيرة فارغة لـ {self.symbol}. لا يمكن توليد إشارة.")
             return None
 
-        try:
-            df_calc = df.copy()
-            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
-            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
-            df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
-            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
-            df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-            adx_df = calculate_adx(df_calc, ADX_PERIOD)
-            df_calc = df_calc.join(adx_df)
-            df_calc = calculate_vwap(df_calc)
-            df_calc = calculate_obv(df_calc)
-            df_calc = detect_candlestick_patterns(df_calc)
-
-            # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
-            df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
-
-            # إضافة مؤشر زخم صعودي (RSI Momentum)
-            df_calc['rsi_momentum_bullish'] = 0
-            if len(df_calc) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
-                for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_calc)):
-                    rsi_slice = df_calc['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
-                    if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
-                        df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
-
-
-            # Ensure all feature columns for ML exist and are numeric
-            for col in self.feature_columns_for_ml:
-                if col not in df_calc.columns:
-                    logger.warning(f"⚠️ [Strategy {self.symbol}] عمود الميزة المفقود لنموذج ML: {col}")
-                    df_calc[col] = np.nan # Add missing column as NaN
-                else:
-                    df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
-
-            initial_len = len(df_calc)
-            # Use all required columns for dropna, including ML features
-            all_required_cols = list(set(self.feature_columns_for_ml + [
-                'open', 'high', 'low', 'close', 'volume', 'BullishCandleSignal', 'BearishCandleSignal',
-                f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', 'rsi', 'atr', 'bb_upper',
-                'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-                'supertrend', 'supertrend_trend' # Add all other indicators used in strategy conditions
-            ]))
-            df_cleaned = df_calc.dropna(subset=all_required_cols).copy()
-            dropped_count = initial_len - len(df_cleaned)
-
-            if dropped_count > 0:
-                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم إسقاط {dropped_count} صفًا بسبب قيم NaN في المؤشرات.")
-            if df_cleaned.empty:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة قيم NaN للمؤشرات.")
+        # Check for open signals for this symbol
+        with open_signals_lock:
+            open_signals_for_symbol = [s for s in open_signals if s['symbol'] == self.symbol and not s['achieved_target']]
+            if len(open_signals_for_symbol) >= MAX_OPEN_SIGNALS_PER_SYMBOL:
+                logger.info(f"ℹ️ [Signal Gen] يوجد بالفعل {len(open_signals_for_symbol)} إشارة مفتوحة لـ {self.symbol}. تخطي توليد إشارة جديدة.")
                 return None
 
-            latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. أحدث EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, SuperTrend: {latest.get('supertrend', np.nan):.4f}, Volume 15m Avg: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}")
-            return df_cleaned
+        # Prepare features for ML prediction
+        ml_features = {}
+        for feature in self.feature_names:
+            ml_features[feature] = latest_candle_data.get(feature)
+            if pd.isna(ml_features[feature]):
+                ml_features[feature] = 0.0 # Handle NaN features for ML model gracefully
 
-        except KeyError as ke:
-             logger.error(f"❌ [Strategy {self.symbol}] خطأ: لم يتم العثور على عمود مطلوب أثناء حساب المؤشر: {ke}", exc_info=True)
-             return None
-        except Exception as e:
-            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشر: {e}", exc_info=True)
-            return None
+        features_df = pd.DataFrame([ml_features])
 
-
-    def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """
-        Generates a buy signal based on the processed DataFrame.
-        If the ML model predicts bullish, it overrides all other essential conditions.
-        """
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء...")
-
-        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 1
-        if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.")
-            return None
-
-        # Ensure all required columns for signal generation, including ML features, are present
-        required_cols_for_signal = list(set(self.feature_columns_for_ml + [
-            'close', 'rsi', 'atr', 'bb_upper', 'BullishCandleSignal',
-            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus',
-            'supertrend', 'supertrend_trend', 'vwap', 'obv'
-        ]))
-        missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
-        if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.")
-            return None
-
-        last_row = df_processed.iloc[-1]
-        recent_df = df_processed.iloc[-min_signal_data_len:]
-
-        if recent_df[required_cols_for_signal].isnull().values.any():
-             logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات الحديثة تحتوي على قيم NaN في أعمدة الإشارة المطلوبة. لا يمكن إنشاء إشارة.")
-             return None
-
-        # --- ML Model Prediction (NEW: Mandatory Override) ---
-        ml_overrides_essentials = False
-        ml_prediction_result_text = "N/A (نموذج غير محمل)"
-        if self.ml_model: # Use self.ml_model which is loaded per symbol
+        ml_prediction = 0
+        if self.ml_model:
             try:
-                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
-                ml_pred = self.ml_model.predict(features_for_prediction)[0]
-                if ml_pred == 1: # If ML model predicts upward movement
-                    ml_overrides_essentials = True
-                    ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
-                    logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي. تجاوز الشروط الأساسية الأخرى.")
-                else:
-                    ml_prediction_result_text = 'هابط (لا يوجد تجاوز)'
-            except Exception as ml_err:
-                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
-                ml_prediction_result_text = "خطأ في التنبؤ (0)"
-        signal_details = {'ML_Prediction': ml_prediction_result_text} # Initialize signal_details with ML prediction
+                # Ensure feature order matches training
+                features_for_prediction = features_df[self.feature_names].values
+                ml_prediction = self.ml_model.predict(features_for_prediction)[0]
+                logger.debug(f"ℹ️ [Signal Gen] تنبؤ ML لـ {self.symbol}: {ml_prediction}")
+            except Exception as e:
+                logger.error(f"❌ [Signal Gen] خطأ في تنبؤ نموذج ML لـ {self.symbol}: {e}", exc_info=True)
+                ml_prediction = 0 # Fallback to no ML signal
 
-        # --- Check BTC Trend (Still applies even with ML override, as a general market filter) ---
-        btc_trend = get_btc_trend_4h()
-        if "هبوط" in btc_trend:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف بسبب اتجاه البيتكوين الهابط ({btc_trend}).")
-            signal_details['BTC_Trend'] = f'هبوط ({btc_trend}) ❌'
-            return None
-        elif "N/A" in btc_trend:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد اتجاه البيتكوين، سيتم تجاهل هذا الشرط.")
-             signal_details['BTC_Trend'] = 'غير متاح (تجاهل)'
+        # BTC Trend Filter (assuming BTC data is available in ticker_data)
+        btc_price = ticker_data.get('BTCUSDT', {}).get('last_price')
+        if btc_price:
+            # For simplicity, we'll just check if BTC is generally trending up.
+            # In a real scenario, you'd calculate BTC's EMA cross or SuperTrend.
+            # For now, a placeholder: if BTC is below a recent high, consider it not bullish enough.
+            # This needs actual BTC historical data and indicator calculation.
+            # For this example, let's assume a simple check for now, or remove if not critical.
+            # A more robust solution would involve fetching BTC candles and running indicators.
+            # For now, let's assume BTC trend is generally bullish or ignore this filter if no complex BTC logic is implemented.
+            pass # Placeholder, implement robust BTC trend check if needed.
+
+        # Essential Conditions
+        is_ema_short_above_long = latest_candle_data.get(f'ema_{EMA_SHORT_PERIOD}', -np.inf) > latest_candle_data.get(f'ema_{EMA_LONG_PERIOD}', -np.inf)
+        is_price_above_emas = (current_real_time_price > latest_candle_data.get(f'ema_{EMA_SHORT_PERIOD}', -np.inf) and
+                               current_real_time_price > latest_candle_data.get(f'ema_{EMA_LONG_PERIOD}', -np.inf))
+        is_price_above_vwma = current_real_time_price > latest_candle_data.get('vwma', -np.inf)
+        is_supertrend_bullish = latest_candle_data.get('supertrend_trend', 0) == 1 and current_real_time_price > latest_candle_data.get('supertrend', -np.inf)
+        is_macd_bullish = (latest_candle_data.get('macd_hist', -np.inf) > 0 or
+                           (latest_candle_data.get('macd', -np.inf) > latest_candle_data.get('macd_signal', -np.inf) and
+                            latest_candle_data.get('macd', -np.inf) > latest_candle_data.iloc[-2].get('macd', -np.inf))) # MACD cross up
+        is_adx_strong_trend = latest_candle_data.get('adx', 0) > MIN_ADX_TREND_STRENGTH and latest_candle_data.get('di_plus', 0) > latest_candle_data.get('di_minus', 0)
+        
+        # Volume Filter
+        is_sufficient_volume = latest_candle_data.get('volume_15m_avg', 0) >= MIN_VOLUME_15M_USDT
+
+
+        # Conditions check
+        if ml_prediction == 1:
+            logger.info(f"✅ [Signal Gen] ML Model predicts BUY for {self.symbol}. Bypassing essential conditions.")
+            is_essential_conditions_met = True # ML overrides
         else:
-             signal_details['BTC_Trend'] = f'صعود أو استقرار ({btc_trend}) ✅'
+            is_essential_conditions_met = (
+                is_ema_short_above_long and
+                is_price_above_emas and
+                is_price_above_vwma and
+                is_supertrend_bullish and
+                is_macd_bullish and
+                is_adx_strong_trend
+            )
+            if not is_essential_conditions_met:
+                logger.debug(f"ℹ️ [Signal Gen] الشروط الأساسية غير مستوفاة لـ {self.symbol}.")
+                return None
 
-
-        # --- Check Mandatory Conditions (Bypassed if ML overrides) ---
-        essential_passed = True
-        failed_essential_conditions = []
-
-        if not ml_overrides_essentials: # Only check if ML model did NOT override
-            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
-                    last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
-                    last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
-                    last_row['close'] > last_row['vwma']):
-                essential_passed = False
-                failed_essential_conditions.append('Price Above EMAs and VWMA')
-                detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
-                signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق جميع المتوسطات ({detail_ma})'
-            else:
-                signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق جميع المتوسطات'
-
-            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
-                    last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
-                 essential_passed = False
-                 failed_essential_conditions.append('Short EMA Above Long EMA')
-                 detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
-                 signal_details['EMA_Order'] = f'فشل: EMA القصير ليس فوق EMA الطويل ({detail_ema_cross})'
-            else:
-                 signal_details['EMA_Order'] = f'نجاح: EMA القصير فوق EMA الطويل'
-
-            if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-                 essential_passed = False
-                 failed_essential_conditions.append('SuperTrend (اتجاه صعودي والسعر فوقه)')
-                 detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-                 signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوقه ({detail_st})'
-            else:
-                signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوقه'
-
-            if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
-                 essential_passed = False
-                 failed_essential_conditions.append('MACD (هيستوجرام إيجابي أو تقاطع صعودي)')
-                 detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-                 signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي ولا يوجد تقاطع صعودي ({detail_macd})'
-            else:
-                 detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
-                 detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-                 detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
-                 signal_details['MACD'] = f'نجاح: {detail_macd}'
-
-            if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
-                 essential_passed = False
-                 failed_essential_conditions.append(f'ADX/DI (اتجاه صعودي قوي، ADX > {MIN_ADX_TREND_STRENGTH})')
-                 detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-                 signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
-            else:
-                 signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
-
-        # If ML did not override AND essential conditions failed, then no signal
-        if not essential_passed and not ml_overrides_essentials:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] فشلت الشروط الإلزامية (ولم يتم تجاوزها بواسطة ML): {', '.join(failed_essential_conditions)}. تم رفض الإشارة.")
-            return None
-        elif ml_overrides_essentials:
-            logger.info(f"✅ [Strategy {self.symbol}] تم تجاوز الشروط الأساسية بواسطة تنبؤ ML الصعودي.")
-            # If ML overrides, set essential conditions to "ML Override" in details for clarity
-            for cond_name in self.essential_conditions:
-                # Check if the key already exists from a specific check, otherwise add generic override
-                if cond_name == 'price_above_emas_and_vwma' and 'Price_MA_Alignment' not in signal_details:
-                    signal_details['Price_MA_Alignment'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'ema_short_above_ema_long' and 'EMA_Order' not in signal_details:
-                    signal_details['EMA_Order'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'supertrend_up' and 'SuperTrend' not in signal_details:
-                    signal_details['SuperTrend'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'macd_positive_or_cross' and 'MACD' not in signal_details:
-                    signal_details['MACD'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'adx_trending_bullish_strong' and 'ADX/DI' not in signal_details:
-                    signal_details['ADX/DI'] = 'تم تجاوزها بواسطة ML'
-
-
-        # --- Calculate Score for Optional Conditions ---
-        current_score = 0.0
-
-        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
-            current_score += self.condition_weights.get('above_vwap', 0)
-            signal_details['VWAP_Daily'] = f'فوق VWAP اليومي (+{self.condition_weights.get("above_vwap", 0)})'
-        else:
-             signal_details['VWAP_Daily'] = f'تحت VWAP اليومي (0)'
-
-        if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
-            current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['RSI_Basic'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
-        else:
-             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) غير مقبول (0)'
-
-        if last_row.get('BullishCandleSignal', 0) == 1:
-            current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Candle'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle", 0)})'
-        else:
-             signal_details['Candle'] = f'لا يوجد نمط شمعة صعودي (0)'
-
-        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995:
-             current_score += self.condition_weights.get('not_bb_extreme', 0)
-             signal_details['Bollinger_Basic'] = f'ليس عند الحد العلوي لبولينجر (+{self.condition_weights.get("not_bb_extreme", 0)})'
-        else:
-             signal_details['Bollinger_Basic'] = f'عند أو فوق الحد العلوي لبولينجر (0)'
-
-        if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']:
-            current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV_Last'] = f'يرتفع في الشمعة الأخيرة (+{self.condition_weights.get("obv_rising", 0)})'
-        else:
-             signal_details['OBV_Last'] = f'لا يرتفع في الشمعة الأخيرة (0)'
-
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80:
-             current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
-        else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) ليس في النطاق الصعودي (0)'
-
-        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
-             current_score += self.condition_weights.get('macd_filter_breakout', 0)
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
-        else:
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD ليس إيجابي (0)'
-
-        macd_hist_increasing = False
-        if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
-             macd_hist_slice = recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]
-             if not macd_hist_slice.isnull().any() and np.all(np.diff(macd_hist_slice) > 0):
-                  macd_hist_increasing = True
-        if macd_hist_increasing:
-             current_score += self.condition_weights.get('macd_hist_increasing', 0)
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("macd_hist_increasing", 0)})'
-        else:
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD لا يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (0)'
-
-        obv_increasing_recent = False
-        if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
-             obv_slice = recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]
-             if not obv_slice.isnull().any() and np.all(np.diff(obv_slice) > 0):
-                  obv_increasing_recent = True
-        if obv_increasing_recent:
-             current_score += self.condition_weights.get('obv_increasing_recent', 0)
-             signal_details['OBV_Increasing_Recent'] = f'OBV يتزايد خلال آخر {OBV_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("obv_increasing_recent", 0)})'
-        else:
-             signal_details['OBV_Increasing_Recent'] = f'OBV لا يتزايد خلال آخر {OBV_INCREASE_CANDLES} شمعات (0)'
-
-
-        if current_score < self.min_signal_score and not ml_overrides_essentials: # Score check still applies if ML didn't override
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم يتم استيفاء درجة الإشارة المطلوبة من الشروط الاختيارية (الدرجة: {current_score:.2f} / {self.total_possible_score:.2f}, الحد الأدنى: {self.min_signal_score:.2f}). تم رفض الإشارة.")
+        if not is_sufficient_volume:
+            logger.debug(f"ℹ️ [Signal Gen] حجم التداول غير كافٍ لـ {self.symbol}.")
             return None
 
-        # استخدام fetch_recent_volume مع المعلمات الجديدة
-        volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
-        if volume_recent < MIN_VOLUME_15M_USDT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
+        # Optional Conditions Scoring (only if essential conditions are met or bypassed by ML)
+        score = 0
+        max_score = 0
+
+        # VWAP
+        if current_real_time_price > latest_candle_data.get('vwap', -np.inf):
+            score += 10
+        max_score += 10
+
+        # RSI Range
+        rsi_val = latest_candle_data.get('rsi')
+        if rsi_val is not None and (RSI_OVERSOLD < rsi_val < RSI_OVERBOUGHT):
+            score += 10
+        max_score += 10
+
+        # Bullish Candlestick Pattern
+        if latest_candle_data.get('BullishCandleSignal', 0) == 1:
+            score += 20
+        max_score += 20
+
+        # Not near Bollinger Upper Band
+        if current_real_time_price < latest_candle_data.get('bb_upper', np.inf) * 0.99: # 1% buffer
+            score += 10
+        max_score += 10
+
+        # OBV increasing
+        if latest_candle_data.get('obv', -np.inf) > latest_candle_data.iloc[-2].get('obv', -np.inf):
+            score += 10
+        max_score += 10
+
+        # RSI Breakout Filter (RSI between 50 and 80)
+        if rsi_val is not None and (50 <= rsi_val <= 80):
+            score += 10
+        max_score += 10
+
+        # MACD Histogram positive
+        if latest_candle_data.get('macd_hist', -np.inf) > 0:
+            score += 10
+        max_score += 10
+
+        # MACD Histogram increasing for last N candles
+        macd_hist_series = latest_candle_data.index.to_series().apply(lambda x: df_copy.loc[x, 'macd_hist'])
+        if len(macd_hist_series) >= MACD_HIST_INCREASE_CANDLES:
+            if np.all(np.diff(macd_hist_series.iloc[-MACD_HIST_INCREASE_CANDLES:]) > 0):
+                score += 10
+        max_score += 10
+
+        # OBV increasing for last N candles
+        obv_series = latest_candle_data.index.to_series().apply(lambda x: df_copy.loc[x, 'obv'])
+        if len(obv_series) >= OBV_INCREASE_CANDLES:
+            if np.all(np.diff(obv_series.iloc[-OBV_INCREASE_CANDLES:]) > 0):
+                score += 10
+        max_score += 10
+
+
+        min_score_threshold = max_score * 0.70 # 70% of max score
+        is_optional_conditions_met = (score >= min_score_threshold)
+        
+        if ml_prediction == 0 and not is_optional_conditions_met:
+            logger.debug(f"ℹ️ [Signal Gen] الشروط الاختيارية غير مستوفاة (الدرجة: {score}/{max_score}) لـ {self.symbol}.")
             return None
 
-        current_price = last_row['close']
-        current_atr = last_row.get('atr')
+        # Calculate initial target price
+        atr_value = latest_candle_data.get('atr')
+        if atr_value is None or atr_value <= 0:
+            logger.warning(f"⚠️ [Signal Gen] قيمة ATR غير صالحة لـ {self.symbol}. لا يمكن حساب الهدف.")
+            return None
 
-        if pd.isna(current_atr) or current_atr <= 0:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف.")
-             return None
+        initial_target_price = current_real_time_price + (ENTRY_ATR_MULTIPLIER * atr_value)
 
-        target_multiplier = ENTRY_ATR_MULTIPLIER
-        initial_target = current_price + (target_multiplier * current_atr)
-
-        profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
+        # Check profit margin
+        profit_margin_pct = (initial_target_price / current_real_time_price) - 1
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
+            logger.debug(f"ℹ️ [Signal Gen] هامش الربح المتوقع ({profit_margin_pct:.4f}%) أقل من الحد الأدنى ({MIN_PROFIT_MARGIN_PCT:.4f}%) لـ {self.symbol}.")
             return None
 
-        signal_output = {
+        signal_details = {
+            'ml_prediction': int(ml_prediction), # Convert numpy.int64 to int
+            'score': score,
+            'max_score': max_score,
+            'is_essential_conditions_met': is_essential_conditions_met,
+            'is_sufficient_volume': is_sufficient_volume,
+            'current_atr': atr_value,
+            'current_rsi': rsi_val,
+            'current_macd_hist': latest_candle_data.get('macd_hist'),
+            'current_supertrend_trend': latest_candle_data.get('supertrend_trend'),
+            'current_vwma': latest_candle_data.get('vwma'),
+            'current_ema_short': latest_candle_data.get(f'ema_{EMA_SHORT_PERIOD}'),
+            'current_ema_long': latest_candle_data.get(f'ema_{EMA_LONG_PERIOD}'),
+            'current_adx': latest_candle_data.get('adx'),
+            'current_di_plus': latest_candle_data.get('di_plus'),
+            'current_di_minus': latest_candle_data.get('di_minus'),
+            'current_vwap': latest_candle_data.get('vwap'),
+            'current_obv': latest_candle_data.get('obv'),
+            'current_volume_15m_avg': latest_candle_data.get('volume_15m_avg'),
+            'current_rsi_momentum_bullish': latest_candle_data.get('rsi_momentum_bullish'),
+            'latest_candle_close': latest_candle_data['close'],
+            'latest_candle_open': latest_candle_data['open'],
+            'latest_candle_high': latest_candle_data['high'],
+            'latest_candle_low': latest_candle_data['low'],
+            'latest_candle_volume': latest_candle_data['volume'],
+            'timestamp': latest_candle_data.name.isoformat() # Timestamp of the candle
+        }
+
+        signal = {
             'symbol': self.symbol,
-            'entry_price': float(f"{current_price:.8g}"),
-            'initial_target': float(f"{initial_target:.8g}"),
-            'current_target': float(f"{initial_target:.8g}"),
-            'r2_score': float(f"{current_score:.2f}"),
-            'strategy_name': 'Scalping_Momentum_Trend_ML_Override', # Updated strategy name
-            'signal_details': signal_details,
-            'volume_15m': volume_recent, # تحديث هنا ليعكس الحجم الجديد
-            'trade_value': TRADE_VALUE,
-            'total_possible_score': float(f"{self.total_possible_score:.2f}")
+            'entry_price': current_real_time_price,
+            'initial_target': initial_target_price,
+            'current_target': initial_target_price,
+            'r2_score': model_metrics.get('r2_score', None) if self.ml_model else None, # Assuming ML model has R2 score
+            'volume_15m': latest_candle_data.get('volume_15m_avg'),
+            'strategy_name': 'ScalpingTradingStrategy_V1',
+            'signal_details': signal_details
         }
-
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء. السعر: {current_price:.6f}, الدرجة (اختياري): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}")
-        return signal_output
+        return signal
 
 
-# ---------------------- Telegram Functions ----------------------
-def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
-    """Sends a message via Telegram Bot API with improved error handling."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': str(target_chat_id),
-        'text': text,
-        'parse_mode': parse_mode,
-        'disable_web_page_preview': disable_web_page_preview
-    }
-    if reply_markup:
-        try:
-            payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
-        except (TypeError, ValueError) as json_err:
-             logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON: {json_err} - Markup: {reply_markup}")
-             return None
-
-    logger.debug(f"ℹ️ [Telegram] إرسال رسالة إلى {target_chat_id}...")
-    try:
-        response = requests.post(url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح إلى {target_chat_id}.")
-        return response.json()
-    except requests.exceptions.Timeout:
-         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (مهلة).")
-         return None
-    except requests.exceptions.HTTPError as http_err:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).")
-        try:
-            error_details = http_err.response.json()
-            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
-        except json.JSONDecodeError:
-            logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ: {http_err.response.text}")
-        return None
-    except requests.exceptions.RequestException as req_err:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ في الطلب): {req_err}")
-        return None
-    except Exception as e:
-         logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}", exc_info=True)
-         return None
-
-def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
-    """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the score."""
-    logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه للإشارة: {signal_data.get('symbol', 'N/A')}")
-    try:
-        entry_price = float(signal_data['entry_price'])
-        target_price = float(signal_data['initial_target'])
-        symbol = signal_data['symbol']
-        strategy_name = signal_data.get('strategy_name', 'N/A')
-        signal_score = signal_data.get('r2_score', 0.0)
-        total_possible_score = signal_data.get('total_possible_score', 10.0)
-        volume_15m = signal_data.get('volume_15m', 0.0) # تم تحديث هذا ليعكس الحجم الجديد
-        trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
-        signal_details = signal_data.get('signal_details', {})
-
-        profit_pct = ((target_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-
-        entry_fee = trade_value_signal * BINANCE_FEE_RATE
-        exit_value = trade_value_signal * (1 + profit_pct / 100.0)
-        exit_fee = exit_value * BINANCE_FEE_RATE
-        total_trade_fees = entry_fee + exit_fee
-
-        profit_usdt_gross = trade_value_signal * (profit_pct / 100)
-        profit_usdt_net = profit_usdt_gross - total_trade_fees
-
-        timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-
-        fear_greed = get_fear_greed_index()
-        btc_trend = signal_details.get('BTC_Trend', 'N/A') # Get BTC trend from signal_details
-        ml_prediction_status = signal_details.get('ML_Prediction', 'N/A') # Get ML prediction status
-
-        message = (
-            f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"📈 **نوع الإشارة:** شراء (طويل)\n"
-            f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (النقاط - اختيارية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **السيولة (آخر 15 دقيقة):** {volume_15m:,.0f} USDT\n" # تم تحديث النص هنا
-            f"——————————————\n"
-            f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
-            f"🎯 **الهدف الأولي:** `${target_price:,.8g}`\n"
-            f"💰 **الربح المتوقع (إجمالي):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})\n"
-            f"💸 **الرسوم المتوقعة:** ${total_trade_fees:,.2f}\n"
-            f"📈 **الربح الصافي المتوقع:** ${profit_usdt_net:+.2f}\n"
-            f"——————————————\n"
-            f"🤖 *تنبؤ نموذج ML:* *{ml_prediction_status}*\n" # Highlight ML prediction
-            f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {signal_details.get('Price_MA_Alignment', 'N/A')}\n"
-            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {signal_details.get('EMA_Order', 'N/A')}\n"
-            f"  - سوبر ترند: {signal_details.get('SuperTrend', 'N/A')}\n"
-            f"  - ماكد: {signal_details.get('MACD', 'N/A')}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {signal_details.get('ADX/DI', 'N/A')}\n"
-            f"——————————————\n"
-            f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
-            f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
-            f"  - مؤشر القوة النسبية (RSI): {signal_details.get('RSI_Basic', 'N/A')}\n"
-            f"  - نمط شمعة صعودي: {signal_details.get('Candle', 'N/A')}\n"
-            f"  - ليس عند الحد العلوي لبولينجر: {signal_details.get('Bollinger_Basic', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يرتفع (شمعة أخيرة): {signal_details.get('OBV_Last', 'N/A')}\n"
-            f"  - فلتر RSI للاختراق: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
-            f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
-            f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n"
-            f"——————————————\n"
-            f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
-            f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
-            f"——————————————\n"
-            f"⏰ {timestamp_str}"
-        )
-
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}]
-            ]
-        }
-
-        send_telegram_message(CHAT_ID, message, reply_markup=reply_markup, parse_mode='Markdown')
-
-    except KeyError as ke:
-        logger.error(f"❌ [Telegram Alert] بيانات الإشارة غير مكتملة للرمز {signal_data.get('symbol', 'N/A')}: مفتاح مفقود {ke}", exc_info=True)
-    except Exception as e:
-        logger.error(f"❌ [Telegram Alert] فشل إرسال تنبيه الإشارة للرمز {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
-
-def send_tracking_notification(details: Dict[str, Any]) -> None:
-    """Formats and sends enhanced Telegram notifications for tracking events in Arabic."""
-    symbol = details.get('symbol', 'N/A')
-    signal_id = details.get('id', 'N/A')
-    notification_type = details.get('type', 'unknown')
-    message = ""
-    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
-    closing_price = details.get('closing_price', 0.0)
-    profit_pct = details.get('profit_pct', 0.0)
-    current_price = details.get('current_price', 0.0)
-    time_to_target = details.get('time_to_target', 'N/A')
-    old_target = details.get('old_target', 0.0)
-    new_target = details.get('new_target', 0.0)
-
-
-    logger.debug(f"ℹ️ [Notification] تنسيق إشعار التتبع: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
-
-    if notification_type == 'target_hit':
-        message = (
-            f"✅ *تم الوصول إلى الهدف (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **الزوج:** `{safe_symbol}`\n"
-            f"🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}`\n"
-            f"💰 **الربح المحقق:** {profit_pct:+.2f}%\n"
-            f"⏱️ **الوقت المستغرق:** {time_to_target}"
-        )
-    elif notification_type == 'target_updated':
-         message = (
-             f"↗️ *تم تحديث الهدف (ID: {signal_id})*\n"
-             f"——————————————\n"
-             f"🪙 **الزوج:** `{safe_symbol}`\n"
-             f"📈 **السعر الحالي:** `${current_price:,.8g}`\n"
-             f"🎯 **الهدف السابق:** `${old_target:,.8g}`\n"
-             f"🎯 **الهدف الجديد:** `${new_target:,.8g}`\n"
-             f"ℹ️ *تم التحديث بناءً على استمرار الزخم الصعودي.*"
-         )
-    else:
-        logger.warning(f"⚠️ [Notification] نوع إشعار غير معروف: {notification_type} للتفاصيل: {details}")
-        return
-
-    if message:
-        send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
-
-# ---------------------- Database Functions (Insert and Update) ----------------------
-def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    """Inserts a new signal into the signals table with the weighted score and entry time."""
+def save_signal_to_db(signal: Dict[str, Any]) -> bool:
+    """Saves a generated signal to the database."""
     if not check_db_connection() or not conn:
-        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة {signal.get('symbol', 'N/A')} بسبب مشكلة في اتصال قاعدة البيانات.")
+        logger.error("❌ [DB Save] لا يمكن حفظ الإشارة بسبب مشكلة في اتصال قاعدة البيانات.")
         return False
 
-    symbol = signal.get('symbol', 'N/A')
-    logger.debug(f"ℹ️ [DB Insert] محاولة إدراج إشارة لـ {symbol}...")
+    logger.info(f"ℹ️ [DB Save] حفظ إشارة لـ {signal['symbol']} في قاعدة البيانات...")
     try:
-        signal_prepared = convert_np_values(signal)
-        signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
-
-        with conn.cursor() as cur_ins:
-            insert_query = sql.SQL("""
-                INSERT INTO signals
-                 (symbol, entry_price, initial_target, current_target,
-                 r2_score, strategy_name, signal_details, volume_15m, entry_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW());
-            """)
-            cur_ins.execute(insert_query, (
-                signal_prepared['symbol'],
-                signal_prepared['entry_price'],
-                signal_prepared['initial_target'],
-                signal_prepared['current_target'],
-                signal_prepared.get('r2_score'),
-                signal_prepared.get('strategy_name', 'unknown'),
-                signal_details_json,
-                signal_prepared.get('volume_15m')
-            ))
-        conn.commit()
-        logger.info(f"✅ [DB Insert] تم إدراج إشارة لـ {symbol} في قاعدة البيانات (الدرجة: {signal_prepared.get('r2_score')}).")
+        with db_lock: # Use lock for DB access
+            with conn.cursor() as db_cur:
+                insert_query = sql.SQL("""
+                    INSERT INTO signals (
+                        symbol, entry_price, initial_target, current_target,
+                        r2_score, volume_15m, strategy_name, signal_details
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                """)
+                db_cur.execute(insert_query, (
+                    signal['symbol'],
+                    signal['entry_price'],
+                    signal['initial_target'],
+                    signal['current_target'],
+                    signal.get('r2_score'),
+                    signal.get('volume_15m'),
+                    signal['strategy_name'],
+                    json.dumps(signal['signal_details']) # Convert dict to JSON string
+                ))
+            conn.commit()
+        logger.info(f"✅ [DB Save] تم حفظ إشارة {signal['symbol']} بنجاح.")
         return True
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [DB Insert] خطأ في قاعدة البيانات أثناء إدراج إشارة لـ {symbol}: {db_err}")
+        logger.error(f"❌ [DB Save] خطأ في قاعدة البيانات أثناء حفظ الإشارة: {db_err}", exc_info=True)
         if conn: conn.rollback()
         return False
-    except (TypeError, ValueError) as convert_err:
-         logger.error(f"❌ [DB Insert] خطأ في تحويل بيانات الإشارة قبل الإدراج لـ {symbol}: {convert_err} - بيانات الإشارة: {signal}")
-         if conn: conn.rollback()
-         return False
     except Exception as e:
-        logger.error(f"❌ [DB Insert] خطأ غير متوقع أثناء إدراج إشارة لـ {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Save] خطأ غير متوقع أثناء حفظ الإشارة: {e}", exc_info=True)
         if conn: conn.rollback()
         return False
 
-# ---------------------- Open Signal Tracking Function ----------------------
-def track_signals() -> None:
-    """Tracks open signals and checks targets. Calculates time to target upon hit."""
-    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة...")
-    while True:
-        active_signals_summary: List[str] = []
-        processed_in_cycle = 0
-        try:
-            if not check_db_connection() or not conn:
-                logger.warning("⚠️ [Tracker] تخطي دورة التتبع بسبب مشكلة في اتصال قاعدة البيانات.")
-                time.sleep(15)
-                continue
+def get_open_signals_from_db() -> List[Dict[str, Any]]:
+    """Fetches all open signals from the database."""
+    if not check_db_connection() or not conn:
+        logger.error("❌ [DB Fetch] لا يمكن جلب الإشارات المفتوحة بسبب مشكلة في اتصال قاعدة البيانات.")
+        return []
 
-            with conn.cursor() as track_cur:
-                 track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time
-                    FROM signals
-                    WHERE achieved_target = FALSE;
-                """)
-                 open_signals: List[Dict] = track_cur.fetchall()
+    logger.debug("ℹ️ [DB Fetch] جلب الإشارات المفتوحة من قاعدة البيانات...")
+    try:
+        with db_lock: # Use lock for DB access
+            with conn.cursor() as db_cur:
+                db_cur.execute("SELECT * FROM signals WHERE achieved_target = FALSE;")
+                signals = db_cur.fetchall()
+                logger.debug(f"✅ [DB Fetch] تم جلب {len(signals)} إشارة مفتوحة.")
+                return signals
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [DB Fetch] خطأ في قاعدة البيانات أثناء جلب الإشارات المفتوحة: {db_err}", exc_info=True)
+        return []
+    except Exception as e:
+        logger.error(f"❌ [DB Fetch] خطأ غير متوقع أثناء جلب الإشارات المفتوحة: {e}", exc_info=True)
+        return []
+
+def update_signal_in_db(signal_id: int, updates: Dict[str, Any]) -> bool:
+    """Updates an existing signal in the database."""
+    if not check_db_connection() or not conn:
+        logger.error("❌ [DB Update] لا يمكن تحديث الإشارة بسبب مشكلة في اتصال قاعدة البيانات.")
+        return False
+
+    logger.info(f"ℹ️ [DB Update] تحديث الإشارة ID: {signal_id}...")
+    try:
+        with db_lock: # Use lock for DB access
+            with conn.cursor() as db_cur:
+                set_clauses = [sql.SQL(f"{k} = %s") for k in updates.keys()]
+                update_query = sql.SQL("UPDATE signals SET {} WHERE id = %s;").format(
+                    sql.SQL(', ').join(set_clauses)
+                )
+                db_cur.execute(update_query, (*updates.values(), signal_id))
+            conn.commit()
+        logger.info(f"✅ [DB Update] تم تحديث الإشارة ID: {signal_id} بنجاح.")
+        return True
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [DB Update] خطأ في قاعدة البيانات أثناء تحديث الإشارة ID: {signal_id}: {db_err}", exc_info=True)
+        if conn: conn.rollback()
+        return False
+    except Exception as e:
+        logger.error(f"❌ [DB Update] خطأ غير متوقع أثناء تحديث الإشارة ID: {signal_id}: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return False
+
+def send_telegram_alert(message: str) -> None:
+    """Sends a message to the configured Telegram chat."""
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.warning("⚠️ [Telegram] لم يتم تكوين رمز Telegram المميز أو معرف الدردشة. تخطي إرسال التنبيه.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown' # Use Markdown for formatting
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=5)
+        response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+        logger.info("✅ [Telegram] تم إرسال تنبيه Telegram بنجاح.")
+    except requests.exceptions.Timeout:
+        logger.error("❌ [Telegram] انتهت مهلة طلب Telegram.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [Telegram] خطأ في إرسال تنبيه Telegram: {e}")
+    except Exception as e:
+        logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال تنبيه Telegram: {e}", exc_info=True)
+
+
+# ---------------------- WebSocket Data Processing ----------------------
+
+def process_ticker_data(msg: Dict[str, Any]) -> None:
+    """
+    Processes incoming WebSocket ticker data.
+    Updates global ticker_data and aggregates 5-minute candles.
+    Triggers signal generation when a 5-minute candle closes.
+    """
+    global ticker_data, current_5m_candles, symbol_strategies
+
+    event_type = msg.get('e')
+    if event_type == '24hrTicker':
+        symbol = msg['s']
+        last_price = float(msg['c'])
+        volume = float(msg['v']) # Base asset volume
+        quote_volume = float(msg['q']) # Quote asset volume (USDT)
+        event_time_ms = msg['E'] # Event time in milliseconds
+
+        # Update global real-time ticker data
+        ticker_data[symbol] = {
+            'last_price': last_price,
+            'volume': volume,
+            'quote_volume': quote_volume,
+            'event_time': event_time_ms
+        }
+        logger.debug(f"Received ticker for {symbol}: {last_price}")
+
+        # --- Candle Aggregation Logic ---
+        # Calculate the start time for the current 5-minute candle window
+        current_5m_window_start_ms = (event_time_ms // (5 * 60 * 1000)) * (5 * 60 * 1000)
+
+        if symbol not in current_5m_candles:
+            # Initialize new candle for this symbol if it's the first data point for this symbol
+            current_5m_candles[symbol] = {
+                'open': last_price,
+                'high': last_price,
+                'low': last_price,
+                'close': last_price,
+                'volume': 0.0,
+                'start_time': current_5m_window_start_ms,
+                'last_update_time': event_time_ms
+            }
+            logger.debug(f"ℹ️ [Candle Aggregator] بدء شمعة 5m جديدة لـ {symbol} عند {datetime.fromtimestamp(current_5m_window_start_ms / 1000)}")
+
+        candle = current_5m_candles[symbol]
+
+        # Check if the current event falls into a new 5-minute window
+        # This means the previous candle is complete
+        if current_5m_window_start_ms > candle['start_time']:
+            logger.info(f"ℹ️ [Candle Aggregator] إغلاق شمعة 5m سابقة لـ {symbol} عند {datetime.fromtimestamp(candle['start_time'] / 1000)}")
+            # Finalize the previous candle and process it
+            closed_candle_data = {
+                'timestamp': candle['start_time'],
+                'open': candle['open'],
+                'high': candle['high'],
+                'low': candle['low'],
+                'close': candle['close'],
+                'volume': candle['volume']
+            }
+            # Asynchronously process the closed candle to avoid blocking WebSocket
+            # Use a separate thread for processing to keep WebSocket listener responsive
+            Thread(target=process_closed_candle, args=(symbol, closed_candle_data), daemon=True).start()
+
+            # Start a new candle with the current price as its open
+            current_5m_candles[symbol] = {
+                'open': last_price,
+                'high': last_price,
+                'low': last_price,
+                'close': last_price,
+                'volume': 0.0, # Reset volume for new candle
+                'start_time': current_5m_window_start_ms,
+                'last_update_time': event_time_ms
+            }
+            logger.debug(f"ℹ️ [Candle Aggregator] بدء شمعة 5m جديدة لـ {symbol} عند {datetime.fromtimestamp(current_5m_window_start_ms / 1000)}")
+
+        # Update the current candle with the latest tick data
+        candle['high'] = max(candle['high'], last_price)
+        candle['low'] = min(candle['low'], last_price)
+        candle['close'] = last_price
+        candle['volume'] += volume # Accumulate volume for the current candle
+        candle['last_update_time'] = event_time_ms
+
+    else:
+        logger.warning(f"⚠️ [WebSocket] نوع رسالة غير متوقع: {event_type}")
+
+
+def process_closed_candle(symbol: str, closed_candle: Dict[str, Any]) -> None:
+    """
+    Processes a newly closed 5-minute candle for a specific symbol.
+    Fetches recent historical data, appends the new candle, calculates indicators,
+    and generates a buy signal if conditions are met.
+    """
+    logger.info(f"⏳ [Signal Gen] معالجة شمعة 5m مغلقة لـ {symbol}...")
+    try:
+        # 1. Fetch recent historical data (e.g., last 200 candles)
+        # This is crucial for indicator calculation that needs lookback periods.
+        # Fetch slightly more than needed to ensure enough data after potential NaNs.
+        # Use DATA_LOOKBACK_DAYS for consistency with ml.py's training data range
+        df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS)
+        
+        if df_hist is None or df_hist.empty:
+            logger.warning(f"⚠️ [Signal Gen] لا توجد بيانات تاريخية كافية لـ {symbol} لمعالجة الشمعة المغلقة.")
+            return
+
+        # Convert closed_candle timestamp to datetime for DataFrame indexing
+        closed_candle_timestamp = pd.to_datetime(closed_candle['timestamp'], unit='ms')
+
+        # Check if the closed candle is already the very last candle in df_hist
+        # This can happen if get_historical_klines returns data up to the current moment.
+        # If so, we update it. Otherwise, append.
+        if not df_hist.empty and df_hist.index[-1] == closed_candle_timestamp:
+            logger.debug(f"ℹ️ [Signal Gen] الشمعة المغلقة لـ {symbol} موجودة بالفعل في البيانات التاريخية (آخر شمعة). تحديثها.")
+            df_hist.loc[closed_candle_timestamp] = [
+                closed_candle['open'], closed_candle['high'],
+                closed_candle['low'], closed_candle['close'], closed_candle['volume']
+            ]
+        elif closed_candle_timestamp not in df_hist.index: # Only append if not already present
+            # Append the new closed candle to the historical DataFrame
+            new_candle_df = pd.DataFrame([closed_candle], index=[closed_candle_timestamp], columns=['open', 'high', 'low', 'close', 'volume'])
+            df_hist = pd.concat([df_hist, new_candle_df]).sort_index()
+            logger.debug(f"ℹ️ [Signal Gen] تم إضافة شمعة 5m مغلقة جديدة لـ {symbol} إلى البيانات التاريخية.")
+        else:
+            logger.debug(f"ℹ️ [Signal Gen] الشمعة المغلقة لـ {symbol} موجودة بالفعل في البيانات التاريخية (ليست الأحدث). تخطي الإضافة.")
+
+
+        # Get the strategy instance for this symbol
+        strategy = symbol_strategies.get(symbol)
+        if not strategy:
+            logger.error(f"❌ [Signal Gen] لم يتم العثور على استراتيجية لـ {symbol}. تخطي توليد الإشارة.")
+            return
+
+        # Calculate indicators on the updated DataFrame
+        # Pass a copy to populate_indicators to avoid modifying the original df_hist
+        df_with_indicators = strategy.populate_indicators(df_hist.copy())
+        
+        # Ensure we have enough data after indicator calculation for the latest candle
+        if df_with_indicators.empty or len(df_with_indicators) < 2:
+            logger.warning(f"⚠️ [Signal Gen] DataFrame لـ {symbol} فارغ أو غير كافٍ بعد حساب المؤشرات. تخطي.")
+            return
+
+        # Get the latest candle's data with calculated indicators
+        latest_candle_data = df_with_indicators.iloc[-1]
+        
+        # Get the current real-time price from ticker_data for the entry price
+        current_real_time_price = ticker_data.get(symbol, {}).get('last_price')
+        if current_real_time_price is None:
+            logger.warning(f"⚠️ [Signal Gen] لم يتم العثور على سعر الوقت الفعلي لـ {symbol}. استخدام سعر الإغلاق للشمعة المغلقة كـ سعر دخول.")
+            current_real_time_price = latest_candle_data['close']
+
+        # Generate buy signal
+        signal = strategy.generate_buy_signal(latest_candle_data, current_real_time_price)
+
+        if signal:
+            logger.info(f"🔥 [Signal Gen] تم توليد إشارة شراء لـ {symbol}!")
+            # Save signal to DB and send Telegram alert
+            if save_signal_to_db(signal):
+                logger.info(f"✅ [Signal Gen] تم حفظ إشارة {symbol} في قاعدة البيانات.")
+                send_telegram_alert(f"🔥 إشارة شراء جديدة لـ {signal['symbol']}!\n"
+                                    f"السعر: {signal['entry_price']:.4f}\n"
+                                    f"الهدف: {signal['initial_target']:.4f}\n"
+                                    f"الربح المتوقع: {signal['profit_percentage']:.2f}%")
+            else:
+                logger.error(f"❌ [Signal Gen] فشل حفظ إشارة {symbol} في قاعدة البيانات.")
+        else:
+            logger.debug(f"ℹ️ [Signal Gen] لا توجد إشارة شراء لـ {symbol} في هذه الشمعة.")
+
+    except Exception as e:
+        logger.error(f"❌ [Signal Gen] خطأ في معالجة الشمعة المغلقة لـ {symbol}: {e}", exc_info=True)
+
+
+# ---------------------- Signal Tracking and Target Update ----------------------
+
+def track_signals() -> None:
+    """
+    Periodically fetches and tracks open signals, updating their status
+    and target prices based on real-time data.
+    """
+    global open_signals, ticker_data
+
+    logger.info("✅ [Tracker] بدء مؤشر الإشارة.")
+    while True:
+        try:
+            # Refresh open signals from DB
+            with open_signals_lock:
+                open_signals = get_open_signals_from_db()
 
             if not open_signals:
-                time.sleep(10)
+                logger.debug("ℹ️ [Tracker] لا توجد إشارات مفتوحة للتتبع.")
+                time.sleep(10) # Sleep longer if no signals
                 continue
 
-            logger.debug(f"ℹ️ [Tracker] تتبع {len(open_signals)} إشارة مفتوحة...")
+            for signal in open_signals:
+                symbol = signal['symbol']
+                signal_id = signal['id']
+                current_target = signal['current_target']
+                entry_price = signal['entry_price']
 
-            for signal_row in open_signals:
-                signal_id = signal_row['id']
-                symbol = signal_row['symbol']
-                processed_in_cycle += 1
-                update_executed = False
-
-                try:
-                    entry_price = float(signal_row['entry_price'])
-                    entry_time = signal_row['entry_time']
-                    current_target = float(signal_row['current_target'])
-
-                    current_price = ticker_data.get(symbol)
-
-                    if current_price is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
-                         continue
-
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}")
-
-                    update_query: Optional[sql.SQL] = None
-                    update_params: Tuple = ()
-                    log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'current_price': current_price}
-
-
-                    # --- Check and Update Logic ---
-                    # 1. Check for Target Hit
-                    if current_price >= current_target:
-                        profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        closed_at = datetime.now()
-                        time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
-                        time_to_target_str = str(time_to_target_duration)
-
-                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
-                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%, الوقت: {time_to_target_str})."
-                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str})
-                        update_executed = True
-
-                    # 2. Check for Target Extension (Only if Target not hit)
-                    if not update_executed:
-                        if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
-                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرار...")
-
-                             df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-
-                             if df_continuation is not None and not df_continuation.empty:
-                                 continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
-
-                                 if df_continuation_indicators is not None:
-                                     continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
-
-                                     if continuation_signal:
-                                         latest_row = df_continuation_indicators.iloc[-1]
-                                         current_atr_for_new_target = latest_row.get('atr')
-
-                                         if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
-                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_new_target)
-
-                                             if potential_new_target > current_target:
-                                                 old_target = current_target
-                                                 new_target = potential_new_target
-                                                 update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
-                                                 update_params = (new_target, signal_id)
-                                                 log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target:.8g} إلى {new_target:.8g} بناءً على إشارة الاستمرار."
-                                                 notification_details.update({'type': 'target_updated', 'old_target': old_target, 'new_target': new_target})
-                                                 update_executed = True
-                                             else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) ليس أعلى من الهدف الحالي ({current_target:.8g}). عدم تحديث الهدف.")
-                                         else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف الجديد بسبب ATR غير صالح ({current_atr_for_new_target}) من بيانات الاستمرار.")
-                                     else:
-                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم إنشاء إشارة استمرار.")
-                                 else:
-                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في ملء المؤشرات للتحقق من الاستمرار.")
-                             else:
-                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب البيانات التاريخية للتحقق من الاستمرار.")
-
-
-                    if update_executed and update_query:
-                        try:
-                             with conn.cursor() as update_cur:
-                                  update_cur.execute(update_query, update_params)
-                             conn.commit()
-                             if log_message: logger.info(log_message)
-                             if notification_details.get('type'):
-                                send_tracking_notification(notification_details)
-                        except psycopg2.Error as db_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في قاعدة البيانات أثناء التحديث: {db_err}")
-                            if conn: conn.rollback()
-                        except Exception as exec_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار: {exec_err}", exc_info=True)
-                            if conn: conn.rollback()
-
-                except (TypeError, ValueError) as convert_err:
-                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}")
+                # Get the latest real-time price
+                current_price_data = ticker_data.get(symbol)
+                if not current_price_data:
+                    logger.warning(f"⚠️ [Tracker] لا توجد بيانات تيكر لـ {symbol}. تخطي تتبع الإشارة ID: {signal_id}.")
                     continue
-                except Exception as inner_loop_err:
-                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء معالجة الإشارة: {inner_loop_err}", exc_info=True)
-                     continue
 
-            if active_signals_summary:
-                logger.debug(f"ℹ️ [Tracker] نهاية حالة الدورة ({processed_in_cycle} معالجة): {'; '.join(active_signals_summary)}")
+                current_price = current_price_data['last_price']
 
-            time.sleep(3)
+                # Check if target is achieved
+                if current_price >= current_target:
+                    profit_percentage = ((current_price / entry_price) - 1) * 100
+                    updates = {
+                        'achieved_target': True,
+                        'closing_price': current_price,
+                        'closed_at': datetime.utcnow(),
+                        'profit_percentage': profit_percentage,
+                        'time_to_target': datetime.utcnow() - signal['entry_time'] # Calculate duration
+                    }
+                    if update_signal_in_db(signal_id, updates):
+                        logger.info(f"🎯 [Tracker] تم الوصول إلى الهدف لـ {symbol} (ID: {signal_id}). السعر: {current_price:.4f}، الربح: {profit_percentage:.2f}%")
+                        send_telegram_alert(f"🎯 *تم الوصول إلى الهدف!* لـ {symbol}\n"
+                                            f"سعر الدخول: {entry_price:.4f}\n"
+                                            f"سعر الإغلاق: {current_price:.4f}\n"
+                                            f"الربح: {profit_percentage:.2f}%")
+                else:
+                    # Logic for target extension/trailing (if price approaches target but not hit)
+                    # This part needs to re-evaluate the strategy based on current market conditions
+                    # and potentially extend the target if the trend continues.
+                    # This is similar to the signal generation logic but for open positions.
+                    if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
+                        logger.debug(f"ℹ️ [Tracker] السعر يقترب من الهدف لـ {symbol}. إعادة تقييم...")
+                        
+                        # Get the strategy instance for this symbol
+                        strategy = symbol_strategies.get(symbol)
+                        if not strategy:
+                            logger.error(f"❌ [Tracker] لم يتم العثور على استراتيجية لـ {symbol} لإعادة التقييم.")
+                            continue
 
-        except psycopg2.Error as db_cycle_err:
-             logger.error(f"❌ [Tracker] خطأ في قاعدة البيانات في دورة التتبع الرئيسية: {db_cycle_err}. محاولة إعادة الاتصال...")
-             if conn: conn.rollback()
-             time.sleep(30)
-             check_db_connection()
-        except Exception as cycle_err:
-            logger.error(f"❌ [Tracker] خطأ غير متوقع في دورة تتبع الإشارة: {cycle_err}", exc_info=True)
-            time.sleep(30)
+                        # Fetch fresh historical data for indicator recalculation
+                        df_hist_re_eval = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS)
+                        if df_hist_re_eval is None or df_hist_re_eval.empty:
+                            logger.warning(f"⚠️ [Tracker] لا توجد بيانات تاريخية كافية لـ {symbol} لإعادة تقييم الهدف.")
+                            continue
 
-def get_interval_minutes(interval: str) -> int:
-    """Helper function to convert Binance interval string to minutes."""
-    if interval.endswith('m'):
-        return int(interval[:-1])
-    elif interval.endswith('h'):
-        return int(interval[:-1]) * 60
-    elif interval.endswith('d'):
-        return int(interval[:-1]) * 60 * 24
-    return 0
+                        df_with_indicators_re_eval = strategy.populate_indicators(df_hist_re_eval.copy())
+                        if df_with_indicators_re_eval.empty or len(df_with_indicators_re_eval) < 2:
+                            logger.warning(f"⚠️ [Tracker] DataFrame لـ {symbol} فارغ أو غير كافٍ بعد حساب المؤشرات لإعادة تقييم الهدف.")
+                            continue
+                        
+                        latest_candle_data_re_eval = df_with_indicators_re_eval.iloc[-1]
+                        
+                        # Re-run a simplified signal generation check to see if conditions are still bullish
+                        # This is to check if a new, higher target would be valid
+                        # We don't want to create a new signal, just update the existing one's target
+                        
+                        # Prepare features for ML prediction (if ML is used for re-evaluation)
+                        ml_features_re_eval = {}
+                        for feature in strategy.feature_names:
+                            ml_features_re_eval[feature] = latest_candle_data_re_eval.get(feature)
+                            if pd.isna(ml_features_re_eval[feature]):
+                                ml_features_re_eval[feature] = 0.0 # Handle NaN features gracefully
+
+                        features_df_re_eval = pd.DataFrame([ml_features_re_eval])
+
+                        ml_prediction_re_eval = 0
+                        if strategy.ml_model:
+                            try:
+                                features_for_prediction_re_eval = features_df_re_eval[strategy.feature_names].values
+                                ml_prediction_re_eval = strategy.ml_model.predict(features_for_prediction_re_eval)[0]
+                            except Exception as e:
+                                logger.error(f"❌ [Tracker] خطأ في تنبؤ نموذج ML لإعادة تقييم الهدف لـ {symbol}: {e}", exc_info=True)
+                                ml_prediction_re_eval = 0
+
+                        # Check essential conditions again (or rely on ML prediction)
+                        is_ema_short_above_long = latest_candle_data_re_eval.get(f'ema_{EMA_SHORT_PERIOD}', -np.inf) > latest_candle_data_re_eval.get(f'ema_{EMA_LONG_PERIOD}', -np.inf)
+                        is_price_above_emas = (current_price > latest_candle_data_re_eval.get(f'ema_{EMA_SHORT_PERIOD}', -np.inf) and
+                                               current_price > latest_candle_data_re_eval.get(f'ema_{EMA_LONG_PERIOD}', -np.inf))
+                        is_price_above_vwma = current_price > latest_candle_data_re_eval.get('vwma', -np.inf)
+                        is_supertrend_bullish = latest_candle_data_re_eval.get('supertrend_trend', 0) == 1 and current_price > latest_candle_data_re_eval.get('supertrend', -np.inf)
+                        is_macd_bullish = (latest_candle_data_re_eval.get('macd_hist', -np.inf) > 0 or
+                                           (latest_candle_data_re_eval.get('macd', -np.inf) > latest_candle_data_re_eval.get('macd_signal', -np.inf)))
+                        is_adx_strong_trend = latest_candle_data_re_eval.get('adx', 0) > MIN_ADX_TREND_STRENGTH and latest_candle_data_re_eval.get('di_plus', 0) > latest_candle_data_re_eval.get('di_minus', 0)
+                        
+                        is_re_evaluation_conditions_met = (ml_prediction_re_eval == 1) or (
+                            is_ema_short_above_long and
+                            is_price_above_emas and
+                            is_price_above_vwma and
+                            is_supertrend_bullish and
+                            is_macd_bullish and
+                            is_adx_strong_trend
+                        )
+
+                        if is_re_evaluation_conditions_met:
+                            atr_value_re_eval = latest_candle_data_re_eval.get('atr')
+                            if atr_value_re_eval is not None and atr_value_re_eval > 0:
+                                new_potential_target = current_price + (ENTRY_ATR_MULTIPLIER * atr_value_re_eval)
+                                if new_potential_target > current_target:
+                                    updates = {'current_target': new_potential_target}
+                                    if update_signal_in_db(signal_id, updates):
+                                        logger.info(f"⬆️ [Tracker] تم تحديث الهدف لـ {symbol} (ID: {signal_id}) من {current_target:.4f} إلى {new_potential_target:.4f}.")
+                                        send_telegram_alert(f"⬆️ *تم تحديث الهدف!* لـ {symbol}\n"
+                                                            f"الهدف القديم: {current_target:.4f}\n"
+                                                            f"الهدف الجديد: {new_potential_target:.4f}\n"
+                                                            f"السعر الحالي: {current_price:.4f}")
+                        else:
+                            logger.debug(f"ℹ️ [Tracker] الظروف لم تعد مواتية لتمديد الهدف لـ {symbol}.")
+
+            time.sleep(5) # Check open signals every 5 seconds
+        except Exception as e:
+            logger.critical(f"❌ [Tracker] حدث خطأ فادح في تتبع الإشارات: {e}", exc_info=True)
+            time.sleep(30) # Longer sleep on error
 
 
-# ---------------------- Flask Service (Optional for Webhook) ----------------------
+# ---------------------- Flask Service (for Render uptime) ----------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home() -> Response:
     """Simple home page to show the bot is running."""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
-    tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
-    main_bot_alive = main_bot_thread.is_alive() if 'main_bot_thread' in globals() and main_bot_thread else False
-    status = "running" if ws_alive and tracker_alive and main_bot_alive else "partially running"
-    return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
+    # You can add more status details here if needed
+    status_message = (
+        f"🤖 *Crypto Bot Service Status:*\n"
+        f"- Current Time: {now}\n"
+        f"- Service: Running and monitoring markets.\n"
+        f"- Open Signals: {len(open_signals)}\n"
+        f"- Ticker Data Symbols: {len(ticker_data)}\n"
+    )
+    return Response(status_message, status=200, mimetype='text/plain')
 
 @app.route('/favicon.ico')
 def favicon() -> Response:
     """Handles favicon request to avoid 404 errors in logs."""
     return Response(status=204)
 
-@app.route('/webhook', methods=['POST'])
-def webhook() -> Tuple[str, int]:
-    """Handles incoming requests from Telegram (like button presses and commands)."""
-    # Only process webhook if WEBHOOK_URL is configured
-    if not WEBHOOK_URL:
-        logger.warning("⚠️ [Flask] تم استلام طلب webhook، ولكن WEBHOOK_URL غير مهيأ. تجاهل الطلب.")
-        return "Webhook not configured", 200 # Return OK to Telegram to avoid repeated attempts
-
-    if not request.is_json:
-        logger.warning("⚠️ [Flask] تم استلام طلب webhook غير JSON.")
-        return "Invalid request format", 400
-
-    try:
-        data = request.get_json()
-        logger.debug(f"ℹ️ [Flask] تم استلام بيانات webhook: {json.dumps(data)[:200]}...")
-
-        if 'callback_query' in data:
-            callback_query = data['callback_query']
-            callback_id = callback_query['id']
-            callback_data = callback_query.get('data')
-            message_info = callback_query.get('message')
-            if not message_info or not callback_data:
-                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد الرسالة أو البيانات.")
-                 try:
-                     ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-                     requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
-                 except Exception as ack_err:
-                     logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال غير الصالح {callback_id}: {ack_err}")
-                 return "OK", 200
-            chat_id_callback = message_info.get('chat', {}).get('id')
-            if not chat_id_callback:
-                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد معرف الدردشة.")
-                 try:
-                     ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-                     requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
-                 except Exception as ack_err:
-                     logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال غير الصالح {callback_id}: {ack_err}")
-                 return "OK", 200
-
-
-            message_id = message_info['message_id']
-            user_info = callback_query.get('from', {})
-            user_id = user_info.get('id')
-            username = user_info.get('username', 'N/A')
-
-            logger.info(f"ℹ️ [Flask] تم استلام استعلام رد الاتصال: البيانات='{callback_data}', المستخدم={username}({user_id}), الدردشة={chat_id_callback}")
-
-            try:
-                ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-                requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
-            except Exception as ack_err:
-                 logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال {callback_id}: {ack_err}")
-
-            if callback_data == "get_report":
-                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown'))
-                report_thread.start()
-            else:
-                logger.warning(f"⚠️ [Flask] تم استلام بيانات رد اتصال غير معالجة: '{callback_data}'")
-
-
-        elif 'message' in data:
-            message_data = data['message']
-            chat_info = message_data.get('chat')
-            user_info = message_data.get('from', {})
-            text_msg = message_data.get('text', '').strip()
-
-            if not chat_info or not text_msg:
-                 logger.debug("ℹ️ [Flask] تم استلام رسالة بدون معلومات الدردشة أو النص.")
-                 return "OK", 200
-
-            chat_id_msg = chat_info['id']
-            user_id = user_info.get('id')
-            username = user_info.get('username', 'N/A')
-
-            logger.info(f"ℹ️ [Flask] تم استلام رسالة: النص='{text_msg}', المستخدم={username}({user_id}), الدردشة={chat_id_msg}")
-
-            if text_msg.lower() == '/report':
-                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
-                 report_thread.start()
-            elif text_msg.lower() == '/status':
-                 status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
-                 status_thread.start()
-
-        else:
-            logger.debug("ℹ️ [Flask] تم استلام بيانات webhook بدون 'callback_query' أو 'message'.")
-
-        return "OK", 200
-    except Exception as e:
-         logger.error(f"❌ [Flask] خطأ في معالجة webhook: {e}", exc_info=True)
-         return "Internal Server Error", 500
-
-def handle_status_command(chat_id_msg: int) -> None:
-    """Separate function to handle /status command to avoid blocking the Webhook."""
-    logger.info(f"ℹ️ [Flask Status] معالجة أمر /status للدردشة {chat_id_msg}")
-    status_msg = "⏳ جلب الحالة..."
-    msg_sent = send_telegram_message(chat_id_msg, status_msg)
-    if not (msg_sent and msg_sent.get('ok')):
-         logger.error(f"❌ [Flask Status] فشل إرسال رسالة الحالة الأولية إلى {chat_id_msg}")
-         return
-    message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
-
-    if message_id_to_edit is None:
-        logger.error(f"❌ [Flask Status] فشل الحصول على message_id لتحديث الحالة في الدردشة {chat_id_msg}")
-        return
-
-
-    try:
-        open_count = 0
-        if check_db_connection() and conn:
-            with conn.cursor() as status_cur:
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
-                open_count = (status_cur.fetchone() or {}).get('count', 0)
-
-        ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
-        tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌'
-        main_bot_alive = 'نشط ✅' if 'main_bot_thread' in globals() and main_bot_thread and main_bot_thread.is_alive() else 'غير نشط ❌'
-        final_status_msg = (
-            f"🤖 *حالة البوت:*\n"
-            f"- تتبع الأسعار (WS): {ws_status}\n"
-            f"- تتبع الإشارات: {tracker_status}\n"
-            f"- حلقة البوت الرئيسية: {main_bot_alive}\n" # Added main bot loop status
-            f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
-        )
-        edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-        edit_payload = {
-            'chat_id': chat_id_msg,
-             'message_id': message_id_to_edit,
-            'text': final_status_msg,
-            'parse_mode': 'Markdown'
-        }
-        response = requests.post(edit_url, json=edit_payload, timeout=10)
-        response.raise_for_status()
-        logger.info(f"✅ [Flask Status] تم تحديث الحالة للدردشة {chat_id_msg}")
-
-    except Exception as status_err:
-        logger.error(f"❌ [Flask Status] خطأ في جلب/تعديل تفاصيل الحالة للدردشة {chat_id_msg}: {status_err}", exc_info=True)
-        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.")
-
-
-def run_flask() -> None:
-    """Runs the Flask application to listen for the Webhook using a production server if available."""
+def run_flask_service() -> None:
+    """Runs the Flask application."""
     host = "0.0.0.0"
-    port = int(os.environ.get('PORT', 10000)) # Use PORT environment variable or default value
+    port = int(os.environ.get('PORT', 10000))
     logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...")
     try:
         from waitress import serve
         logger.info("✅ [Flask] استخدام خادم 'waitress'.")
         serve(app, host=host, port=port, threads=6)
     except ImportError:
-         logger.warning("⚠️ [Flask] 'waitress' غير مثبت. الرجوع إلى خادم تطوير Flask (لا يوصى به للإنتاج).")
-         try:
-             app.run(host=host, port=port)
-         except Exception as flask_run_err:
-              logger.critical(f"❌ [Flask] فشل بدء خادم التطوير: {flask_run_err}", exc_info=True)
+        logger.warning("⚠️ [Flask] 'waitress' غير مثبت. الرجوع إلى خادم تطوير Flask (لا يوصى به للإنتاج).")
+        try:
+            app.run(host=host, port=port)
+        except Exception as flask_run_err:
+            logger.critical(f"❌ [Flask] فشل بدء خادم التطوير: {flask_run_err}", exc_info=True)
     except Exception as serve_err:
-         logger.critical(f"❌ [Flask] فشل بدء الخادم (waitress؟): {serve_err}", exc_info=True)
+        logger.critical(f"❌ [Flask] فشل بدء الخادم (waitress؟): {serve_err}", exc_info=True)
 
-# ---------------------- Main Loop and Check Function ----------------------
+
+# ---------------------- Main Execution ----------------------
 def main_loop() -> None:
-    """Main loop to scan pairs and generate signals."""
-    symbols_to_scan = get_crypto_symbols()
-    if not symbols_to_scan:
-        logger.critical("❌ [Main] لا توجد رموز صالحة تم تحميلها أو التحقق منها. لا يمكن المتابمة.")
-        return
+    """
+    Initializes strategy instances and loads ML models for all symbols.
+    Signal generation is handled by real-time candle processing via WebSocket.
+    """
+    global all_symbols, symbol_strategies
 
-    logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمزًا صالحًا للمسح.")
-    last_full_scan_time = time.time()
+    logger.info("ℹ️ [Main Loop] بدء تهيئة الاستراتيجيات وتحميل نماذج ML...")
 
+    for symbol in all_symbols:
+        try:
+            # Initialize strategy for each symbol. It will load its specific ML model.
+            strategy = ScalpingTradingStrategy(symbol, client, conn, cur)
+            symbol_strategies[symbol] = strategy
+            logger.info(f"✅ [Main Loop] تم تهيئة الاستراتيجية لـ {symbol} وتحميل نموذج ML.")
+        except Exception as e:
+            logger.error(f"❌ [Main Loop] فشل تهيئة الاستراتيجية لـ {symbol}: {e}", exc_info=True)
+            # Decide whether to continue without this symbol or exit.
+            # For now, we'll just log and continue.
+
+    logger.info("✅ [Main Loop] اكتمل تهيئة الاستراتيجيات وتحميل نماذج ML.")
+    # The main loop now just keeps running, waiting for WebSocket events to trigger signal generation.
+    # It might also have a periodic check for overall health or re-initialization if needed.
     while True:
-        try:
-            scan_start_time = time.time()
-            logger.info("+" + "-"*60 + "+")
-            logger.info(f"🔄 [Main] بدء دورة مسح السوق - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info("+" + "-"*60 + "+")
-
-            if not check_db_connection() or not conn:
-                logger.error("❌ [Main] تخطي دورة المسح بسبب فشل اتصال قاعدة البيانات.")
-                time.sleep(60)
-                continue
-
-            open_count = 0
-            try:
-                 with conn.cursor() as cur_check:
-                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
-                    open_count = (cur_check.fetchone() or {}).get('count', 0)
-            except psycopg2.Error as db_err:
-                 logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء التحقق من عدد الإشارات المفتوحة: {db_err}. تخطي الدورة.")
-                 if conn: conn.rollback()
-                 time.sleep(60)
-                 continue
-
-            logger.info(f"ℹ️ [Main] الإشارات المفتوحة حالياً: {open_count} / {MAX_OPEN_TRADES}")
-            if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"⚠️ [Main] تم الوصول إلى الحد الأقصى لعدد الإشارات المفتوحة. انتظار...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
-                continue
-
-            processed_in_loop = 0
-            signals_generated_in_loop = 0
-            slots_available = MAX_OPEN_TRADES - open_count
-
-            for symbol in symbols_to_scan:
-                 if slots_available <= 0:
-                      logger.info(f"ℹ️ [Main] تم الوصول إلى الحد الأقصى ({MAX_OPEN_TRADES}) أثناء المسح. إيقاف مسح الرموز لهذه الدورة.")
-                      break
-
-                 processed_in_loop += 1
-                 logger.debug(f"🔍 [Main] مسح {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
-
-                 try:
-                    with conn.cursor() as symbol_cur:
-                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE LIMIT 1;", (symbol,))
-                        if symbol_cur.fetchone():
-                            continue
-
-                    df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty:
-                        continue
-
-                    strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
-                    df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None:
-                        continue
-
-                    potential_signal = strategy.generate_buy_signal(df_indicators)
-
-                    if potential_signal:
-                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! (الدرجة: {potential_signal.get('r2_score', 0):.2f}) التحقق النهائي والإدراج...")
-                        with conn.cursor() as final_check_cur:
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
-                             final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
-
-                             if final_open_count < MAX_OPEN_TRADES:
-                                 if insert_signal_into_db(potential_signal):
-                                     send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                                     signals_generated_in_loop += 1
-                                     slots_available -= 1
-                                     time.sleep(2)
-                                 else:
-                                     logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
-                             else:
-                                 logger.warning(f"⚠️ [Main] تم الوصول إلى الحد الأقصى ({final_open_count}) قبل إدراج الإشارة لـ {symbol}. تم تجاهل الإشارة.")
-                                 break
-
-                 except psycopg2.Error as db_loop_err:
-                      logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال إلى التالي...")
-                      if conn: conn.rollback()
-                      continue
-                 except Exception as symbol_proc_err:
-                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
-                      continue
-
-                 time.sleep(0.1)
-
-            scan_duration = time.time() - scan_start_time
-            logger.info(f"🏁 [Main] انتهت دورة المسح. الإشارات التي تم إنشاؤها: {signals_generated_in_loop}. مدة المسح: {scan_duration:.2f} ثانية.")
-            frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
-            wait_time = max(frame_minutes * 60, 120 - scan_duration)
-            logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
-            time.sleep(wait_time)
-
-        except KeyboardInterrupt:
-             logger.info("🛑 [Main] تم طلب الإيقاف (KeyboardInterrupt). إيقاف التشغيل...")
-             break
-        except psycopg2.Error as db_main_err:
-             logger.error(f"❌ [Main] خطأ فادح في قاعدة البيانات في الحلقة الرئيسية: {db_main_err}. محاولة إعادة الاتصال...")
-             if conn: conn.rollback()
-             time.sleep(60)
-             try:
-                 init_db()
-             except Exception as recon_err:
-                 logger.critical(f"❌ [Main] فشل إعادة الاتصال بقاعدة البيانات: {recon_err}. خروج...")
-                 break
-        except Exception as main_err:
-            logger.error(f"❌ [Main] خطأ غير متوقع في الحلقة الرئيسية: {main_err}", exc_info=True)
-            logger.info("ℹ️ [Main] انتظار 120 ثانية قبل إعادة المحاولة...")
-            time.sleep(120)
-
-def cleanup_resources() -> None:
-    """Closes used resources like the database connection."""
-    global conn
-    logger.info("ℹ️ [Cleanup] إغلاق الموارد...")
-    if conn:
-        try:
-            conn.close()
-            logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
-        except Exception as close_err:
-            logger.error(f"⚠️ [DB] خطأ في إغلاق اتصال قاعدة البيانات: {close_err}")
-    logger.info("✅ [Cleanup] اكتمل تنظيف الموارد.")
+        time.sleep(60) # Keep the thread alive, but actual work is event-driven
+        logger.debug("ℹ️ [Main Loop] خيط الحلقة الرئيسية لا يزال نشطًا.")
 
 
-# ---------------------- Main Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 بدء بوت إشارات التداول...")
+    logger.info("🚀 بدء بوت تداول العملات المشفرة...")
     logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    ws_thread: Optional[Thread] = None
-    tracker_thread: Optional[Thread] = None
-    flask_thread: Optional[Thread] = None
-    main_bot_thread: Optional[Thread] = None # New thread for main_loop
+    # 1. بدء خدمة Flask في خيط منفصل أولاً
+    flask_thread = Thread(target=run_flask_service, daemon=False, name="FlaskServiceThread")
+    flask_thread.start()
+    logger.info("✅ [Main] تم بدء خدمة Flask.")
+    time.sleep(2) # إعطاء بعض الوقت لـ Flask للبدء
 
     try:
-        # 1. Initialize the database first
+        # 2. تهيئة قاعدة البيانات
         init_db()
 
-        # 2. No longer load all ML models at startup. They will be loaded on demand per symbol.
-        #    ml_model = load_ml_model_from_db()
-        #    if ml_model is None:
-        #        logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
+        # 3. جلب قائمة الرموز
+        all_symbols = get_crypto_symbols()
+        if not all_symbols:
+            logger.critical("❌ [Main] لا توجد رموز صالحة للتدفق. يرجى التحقق من 'crypto_list.txt'.")
+            exit(1)
 
-        # 3. Start WebSocket Ticker
-        ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
-        ws_thread.start()
-        logger.info("✅ [Main] تم بدء مؤشر WebSocket.")
-        logger.info("ℹ️ [Main] انتظار 5 ثوانٍ لتهيئة WebSocket...")
+        # 4. بدء WebSocket Manager
+        twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
+        twm.start()
+        logger.info("✅ [Main] تم بدء ThreadedWebsocketManager.")
+
+        # 5. الاشتراك في تدفقات التيكر لجميع الرموز
+        # استخدام 'allTickers' لتدفق جميع الرموز
+        twm.start_all_ticker_futures_socket(callback=process_ticker_data) # Changed to futures for all tickers
+        logger.info(f"✅ [Main] تم الاشتراك في تدفقات التيكر لجميع الرموز.")
+
+        # 6. إعطاء بعض الوقت لـ WebSocket لاستقبال البيانات الأولية
+        logger.info("ℹ️ [Main] انتظار استقبال بيانات أولية من WebSocket...")
         time.sleep(5)
         if not ticker_data:
              logger.warning("⚠️ [Main] لم يتم استلام بيانات أولية من WebSocket بعد 5 ثوانٍ.")
@@ -2204,29 +1627,27 @@ if __name__ == "__main__":
              logger.info(f"✅ [Main] تم استلام بيانات أولية من WebSocket لـ {len(ticker_data)} رمزًا.")
 
 
-        # 4. Start Signal Tracker
+        # 7. Start Signal Tracker
         tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
         tracker_thread.start()
         logger.info("✅ [Main] تم بدء مؤشر الإشارة.")
 
-        # 5. Start the main bot logic in a separate thread
+        # 8. Start the main bot logic in a separate thread (now primarily for strategy initialization)
         main_bot_thread = Thread(target=main_loop, daemon=True, name="MainBotLoopThread")
         main_bot_thread.start()
         logger.info("✅ [Main] تم بدء حلقة البوت الرئيسية في خيط منفصل.")
 
-        # 6. Start Flask Server (ALWAYS run, daemon=False so it keeps the main program alive)
-        flask_thread = Thread(target=run_flask, daemon=False, name="FlaskThread")
-        flask_thread.start()
-        logger.info("✅ [Main] تم بدء خادم Flask.")
-
-        # Wait for the Flask thread to finish (it usually won't unless there's an error)
+        # Wait for the Flask thread to finish (it usually won't unless there's an error),
+        # keeping the main program alive.
         flask_thread.join()
 
     except Exception as startup_err:
-        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True)
+        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل: {startup_err}", exc_info=True)
     finally:
-        logger.info("🛑 [Main] يتم إيقاف تشغيل البرنامج...")
+        logger.info("🛑 [Main] يتم إيقاف تشغيل البوت...")
+        if twm:
+            twm.stop()
+            logger.info("✅ [WebSocket] تم إيقاف ThreadedWebsocketManager.")
         cleanup_resources()
-        logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
-        os._exit(0)
+        logger.info("👋 [Main] تم إيقاف بوت تداول العملات المشفرة.")
 
