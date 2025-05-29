@@ -32,7 +32,7 @@ logger = logging.getLogger('CryptoBot')
 # ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_SECRET')
+    API_SECRET: str = config('BINANCE_API_API_SECRET')
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
@@ -522,6 +522,76 @@ def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME
     except Exception as e:
         logger.error(f"❌ [Data Volume] خطأ غير متوقع أثناء جلب الحجم لـ {symbol}: {e}", exc_info=True)
         return 0.0
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
 def generate_performance_report() -> str:
