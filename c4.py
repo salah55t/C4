@@ -32,7 +32,7 @@ logger = logging.getLogger('CryptoBot')
 # ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_API_SECRET')
+    API_SECRET: str = config('BINANCE_API_SECRET') # تم تصحيح هذا السطر
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
