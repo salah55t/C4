@@ -32,7 +32,7 @@ logger = logging.getLogger('CryptoBot')
 # ---------------------- تحميل المتغيرات البيئية ----------------------
 try:
     API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_SECRET') # تم تصحيح هذا السطر
+    API_SECRET: str = config('BINANCE_API_SECRET')
     TELEGRAM_TOKEN: str = config('TELEGRAM_BOT_TOKEN')
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
@@ -598,6 +598,7 @@ def generate_performance_report() -> str:
     """Generates a comprehensive performance report from the database in Arabic, including recent closed trades and USD profit/loss."""
     logger.info("ℹ️ [Report] إنشاء تقرير الأداء...")
     if not check_db_connection() or not conn or not cur:
+        logger.error("❌ [Report] لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات.")
         return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
     try:
         with conn.cursor() as report_cur:
@@ -1266,15 +1267,20 @@ def webhook() -> Tuple[str, int]:
 
     try:
         data = request.get_json()
-        logger.debug(f"ℹ️ [Flask] تم استلام بيانات webhook: {json.dumps(data)[:200]}...")
+        logger.info(f"✅ [Flask] تم استلام بيانات webhook. حجم البيانات: {len(json.dumps(data))} بايت.")
+        logger.debug(f"ℹ️ [Flask] بيانات webhook الكاملة: {json.dumps(data)}") # Log full payload for debugging
+
 
         if 'callback_query' in data:
             callback_query = data['callback_query']
             callback_id = callback_query['id']
             callback_data = callback_query.get('data')
             message_info = callback_query.get('message')
+
+            logger.info(f"ℹ️ [Flask] تم استلام استعلام رد اتصال (Callback Query). ID: {callback_id}, البيانات: '{callback_data}'")
+
             if not message_info or not callback_data:
-                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد الرسالة أو البيانات.")
+                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد الرسالة أو البيانات. تجاهل.")
                  try:
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
@@ -1283,7 +1289,7 @@ def webhook() -> Tuple[str, int]:
                  return "OK", 200
             chat_id_callback = message_info.get('chat', {}).get('id')
             if not chat_id_callback:
-                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد معرف الدردشة.")
+                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (ID: {callback_id}) يفتقد معرف الدردشة. تجاهل.")
                  try:
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
@@ -1297,17 +1303,23 @@ def webhook() -> Tuple[str, int]:
             user_id = user_info.get('id')
             username = user_info.get('username', 'N/A')
 
-            logger.info(f"ℹ️ [Flask] تم استلام استعلام رد الاتصال: البيانات='{callback_data}', المستخدم={username}({user_id}), الدردشة={chat_id_callback}")
+            logger.info(f"ℹ️ [Flask] معالجة استعلام رد الاتصال: البيانات='{callback_data}', المستخدم={username}({user_id}), الدردشة={chat_id_callback}")
 
             try:
+                # Always acknowledge the callback query to remove the loading animation from the button
                 ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                 requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
+                logger.debug(f"✅ [Flask] تم تأكيد استعلام رد الاتصال {callback_id}.")
             except Exception as ack_err:
                  logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال {callback_id}: {ack_err}")
 
             if callback_data == "get_report":
-                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, generate_performance_report(), parse_mode='Markdown'))
+                logger.info(f"ℹ️ [Flask] تم استلام طلب 'get_report' من الدردشة {chat_id_callback}. جاري إنشاء التقرير...")
+                report_content = generate_performance_report()
+                logger.info(f"✅ [Flask] تم إنشاء التقرير. طول التقرير: {len(report_content)} حرف.")
+                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, report_content, parse_mode='Markdown'))
                 report_thread.start()
+                logger.info(f"✅ [Flask] تم بدء خيط إرسال التقرير للدردشة {chat_id_callback}.")
             else:
                 logger.warning(f"⚠️ [Flask] تم استلام بيانات رد اتصال غير معالجة: '{callback_data}'")
 
