@@ -1253,7 +1253,7 @@ def favicon() -> Response:
     """Handles favicon request to avoid 404 errors in logs."""
     return Response(status=204)
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/Webhook', methods=['POST'])
 def webhook() -> Tuple[str, int]:
     """Handles incoming requests from Telegram (like button presses and commands)."""
     # Only process webhook if WEBHOOK_URL is configured
