@@ -64,7 +64,7 @@ VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط �
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
-MIN_VOLUME_15M_USDT: float = 50000.0 # Essential filter
+MIN_VOLUME_15M_USDT: float = 250000.0 # Essential filter
 
 ENTRY_ATR_PERIOD: int = 10 # Still needed for target calculation
 ENTRY_ATR_MULTIPLIER: float = 1.5 # Still needed for target calculation
