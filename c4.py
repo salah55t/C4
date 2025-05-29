@@ -106,7 +106,7 @@ def get_fear_greed_index() -> str:
         "Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد",
         "Greed": "جشع", "Extreme Greed": "جشع شديد",
     }
-    url = "https://api.alternative.me/fng/"
+    url = "https://https://api.alternative.me/fng/"
     logger.debug(f"ℹ️ [Indicators] جلب مؤشر الخوف والجشع من {url}...")
     try:
         response = requests.get(url, timeout=10)
