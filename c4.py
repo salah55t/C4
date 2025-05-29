@@ -50,7 +50,7 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
 SIGNAL_TRACKING_TIMEFRAME: str = '5m'
@@ -514,6 +514,3418 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
          return raw_symbols
 
 
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+# ---------------------- Reading and Validating Symbols List ----------------------
+def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads the list of currency symbols from a text file, then validates them
+    as valid USDT pairs available for Spot trading on Binance.
+    """
+    raw_symbols: List[str] = []
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...")
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            file_path = os.path.abspath(filename)
+            if not os.path.exists(file_path):
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكربت أو الدليل الحالي.")
+                 return []
+            else:
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_symbols = [f"{line.strip().upper().replace('USDT', '')}USDT"
+                           for line in f if line.strip() and not line.startswith('#')]
+        raw_symbols = sorted(list(set(raw_symbols)))
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.")
+
+    except FileNotFoundError:
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.")
+         return []
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True)
+        return []
+
+    if not raw_symbols:
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.")
+         return []
+
+    if not client:
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return raw_symbols
+
+    try:
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...")
+        exchange_info = client.get_exchange_info()
+        valid_trading_usdt_symbols = {
+            s['symbol'] for s in exchange_info['symbols']
+            if s.get('quoteAsset') == 'USDT' and
+               s.get('status') == 'TRADING' and
+               s.get('isSpotTradingAllowed') is True
+        }
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} زوج تداول USDT صالح في Spot على Binance.")
+        validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
+
+        removed_count = len(raw_symbols) - len(validated_symbols)
+        if removed_count > 0:
+            removed_symbols = set(raw_symbols) - set(validated_symbols)
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}")
+
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.")
+        return validated_symbols
+
+    except (BinanceAPIException, BinanceRequestException) as binance_err:
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}")
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+    except Exception as api_err:
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True)
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون التحقق من Binance.")
+         return raw_symbols
+
+
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """Fetches historical candlestick data from Binance."""
+    if not client:
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.")
+        return None
+    try:
+        start_dt = datetime.utcnow() - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} منذ {start_str} (حد 1000 شمعة)...")
+
+        klines = client.get_historical_klines(symbol, interval, start_str, limit=1000)
+
+        if not klines:
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
+            return None
+
+        df = pd.DataFrame(klines, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df[numeric_cols]
+        initial_len = len(df)
+        df.dropna(subset=numeric_cols, inplace=True)
+
+        if len(df) < initial_len:
+            logger.debug(f"ℹ️ [Data] {symbol}: تم إسقاط {initial_len - len(df)} صفًا بسبب قيم NaN في بيانات OHLCV.")
+
+        if df.empty:
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.")
+            return None
+
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.")
+        return df
+
+    except BinanceAPIException as api_err:
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}")
+         return None
+    except BinanceRequestException as req_err:
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}")
+         return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def get_btc_trend_4h() -> str:
+    """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين على 4 ساعات...")
+    try:
+        df = fetch_historical_data("BTCUSDT", interval=Client.KLINE_INTERVAL_4HOUR, days=10)
+        if df is None or df.empty or len(df) < 50 + 1:
+            logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية لحساب الاتجاه.")
+            return "N/A (بيانات غير كافية)"
+
+        df['close'] = pd.to_numeric(df['close'], errors='coerce')
+        df.dropna(subset=['close'], inplace=True)
+        if len(df) < 50:
+             logger.warning("⚠️ [Indicators] بيانات BTC/USDT 4H غير كافية بعد إزالة قيم NaN.")
+             return "N/A (بيانات غير كافية)"
+
+        ema20 = calculate_ema(df['close'], 20).iloc[-1]
+        ema50 = calculate_ema(df['close'], 50).iloc[-1]
+        current_close = df['close'].iloc[-1]
+
+        if pd.isna(ema20) or pd.isna(ema50) or pd.isna(current_close):
+            logger.warning("⚠️ [Indicators] قيم EMA أو السعر الحالي للبيتكوين هي NaN.")
+            return "N/A (خطأ في الحساب)"
+
+        diff_ema20_pct = abs(current_close - ema20) / current_close if current_close > 0 else 0
+
+        if current_close > ema20 > ema50:
+            trend = "صعود 📈"
+        elif current_close < ema20 < ema50:
+            trend = "هبوط 📉"
+        elif diff_ema20_pct < 0.005:
+            trend = "استقرار 🔄"
+        else:
+            trend = "تذبذب 🔀"
+
+        logger.debug(f"✅ [Indicators] اتجاه البيتكوين 4H: {trend}")
+        return trend
+    except Exception as e:
+        logger.error(f"❌ [Indicators] خطأ في حساب اتجاه البيتكوين على 4 ساعات: {e}", exc_info=True)
+        return "N/A (خطأ)"
+
+# ---------------------- Database Connection Setup ----------------------
+def init_db(retries: int = 5, delay: int = 5) -> None:
+    """Initializes database connection and creates tables if they don't exist."""
+    global conn, cur
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...")
+    for attempt in range(retries):
+        try:
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...")
+            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            conn.autocommit = False
+            cur = conn.cursor()
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+
+            # --- Create or update signals table (Modified schema) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    r2_score DOUBLE PRECISION,
+                    volume_15m DOUBLE PRECISION,
+                    achieved_target BOOLEAN DEFAULT FALSE,
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    sent_at TIMESTAMP DEFAULT NOW(),
+                    entry_time TIMESTAMP DEFAULT NOW(),
+                    time_to_target INTERVAL,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
+
+            # --- Create ml_models table (NEW) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY,
+                    model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL,
+                    trained_at TIMESTAMP DEFAULT NOW(),
+                    metrics JSONB
+                );""")
+            conn.commit()
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.")
+
+            # --- Create market_dominance table (if it doesn't exist) ---
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                );
+            """)
+            conn.commit()
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.")
+
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+            return
+
+        except OperationalError as op_err:
+            logger.error(f"❌ [DB] خطأ تشغيلي في الاتصال (المحاولة {attempt + 1}): {op_err}")
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise op_err
+            time.sleep(delay)
+        except Exception as e:
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True)
+            if conn: conn.rollback()
+            if attempt == retries - 1:
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
+                 raise e
+            time.sleep(delay)
+
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.")
+    exit(1)
+
+
+def check_db_connection() -> bool:
+    """Checks database connection status and re-initializes if necessary."""
+    global conn, cur
+    try:
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] الاتصال مغلق أو غير موجود. إعادة التهيئة...")
+            init_db()
+            return True
+        else:
+             with conn.cursor() as check_cur:
+                  check_cur.execute("SELECT 1;")
+                  check_cur.fetchone()
+             return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] فقدان الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...")
+        try:
+             init_db()
+             return True
+        except Exception as recon_err:
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد فقدان الاتصال: {recon_err}")
+            return False
+    except Exception as e:
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء التحقق من الاتصال: {e}", exc_info=True)
+        try:
+            init_db()
+            return True
+        except Exception as recon_err:
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}")
+             return False
+
+def load_ml_model_from_db(symbol: str) -> Optional[Any]:
+    """Loads the latest trained ML model for a specific symbol from the database."""
+    global ml_models
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+
+    if model_name in ml_models:
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.")
+        return ml_models[model_name]
+
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+        return None
+
+    try:
+        with conn.cursor() as db_cur:
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            result = db_cur.fetchone()
+            if result and result['model_data']:
+                model = pickle.loads(result['model_data'])
+                ml_models[model_name] = model # Store in global dictionary
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.")
+                return model
+            else:
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML باسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.")
+                return None
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True)
+        return None
+    except pickle.UnpicklingError as unpickle_err:
+        logger.error(f"❌ [ML Model] خطأ في فك تسلسل نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True)
+        return None
+
+
+def convert_np_values(obj: Any) -> Any:
+    """Converts NumPy data types to native Python types for JSON and DB compatibility."""
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_np_values(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.int_)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64)):
+        return float(obj)
+    elif isinstance(obj, (np.bool_)):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
 # ---------------------- WebSocket Management for Ticker Prices ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     """Handles incoming WebSocket messages for mini-ticker prices."""
@@ -835,7 +4247,7 @@ class ScalpingTradingStrategy:
         
         # --- Volume Check (Essential filter) ---
         volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
-        if volume_recent < MIN_VOLUME_15M_USdt:
+        if volume_recent < MIN_VOLUME_15M_USDT: # Corrected typo here
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
             signal_details['Volume_Check'] = f'فشل: سيولة غير كافية ({volume_recent:,.0f} USDT)'
             return None
@@ -1476,128 +4888,4 @@ def main_loop() -> None:
 
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
-                        continue
-
-                    potential_signal = strategy.generate_buy_signal(df_indicators)
-
-                    if potential_signal:
-                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي والإدراج...")
-                        with conn.cursor() as final_check_cur:
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
-                             final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
-
-                             if final_open_count < MAX_OPEN_TRADES:
-                                 if insert_signal_into_db(potential_signal):
-                                     send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                                     signals_generated_in_loop += 1
-                                     slots_available -= 1
-                                     time.sleep(2)
-                                 else:
-                                     logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
-                             else:
-                                 logger.warning(f"⚠️ [Main] تم الوصول إلى الحد الأقصى ({final_open_count}) قبل إدراج الإشارة لـ {symbol}. تم تجاهل الإشارة.")
-                                 break
-
-                 except psycopg2.Error as db_loop_err:
-                      logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال إلى التالي...")
-                      if conn: conn.rollback()
-                      continue
-                 except Exception as symbol_proc_err:
-                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True)
-                      continue
-
-                 time.sleep(0.1)
-
-            scan_duration = time.time() - scan_start_time
-            logger.info(f"🏁 [Main] انتهت دورة المسح. الإشارات التي تم إنشاؤها: {signals_generated_in_loop}. مدة المسح: {scan_duration:.2f} ثانية.")
-            frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
-            wait_time = max(frame_minutes * 60, 120 - scan_duration)
-            logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
-            time.sleep(wait_time)
-
-        except KeyboardInterrupt:
-             logger.info("🛑 [Main] تم طلب الإيقاف (KeyboardInterrupt). إيقاف التشغيل...")
-             break
-        except psycopg2.Error as db_main_err:
-             logger.error(f"❌ [Main] خطأ فادح في قاعدة البيانات في الحلقة الرئيسية: {db_main_err}. محاولة إعادة الاتصال...")
-             if conn: conn.rollback()
-             time.sleep(60)
-             try:
-                 init_db()
-             except Exception as recon_err:
-                 logger.critical(f"❌ [Main] فشل إعادة الاتصال بقاعدة البيانات: {recon_err}. خروج...")
-                 break
-        except Exception as main_err:
-            logger.error(f"❌ [Main] خطأ غير متوقع في الحلقة الرئيسية: {main_err}", exc_info=True)
-            logger.info("ℹ️ [Main] انتظار 120 ثانية قبل إعادة المحاولة...")
-            time.sleep(120)
-
-def cleanup_resources() -> None:
-    """Closes used resources like the database connection."""
-    global conn
-    logger.info("ℹ️ [Cleanup] إغلاق الموارد...")
-    if conn:
-        try:
-            conn.close()
-            logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
-        except Exception as close_err:
-            logger.error(f"⚠️ [DB] خطأ في إغلاق اتصال قاعدة البيانات: {close_err}")
-    logger.info("✅ [Cleanup] اكتمل تنظيف الموارد.")
-
-
-# ---------------------- Main Entry Point ----------------------
-if __name__ == "__main__":
-    logger.info("🚀 بدء بوت إشارات التداول...")
-    logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    ws_thread: Optional[Thread] = None
-    tracker_thread: Optional[Thread] = None
-    flask_thread: Optional[Thread] = None
-    main_bot_thread: Optional[Thread] = None # New thread for main_loop
-
-    try:
-        # 1. Initialize the database first
-        init_db()
-
-        # 2. No longer load all ML models at startup. They will be loaded on demand per symbol.
-        #    ml_model = load_ml_model_from_db()
-        #    if ml_model is None:
-        #        logger.warning("⚠️ [Main] لم يتم تحميل نموذج تعلم الآلة. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
-
-        # 3. Start WebSocket Ticker
-        ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
-        ws_thread.start()
-        logger.info("✅ [Main] تم بدء مؤشر WebSocket.")
-        logger.info("ℹ️ [Main] انتظار 5 ثوانٍ لتهيئة WebSocket...")
-        time.sleep(5)
-        if not ticker_data:
-             logger.warning("⚠️ [Main] لم يتم استلام بيانات أولية من WebSocket بعد 5 ثوانٍ.")
-        else:
-             logger.info(f"✅ [Main] تم استلام بيانات أولية من WebSocket لـ {len(ticker_data)} رمزًا.")
-
-
-        # 4. Start Signal Tracker
-        tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
-        tracker_thread.start()
-        logger.info("✅ [Main] تم بدء مؤشر الإشارة.")
-
-        # 5. Start the main bot logic in a separate thread
-        main_bot_thread = Thread(target=main_loop, daemon=True, name="MainBotLoopThread")
-        main_bot_thread.start()
-        logger.info("✅ [Main] تم بدء حلقة البوت الرئيسية في خيط منفصل.")
-
-        # 6. Start Flask Server (ALWAYS run, daemon=False so it keeps the main program alive)
-        flask_thread = Thread(target=run_flask, daemon=False, name="FlaskThread")
-        flask_thread.start()
-        logger.info("✅ [Main] تم بدء خادم Flask.")
-
-        # Wait for the Flask thread to finish (it usually won't unless there's an error)
-        flask_thread.join()
-
-    except Exception as startup_err:
-        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True)
-    finally:
-        logger.info("🛑 [Main] يتم إيقاف تشغيل البرنامج...")
-        cleanup_resources()
-        logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
-        os._exit(0)
+                        conti
