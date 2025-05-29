@@ -50,43 +50,24 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
 SIGNAL_TRACKING_TIMEFRAME: str = '5m'
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
-# Indicator Parameters
-RSI_PERIOD: int = 9
-RSI_OVERSOLD: int = 30
-RSI_OVERBOUGHT: int = 70
-EMA_SHORT_PERIOD: int = 8
-EMA_LONG_PERIOD: int = 21
-VWMA_PERIOD: int = 15
-SWING_ORDER: int = 3
-FIB_LEVELS_TO_CHECK: List[float] = [0.382, 0.5, 0.618]
-FIB_TOLERANCE: float = 0.005
-LOOKBACK_FOR_SWINGS: int = 50
-ENTRY_ATR_PERIOD: int = 10
-ENTRY_ATR_MULTIPLIER: float = 1.5
-BOLLINGER_WINDOW: int = 20
-BOLLINGER_STD_DEV: int = 2
-MACD_FAST: int = 9
-MACD_SLOW: int = 18
-MACD_SIGNAL: int = 9
-ADX_PERIOD: int = 10
-SUPERTREND_PERIOD: int = 10
-SUPERTREND_MULTIPLIER: float = 2.5
+# Indicator Parameters (Only those needed for ML features or essential filters)
+RSI_PERIOD: int = 9 # Still needed for RSI Momentum
+RSI_OVERSOLD: int = 30 # Not directly used for signal, but good to keep for context if needed later
+RSI_OVERBOUGHT: int = 70 # Not directly used for signal, but good to keep for context if needed later
 VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
-MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 250000.0
+MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
+MIN_VOLUME_15M_USDT: float = 250000.0 # Essential filter
 
-RECENT_EMA_CROSS_LOOKBACK: int = 2
-MIN_ADX_TREND_STRENGTH: int = 20
-MACD_HIST_INCREASE_CANDLES: int = 3
-OBV_INCREASE_CANDLES: int = 3
+ENTRY_ATR_PERIOD: int = 10 # Still needed for target calculation
+ENTRY_ATR_MULTIPLIER: float = 1.5 # Still needed for target calculation
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -204,23 +185,53 @@ def calculate_ema(series: pd.Series, span: int) -> pd.Series:
         return pd.Series(index=series.index if series is not None else None, dtype=float)
     return series.ewm(span=span, adjust=False).mean()
 
-def calculate_vwma(df: pd.DataFrame, period: int) -> pd.Series:
-    """Calculates Volume Weighted Moving Average (VWMA)."""
-    df_calc = df.copy()
-    required_cols = ['close', 'volume']
-    if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator VWMA] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
-        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
-    if len(df_calc) < period:
-        logger.warning(f"⚠️ [Indicator VWMA] بيانات غير كافية ({len(df_calc)} < {period}) لحساب VWMA.")
-        return pd.Series(index=df_calc.index if df_calc is not None else None, dtype=float)
+def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
+    df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
 
-    df_calc['price_volume'] = df_calc['close'] * df_calc['volume']
-    rolling_price_volume_sum = df_calc['price_volume'].rolling(window=period, min_periods=period).sum()
-    rolling_volume_sum = df_calc['volume'].rolling(window=period, min_periods=period).sum()
-    vwma = rolling_price_volume_sum / rolling_volume_sum.replace(0, np.nan)
-    df_calc.drop(columns=['price_volume'], inplace=True, errors='ignore')
-    return vwma
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
+    return df
+
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
 
 def get_btc_trend_4h() -> str:
     """Calculates Bitcoin trend on 4-hour timeframe using EMA20 and EMA50."""
@@ -555,466 +566,11 @@ def run_ticker_socket_manager() -> None:
 
         time.sleep(15)
 
-# ---------------------- Technical Indicator Functions ----------------------
-
-def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
-    """Calculates Relative Strength Index (RSI)."""
-    df = df.copy()
-    if 'close' not in df.columns or df['close'].isnull().all():
-        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
-        df['rsi'] = np.nan
-        return df
-    if len(df) < period:
-        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
-        df['rsi'] = np.nan
-        return df
-
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
-    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-
-    rsi_series = 100 - (100 / (1 + rs))
-    df['rsi'] = rsi_series.ffill().fillna(50)
-
-    return df
-
-def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
-    """Calculates Average True Range (ATR)."""
-    df = df.copy()
-    required_cols = ['high', 'low', 'close']
-    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
-        df['atr'] = np.nan
-        return df
-    if len(df) < period + 1:
-        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
-        df['atr'] = np.nan
-        return df
-
-    high_low = df['high'] - df['low']
-    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
-    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
-
-    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
-
-    df['atr'] = tr.ewm(span=period, adjust=False).mean()
-    return df
-
-
-def calculate_bollinger_bands(df: pd.DataFrame, window: int = BOLLINGER_WINDOW, num_std: int = BOLLINGER_STD_DEV) -> pd.DataFrame:
-    """Calculates Bollinger Bands."""
-    df = df.copy()
-    if 'close' not in df.columns or df['close'].isnull().all():
-        logger.warning("⚠️ [Indicator BB] عمود 'close' مفقود أو فارغ.")
-        df['bb_middle'] = np.nan
-        df['bb_upper'] = np.nan
-        df['bb_lower'] = np.nan
-        return df
-    if len(df) < window:
-         logger.warning(f"⚠️ [Indicator BB] بيانات غير كافية ({len(df)} < {window}) لحساب BB.)")
-         df['bb_middle'] = np.nan
-         df['bb_upper'] = np.nan
-         df['bb_lower'] = np.nan
-         return df
-
-    df['bb_middle'] = df['close'].rolling(window=window).mean()
-    df['bb_std'] = df['close'].rolling(window=window).std()
-    df['bb_upper'] = df['bb_middle'] + num_std * df['bb_std']
-    df['bb_lower'] = df['bb_middle'] - num_std * df['bb_std']
-    return df
-
-
-def calculate_macd(df: pd.DataFrame, fast: int = MACD_FAST, slow: int = MACD_SLOW, signal: int = MACD_SIGNAL) -> pd.DataFrame:
-    """Calculates MACD, Signal Line, and Histogram."""
-    df = df.copy()
-    if 'close' not in df.columns or df['close'].isnull().all():
-        logger.warning("⚠️ [Indicator MACD] عمود 'close' مفقود أو فارغ.")
-        df['macd'] = np.nan
-        df['macd_signal'] = np.nan
-        df['macd_hist'] = np.nan
-        return df
-    min_len = max(fast, slow, signal)
-    if len(df) < min_len:
-        logger.warning(f"⚠️ [Indicator MACD] بيانات غير كافية ({len(df)} < {min_len}) لحساب MACD.")
-        df['macd'] = np.nan
-        df['macd_signal'] = np.nan
-        df['macd_hist'] = np.nan
-        return df
-
-    ema_fast = calculate_ema(df['close'], fast)
-    ema_slow = calculate_ema(df['close'], slow)
-    df['macd'] = ema_fast - ema_slow
-    df['macd_signal'] = calculate_ema(df['macd'], signal)
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    return df
-
-
-def calculate_adx(df: pd.DataFrame, period: int = ADX_PERIOD) -> pd.DataFrame:
-    """Calculates ADX, DI+ and DI-."""
-    df_calc = df.copy()
-    required_cols = ['high', 'low', 'close']
-    if not all(col in df_calc.columns for col in required_cols) or df_calc[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator ADX] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
-        df_calc['adx'] = np.nan
-        df_calc['di_plus'] = np.nan
-        df_calc['di_minus'] = np.nan
-        return df_calc
-    if len(df_calc) < period * 2:
-        logger.warning(f"⚠️ [Indicator ADX] بيانات غير كافية ({len(df)} < {period * 2}) لحساب ADX.")
-        df_calc['adx'] = np.nan
-        df_calc['di_plus'] = np.nan
-        df_calc['di_minus'] = np.nan
-        return df_calc
-
-    df_calc['high-low'] = df_calc['high'] - df_calc['low']
-    df_calc['high-prev_close'] = abs(df_calc['high'] - df_calc['close'].shift(1))
-    df_calc['low-prev_close'] = abs(df_calc['low'] - df_calc['close'].shift(1))
-    df_calc['tr'] = df_calc[['high-low', 'high-prev_close', 'low-prev_close']].max(axis=1, skipna=False)
-
-    df_calc['up_move'] = df_calc['high'] - df_calc['high'].shift(1)
-    df_calc['down_move'] = df_calc['low'].shift(1) - df_calc['low']
-    df_calc['+dm'] = np.where((df_calc['up_move'] > df_calc['down_move']) & (df_calc['up_move'] > 0), df_calc['up_move'], 0)
-    df_calc['-dm'] = np.where((df_calc['down_move'] > df_calc['up_move']) & (df_calc['down_move'] > 0), df_calc['down_move'], 0)
-
-    alpha = 1 / period
-    df_calc['tr_smooth'] = df_calc['tr'].ewm(alpha=alpha, adjust=False).mean()
-    df_calc['+dm_smooth'] = df_calc['+dm'].ewm(alpha=alpha, adjust=False).mean()
-    df_calc['di_minus_smooth'] = df_calc['-dm'].ewm(alpha=alpha, adjust=False).mean()
-
-    df_calc['di_plus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['+dm_smooth'] / df_calc['tr_smooth']), 0)
-    df_calc['di_minus'] = np.where(df_calc['tr_smooth'] > 0, 100 * (df_calc['di_minus_smooth'] / df_calc['tr_smooth']), 0)
-
-    di_sum = df_calc['di_plus'] + df_calc['di_minus']
-    df_calc['dx'] = np.where(di_sum > 0, 100 * abs(df_calc['di_plus'] - df_calc['di_minus']) / di_sum, 0)
-
-    df_calc['adx'] = df_calc['dx'].ewm(alpha=alpha, adjust=False).mean()
-
-    return df_calc[['adx', 'di_plus', 'di_minus']]
-
-
-def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates Volume Weighted Average Price (VWAP) - Resets daily."""
-    df = df.copy()
-    required_cols = ['high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator VWAP] أعمدة 'high', 'low', 'close' أو 'volume' مفقودة أو فارغة.")
-        df['vwap'] = np.nan
-        return df
-    if not isinstance(df.index, pd.DatetimeIndex):
-        try:
-            df.index = pd.to_datetime(df.index)
-            logger.warning("⚠️ [Indicator VWAP] تم تحويل الفهرس إلى DatetimeIndex.")
-        except Exception:
-            logger.error("❌ [Indicator VWAP] فشل تحويل الفهرس إلى DatetimeIndex، لا يمكن حساب VWAP اليومي.")
-            df['vwap'] = np.nan
-            return df
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert('UTC')
-        logger.debug("ℹ️ [Indicator VWAP] تم تحويل الفهرس إلى UTC لإعادة الضبط اليومي.")
-    else:
-        df.index = df.index.tz_localize('UTC')
-        logger.debug("ℹ️ [Indicator VWAP] تم توطين الفهرس إلى UTC لإعادة الضبط اليومي.")
-
-
-    df['date'] = df.index.date
-    df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-    df['tp_vol'] = df['typical_price'] * df['volume']
-
-    try:
-        df['cum_tp_vol'] = df.groupby('date')['tp_vol'].cumsum()
-        df['cum_volume'] = df.groupby('date')['volume'].cumsum()
-    except KeyError as e:
-        logger.error(f"❌ [Indicator VWAP] خطأ في تجميع البيانات حسب التاريخ: {e}. قد يكون الفهرس غير صحيح.")
-        df['vwap'] = np.nan
-        df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
-        return df
-    except Exception as e:
-         logger.error(f"❌ [Indicator VWAP] خطأ غير متوقع في حساب VWAP: {e}", exc_info=True)
-         df['vwap'] = np.nan
-         df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
-         return df
-
-
-    df['vwap'] = np.where(df['cum_volume'] > 0, df['cum_tp_vol'] / df['cum_volume'], np.nan)
-
-    df['vwap'] = df['vwap'].bfill()
-
-    df.drop(columns=['date', 'typical_price', 'tp_vol', 'cum_tp_vol', 'cum_volume'], inplace=True, errors='ignore')
-    return df
-
-
-def calculate_obv(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates On-Balance Volume (OBV)."""
-    df = df.copy()
-    required_cols = ['close', 'volume']
-    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator OBV] أعمدة 'close' أو 'volume' مفقودة أو فارغة.")
-        df['obv'] = np.nan
-        return df
-    if not pd.api.types.is_numeric_dtype(df['close']) or not pd.api.types.is_numeric_dtype(df['volume']):
-        logger.warning("⚠️ [Indicator OBV] أعمدة 'close' أو 'volume' ليست رقمية.")
-        df['obv'] = np.nan
-        return df
-
-    obv = np.zeros(len(df), dtype=np.float64)
-    close = df['close'].values
-    volume = df['volume'].values
-
-    close_diff = df['close'].diff().values
-
-    for i in range(1, len(df)):
-        if np.isnan(close[i]) or np.isnan(volume[i]) or np.isnan(close_diff[i]):
-            obv[i] = obv[i-1]
-            continue
-
-        if close_diff[i] > 0:
-            obv[i] = obv[i-1] + volume[i]
-        elif close_diff[i] < 0:
-             obv[i] = obv[i-1] - volume[i]
-        else:
-             obv[i] = obv[i-1]
-
-    df['obv'] = obv
-    return df
-
-
-def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTREND_PERIOD, multiplier: float = SUPERTREND_MULTIPLIER) -> pd.DataFrame:
-    """Calculates the SuperTrend indicator."""
-    df_st = df.copy()
-    required_cols = ['high', 'low', 'close']
-    if not all(col in df_st.columns for col in required_cols) or df_st[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator SuperTrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
-        df_st['supertrend'] = np.nan
-        df_st['supertrend_trend'] = 0
-        return df_st
-
-    df_st = calculate_atr_indicator(df_st, period=SUPERTREND_PERIOD)
-
-
-    if 'atr' not in df_st.columns or df_st['atr'].isnull().all():
-         logger.warning("⚠️ [Indicator SuperTrend] لا يمكن حساب SuperTrend بسبب قيم ATR غير صالحة أو مفقودة.")
-         df_st['supertrend'] = np.nan
-         df_st['supertrend_trend'] = 0
-         return df_st
-    if len(df_st) < SUPERTREND_PERIOD:
-        logger.warning(f"⚠️ [Indicator SuperTrend] بيانات غير كافية ({len(df_st)} < {SUPERTREND_PERIOD}) لحساب SuperTrend.")
-        df_st['supertrend'] = np.nan
-        df_st['supertrend_trend'] = 0
-        return df_st
-
-    hl2 = (df_st['high'] + df_st['low']) / 2
-    df_st['basic_ub'] = hl2 + multiplier * df_st['atr']
-    df_st['basic_lb'] = hl2 - multiplier * df_st['atr']
-
-    df_st['final_ub'] = 0.0
-    df_st['final_lb'] = 0.0
-    df_st['supertrend'] = np.nan
-    df_st['supertrend_trend'] = 0
-
-    close = df_st['close'].values
-    basic_ub = df_st['basic_ub'].values
-    basic_lb = df_st['basic_lb'].values
-    final_ub = df_st['final_ub'].values
-    final_lb = df_st['final_lb'].values
-    st = df_st['supertrend'].values
-    st_trend = df_st['supertrend_trend'].values
-
-    for i in range(1, len(df_st)):
-        if pd.isna(basic_ub[i]) or pd.isna(basic_lb[i]) or pd.isna(close[i]):
-            final_ub[i] = final_ub[i-1]
-            final_lb[i] = final_lb[i-1]
-            st[i] = st[i-1]
-            st_trend[i] = st_trend[i-1]
-            continue
-
-        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-
-        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-
-        if st_trend[i-1] == -1:
-            if close[i] <= final_ub[i]:
-                st[i] = final_ub[i]
-                st_trend[i] = -1
-            else:
-                st[i] = final_lb[i]
-                st_trend[i] = 1
-        elif st_trend[i-1] == 1:
-            if close[i] >= final_lb[i]:
-                st[i] = final_lb[i]
-                st_trend[i] = 1
-            else:
-                st[i] = final_ub[i]
-                st_trend[i] = -1
-        else:
-             if close[i] > final_ub[i]:
-                 st[i] = final_lb[i]
-                 st_trend[i] = 1
-             elif close[i] < final_ub[i]:
-                  st[i] = final_ub[i]
-                  st_trend[i] = -1
-             else:
-                  st[i] = np.nan
-                  st_trend[i] = 0
-
-
-    df_st['final_ub'] = final_ub
-    df_st['final_lb'] = final_lb
-    df_st['supertrend'] = st
-    df_st['supertrend_trend'] = st_trend
-
-    df_st.drop(columns=['basic_ub', 'basic_lb', 'final_ub', 'final_lb'], inplace=True, errors='ignore')
-
-    return df_st
-
-
-# ---------------------- Candlestick Patterns ----------------------
-
-def is_hammer(row: pd.Series) -> int:
-    """Checks for Hammer pattern (bullish signal)."""
-    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
-    body = abs(c - o)
-    candle_range = h - l
-    if candle_range == 0: return 0
-    lower_shadow = min(o, c) - l
-    upper_shadow = h - max(o, c)
-    is_small_body = body < (candle_range * 0.35)
-    is_long_lower_shadow = lower_shadow >= 1.8 * body if body > 0 else lower_shadow > candle_range * 0.6
-    is_small_upper_shadow = upper_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
-    return 100 if is_small_body and is_long_lower_shadow and is_small_upper_shadow else 0
-
-def is_shooting_star(row: pd.Series) -> int:
-    """Checks for Shooting Star pattern (bearish signal)."""
-    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
-    body = abs(c - o)
-    candle_range = h - l
-    if candle_range == 0: return 0
-    lower_shadow = min(o, c) - l
-    upper_shadow = h - max(o, c)
-    is_small_body = body < (candle_range * 0.35)
-    is_long_upper_shadow = upper_shadow >= 1.8 * body if body > 0 else upper_shadow > candle_range * 0.6
-    is_small_lower_shadow = lower_shadow <= body * 0.6 if body > 0 else upper_shadow < candle_range * 0.15
-    return -100 if is_small_body and is_long_upper_shadow and is_small_lower_shadow else 0
-
-def is_doji(row: pd.Series) -> int:
-    """Checks for Doji pattern (uncertainty)."""
-    o, h, l, c = row.get('open'), row.get('high'), row.get('low'), row.get('close')
-    if pd.isna([o, h, l, c]).any(): return 0
-    candle_range = h - l
-    if candle_range == 0: return 0
-    return 100 if abs(c - o) <= (candle_range * 0.1) else 0
-
-def compute_engulfing(df: pd.DataFrame, idx: int) -> int:
-    """Checks for Bullish or Bearish Engulfing pattern."""
-    if idx == 0: return 0
-    prev = df.iloc[idx - 1]
-    curr = df.iloc[idx]
-    if pd.isna([prev['close'], prev['open'], curr['close'], curr['open']]).any():
-        return 0
-    if abs(prev['close'] - prev['open']) < (prev['high'] - prev['low']) * 0.1:
-        return 0
-
-    is_bullish = (prev['close'] < prev['open'] and curr['close'] > curr['open'] and
-                  curr['open'] <= prev['close'] and curr['close'] >= prev['open'])
-    is_bearish = (prev['close'] > prev['open'] and curr['close'] < curr['open'] and
-                  curr['open'] >= prev['close'] and curr['close'] <= prev['open'])
-
-    if is_bullish: return 100
-    if is_bearish: return -100
-    return 0
-
-def detect_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """Adds candlestick pattern signals to the DataFrame."""
-    df = df.copy()
-    logger.debug("ℹ️ [Indicators] كشف أنماط الشموع...")
-    df['Hammer'] = df.apply(is_hammer, axis=1)
-    df['ShootingStar'] = df.apply(is_shooting_star, axis=1)
-    df['Doji'] = df.apply(is_doji, axis=1)
-    engulfing_values = [compute_engulfing(df, i) for i in range(len(df))]
-    df['Engulfing'] = engulfing_values
-    df['BullishCandleSignal'] = df.apply(lambda row: 1 if (row['Hammer'] == 100 or row['Engulfing'] == 100) else 0, axis=1)
-    df['BearishCandleSignal'] = df.apply(lambda row: 1 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
-    logger.debug("✅ [Indicators] تم كشف أنماط الشموع.")
-    return df
-
-# ---------------------- Other Helper Functions (Elliott, Swings, Volume) ----------------------
-def detect_swings(prices: np.ndarray, order: int = SWING_ORDER) -> Tuple[List[Tuple[int, float]], List[Tuple[int, float]]]:
-    """Detects swing points (peaks and troughs) in a time series (numpy array)."""
-    n = len(prices)
-    if n < 2 * order + 1: return [], []
-
-    maxima_indices = []
-    minima_indices = []
-
-    for i in range(order, n - order):
-        window = prices[i - order : i + order + 1]
-        center_val = prices[i]
-
-        if np.isnan(window).any(): continue
-
-        is_max = np.all(center_val >= window)
-        is_min = np.all(center_val <= window)
-        is_unique_max = is_max and (np.sum(window == center_val) == 1)
-        is_unique_min = is_min and (np.sum(window == center_val) == 1)
-
-        if is_unique_max:
-            if not maxima_indices or i > maxima_indices[-1] + order:
-                 maxima_indices.append(i)
-        elif is_unique_min:
-            if not minima_indices or i > minima_indices[-1] + order:
-                minima_indices.append(i)
-
-    maxima = [(idx, prices[idx]) for idx in maxima_indices]
-    minima = [(idx, prices[idx]) for idx in minima_indices]
-    return maxima, minima
-
-def detect_elliott_waves(df: pd.DataFrame, order: int = SWING_ORDER) -> List[Dict[str, Any]]:
-    """Simple attempt to identify Elliott Waves based on MACD histogram swings."""
-    if 'macd_hist' not in df.columns or df['macd_hist'].isnull().all():
-        logger.warning("⚠️ [Elliott] عمود 'macd_hist' مفقود أو فارغ لحساب موجات إليوت.")
-        return []
-
-    macd_values = df['macd_hist'].dropna().values
-    if len(macd_values) < 2 * order + 1:
-         logger.warning("⚠️ [Elliott] بيانات MACD hist غير كافية بعد إزالة قيم NaN.")
-         return []
-
-    maxima, minima = detect_swings(macd_values, order=order)
-
-    df_nonan_macd = df['macd_hist'].dropna()
-    all_swings = sorted(
-        [(df_nonan_macd.index[idx], val, 'max') for idx, val in maxima] +
-        [(df_nonan_macd.index[idx], val, 'min') for idx, val in minima],
-        key=lambda x: x[0]
-    )
-
-    waves = []
-    wave_number = 1
-    for timestamp, val, typ in all_swings:
-        wave_type = "Impulse" if (typ == 'max' and val > 0) or (typ == 'min' and val >= 0) else "Correction"
-        waves.append({
-            "wave": wave_number,
-            "timestamp": str(timestamp),
-            "macd_hist_value": float(val),
-            "swing_type": typ,
-            "classified_type": wave_type
-        })
-        wave_number += 1
-    return waves
-
-
+# ---------------------- Technical Indicator Functions (Only those needed for ML features) ----------------------
+# Keeping only necessary indicator calculations for ML features or essential filters
+# Removed: calculate_vwma, calculate_bollinger_bands, calculate_macd, calculate_adx, calculate_vwap, calculate_obv, detect_candlestick_patterns
+
+# ---------------------- Other Helper Functions (Volume) ----------------------
 def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
     """Fetches the trading volume in USDT for the last `num_candles` of the specified `interval`."""
     if not client:
@@ -1133,73 +689,38 @@ def generate_performance_report() -> str:
         logger.error(f"❌ [Report] خطأ غير متوقع أثناء إنشاء تقرير الأداء: {e}", exc_info=True)
         return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء."
 
-# ---------------------- Trading Strategy (Adjusted for Scalping) -------------------
+# ---------------------- Trading Strategy (Adjusted for ML-Only) -------------------
 
 class ScalpingTradingStrategy:
-    """Encapsulates the trading strategy logic and associated indicators with a scoring system and mandatory conditions, adjusted for Scalping and targeting early momentum."""
+    """Encapsulates the trading strategy logic, now relying solely on ML model prediction for buy signals."""
 
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol
         if self.ml_model is None:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. ستعمل الإستراتيجية بدون تنبؤات التعلم الآلي كشرط تجاوز.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. لن تتمكن الإستراتيجية من توليد إشارات.")
 
         self.feature_columns_for_ml = [ # Features expected by the ML model
-            'volume_15m_avg', # New feature
-            'rsi_momentum_bullish' # New feature
+            'volume_15m_avg',
+            'rsi_momentum_bullish'
         ]
-
-        self.condition_weights = {
-            'rsi_ok': 0.5,
-            'bullish_candle': 1.5,
-            'not_bb_extreme': 0.5,
-            'obv_rising': 1.0,
-            'rsi_filter_breakout': 1.0,
-            'macd_filter_breakout': 1.0,
-            'macd_hist_increasing': 3.0,
-            'obv_increasing_recent': 3.0,
-            'above_vwap': 1.0,
-            # 'ml_prediction_bullish': 2.5 # Removed from weights, now a mandatory override
-        }
-
-        self.essential_conditions = [
-            'price_above_emas_and_vwma',
-            'ema_short_above_ema_long',
-            'supertrend_up',
-            'macd_positive_or_cross',
-            'adx_trending_bullish_strong',
-        ]
-
-        self.total_possible_score = sum(self.condition_weights.values())
-        self.min_score_threshold_pct = 0.70
-        self.min_signal_score = self.total_possible_score * self.min_score_threshold_pct
-
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Calculates all required indicators for the strategy."""
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات...")
-        # min_len_required should reflect all indicators used in the strategy (not just ML features)
-        min_len_required = max(EMA_SHORT_PERIOD, EMA_LONG_PERIOD, VWMA_PERIOD, RSI_PERIOD, ENTRY_ATR_PERIOD, BOLLINGER_WINDOW, MACD_SLOW, ADX_PERIOD*2, SUPERTREND_PERIOD, RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 5
+        """Calculates only the required indicators for the ML model's features."""
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات لنموذج ML...")
+        # min_len_required should reflect only indicators used for ML features
+        min_len_required = max(RSI_PERIOD, RSI_MOMENTUM_LOOKBACK_CANDLES, VOLUME_LOOKBACK_CANDLES) + 5
 
         if len(df) < min_len_required:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب مؤشرات ML.")
             return None
 
         try:
             df_calc = df.copy()
-            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
-            df_calc = calculate_supertrend(df_calc, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-            df_calc[f'ema_{EMA_SHORT_PERIOD}'] = calculate_ema(df_calc['close'], EMA_SHORT_PERIOD)
-            df_calc[f'ema_{EMA_LONG_PERIOD}'] = calculate_ema(df_calc['close'], EMA_LONG_PERIOD)
-            df_calc['vwma'] = calculate_vwma(df_calc, VWMA_PERIOD)
+            # Calculate RSI as it's a prerequisite for rsi_momentum_bullish
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            df_calc = calculate_bollinger_bands(df_calc, BOLLINGER_WINDOW, BOLLINGER_STD_DEV)
-            df_calc = calculate_macd(df_calc, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-            adx_df = calculate_adx(df_calc, ADX_PERIOD)
-            df_calc = df_calc.join(adx_df)
-            df_calc = calculate_vwap(df_calc)
-            df_calc = calculate_obv(df_calc)
-            df_calc = detect_candlestick_patterns(df_calc)
+            # Calculate ATR for target price calculation, not for signal generation logic
+            df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
 
             # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
             df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
@@ -1212,7 +733,6 @@ class ScalpingTradingStrategy:
                     if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
                         df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
 
-
             # Ensure all feature columns for ML exist and are numeric
             for col in self.feature_columns_for_ml:
                 if col not in df_calc.columns:
@@ -1222,12 +742,9 @@ class ScalpingTradingStrategy:
                     df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
             initial_len = len(df_calc)
-            # Use all required columns for dropna, including ML features
+            # Use all required columns for dropna, including ML features and ATR for target
             all_required_cols = list(set(self.feature_columns_for_ml + [
-                'open', 'high', 'low', 'close', 'volume', 'BullishCandleSignal', 'BearishCandleSignal',
-                f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma', 'rsi', 'atr', 'bb_upper',
-                'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus', 'vwap', 'obv',
-                'supertrend', 'supertrend_trend' # Add all other indicators used in strategy conditions
+                'open', 'high', 'low', 'close', 'volume', 'atr'
             ]))
             df_cleaned = df_calc.dropna(subset=all_required_cols).copy()
             dropped_count = initial_len - len(df_cleaned)
@@ -1239,7 +756,7 @@ class ScalpingTradingStrategy:
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب المؤشرات. أحدث EMA{EMA_SHORT_PERIOD}: {latest.get(f'ema_{EMA_SHORT_PERIOD}', np.nan):.4f}, EMA{EMA_LONG_PERIOD}: {latest.get(f'ema_{EMA_LONG_PERIOD}', np.nan):.4f}, VWMA: {latest.get('vwma', np.nan):.4f}, MACD Hist: {latest.get('macd_hist', np.nan):.4f}, SuperTrend: {latest.get('supertrend', np.nan):.4f}, Volume 15m Avg: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}")
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. أحدث حجم 15 دقيقة: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}, ATR: {latest.get('atr', np.nan):.4f}")
             return df_cleaned
 
         except KeyError as ke:
@@ -1252,22 +769,19 @@ class ScalpingTradingStrategy:
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        Generates a buy signal based on the processed DataFrame.
-        If the ML model predicts bullish, it overrides all other essential conditions.
+        Generates a buy signal based solely on the ML model's bullish prediction,
+        followed by essential filters (BTC trend, volume, profit margin).
         """
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء...")
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء (تعتمد على ML فقط)...")
 
-        min_signal_data_len = max(RECENT_EMA_CROSS_LOOKBACK, MACD_HIST_INCREASE_CANDLES, OBV_INCREASE_CANDLES, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 1
+        min_signal_data_len = max(VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES) + 1
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.")
             return None
 
         # Ensure all required columns for signal generation, including ML features, are present
         required_cols_for_signal = list(set(self.feature_columns_for_ml + [
-            'close', 'rsi', 'atr', 'bb_upper', 'BullishCandleSignal',
-            f'ema_{EMA_SHORT_PERIOD}', f'ema_{EMA_LONG_PERIOD}', 'vwma',
-            'macd', 'macd_signal', 'macd_hist', 'adx', 'di_plus', 'di_minus',
-            'supertrend', 'supertrend_trend', 'vwap', 'obv'
+            'close', 'atr'
         ]))
         missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
         if missing_cols:
@@ -1275,31 +789,14 @@ class ScalpingTradingStrategy:
             return None
 
         last_row = df_processed.iloc[-1]
-        recent_df = df_processed.iloc[-min_signal_data_len:]
 
-        if recent_df[required_cols_for_signal].isnull().values.any():
+        if last_row[required_cols_for_signal].isnull().values.any():
              logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات الحديثة تحتوي على قيم NaN في أعمدة الإشارة المطلوبة. لا يمكن إنشاء إشارة.")
              return None
 
-        # --- ML Model Prediction (NEW: Mandatory Override) ---
-        ml_overrides_essentials = False
-        ml_prediction_result_text = "N/A (نموذج غير محمل)"
-        if self.ml_model: # Use self.ml_model which is loaded per symbol
-            try:
-                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
-                ml_pred = self.ml_model.predict(features_for_prediction)[0]
-                if ml_pred == 1: # If ML model predicts upward movement
-                    ml_overrides_essentials = True
-                    ml_prediction_result_text = 'صعودي (تجاوز الشروط الأساسية) ✅'
-                    logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي. تجاوز الشروط الأساسية الأخرى.")
-                else:
-                    ml_prediction_result_text = 'هابط (لا يوجد تجاوز)'
-            except Exception as ml_err:
-                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
-                ml_prediction_result_text = "خطأ في التنبؤ (0)"
-        signal_details = {'ML_Prediction': ml_prediction_result_text} # Initialize signal_details with ML prediction
+        signal_details = {} # Initialize signal_details
 
-        # --- Check BTC Trend (Still applies even with ML override, as a general market filter) ---
+        # --- Check BTC Trend (High-level market filter, always applies) ---
         btc_trend = get_btc_trend_4h()
         if "هبوط" in btc_trend:
             logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف بسبب اتجاه البيتكوين الهابط ({btc_trend}).")
@@ -1311,163 +808,46 @@ class ScalpingTradingStrategy:
         else:
              signal_details['BTC_Trend'] = f'صعود أو استقرار ({btc_trend}) ✅'
 
+        # --- ML Model Prediction (Primary decision maker) ---
+        ml_prediction_result_text = "N/A (نموذج غير محمل)"
+        ml_is_bullish = False
 
-        # --- Check Mandatory Conditions (Bypassed if ML overrides) ---
-        essential_passed = True
-        failed_essential_conditions = []
+        if self.ml_model: # Use self.ml_model which is loaded per symbol
+            try:
+                features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
+                ml_pred = self.ml_model.predict(features_for_prediction)[0]
+                if ml_pred == 1: # If ML model predicts upward movement
+                    ml_is_bullish = True
+                    ml_prediction_result_text = 'صعودي ✅'
+                    logger.info(f"✨ [Strategy {self.symbol}] تنبؤ نموذج ML صعودي.")
+                else:
+                    ml_prediction_result_text = 'هابط ❌'
+                    logger.info(f"ℹ️ [Strategy {self.symbol}] تنبؤ نموذج ML هابط. تم رفض الإشارة.")
+            except Exception as ml_err:
+                logger.error(f"❌ [Strategy {self.symbol}] خطأ في تنبؤ نموذج ML: {ml_err}", exc_info=True)
+                ml_prediction_result_text = "خطأ في التنبؤ (0)"
+        
+        signal_details['ML_Prediction'] = ml_prediction_result_text
 
-        if not ml_overrides_essentials: # Only check if ML model did NOT override
-            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and pd.notna(last_row['vwma']) and
-                    last_row['close'] > last_row[f'ema_{EMA_SHORT_PERIOD}'] and
-                    last_row['close'] > last_row[f'ema_{EMA_LONG_PERIOD}'] and
-                    last_row['close'] > last_row['vwma']):
-                essential_passed = False
-                failed_essential_conditions.append('Price Above EMAs and VWMA')
-                detail_ma = f"Close:{last_row['close']:.4f}, EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}, VWMA:{last_row['vwma']:.4f}"
-                signal_details['Price_MA_Alignment'] = f'فشل: السعر ليس فوق جميع المتوسطات ({detail_ma})'
-            else:
-                signal_details['Price_MA_Alignment'] = f'نجاح: السعر فوق جميع المتوسطات'
-
-            if not (pd.notna(last_row[f'ema_{EMA_SHORT_PERIOD}']) and pd.notna(last_row[f'ema_{EMA_LONG_PERIOD}']) and
-                    last_row[f'ema_{EMA_SHORT_PERIOD}'] > last_row[f'ema_{EMA_LONG_PERIOD}']):
-                 essential_passed = False
-                 failed_essential_conditions.append('Short EMA Above Long EMA')
-                 detail_ema_cross = f"EMA{EMA_SHORT_PERIOD}:{last_row[f'ema_{EMA_SHORT_PERIOD}']:.4f}, EMA{EMA_LONG_PERIOD}:{last_row[f'ema_{EMA_LONG_PERIOD}']:.4f}"
-                 signal_details['EMA_Order'] = f'فشل: EMA القصير ليس فوق EMA الطويل ({detail_ema_cross})'
-            else:
-                 signal_details['EMA_Order'] = f'نجاح: EMA القصير فوق EMA الطويل'
-
-            if not (pd.notna(last_row['supertrend']) and last_row['close'] > last_row['supertrend'] and last_row['supertrend_trend'] == 1):
-                 essential_passed = False
-                 failed_essential_conditions.append('SuperTrend (اتجاه صعودي والسعر فوقه)')
-                 detail_st = f'ST:{last_row.get("supertrend", np.nan):.4f}, Trend:{last_row.get("supertrend_trend", 0)}'
-                 signal_details['SuperTrend'] = f'فشل: ليس اتجاه صعودي أو السعر ليس فوقه ({detail_st})'
-            else:
-                signal_details['SuperTrend'] = f'نجاح: اتجاه صعودي والسعر فوقه'
-
-            if not (pd.notna(last_row['macd_hist']) and pd.notna(last_row['macd']) and pd.notna(last_row['macd_signal']) and (last_row['macd_hist'] > 0 or last_row['macd'] > last_row['macd_signal'])):
-                 essential_passed = False
-                 failed_essential_conditions.append('MACD (هيستوجرام إيجابي أو تقاطع صعودي)')
-                 detail_macd = f'Hist: {last_row.get("macd_hist", np.nan):.4f}, MACD: {last_row.get("macd", np.nan):.4f}, Signal: {last_row.get("macd_signal", np.nan):.4f}'
-                 signal_details['MACD'] = f'فشل: ليس هيستوجرام إيجابي ولا يوجد تقاطع صعودي ({detail_macd})'
-            else:
-                 detail_macd = f'Hist > 0 ({last_row["macd_hist"]:.4f})' if last_row['macd_hist'] > 0 else ''
-                 detail_macd += ' & ' if detail_macd and last_row['macd'] > last_row['macd_signal'] else ''
-                 detail_macd += 'تقاطع صعودي' if last_row['macd'] > last_row['macd_signal'] else ''
-                 signal_details['MACD'] = f'نجاح: {detail_macd}'
-
-            if not (pd.notna(last_row['adx']) and pd.notna(last_row['di_plus']) and pd.notna(last_row['di_minus']) and last_row['adx'] > MIN_ADX_TREND_STRENGTH and last_row['di_plus'] > last_row['di_minus']):
-                 essential_passed = False
-                 failed_essential_conditions.append(f'ADX/DI (اتجاه صعودي قوي، ADX > {MIN_ADX_TREND_STRENGTH})')
-                 detail_adx = f'ADX:{last_row.get("adx", np.nan):.1f}, DI+:{last_row.get("di_plus", np.nan):.1f}, DI-:{last_row.get("di_minus", np.nan):.1f}'
-                 signal_details['ADX/DI'] = f'فشل: ليس اتجاه صعودي قوي (ADX <= {MIN_ADX_TREND_STRENGTH} أو DI+ <= DI-) ({detail_adx})'
-            else:
-                 signal_details['ADX/DI'] = f'نجاح: اتجاه صعودي قوي (ADX:{last_row["adx"]:.1f}, DI+>DI-)'
-
-        # If ML did not override AND essential conditions failed, then no signal
-        if not essential_passed and not ml_overrides_essentials:
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] فشلت الشروط الإلزامية (ولم يتم تجاوزها بواسطة ML): {', '.join(failed_essential_conditions)}. تم رفض الإشارة.")
+        # If ML model is not bullish or failed, no signal
+        if not ml_is_bullish:
             return None
-        elif ml_overrides_essentials:
-            logger.info(f"✅ [Strategy {self.symbol}] تم تجاوز الشروط الأساسية بواسطة تنبؤ ML الصعودي.")
-            # If ML overrides, set essential conditions to "ML Override" in details for clarity
-            for cond_name in self.essential_conditions:
-                # Check if the key already exists from a specific check, otherwise add generic override
-                if cond_name == 'price_above_emas_and_vwma' and 'Price_MA_Alignment' not in signal_details:
-                    signal_details['Price_MA_Alignment'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'ema_short_above_ema_long' and 'EMA_Order' not in signal_details:
-                    signal_details['EMA_Order'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'supertrend_up' and 'SuperTrend' not in signal_details:
-                    signal_details['SuperTrend'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'macd_positive_or_cross' and 'MACD' not in signal_details:
-                    signal_details['MACD'] = 'تم تجاوزها بواسطة ML'
-                elif cond_name == 'adx_trending_bullish_strong' and 'ADX/DI' not in signal_details:
-                    signal_details['ADX/DI'] = 'تم تجاوزها بواسطة ML'
-
-
-        # --- Calculate Score for Optional Conditions ---
-        current_score = 0.0
-
-        if pd.notna(last_row['vwap']) and last_row['close'] > last_row['vwap']:
-            current_score += self.condition_weights.get('above_vwap', 0)
-            signal_details['VWAP_Daily'] = f'فوق VWAP اليومي (+{self.condition_weights.get("above_vwap", 0)})'
-        else:
-             signal_details['VWAP_Daily'] = f'تحت VWAP اليومي (0)'
-
-        if pd.notna(last_row['rsi']) and last_row['rsi'] < RSI_OVERBOUGHT and last_row['rsi'] > RSI_OVERSOLD:
-            current_score += self.condition_weights.get('rsi_ok', 0)
-            signal_details['RSI_Basic'] = f'مقبول ({RSI_OVERSOLD}<{last_row["rsi"]:.1f}<{RSI_OVERBOUGHT}) (+{self.condition_weights.get("rsi_ok", 0)})'
-        else:
-             signal_details['RSI_Basic'] = f'RSI ({last_row["rsi"]:.1f}) غير مقبول (0)'
-
-        if last_row.get('BullishCandleSignal', 0) == 1:
-            current_score += self.condition_weights.get('bullish_candle', 0)
-            signal_details['Candle'] = f'نمط شمعة صعودي (+{self.condition_weights.get("bullish_candle", 0)})'
-        else:
-             signal_details['Candle'] = f'لا يوجد نمط شمعة صعودي (0)'
-
-        if pd.notna(last_row['bb_upper']) and last_row['close'] < last_row['bb_upper'] * 0.995:
-             current_score += self.condition_weights.get('not_bb_extreme', 0)
-             signal_details['Bollinger_Basic'] = f'ليس عند الحد العلوي لبولينجر (+{self.condition_weights.get("not_bb_extreme", 0)})'
-        else:
-             signal_details['Bollinger_Basic'] = f'عند أو فوق الحد العلوي لبولينجر (0)'
-
-        if len(df_processed) >= 2 and pd.notna(df_processed.iloc[-2]['obv']) and pd.notna(last_row['obv']) and last_row['obv'] > df_processed.iloc[-2]['obv']:
-            current_score += self.condition_weights.get('obv_rising', 0)
-            signal_details['OBV_Last'] = f'يرتفع في الشمعة الأخيرة (+{self.condition_weights.get("obv_rising", 0)})'
-        else:
-             signal_details['OBV_Last'] = f'لا يرتفع في الشمعة الأخيرة (0)'
-
-        if pd.notna(last_row['rsi']) and last_row['rsi'] >= 50 and last_row['rsi'] <= 80:
-             current_score += self.condition_weights.get('rsi_filter_breakout', 0)
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) في النطاق الصعودي (50-80) (+{self.condition_weights.get("rsi_filter_breakout", 0)})'
-        else:
-             signal_details['RSI_Filter_Breakout'] = f'RSI ({last_row["rsi"]:.1f}) ليس في النطاق الصعودي (0)'
-
-        if pd.notna(last_row['macd_hist']) and last_row['macd_hist'] > 0:
-             current_score += self.condition_weights.get('macd_filter_breakout', 0)
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD إيجابي ({last_row["macd_hist"]:.4f}) (+{self.condition_weights.get("macd_filter_breakout", 0)})'
-        else:
-             signal_details['MACD_Filter_Breakout'] = f'هيستوجرام MACD ليس إيجابي (0)'
-
-        macd_hist_increasing = False
-        if len(recent_df) >= MACD_HIST_INCREASE_CANDLES + 1:
-             macd_hist_slice = recent_df['macd_hist'].iloc[-MACD_HIST_INCREASE_CANDLES-1:]
-             if not macd_hist_slice.isnull().any() and np.all(np.diff(macd_hist_slice) > 0):
-                  macd_hist_increasing = True
-        if macd_hist_increasing:
-             current_score += self.condition_weights.get('macd_hist_increasing', 0)
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("macd_hist_increasing", 0)})'
-        else:
-             signal_details['MACD_Hist_Increasing'] = f'هيستوجرام MACD لا يتزايد خلال آخر {MACD_HIST_INCREASE_CANDLES} شمعات (0)'
-
-        obv_increasing_recent = False
-        if len(recent_df) >= OBV_INCREASE_CANDLES + 1:
-             obv_slice = recent_df['obv'].iloc[-OBV_INCREASE_CANDLES-1:]
-             if not obv_slice.isnull().any() and np.all(np.diff(obv_slice) > 0):
-                  obv_increasing_recent = True
-        if obv_increasing_recent:
-             current_score += self.condition_weights.get('obv_increasing_recent', 0)
-             signal_details['OBV_Increasing_Recent'] = f'OBV يتزايد خلال آخر {OBV_INCREASE_CANDLES} شمعات (+{self.condition_weights.get("obv_increasing_recent", 0)})'
-        else:
-             signal_details['OBV_Increasing_Recent'] = f'OBV لا يتزايد خلال آخر {OBV_INCREASE_CANDLES} شمعات (0)'
-
-
-        if current_score < self.min_signal_score and not ml_overrides_essentials: # Score check still applies if ML didn't override
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] لم يتم استيفاء درجة الإشارة المطلوبة من الشروط الاختيارية (الدرجة: {current_score:.2f} / {self.total_possible_score:.2f}, الحد الأدنى: {self.min_signal_score:.2f}). تم رفض الإشارة.")
-            return None
-
-        # استخدام fetch_recent_volume مع المعلمات الجديدة
+        
+        # --- Volume Check (Essential filter) ---
         volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
-        if volume_recent < MIN_VOLUME_15M_USDT:
+        if volume_recent < MIN_VOLUME_15M_USdt:
             logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.")
+            signal_details['Volume_Check'] = f'فشل: سيولة غير كافية ({volume_recent:,.0f} USDT)'
             return None
+        else:
+            signal_details['Volume_Check'] = f'نجاح: سيولة كافية ({volume_recent:,.0f} USDT)'
+
 
         current_price = last_row['close']
         current_atr = last_row.get('atr')
 
         if pd.isna(current_atr) or current_atr <= 0:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف. تم رفض الإشارة.")
              return None
 
         target_multiplier = ENTRY_ATR_MULTIPLIER
@@ -1476,22 +856,26 @@ class ScalpingTradingStrategy:
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
+            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_margin_pct:.2f}%)'
             return None
+        else:
+            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_margin_pct:.2f}%)'
+
 
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
-            'r2_score': float(f"{current_score:.2f}"),
-            'strategy_name': 'Scalping_Momentum_Trend_ML_Override', # Updated strategy name
+            'r2_score': 1.0, # Placeholder score as it's ML-driven now
+            'strategy_name': 'Scalping_ML_Only', # Updated strategy name
             'signal_details': signal_details,
-            'volume_15m': volume_recent, # تحديث هنا ليعكس الحجم الجديد
+            'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
-            'total_possible_score': float(f"{self.total_possible_score:.2f}")
+            'total_possible_score': 1.0 # Placeholder
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء. السعر: {current_price:.6f}, الدرجة (اختياري): {current_score:.2f}/{self.total_possible_score:.2f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML فقط). السعر: {current_price:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}")
         return signal_output
 
 
@@ -1537,16 +921,14 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
          return None
 
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
-    """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the score."""
+    """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the ML prediction."""
     logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه للإشارة: {signal_data.get('symbol', 'N/A')}")
     try:
         entry_price = float(signal_data['entry_price'])
         target_price = float(signal_data['initial_target'])
         symbol = signal_data['symbol']
         strategy_name = signal_data.get('strategy_name', 'N/A')
-        signal_score = signal_data.get('r2_score', 0.0)
-        total_possible_score = signal_data.get('total_possible_score', 10.0)
-        volume_15m = signal_data.get('volume_15m', 0.0) # تم تحديث هذا ليعكس الحجم الجديد
+        volume_15m = signal_data.get('volume_15m', 0.0)
         trade_value_signal = signal_data.get('trade_value', TRADE_VALUE)
         signal_details = signal_data.get('signal_details', {})
 
@@ -1564,17 +946,16 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
         fear_greed = get_fear_greed_index()
-        btc_trend = signal_details.get('BTC_Trend', 'N/A') # Get BTC trend from signal_details
-        ml_prediction_status = signal_details.get('ML_Prediction', 'N/A') # Get ML prediction status
+        btc_trend = signal_details.get('BTC_Trend', 'N/A')
+        ml_prediction_status = signal_details.get('ML_Prediction', 'N/A')
 
         message = (
-            f"💡 *إشارة تداول جديدة ({strategy_name.replace('_', ' ').title()})* 💡\n"
+            f"💡 *إشارة تداول جديدة (تعتمد على ML فقط)* 💡\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **نوع الإشارة:** شراء (طويل)\n"
             f"🕰️ **الإطار الزمني:** {timeframe}\n"
-            f"📊 **قوة الإشارة (النقاط - اختيارية):** *{signal_score:.1f} / {total_possible_score:.1f}*\n"
-            f"💧 **السيولة (آخر 15 دقيقة):** {volume_15m:,.0f} USDT\n" # تم تحديث النص هنا
+            f"💧 **السيولة (آخر 15 دقيقة):** {volume_15m:,.0f} USDT\n"
             f"——————————————\n"
             f"➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}`\n"
             f"🎯 **الهدف الأولي:** `${target_price:,.8g}`\n"
@@ -1582,24 +963,10 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"💸 **الرسوم المتوقعة:** ${total_trade_fees:,.2f}\n"
             f"📈 **الربح الصافي المتوقع:** ${profit_usdt_net:+.2f}\n"
             f"——————————————\n"
-            f"🤖 *تنبؤ نموذج ML:* *{ml_prediction_status}*\n" # Highlight ML prediction
-            f"✅ *الشروط الإلزامية المحققة:*\n"
-            f"  - السعر فوق المتوسطات (EMA{EMA_SHORT_PERIOD}, EMA{EMA_LONG_PERIOD}, VWMA): {signal_details.get('Price_MA_Alignment', 'N/A')}\n"
-            f"  - المتوسط القصير فوق الطويل (EMA{EMA_SHORT_PERIOD} > EMA{EMA_LONG_PERIOD}): {signal_details.get('EMA_Order', 'N/A')}\n"
-            f"  - سوبر ترند: {signal_details.get('SuperTrend', 'N/A')}\n"
-            f"  - ماكد: {signal_details.get('MACD', 'N/A')}\n"
-            f"  - مؤشر الاتجاه (ADX/DI): {signal_details.get('ADX/DI', 'N/A')}\n"
-            f"——————————————\n"
-            f"✨ *شروط النقاط الإضافية (الاختيارية):*\n"
-            f"  - فوق متوسط الحجم الموزون اليومي (VWAP): {signal_details.get('VWAP_Daily', 'N/A')}\n"
-            f"  - مؤشر القوة النسبية (RSI): {signal_details.get('RSI_Basic', 'N/A')}\n"
-            f"  - نمط شمعة صعودي: {signal_details.get('Candle', 'N/A')}\n"
-            f"  - ليس عند الحد العلوي لبولينجر: {signal_details.get('Bollinger_Basic', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يرتفع (شمعة أخيرة): {signal_details.get('OBV_Last', 'N/A')}\n"
-            f"  - فلتر RSI للاختراق: {signal_details.get('RSI_Filter_Breakout', 'N/A')}\n"
-            f"  - فلتر MACD للاختراق: {signal_details.get('MACD_Filter_Breakout', 'N/A')}\n"
-            f"  - هيستوجرام MACD يتزايد ({MACD_HIST_INCREASE_CANDLES} شمعات): {signal_details.get('MACD_Hist_Increasing', 'N/A')}\n"
-            f"  - حجم التوازن (OBV) يتزايد مؤخراً ({OBV_INCREASE_CANDLES} شمعات): {signal_details.get('OBV_Increasing_Recent', 'N/A')}\n"
+            f"🤖 *تنبؤ نموذج ML:* *{ml_prediction_status}*\n"
+            f"✅ *الشروط الإضافية المحققة:*\n"
+            f"  - فحص السيولة: {signal_details.get('Volume_Check', 'N/A')}\n"
+            f"  - فحص هامش الربح: {signal_details.get('Profit_Margin_Check', 'N/A')}\n"
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
             f"₿ **اتجاه البيتكوين (4 ساعات):** {btc_trend}\n"
@@ -2102,6 +1469,11 @@ def main_loop() -> None:
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
+                    # Check if ML model was loaded successfully for this symbol
+                    if strategy.ml_model is None:
+                        logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح.")
+                        continue
+
                     df_indicators = strategy.populate_indicators(df_hist)
                     if df_indicators is None:
                         continue
@@ -2109,7 +1481,7 @@ def main_loop() -> None:
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
                     if potential_signal:
-                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! (الدرجة: {potential_signal.get('r2_score', 0):.2f}) التحقق النهائي والإدراج...")
+                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي والإدراج...")
                         with conn.cursor() as final_check_cur:
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
@@ -2229,4 +1601,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
         os._exit(0)
-
