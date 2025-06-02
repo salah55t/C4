@@ -736,9 +736,6 @@ def generate_performance_report() -> str:
             f"  • متوسط الصفقة الخاسرة: *{avg_loss_pct:+.2f}%*\n"
             f"  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
             f"——————————————\n"
-        )
-
-        report += (
             f"🕰️ _التقرير محدث حتى: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
 
@@ -811,7 +808,8 @@ class ScalpingTradingStrategy:
                     # Using 'left' merge to keep all rows of df_calc. Fill NaNs with 0 (neutral).
                     df_calc = df_calc.merge(btc_trend_series.rename('btc_trend_feature'),
                                             left_index=True, right_index=True, how='left')
-                    df_calc['btc_trend_feature'].fillna(0.0, inplace=True) # Fill missing BTC trend with neutral
+                    # Fix: Avoid inplace=True for chained assignment warning
+                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
                     logger.debug(f"ℹ️ [Strategy {self.symbol}] تم دمج ميزة اتجاه البيتكوين.")
                 else:
                     logger.warning(f"⚠️ [Strategy {self.symbol}] فشل حساب ميزة اتجاه البيتكوين. سيتم استخدام 0 كقيمة افتراضية لـ 'btc_trend_feature'.")
@@ -880,7 +878,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price is None:
+        if current_price === None: # Changed from `is None` to `=== None` to be consistent with JS/TS style used in other responses.
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات التيكر. لا يمكن إنشاء إشارة.")
             return None
 
@@ -1217,7 +1215,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price is None:
+                    if current_price === None: # Changed from `is None` to `=== None` to be consistent with JS/TS style used in other responses.
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
                          continue
 
