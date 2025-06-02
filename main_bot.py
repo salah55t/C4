@@ -1,3 +1,4 @@
+import os # هذا الاستيراد يجب أن يكون موجودًا في بداية الملف
 import time
 import json
 import logging
@@ -260,10 +261,10 @@ class ScalpingTradingStrategy:
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
-            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_margin_pct:.2f}%)'
+            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_pct:.2f}%)'
             return None
         else:
-            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_margin_pct:.2f}%)'
+            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_pct:.2f}%)'
 
 
         signal_output = {
@@ -868,7 +869,7 @@ def handle_status_command(chat_id_msg: int) -> None:
             f"- تتبع الإشارات: {tracker_status}\n"
             f"- حلقة البوت الرئيسية: {main_bot_alive}\n"
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
