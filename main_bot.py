@@ -1,3 +1,4 @@
+import os # تم إضافة هذا الاستيراد
 import time
 import json
 import logging
@@ -11,6 +12,7 @@ from flask import Flask, request, Response
 from typing import List, Dict, Optional, Tuple, Any, Union
 
 # استيراد الدوال المشتركة والثوابت من ملف المرافق
+import utils # استيراد utils كـ module
 from utils import (
     init_db, check_db_connection, initialize_binance_client,
     fetch_historical_data, calculate_rsi_indicator, calculate_atr_indicator,
@@ -20,6 +22,9 @@ from utils import (
     RSI_PERIOD, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES,
     ENTRY_ATR_PERIOD, BASE_ML_MODEL_NAME, TELEGRAM_TOKEN, CHAT_ID, WEBHOOK_URL
 )
+
+# استيراد وظيفة التدريب من train_models.py
+from train_models import run_training_for_all_symbols
 
 # ---------------------- ثوابت ومتغيرات عامة خاصة بالبوت ----------------------
 TRADE_VALUE: float = 10.0
@@ -73,7 +78,7 @@ def run_ticker_socket_manager() -> None:
     while True:
         try:
             logger.info("ℹ️ [WS] بدء إدارة WebSocket لأسعار التيكر...")
-            twm = ThreadedWebsocketManager(api_key=utils.API_KEY, api_secret=utils.API_SECRET) # استخدام API_KEY من utils
+            twm = ThreadedWebsocketManager(api_key=utils.API_KEY, api_secret=utils.API_SECRET)
             twm.start()
 
             stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
@@ -94,7 +99,7 @@ class ScalpingTradingStrategy:
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol from utils
+        self.ml_model = load_ml_model_from_db(symbol)
         if self.ml_model is None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. لن تتمكن الإستراتيجية من توليد إشارات.")
 
@@ -822,6 +827,10 @@ def webhook() -> Tuple[str, int]:
             elif text_msg.lower() == '/status':
                  status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
                  status_thread.start()
+            elif text_msg.lower() == '/train_models': # أمر جديد لتدريب النماذج يدوياً
+                 train_thread = Thread(target=lambda: run_training_for_all_symbols(chat_id_msg))
+                 train_thread.start()
+
         else:
             logger.debug("ℹ️ [Flask] تم استلام بيانات webhook بدون 'callback_query' أو 'message'.")
 
@@ -860,7 +869,7 @@ def handle_status_command(chat_id_msg: int) -> None:
             f"- تتبع الإشارات: {tracker_status}\n"
             f"- حلقة البوت الرئيسية: {main_bot_alive}\n"
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
@@ -960,7 +969,7 @@ def main_loop() -> None:
 
                     strategy = ScalpingTradingStrategy(symbol)
                     if strategy.ml_model is None:
-                        logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح. يرجى تدريب النموذج أولاً.")
+                        logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح. يرجى تدريب النموذج أولاً باستخدام أمر /train_models.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
@@ -1084,4 +1093,4 @@ if __name__ == "__main__":
         logger.info("🛑 [Main] يتم إيقاف تشغيل البرنامج...")
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف بوت إشارات التداول.")
-        # os._exit(0) # لا تستخدم exit في بيئة الإنتاج إلا إذا كنت متأكدًا
+        # os._exit(0)
