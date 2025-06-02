@@ -386,6 +386,55 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
 
     return df
 
+# NEW: Function to calculate numerical Bitcoin trend feature
+def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    Calculates a numerical representation of Bitcoin's trend based on EMA20 and EMA50.
+    Returns 1 for bullish (صعودي), -1 for bearish (هبوطي), 0 for neutral/sideways (محايد/تذبذب).
+    """
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين للميزات...")
+    # Need enough data for EMA50, plus a few extra candles for robustness
+    min_data_for_ema = 50 + 5 # 50 for EMA50, 5 buffer
+
+    if df_btc is None or df_btc.empty or len(df_btc) < min_data_for_ema:
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية ({len(df_btc) if df_btc is not None else 0} < {min_data_for_ema}) لحساب اتجاه البيتكوين للميزات.")
+        # Return a series of zeros (neutral) with the original index if data is insufficient
+        return pd.Series(index=df_btc.index if df_btc is not None else None, data=0.0)
+
+    df_btc_copy = df_btc.copy()
+    df_btc_copy['close'] = pd.to_numeric(df_btc_copy['close'], errors='coerce')
+    df_btc_copy.dropna(subset=['close'], inplace=True)
+
+    if len(df_btc_copy) < min_data_for_ema:
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية بعد إزالة قيم NaN لحساب الاتجاه.")
+        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if not enough data after dropna
+
+    ema20 = calculate_ema(df_btc_copy['close'], 20)
+    ema50 = calculate_ema(df_btc_copy['close'], 50)
+
+    # Combine EMAs and close into a single DataFrame for easier comparison
+    ema_df = pd.DataFrame({'ema20': ema20, 'ema50': ema50, 'close': df_btc_copy['close']})
+    ema_df.dropna(inplace=True) # Drop rows where any EMA or close is NaN
+
+    if ema_df.empty:
+        logger.warning("⚠️ [Indicators] DataFrame EMA فارغ بعد إزالة قيم NaN. لا يمكن حساب اتجاه البيتكوين.")
+        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if no valid EMA data
+
+    # Initialize trend column with neutral (0.0)
+    trend_series = pd.Series(index=ema_df.index, data=0.0)
+
+    # Apply trend logic:
+    # Bullish: current_close > ema20 > ema50
+    trend_series[(ema_df['close'] > ema_df['ema20']) & (ema_df['ema20'] > ema_df['ema50'])] = 1.0
+    # Bearish: current_close < ema20 < ema50
+    trend_series[(ema_df['close'] < ema_df['ema20']) & (ema_df['ema20'] < ema_df['ema50'])] = -1.0
+
+    # Reindex to original df_btc index and fill any remaining NaNs with 0 (neutral)
+    # This ensures the series has the same index as the altcoin DataFrame for merging
+    final_trend_series = trend_series.reindex(df_btc.index).fillna(0.0)
+    logger.debug(f"✅ [Indicators] تم حساب ميزة اتجاه البيتكوين. أمثلة: {final_trend_series.tail().tolist()}")
+    return final_trend_series
+
 
 # ---------------------- وظائف تدريب وحفظ النموذج ----------------------
 from sklearn.model_selection import train_test_split
@@ -396,13 +445,14 @@ from sklearn.preprocessing import StandardScaler
 def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -> Optional[pd.DataFrame]:
     """
     يجهز البيانات لتدريب نموذج التعلم الآلي.
-    يضيف المؤشرات (فقط حجم السيولة ومؤشر الزخم) ويزيل الصفوف التي تحتوي على قيم NaN.
+    يضيف المؤشرات (حجم السيولة، مؤشر الزخم، واتجاه البيتكوين) ويزيل الصفوف التي تحتوي على قيم NaN.
     يضيف عمود الهدف 'target' الذي يشير إلى ما إذا كان السعر سيرتفع في الشموع القادمة.
     """
-    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol} (حجم السيولة والزخم فقط)...")
+    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol} (حجم السيولة، الزخم، واتجاه البيتكوين)...")
 
     # تحديد الحد الأدنى لطول البيانات المطلوبة فقط للميزات المستخدمة
-    min_len_required = max(VOLUME_LOOKBACK_CANDLES, RSI_PERIOD + RSI_MOMENTUM_LOOKBACK_CANDLES) + target_period + 5
+    # 50 + 5 for BTC EMA calculation, plus target_period, plus some buffer
+    min_len_required = max(VOLUME_LOOKBACK_CANDLES, RSI_PERIOD + RSI_MOMENTUM_LOOKBACK_CANDLES, 55) + target_period + 5
 
     if len(df) < min_len_required:
         logger.warning(f"⚠️ [ML Prep] DataFrame لـ {symbol} قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
@@ -427,11 +477,32 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
                 df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
     logger.debug(f"ℹ️ [ML Prep] تم حساب مؤشر زخم RSI الصعودي لـ {symbol}.")
 
+    # --- NEW: Fetch and calculate BTC trend feature ---
+    # Fetch BTC data for the same period and interval
+    btc_df = fetch_historical_data("BTCUSDT", interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
+    btc_trend_series = None
+    if btc_df is not None and not btc_df.empty:
+        btc_trend_series = _calculate_btc_trend_feature(btc_df)
+        if btc_trend_series is not None:
+            # Merge BTC trend with the current symbol's DataFrame based on timestamp index
+            # Using 'left' merge to keep all rows of df_calc. Fill NaNs with 0 (neutral).
+            df_calc = df_calc.merge(btc_trend_series.rename('btc_trend_feature'),
+                                    left_index=True, right_index=True, how='left')
+            df_calc['btc_trend_feature'].fillna(0.0, inplace=True) # Fill missing BTC trend with neutral
+            logger.debug(f"ℹ️ [ML Prep] تم دمج ميزة اتجاه البيتكوين لـ {symbol}.")
+        else:
+            logger.warning(f"⚠️ [ML Prep] فشل حساب ميزة اتجاه البيتكوين. سيتم استخدام 0 كقيمة افتراضية لـ 'btc_trend_feature'.")
+            df_calc['btc_trend_feature'] = 0.0
+    else:
+        logger.warning(f"⚠️ [ML Prep] فشل جلب البيانات التاريخية للبيتكوين. سيتم استخدام 0 كقيمة افتراضية لـ 'btc_trend_feature'.")
+        df_calc['btc_trend_feature'] = 0.0
+
 
     # تعريف أعمدة الميزات التي سيستخدمها النموذج (فقط الميزات الجديدة)
     feature_columns = [
         'volume_15m_avg', # ميزة جديدة: متوسط حجم السيولة لآخر 15 دقيقة
-        'rsi_momentum_bullish' # ميزة جديدة: زخم RSI الصعودي
+        'rsi_momentum_bullish', # ميزة جديدة: زخم RSI الصعودي
+        'btc_trend_feature' # ميزة جديدة: اتجاه البيتكوين (1: صعودي, -1: هبوطي, 0: محايد)
     ]
 
     # التأكد من وجود جميع أعمدة الميزات وتحويلها إلى أرقام
@@ -779,4 +850,3 @@ if __name__ == "__main__":
         cleanup_resources()
         logger.info("👋 [Main] تم إيقاف سكريبت تدريب نموذج التعلم الآلي.")
         # os._exit(0) # لا تستخدم os._exit(0) هنا إذا كنت تريد أن يبقى Flask يعمل
-
