@@ -1,3 +1,4 @@
+import os # تم إضافة هذا الاستيراد
 import time
 import json
 import logging
@@ -9,11 +10,11 @@ from typing import Dict, Any, Optional, Tuple
 # استيراد الدوال المشتركة من ملف المرافق
 from utils import (
     init_db, check_db_connection, initialize_binance_client,
-    fetch_historical_data, calculate_rsi_indicator, calculate_atr_indicator,
-    get_btc_trend_4h, fetch_recent_volume, get_crypto_symbols,
+    fetch_historical_data, calculate_rsi_indicator,
+    get_btc_trend_4h,
     save_ml_model_to_db, convert_np_values, logger,
     RSI_PERIOD, VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES,
-    BASE_ML_MODEL_NAME, ML_TARGET_LOOKAHEAD_CANDLES, TELEGRAM_TOKEN, CHAT_ID
+    BASE_ML_MODEL_NAME, ML_TARGET_LOOKAHEAD_CANDLES, CHAT_ID, TELEGRAM_TOKEN
 )
 
 # استيراد مكتبات تعلم الآلة
@@ -24,7 +25,6 @@ from sklearn.preprocessing import StandardScaler
 import requests # لإرسال رسائل تيليجرام
 
 # ---------------------- ثوابت خاصة بالتدريب ----------------------
-TRAINING_INTERVAL_DAYS: int = 7 # تدريب النموذج كل 7 أيام
 TRAINING_LOOKBACK_DAYS: int = 60 # زيادة أيام البحث عن البيانات للتدريب
 
 
@@ -131,8 +131,8 @@ def train_ml_model(symbol: str, df: pd.DataFrame) -> Optional[Tuple[Any, Dict[st
     model.scaler = scaler
     return model, metrics
 
-def send_telegram_message(target_chat_id: str, text: str, parse_mode: str = 'Markdown') -> None:
-    """Sends a message via Telegram Bot API."""
+def send_telegram_message_from_training(target_chat_id: str, text: str, parse_mode: str = 'Markdown') -> None:
+    """Sends a message via Telegram Bot API specifically for training script."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         'chat_id': str(target_chat_id),
@@ -146,31 +146,38 @@ def send_telegram_message(target_chat_id: str, text: str, parse_mode: str = 'Mar
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id}: {e}")
 
-# ---------------------- Main Execution Block ----------------------
-if __name__ == "__main__":
-    logger.info("🚀 بدء سكريبت تدريب نماذج تعلم الآلة...")
-    logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+def run_training_for_all_symbols(chat_id_to_notify: int) -> None:
+    """
+    Main function to run the ML model training process for all symbols.
+    Designed to be called from another script (e.g., main_bot.py).
+    """
+    logger.info("🚀 بدء عملية تدريب نماذج تعلم الآلة لجميع الأزواج...")
+    send_telegram_message_from_training(chat_id_to_notify, "⏳ جاري بدء عملية تدريب النماذج لجميع الأزواج. قد يستغرق هذا بعض الوقت...")
 
     try:
         # تهيئة عميل Binance وقاعدة البيانات
+        # هذه الخطوة قد لا تكون ضرورية إذا تم تهيئة العميل وال DB بالفعل في main_bot.py
+        # ولكن نتركها هنا لضمان الاستقلالية إذا تم استدعاء هذه الوظيفة بشكل منفصل.
+        # يجب أن تتأكد أن initialize_binance_client و init_db لا تسبب مشاكل عند استدعائها عدة مرات.
         initialize_binance_client()
         init_db()
 
         symbols_to_train = get_crypto_symbols()
         if not symbols_to_train:
-            logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. خروج.")
-            exit(1)
+            logger.critical("❌ [Training Process] لا توجد رموز صالحة للتدريب. خروج.")
+            send_telegram_message_from_training(chat_id_to_notify, "❌ لا توجد رموز صالحة للتدريب. تم إلغاء العملية.")
+            return
 
         total_trained_models = 0
         total_skipped_models = 0
         training_results = []
 
         for symbol in symbols_to_train:
-            logger.info(f"✨ [Main] بدء تدريب النموذج لـ {symbol}...")
+            logger.info(f"✨ [Training Process] بدء تدريب النموذج لـ {symbol}...")
             try:
                 df_ml = prepare_data_for_ml(symbol, '5m', TRAINING_LOOKBACK_DAYS) # استخدام 5m كإطار زمني للتدريب
                 if df_ml is None:
-                    logger.warning(f"⚠️ [Main] تخطي تدريب {symbol}: لا توجد بيانات كافية أو تم إزالة جميع الصفوف بعد المعالجة.")
+                    logger.warning(f"⚠️ [Training Process] تخطي تدريب {symbol}: لا توجد بيانات كافية.")
                     total_skipped_models += 1
                     training_results.append(f"❌ `{symbol}`: تم التخطي (بيانات غير كافية)")
                     continue
@@ -181,19 +188,19 @@ if __name__ == "__main__":
                         total_trained_models += 1
                         training_results.append(f"✅ `{symbol}`: تم التدريب بنجاح (دقة: {metrics['accuracy']:.2f})")
                     else:
-                        logger.error(f"❌ [Main] فشل حفظ النموذج لـ {symbol} في قاعدة البيانات.")
+                        logger.error(f"❌ [Training Process] فشل حفظ النموذج لـ {symbol} في قاعدة البيانات.")
                         total_skipped_models += 1
                         training_results.append(f"❌ `{symbol}`: فشل الحفظ في DB")
                 else:
-                    logger.warning(f"⚠️ [Main] تخطي تدريب {symbol}: فشل التدريب أو لا توجد مقاييس.")
+                    logger.warning(f"⚠️ [Training Process] تخطي تدريب {symbol}: فشل التدريب أو لا توجد مقاييس.")
                     total_skipped_models += 1
                     training_results.append(f"❌ `{symbol}`: فشل التدريب")
 
             except Exception as e:
-                logger.error(f"❌ [Main] خطأ فادح أثناء تدريب النموذج لـ {symbol}: {e}", exc_info=True)
+                logger.error(f"❌ [Training Process] خطأ فادح أثناء تدريب النموذج لـ {symbol}: {e}", exc_info=True)
                 total_skipped_models += 1
                 training_results.append(f"❌ `{symbol}`: خطأ غير متوقع")
-            time.sleep(1) # تأخير بسيط بين تدريب كل نموذج
+            time.sleep(0.5) # تأخير بسيط بين تدريب كل نموذج
 
         final_message = (
             f"📊 *تقرير تدريب نماذج تعلم الآلة:*\n"
@@ -205,20 +212,11 @@ if __name__ == "__main__":
             f"\n——————————————\n"
             f"🕰️ _اكتمل في: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
         )
-        send_telegram_message(CHAT_ID, final_message)
-        logger.info("✅ [Main] اكتملت عملية تدريب النماذج لجميع الأزواج.")
+        send_telegram_message_from_training(chat_id_to_notify, final_message)
+        logger.info("✅ [Training Process] اكتملت عملية تدريب النماذج لجميع الأزواج.")
 
-    except Exception as startup_err:
-        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في حلقة التدريب الرئيسية: {startup_err}", exc_info=True)
-        send_telegram_message(CHAT_ID, f"❌ *خطأ فادح في سكريبت تدريب النماذج:*\n`{str(startup_err)}`")
-    finally:
-        logger.info("🛑 [Main] يتم إيقاف تشغيل سكريبت التدريب...")
-        if check_db_connection() and utils.conn: # استخدام utils.conn للوصول إلى الاتصال العام
-            try:
-                utils.conn.close()
-                logger.info("✅ [DB] تم إغلاق اتصال قاعدة البيانات.")
-            except Exception as close_err:
-                logger.error(f"⚠️ [DB] خطأ في إغلاق اتصال قاعدة البيانات: {close_err}")
-        logger.info("👋 [Main] تم إيقاف سكريبت تدريب نماذج تعلم الآلة.")
-        # os._exit(0) # لا تستخدم exit في بيئة الإنتاج إلا إذا كنت متأكدًا
+    except Exception as process_err:
+        logger.critical(f"❌ [Training Process] حدث خطأ فادح في عملية التدريب: {process_err}", exc_info=True)
+        send_telegram_message_from_training(chat_id_to_notify, f"❌ *خطأ فادح أثناء عملية تدريب النماذج:*\n`{str(process_err)}`")
 
+# لا يوجد كتلة __name__ == "__main__" هنا، لأننا نريد استدعاء run_training_for_all_symbols كوظيفة.
