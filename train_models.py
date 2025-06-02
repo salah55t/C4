@@ -1,4 +1,4 @@
-import os # تم إضافة هذا الاستيراد
+import os # هذا الاستيراد يجب أن يكون موجودًا في بداية الملف
 import time
 import json
 import logging
