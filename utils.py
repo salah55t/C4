@@ -1,4 +1,4 @@
-import os
+import os # موجود بالفعل
 import json
 import logging
 import requests
@@ -473,7 +473,6 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
                  logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكربت. استخدام الملف في الدليل الحالي: '{file_path}'")
 
         with open(file_path, 'r', encoding='utf-8') as f:
-            # التعديل هنا: نقوم بإضافة 'USDT' إلى كل رمز بعد قراءته
             raw_symbols = [f"{line.strip().upper()}USDT"
                            for line in f if line.strip() and not line.startswith('#')]
         raw_symbols = sorted(list(set(raw_symbols)))
