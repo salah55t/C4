@@ -1,4 +1,3 @@
-import os # تم إضافة هذا الاستيراد
 import time
 import json
 import logging
@@ -869,7 +868,7 @@ def handle_status_command(chat_id_msg: int) -> None:
             f"- تتبع الإشارات: {tracker_status}\n"
             f"- حلقة البوت الرئيسية: {main_bot_alive}\n"
             f"- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- وقت الخادم الحالي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"
         )
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
