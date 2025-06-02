@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',\
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
         logging.StreamHandler()
@@ -878,7 +878,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price === None: # Changed from `is None` to `=== None` to be consistent with JS/TS style used in other responses.
+        if current_price is None: # Corrected from `=== None`
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات التيكر. لا يمكن إنشاء إشارة.")
             return None
 
@@ -1215,7 +1215,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price === None: # Changed from `is None` to `=== None` to be consistent with JS/TS style used in other responses.
+                    if current_price is None: # Corrected from `=== None`
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
                          continue
 
