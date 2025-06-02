@@ -13,7 +13,7 @@ from binance.client import Client
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from datetime import datetime, timedelta
 from decouple import config
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any, Tuple, Union
 
 # استيراد مكتبات Flask والخيوط
 from flask import Flask, request, Response
@@ -22,7 +22,7 @@ from threading import Thread
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',\
     handlers=[
         logging.FileHandler('ml_model_trainer.log', encoding='utf-8'),
         logging.StreamHandler()
@@ -36,6 +36,8 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None) # إضافة WEBHOOK_URL
+    TELEGRAM_TOKEN: Optional[str] = config('TELEGRAM_BOT_TOKEN', default=None) # NEW: Telegram Token
+    CHAT_ID: Optional[str] = config('TELEGRAM_CHAT_ID', default=None) # NEW: Telegram Chat ID
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
      exit(1)
@@ -43,6 +45,8 @@ except Exception as e:
 logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
 logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
 logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Flask will always run for Render)")
+logger.info(f"Telegram Token: {'Available' if TELEGRAM_TOKEN else 'Not available'}")
+logger.info(f"Telegram Chat ID: {'Available' if CHAT_ID else 'Not available'}")
 
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
@@ -673,6 +677,50 @@ def cleanup_resources() -> None:
             logger.error(f"⚠️ [DB] خطأ في إغلاق اتصال قاعدة البيانات: {close_err}")
     logger.info("✅ [Cleanup] اكتمل تنظيف الموارد.")
 
+# ---------------------- Telegram Functions (Copied from c4.py) ----------------------
+def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
+    """Sends a message via Telegram Bot API with improved error handling."""
+    if not TELEGRAM_TOKEN or not target_chat_id:
+        logger.warning("⚠️ [Telegram] لا يمكن إرسال رسالة تيليجرام: TELEGRAM_TOKEN أو CHAT_ID غير موجود.")
+        return None
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': str(target_chat_id),
+        'text': text,
+        'parse_mode': parse_mode,
+        'disable_web_page_preview': disable_web_page_preview
+    }
+    if reply_markup:
+        try:
+            payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
+        except (TypeError, ValueError) as json_err:
+             logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON: {json_err} - Markup: {reply_markup}")
+             return None
+
+    logger.debug(f"ℹ️ [Telegram] إرسال رسالة إلى {target_chat_id}...")
+    try:
+        response = requests.post(url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح إلى {target_chat_id}.")
+        return response.json()
+    except requests.exceptions.Timeout:
+         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (مهلة).")
+         return None
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).")
+        try:
+            error_details = http_err.response.json()
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
+        except json.JSONDecodeError:
+            logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ: {http_err.response.text}")
+        return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ في الطلب): {req_err}")
+        return None
+    except Exception as e:
+         logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}", exc_info=True)
+         return None
 
 # ---------------------- Flask Service ----------------------
 app = Flask(__name__)
@@ -689,7 +737,8 @@ def home() -> Response:
     if last_training_time:
         status_message += f"- Last Training Time: {last_training_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     if last_training_metrics:
-        status_message += f"- Last Training Metrics (Accuracy): {last_training_metrics.get('accuracy', 'N/A'):.4f}\n"
+        status_message += f"- Last Training Metrics (Accuracy): {last_training_metrics.get('avg_accuracy', 'N/A'):.4f}\n"
+        status_message += f"- Successful Models: {last_training_metrics.get('successful_models', 'N/A')}/{last_training_metrics.get('total_models_trained', 'N/A')}\n"
     if training_error:
         status_message += f"- Last Error: {training_error}\n"
 
@@ -725,6 +774,7 @@ if __name__ == "__main__":
     logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | وقت UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
 
     flask_thread: Optional[Thread] = None
+    initial_training_start_time = datetime.now() # Track overall training duration
 
     try:
         # 1. بدء خدمة Flask في خيط منفصل أولاً
@@ -743,6 +793,12 @@ if __name__ == "__main__":
         if not symbols:
             logger.critical("❌ [Main] لا توجد رموز صالحة للتدريب. يرجى التحقق من 'crypto_list.txt'.")
             training_status = "Failed: No valid symbols"
+            # Send Telegram notification for failure
+            if TELEGRAM_TOKEN and CHAT_ID:
+                send_telegram_message(CHAT_ID,
+                                      f"❌ *فشل بدء تدريب نموذج ML:*\n"
+                                      f"لا توجد رموز صالحة للتدريب. يرجى التحقق من `crypto_list.txt`.",
+                                      parse_mode='Markdown')
             exit(1)
 
         training_status = "In Progress: Training Models"
@@ -763,6 +819,14 @@ if __name__ == "__main__":
         total_precision = 0.0
         total_recall = 0.0
         total_f1_score = 0.0
+
+        # Send Telegram notification for training start
+        if TELEGRAM_TOKEN and CHAT_ID:
+            send_telegram_message(CHAT_ID,
+                                  f"🚀 *بدء تدريب نموذج ML:*\n"
+                                  f"جاري تدريب النماذج لـ {len(symbols)} رمزًا.\n"
+                                  f"الوقت: {initial_training_start_time.strftime('%Y-%m-%d %H:%M:%S')}",
+                                  parse_mode='Markdown')
 
 
         # 4. تدريب نموذج لكل رمز بشكل منفصل
@@ -837,6 +901,38 @@ if __name__ == "__main__":
         last_training_time = datetime.now()
         last_training_metrics = overall_metrics
 
+        # Calculate total training duration
+        training_duration = last_training_time - initial_training_start_time
+        training_duration_str = str(training_duration).split('.')[0] # Remove microseconds
+
+        # Send Telegram notification for training completion/failure
+        if TELEGRAM_TOKEN and CHAT_ID:
+            if training_status == "Completed Successfully (All Models Trained)":
+                message_title = "✅ *اكتمل تدريب نموذج ML بنجاح!*"
+            elif training_status == "Completed with Errors (Some Models Failed)":
+                message_title = "⚠️ *اكتمل تدريب نموذج ML مع أخطاء!*"
+            else:
+                message_title = "❌ *فشل تدريب نموذج ML!*"
+            
+            telegram_message = (
+                f"{message_title}\n"
+                f"——————————————\n"
+                f"📊 *الملخص:*\n"
+                f"- إجمالي النماذج المدربة: {overall_metrics['total_models_trained']}\n"
+                f"- النماذج الناجحة: {overall_metrics['successful_models']}\n"
+                f"- النماذج الفاشلة: {overall_metrics['failed_models']}\n"
+                f"- متوسط الدقة: {overall_metrics['avg_accuracy']:.4f}\n"
+                f"- متوسط الدقة (Precision): {overall_metrics['avg_precision']:.4f}\n"
+                f"- متوسط الاستدعاء (Recall): {overall_metrics['avg_recall']:.4f}\n"
+                f"- متوسط مقياس F1: {overall_metrics['avg_f1_score']:.4f}\n"
+                f"——————————————\n"
+                f"⏱️ *مدة التدريب الإجمالية:* {training_duration_str}\n"
+                f"⏰ *وقت الانتهاء:* {last_training_time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            if training_error:
+                telegram_message += f"\n\n🚨 *خطأ عام:* {training_error}"
+            
+            send_telegram_message(CHAT_ID, telegram_message, parse_mode='Markdown')
 
         # انتظر خيط Flask لإنهاء (مما يبقي البرنامج قيد التشغيل)
         if flask_thread:
@@ -846,6 +942,15 @@ if __name__ == "__main__":
         logger.critical(f"❌ [Main] حدث خطأ فادح أثناء تشغيل سكريبت التدريب الرئيسي: {e}", exc_info=True)
         training_status = "Failed: Unhandled exception in main loop"
         training_error = str(e)
+        # Send Telegram notification for critical unhandled error
+        if TELEGRAM_TOKEN and CHAT_ID:
+            error_message = (
+                f"🚨 *خطأ فادح في سكريبت تدريب نموذج ML:*\n"
+                f"حدث خطأ غير متوقع أدى إلى توقف السكريبت.\n"
+                f"التفاصيل: `{e}`\n"
+                f"الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            send_telegram_message(CHAT_ID, error_message, parse_mode='Markdown')
     finally:
         logger.info("🛑 [Main] يتم إيقاف تشغيل سكريبت التدريب...")
         cleanup_resources()
