@@ -35,9 +35,9 @@ try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
-    WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None) # إضافة WEBHOOK_URL
-    TELEGRAM_TOKEN: Optional[str] = config('TELEGRAM_BOT_TOKEN', default=None) # NEW: Telegram Token
-    CHAT_ID: Optional[str] = config('TELEGRAM_CHAT_ID', default=None) # NEW: Telegram Chat ID
+    WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
+    TELEGRAM_TOKEN: Optional[str] = config('TELEGRAM_BOT_TOKEN', default=None)
+    CHAT_ID: Optional[str] = config('TELEGRAM_CHAT_ID', default=None)
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
      exit(1)
@@ -50,15 +50,17 @@ logger.info(f"Telegram Chat ID: {'Available' if CHAT_ID else 'Not available'}")
 
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # تم التغيير إلى 15 دقيقة
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90 # 3 أشهر من البيانات
 BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # اسم أساسي للنموذج، سيتم إضافة الرمز إليه
 
 # Indicator Parameters (نسخ من c4.py لضمان الاتساق)
-# تم الاحتفاظ فقط بالمعلمات المطلوبة لحساب الميزات الجديدة
-VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
+VOLUME_LOOKBACK_CANDLES: int = 1 # عدد الشمعات لحساب متوسط الحجم (1 شمعة * 15 دقيقة = 15 دقيقة)
 RSI_PERIOD: int = 9 # مطلوب لحساب RSI الذي يعتمد عليه RSI Momentum
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
+ENTRY_ATR_PERIOD: int = 10 # مطلوب لحساب ATR الذي يعتمد عليه Supertrend
+SUPERTRAND_PERIOD: int = 10 # فترة Supertrend
+SUPERTRAND_MULTIPLIER: float = 3.0 # مضاعف Supertrend
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
@@ -66,7 +68,6 @@ cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 
 # متغيرات لتتبع حالة التدريب
-# تم تعريفها هنا كمتغيرات عامة
 training_status: str = "Idle"
 last_training_time: Optional[datetime] = None
 last_training_metrics: Dict[str, Any] = {}
@@ -310,10 +311,23 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
         logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} حتى الآن...")
 
-        # Call get_historical_klines for the entire period.
-        # The python-binance library is designed to handle internal pagination
-        # if the requested range exceeds the API's single-request limit (e.g., 1000 klines).
-        klines = client.get_historical_klines(symbol, interval, start_str_overall)
+        # Map interval string to Binance client constant
+        binance_interval = None
+        if interval == '15m':
+            binance_interval = Client.KLINE_INTERVAL_15MINUTE
+        elif interval == '5m':
+            binance_interval = Client.KLINE_INTERVAL_5MINUTE
+        elif interval == '1h':
+            binance_interval = Client.KLINE_INTERVAL_1HOUR
+        elif interval == '4h':
+            binance_interval = Client.KLINE_INTERVAL_4HOUR
+        elif interval == '1d':
+            binance_interval = Client.KLINE_INTERVAL_1DAY
+        else:
+            logger.error(f"❌ [Data] فترة زمنية غير مدعومة: {interval}")
+            return None
+
+        klines = client.get_historical_klines(symbol, binance_interval, start_str_overall)
 
         if not klines:
             logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
@@ -390,6 +404,108 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
 
     return df
 
+def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
+    high_low = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift(1)).abs()
+    low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
+    df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, multiplier: float = SUPERTRAND_MULTIPLIER) -> pd.DataFrame:
+    """Calculates the Supertrend indicator."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Supertrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة. لا يمكن حساب Supertrend.")
+        df['supertrend'] = np.nan
+        df['supertrend_direction'] = 0 # Neutral if cannot calculate
+        return df
+
+    # Ensure ATR is already calculated
+    if 'atr' not in df.columns:
+        df = calculate_atr_indicator(df, period=period) # Use Supertrend period for ATR if not already calculated
+        if 'atr' not in df.columns or df['atr'].isnull().all().any():
+            logger.warning("⚠️ [Indicator Supertrend] فشل حساب ATR. لا يمكن حساب Supertrend.")
+            df['supertrend'] = np.nan
+            df['supertrend_direction'] = 0
+            return df
+
+    # Calculate Basic Upper and Lower Bands
+    df['basic_upper_band'] = ((df['high'] + df['low']) / 2) + (multiplier * df['atr'])
+    df['basic_lower_band'] = ((df['high'] + df['low']) / 2) - (multiplier * df['atr'])
+
+    # Initialize Final Upper and Lower Bands
+    df['final_upper_band'] = 0.0
+    df['final_lower_band'] = 0.0
+
+    # Initialize Supertrend and Direction
+    df['supertrend'] = 0.0
+    df['supertrend_direction'] = 0 # 1 for uptrend, -1 for downtrend, 0 for neutral/flat
+
+    # Determine Supertrend value and direction
+    for i in range(1, len(df)):
+        # Final Upper Band
+        if df['basic_upper_band'].iloc[i] < df['final_upper_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] > df['final_upper_band'].iloc[i-1]:
+            df.loc[df.index[i], 'final_upper_band'] = df['basic_upper_band'].iloc[i]
+        else:
+            df.loc[df.index[i], 'final_upper_band'] = df['final_upper_band'].iloc[i-1]
+
+        # Final Lower Band
+        if df['basic_lower_band'].iloc[i] > df['final_lower_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] < df['final_lower_band'].iloc[i-1]:
+            df.loc[df.index[i], 'final_lower_band'] = df['basic_lower_band'].iloc[i]
+        else:
+            df.loc[df.index[i], 'final_lower_band'] = df['final_lower_band'].iloc[i-1]
+
+        # Supertrend logic
+        if df['supertrend_direction'].iloc[i-1] == 1: # Previous was uptrend
+            if df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Change to downtrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Remain uptrend
+        elif df['supertrend_direction'].iloc[i-1] == -1: # Previous was downtrend
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Change to uptrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Remain downtrend
+        else: # Initial state or neutral
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1
+            elif df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] # Fallback
+                df.loc[df.index[i], 'supertrend_direction'] = 0
+
+
+    # Drop temporary columns
+    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True, errors='ignore')
+    logger.debug(f"✅ [Indicator Supertrend] تم حساب Supertrend.")
+    return df
+
+
 # NEW: Function to calculate numerical Bitcoin trend feature
 def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     """
@@ -449,14 +565,14 @@ from sklearn.preprocessing import StandardScaler
 def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -> Optional[pd.DataFrame]:
     """
     يجهز البيانات لتدريب نموذج التعلم الآلي.
-    يضيف المؤشرات (حجم السيولة، مؤشر الزخم، واتجاه البيتكوين) ويزيل الصفوف التي تحتوي على قيم NaN.
+    يضيف المؤشرات (حجم السيولة، مؤشر الزخم، واتجاه البيتكوين، والسوبر ترند) ويزيل الصفوف التي تحتوي على قيم NaN.
     يضيف عمود الهدف 'target' الذي يشير إلى ما إذا كان السعر سيرتفع في الشموع القادمة.
     """
-    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol} (حجم السيولة، الزخم، واتجاه البيتكوين)...")
+    logger.info(f"ℹ️ [ML Prep] تجهيز البيانات لنموذج التعلم الآلي لـ {symbol} (حجم السيولة، الزخم، اتجاه البيتكوين، والسوبر ترند)...")
 
     # تحديد الحد الأدنى لطول البيانات المطلوبة فقط للميزات المستخدمة
-    # 50 + 5 for BTC EMA calculation, plus target_period, plus some buffer
-    min_len_required = max(VOLUME_LOOKBACK_CANDLES, RSI_PERIOD + RSI_MOMENTUM_LOOKBACK_CANDLES, 55) + target_period + 5
+    # 50 + 5 for BTC EMA calculation, plus target_period, plus some buffer, plus Supertrend period
+    min_len_required = max(VOLUME_LOOKBACK_CANDLES, RSI_PERIOD + RSI_MOMENTUM_LOOKBACK_CANDLES, ENTRY_ATR_PERIOD, SUPERTRAND_PERIOD, 55) + target_period + 5
 
     if len(df) < min_len_required:
         logger.warning(f"⚠️ [ML Prep] DataFrame لـ {symbol} قصير جدًا ({len(df)} < {min_len_required}) لتجهيز البيانات.")
@@ -464,7 +580,7 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
 
     df_calc = df.copy()
 
-    # حساب الميزات المطلوبة فقط: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
+    # حساب الميزات المطلوبة فقط: متوسط حجم السيولة لآخر 15 دقيقة (1 شمعة 15m)
     df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
     logger.debug(f"ℹ️ [ML Prep] تم حساب متوسط حجم 15 دقيقة لـ {symbol}.")
 
@@ -481,6 +597,14 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
                 df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
     logger.debug(f"ℹ️ [ML Prep] تم حساب مؤشر زخم RSI الصعودي لـ {symbol}.")
 
+    # حساب ATR (مطلوب لـ Supertrend)
+    df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+
+    # حساب Supertrend
+    df_calc = calculate_supertrend(df_calc, SUPERTRAND_PERIOD, SUPERTRAND_MULTIPLIER)
+    logger.debug(f"ℹ️ [ML Prep] تم حساب مؤشر Supertrend لـ {symbol}.")
+
+
     # --- NEW: Fetch and calculate BTC trend feature ---
     # Fetch BTC data for the same period and interval
     btc_df = fetch_historical_data("BTCUSDT", interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
@@ -489,10 +613,8 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
         btc_trend_series = _calculate_btc_trend_feature(btc_df)
         if btc_trend_series is not None:
             # Merge BTC trend with the current symbol's DataFrame based on timestamp index
-            # Using 'left' merge to keep all rows of df_calc. Fill NaNs with 0 (neutral).
             df_calc = df_calc.merge(btc_trend_series.rename('btc_trend_feature'),
                                     left_index=True, right_index=True, how='left')
-            # Fix: Avoid inplace=True for chained assignment warning
             df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
             logger.debug(f"ℹ️ [ML Prep] تم دمج ميزة اتجاه البيتكوين لـ {symbol}.")
         else:
@@ -507,7 +629,8 @@ def prepare_data_for_ml(df: pd.DataFrame, symbol: str, target_period: int = 5) -
     feature_columns = [
         'volume_15m_avg', # ميزة جديدة: متوسط حجم السيولة لآخر 15 دقيقة
         'rsi_momentum_bullish', # ميزة جديدة: زخم RSI الصعودي
-        'btc_trend_feature' # ميزة جديدة: اتجاه البيتكوين (1: صعودي, -1: هبوطي, 0: محايد)
+        'btc_trend_feature', # ميزة جديدة: اتجاه البيتكوين (1: صعودي, -1: هبوطي, 0: محايد)
+        'supertrend_direction' # ميزة جديدة: اتجاه Supertrend (1: صعودي, -1: هبوطي, 0: محايد)
     ]
 
     # التأكد من وجود جميع أعمدة الميزات وتحويلها إلى أرقام
@@ -561,7 +684,6 @@ def train_and_evaluate_model(data: pd.DataFrame) -> Tuple[Any, Dict[str, Any]]:
         return None, {}
 
     # تقسيم البيانات إلى مجموعات تدريب واختبار
-    # استخدام stratify=y لضمان توزيع متوازن للفئات في مجموعات التدريب والاختبار
     try:
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     except ValueError as ve:

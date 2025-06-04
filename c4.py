@@ -51,23 +51,26 @@ logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Fl
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 TRADE_VALUE: float = 10.0
 MAX_OPEN_TRADES: int = 5
-SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق ليتناسب مع 3 شمعات = 15 دقيقة
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' # تم التغيير إلى 15 دقيقة
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '5m'
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' # تم التغيير إلى 15 دقيقة
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
 # Indicator Parameters (Only those needed for ML features or essential filters)
 RSI_PERIOD: int = 9 # Still needed for RSI Momentum
 RSI_OVERSOLD: int = 30 # Not directly used for signal, but good to keep for context if needed later
 RSI_OVERBOUGHT: int = 70 # Not directly used for signal, but good to keep for context if needed later
-VOLUME_LOOKBACK_CANDLES: int = 3 # عدد الشمعات لحساب متوسط الحجم (3 شمعات * 5 دقائق = 15 دقيقة)
+VOLUME_LOOKBACK_CANDLES: int = 1 # عدد الشمعات لحساب متوسط الحجم (1 شمعة * 15 دقيقة = 15 دقيقة)
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
+
+ENTRY_ATR_PERIOD: int = 10 # Still needed for target calculation and Supertrend
+ENTRY_ATR_MULTIPLIER: float = 1.5 # Still needed for target calculation
+
+SUPERTRAND_PERIOD: int = 10 # فترة Supertrend
+SUPERTRAND_MULTIPLIER: float = 3.0 # مضاعف Supertrend
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
 MIN_VOLUME_15M_USDT: float = 50000.0 # Essential filter
-
-ENTRY_ATR_PERIOD: int = 10 # Still needed for target calculation
-ENTRY_ATR_MULTIPLIER: float = 1.5 # Still needed for target calculation
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -143,10 +146,26 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
         logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} حتى الآن...")
 
+        # Map interval string to Binance client constant
+        binance_interval = None
+        if interval == '15m':
+            binance_interval = Client.KLINE_INTERVAL_15MINUTE
+        elif interval == '5m':
+            binance_interval = Client.KLINE_INTERVAL_5MINUTE
+        elif interval == '1h':
+            binance_interval = Client.KLINE_INTERVAL_1HOUR
+        elif interval == '4h':
+            binance_interval = Client.KLINE_INTERVAL_4HOUR
+        elif interval == '1d':
+            binance_interval = Client.KLINE_INTERVAL_1DAY
+        else:
+            logger.error(f"❌ [Data] فترة زمنية غير مدعومة: {interval}")
+            return None
+
         # Call get_historical_klines for the entire period.
         # The python-binance library is designed to handle internal pagination
         # if the requested range exceeds the API's single-request limit (e.g., 1000 klines).
-        klines = client.get_historical_klines(symbol, interval, start_str_overall)
+        klines = client.get_historical_klines(symbol, binance_interval, start_str_overall)
 
         if not klines:
             logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.")
@@ -243,6 +262,85 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
 
     df['atr'] = tr.ewm(span=period, adjust=False).mean()
+    return df
+
+def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, multiplier: float = SUPERTRAND_MULTIPLIER) -> pd.DataFrame:
+    """Calculates the Supertrend indicator."""
+    df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Supertrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة. لا يمكن حساب Supertrend.")
+        df['supertrend'] = np.nan
+        df['supertrend_direction'] = 0 # Neutral if cannot calculate
+        return df
+
+    # Ensure ATR is already calculated
+    if 'atr' not in df.columns:
+        df = calculate_atr_indicator(df, period=period) # Use Supertrend period for ATR if not already calculated
+        if 'atr' not in df.columns or df['atr'].isnull().all().any():
+            logger.warning("⚠️ [Indicator Supertrend] فشل حساب ATR. لا يمكن حساب Supertrend.")
+            df['supertrend'] = np.nan
+            df['supertrend_direction'] = 0
+            return df
+
+    # Calculate Basic Upper and Lower Bands
+    df['basic_upper_band'] = ((df['high'] + df['low']) / 2) + (multiplier * df['atr'])
+    df['basic_lower_band'] = ((df['high'] + df['low']) / 2) - (multiplier * df['atr'])
+
+    # Initialize Final Upper and Lower Bands
+    df['final_upper_band'] = 0.0
+    df['final_lower_band'] = 0.0
+
+    # Initialize Supertrend and Direction
+    df['supertrend'] = 0.0
+    df['supertrend_direction'] = 0 # 1 for uptrend, -1 for downtrend, 0 for neutral/flat
+
+    # Determine Supertrend value and direction
+    for i in range(1, len(df)):
+        # Final Upper Band
+        if df['basic_upper_band'].iloc[i] < df['final_upper_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] > df['final_upper_band'].iloc[i-1]:
+            df.loc[df.index[i], 'final_upper_band'] = df['basic_upper_band'].iloc[i]
+        else:
+            df.loc[df.index[i], 'final_upper_band'] = df['final_upper_band'].iloc[i-1]
+
+        # Final Lower Band
+        if df['basic_lower_band'].iloc[i] > df['final_lower_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] < df['final_lower_band'].iloc[i-1]:
+            df.loc[df.index[i], 'final_lower_band'] = df['basic_lower_band'].iloc[i]
+        else:
+            df.loc[df.index[i], 'final_lower_band'] = df['final_lower_band'].iloc[i-1]
+
+        # Supertrend logic
+        if df['supertrend_direction'].iloc[i-1] == 1: # Previous was uptrend
+            if df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Change to downtrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Remain uptrend
+        elif df['supertrend_direction'].iloc[i-1] == -1: # Previous was downtrend
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Change to uptrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Remain downtrend
+        else: # Initial state or neutral
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1
+            elif df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] # Fallback
+                df.loc[df.index[i], 'supertrend_direction'] = 0
+
+
+    # Drop temporary columns
+    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True, errors='ignore')
+    logger.debug(f"✅ [Indicator Supertrend] تم حساب Supertrend.")
     return df
 
 # NEW: Function to calculate numerical Bitcoin trend feature (copied from ml.py)
@@ -557,10 +655,6 @@ def run_ticker_socket_manager() -> None:
 
         time.sleep(15)
 
-# ---------------------- Technical Indicator Functions (Only those needed for ML features) ----------------------
-# Keeping only necessary indicator calculations for ML features or essential filters
-# Removed: calculate_vwma, calculate_bollinger_bands, calculate_macd, calculate_adx, calculate_vwap, calculate_obv, detect_candlestick_patterns
-
 # ---------------------- Other Helper Functions (Volume) ----------------------
 def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
     """Fetches the trading volume in USDT for the last `num_candles` of the specified `interval`."""
@@ -569,7 +663,24 @@ def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME
          return 0.0
     try:
         logger.debug(f"ℹ️ [Data Volume] جلب حجم آخر {num_candles} شمعات {interval} لـ {symbol}...")
-        klines = client.get_klines(symbol=symbol, interval=interval, limit=num_candles)
+
+        # Map interval string to Binance client constant
+        binance_interval = None
+        if interval == '15m':
+            binance_interval = Client.KLINE_INTERVAL_15MINUTE
+        elif interval == '5m':
+            binance_interval = Client.KLINE_INTERVAL_5MINUTE
+        elif interval == '1h':
+            binance_interval = Client.KLINE_INTERVAL_1HOUR
+        elif interval == '4h':
+            binance_interval = Client.KLINE_INTERVAL_4HOUR
+        elif interval == '1d':
+            binance_interval = Client.KLINE_INTERVAL_1DAY
+        else:
+            logger.error(f"❌ [Data Volume] فترة زمنية غير مدعومة: {interval}")
+            return 0.0
+
+        klines = client.get_klines(symbol=symbol, interval=binance_interval, limit=num_candles)
         if not klines or len(klines) < num_candles:
              logger.warning(f"⚠️ [Data Volume] بيانات {interval} غير كافية (أقل من {num_candles} شمعة) لـ {symbol}.")
              return 0.0
@@ -761,19 +872,20 @@ class ScalpingTradingStrategy:
         if self.ml_model is None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج تعلم الآلة لـ {symbol}. لن تتمكن الإستراتيجية من توليد إشارات.")
 
-        # Updated feature columns to include btc_trend_feature
+        # Updated feature columns to include btc_trend_feature and supertrend_direction
         self.feature_columns_for_ml = [ # Features expected by the ML model
             'volume_15m_avg',
             'rsi_momentum_bullish',
-            'btc_trend_feature' # NEW: Bitcoin trend feature
+            'btc_trend_feature', # NEW: Bitcoin trend feature
+            'supertrend_direction' # NEW: Supertrend direction feature
         ]
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates only the required indicators for the ML model's features."""
         logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات لنموذج ML...")
         # min_len_required should reflect only indicators used for ML features
-        # 50 + 5 for BTC EMA calculation, plus some buffer
-        min_len_required = max(RSI_PERIOD, RSI_MOMENTUM_LOOKBACK_CANDLES, VOLUME_LOOKBACK_CANDLES, 55) + 5
+        # 50 + 5 for BTC EMA calculation, plus some buffer, plus Supertrend period
+        min_len_required = max(RSI_PERIOD, RSI_MOMENTUM_LOOKBACK_CANDLES, VOLUME_LOOKBACK_CANDLES, ENTRY_ATR_PERIOD, SUPERTRAND_PERIOD, 55) + 5
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب مؤشرات ML.")
@@ -783,10 +895,13 @@ class ScalpingTradingStrategy:
             df_calc = df.copy()
             # Calculate RSI as it's a prerequisite for rsi_momentum_bullish
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            # Calculate ATR for target price calculation, not for signal generation logic
+            # Calculate ATR for target price calculation and Supertrend
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
+            # Calculate Supertrend
+            df_calc = calculate_supertrend(df_calc, SUPERTRAND_PERIOD, SUPERTRAND_MULTIPLIER)
 
-            # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (3 شمعات 5m)
+
+            # إضافة ميزات جديدة: متوسط حجم السيولة لآخر 15 دقيقة (1 شمعة 15m)
             df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
 
             # إضافة مؤشر زخم صعودي (RSI Momentum)
@@ -805,10 +920,8 @@ class ScalpingTradingStrategy:
                 btc_trend_series = _calculate_btc_trend_feature(btc_df)
                 if btc_trend_series is not None:
                     # Merge BTC trend with the current symbol's DataFrame based on timestamp index
-                    # Using 'left' merge to keep all rows of df_calc. Fill NaNs with 0 (neutral).
                     df_calc = df_calc.merge(btc_trend_series.rename('btc_trend_feature'),
                                             left_index=True, right_index=True, how='left')
-                    # Fix: Avoid inplace=True for chained assignment warning
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
                     logger.debug(f"ℹ️ [Strategy {self.symbol}] تم دمج ميزة اتجاه البيتكوين.")
                 else:
@@ -830,7 +943,7 @@ class ScalpingTradingStrategy:
             initial_len = len(df_calc)
             # Use all required columns for dropna, including ML features and ATR for target
             all_required_cols = list(set(self.feature_columns_for_ml + [
-                'open', 'high', 'low', 'close', 'volume', 'atr'
+                'open', 'high', 'low', 'close', 'volume', 'atr', 'supertrend' # 'supertrend' for debugging, not strictly for ML features
             ]))
             df_cleaned = df_calc.dropna(subset=all_required_cols).copy()
             dropped_count = initial_len - len(df_cleaned)
@@ -842,7 +955,7 @@ class ScalpingTradingStrategy:
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. أحدث حجم 15 دقيقة: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}, BTC Trend: {latest.get('btc_trend_feature', np.nan)}, ATR: {latest.get('atr', np.nan):.4f}")
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. أحدث حجم 15 دقيقة: {latest.get('volume_15m_avg', np.nan):.2f}, RSI Momentum: {latest.get('rsi_momentum_bullish', np.nan)}, BTC Trend: {latest.get('btc_trend_feature', np.nan)}, ATR: {latest.get('atr', np.nan):.4f}, Supertrend Direction: {latest.get('supertrend_direction', np.nan)}")
             return df_cleaned
 
         except KeyError as ke:
@@ -860,7 +973,7 @@ class ScalpingTradingStrategy:
         """
         logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء (تعتمد على ML فقط)...")
 
-        min_signal_data_len = max(VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES, 55) + 1 # Adjusted for BTC trend feature
+        min_signal_data_len = max(VOLUME_LOOKBACK_CANDLES, RSI_MOMENTUM_LOOKBACK_CANDLES, ENTRY_ATR_PERIOD, SUPERTRAND_PERIOD, 55) + 1 # Adjusted for BTC trend feature and Supertrend
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.")
             return None
@@ -878,7 +991,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price is None: # Corrected from `=== None`
+        if current_price is None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات التيكر. لا يمكن إنشاء إشارة.")
             return None
 
@@ -887,18 +1000,6 @@ class ScalpingTradingStrategy:
              return None
 
         signal_details = {} # Initialize signal_details
-
-        # --- REMOVED: BTC Trend Check as a direct filter. It's now an ML feature. ---
-        # btc_trend = get_btc_trend_4h()
-        # if "هبوط" in btc_trend:
-        #     logger.info(f"ℹ️ [Strategy {self.symbol}] التداول متوقف بسبب اتجاه البيتكوين الهابط ({btc_trend}).")
-        #     signal_details['BTC_Trend'] = f'هبوط ({btc_trend}) ❌'
-        #     return None
-        # elif "N/A" in btc_trend:
-        #      logger.warning(f"⚠️ [Strategy {self.symbol}] لا يمكن تحديد اتجاه البيتكوين، سيتم تجاهل هذا الشرط.")
-        #      signal_details['BTC_Trend'] = 'غير متاح (تجاهل)'
-        # else:
-        #      signal_details['BTC_Trend'] = f'صعود أو استقرار ({btc_trend}) ✅'
 
         # --- ML Model Prediction (Primary decision maker) ---
         ml_prediction_result_text = "N/A (نموذج غير محمل)"
@@ -923,6 +1024,7 @@ class ScalpingTradingStrategy:
         signal_details['ML_Prediction'] = ml_prediction_result_text
         # Add the actual btc_trend_feature value to signal_details for logging/reporting
         signal_details['BTC_Trend_Feature_Value'] = last_row.get('btc_trend_feature', 0.0)
+        signal_details['Supertrend_Direction_Value'] = last_row.get('supertrend_direction', 0)
 
 
         # If ML model is not bullish or failed, no signal
@@ -970,7 +1072,7 @@ class ScalpingTradingStrategy:
             'total_possible_score': 1.0 # Placeholder
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML فقط). السعر: {current_price:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}, BTC Trend Feature: {last_row.get('btc_trend_feature', 0.0)}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML فقط). السعر: {current_price:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}, BTC Trend Feature: {last_row.get('btc_trend_feature', 0.0)}, Supertrend Direction: {last_row.get('supertrend_direction', 0)}")
         return signal_output
 
 
@@ -1041,11 +1143,11 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
         fear_greed = get_fear_greed_index()
-        # Removed btc_trend from here as it's no longer a direct filter
-        # btc_trend = signal_details.get('BTC_Trend', 'N/A')
         ml_prediction_status = signal_details.get('ML_Prediction', 'N/A')
         btc_trend_feature_value = signal_details.get('BTC_Trend_Feature_Value', 0.0)
         btc_trend_display = "صعودي 📈" if btc_trend_feature_value == 1.0 else ("هبوطي 📉" if btc_trend_feature_value == -1.0 else "محايد 🔄")
+        supertrend_direction_value = signal_details.get('Supertrend_Direction_Value', 0)
+        supertrend_display = "صعودي ⬆️" if supertrend_direction_value == 1 else ("هبوطي ⬇️" if supertrend_direction_value == -1 else "محايد ↔️")
 
 
         message = (
@@ -1068,7 +1170,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
             f"  - فحص هامش الربح: {signal_details.get('Profit_Margin_Check', 'N/A')}\n"
             f"——————————————\n"
             f"😨/🤑 **مؤشر الخوف والجشع:** {fear_greed}\n"
-            f"₿ **اتجاه البيتكوين (ميزة ML):** {btc_trend_display}\n" # Updated display for BTC trend
+            f"₿ **اتجاه البيتكوين (ميزة ML):** {btc_trend_display}\n"
+            f"📊 **اتجاه السوبر ترند (ميزة ML):** {supertrend_display}\n" # NEW: Supertrend display
             f"——————————————\n"
             f"⏰ {timestamp_str}"
         )
@@ -1215,7 +1318,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price is None: # Corrected from `=== None`
+                    if current_price is None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
                          continue
 
