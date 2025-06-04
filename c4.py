@@ -64,13 +64,13 @@ VOLUME_LOOKBACK_CANDLES: int = 1 # عدد الشمعات لحساب متوسط �
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 # عدد الشمعات للتحقق من تزايد RSI للزخم
 
 ENTRY_ATR_PERIOD: int = 10 # Still needed for target calculation and Supertrend
-ENTRY_ATR_MULTIPLIER: float = 1.5 # Still needed for target calculation
+ENTRY_ATR_MULTIPLIER: float = 2 # Still needed for target calculation
 
 SUPERTRAND_PERIOD: int = 10 # فترة Supertrend
 SUPERTRAND_MULTIPLIER: float = 3.0 # مضاعف Supertrend
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
-MIN_VOLUME_15M_USDT: float = 50000.0 # Essential filter
+MIN_VOLUME_15M_USDT: float = 80000.0 # Essential filter
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
