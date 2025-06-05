@@ -71,7 +71,6 @@ SUPERTRAND_MULTIPLIER: float = 3.0 # مضاعف Supertrend
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
 MIN_VOLUME_15M_USDT: float = 50000.0 # Essential filter
-TRAILING_STOP_PERCENTAGE: float = 1.5 # NEW: Trailing stop loss percentage (e.g., 1.5%)
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -455,10 +454,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
-                    current_target DOUBLE PRECISION NOT NULL, -- Keep for now, might be redundant with trailing stop
-                    initial_stop_loss DOUBLE PRECISION, -- NEW
-                    current_stop_loss DOUBLE PRECISION, -- NEW
-                    highest_price_reached DOUBLE PRECISION, -- NEW
+                    current_target DOUBLE PRECISION NOT NULL,
                     r2_score DOUBLE PRECISION,
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
@@ -1236,62 +1232,45 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     if message:
         send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
 
-# ---------------------- Database Functions (Insert and Update) ---
-def save_signal_to_db(signal: Dict[str, Any]) -> bool:
-    """Saves a validated signal to the database, including initial stop loss and highest price."""
-    symbol = signal.get('symbol', 'N/A')
-    logger.debug(f"ℹ️ [DB Insert] محاولة حفظ إشارة لـ {symbol}...")
-    if not check_db_connection() or not conn or not cur:
-        logger.error(f"❌ [DB Insert] لا يمكن حفظ الإشارة لـ {symbol} بسبب مشكلة في اتصال قاعدة البيانات.")
+# ---------------------- Database Functions (Insert and Update) ----------------------
+def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
+    """Inserts a new signal into the signals table with the weighted score and entry time."""
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة {signal.get('symbol', 'N/A')} بسبب مشكلة في اتصال قاعدة البيانات.")
         return False
 
+    symbol = signal.get('symbol', 'N/A')
+    logger.debug(f"ℹ️ [DB Insert] محاولة إدراج إشارة لـ {symbol}...")
     try:
-        # Prepare signal data, ensuring correct types and handling potential None values
         signal_prepared = convert_np_values(signal)
         signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
-        entry_price = float(signal_prepared['entry_price'])
-        initial_target = float(signal_prepared['initial_target'])
-
-        # --- NEW: Calculate Initial Stop Loss and Highest Price ---
-        # Initial stop loss is set below the entry price by the trailing percentage
-        initial_stop_loss = entry_price * (1 - (TRAILING_STOP_PERCENTAGE / 100.0))
-        # Initial highest price reached is the entry price itself
-        highest_price_reached = entry_price
-        # Current stop loss starts at the initial stop loss level
-        current_stop_loss = initial_stop_loss
-
-        logger.info(f"ℹ️ [DB Insert] {symbol}: سعر الدخول={entry_price:.6f}, وقف الخسارة الأولي={initial_stop_loss:.6f}, أعلى سعر مبدئي={highest_price_reached:.6f}")
 
         with conn.cursor() as cur_ins:
             insert_query = sql.SQL("""
                 INSERT INTO signals
                  (symbol, entry_price, initial_target, current_target,
-                  initial_stop_loss, current_stop_loss, highest_price_reached, -- Added new fields
-                  r2_score, strategy_name, signal_details, volume_15m, entry_time)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW());
+                 r2_score, strategy_name, signal_details, volume_15m, entry_time)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW());
             """)
             cur_ins.execute(insert_query, (
                 signal_prepared['symbol'],
-                entry_price,
-                initial_target,
-                initial_target, # Current target starts as initial target
-                initial_stop_loss, # NEW
-                current_stop_loss, # NEW
-                highest_price_reached, # NEW
+                signal_prepared['entry_price'],
+                signal_prepared['initial_target'],
+                signal_prepared['current_target'],
                 signal_prepared.get('r2_score'),
                 signal_prepared.get('strategy_name', 'unknown'),
                 signal_details_json,
                 signal_prepared.get('volume_15m')
             ))
         conn.commit()
-        logger.info(f"✅ [DB Insert] تم إدراج إشارة لـ {symbol} في قاعدة البيانات (وقف الخسارة الأولي: {initial_stop_loss:.6f}).")
+        logger.info(f"✅ [DB Insert] تم إدراج إشارة لـ {symbol} في قاعدة البيانات (الدرجة: {signal_prepared.get('r2_score')}).")
         return True
     except psycopg2.Error as db_err:
         logger.error(f"❌ [DB Insert] خطأ في قاعدة البيانات أثناء إدراج إشارة لـ {symbol}: {db_err}")
         if conn: conn.rollback()
         return False
-    except (TypeError, ValueError, KeyError) as convert_err:
-         logger.error(f"❌ [DB Insert] خطأ في تحويل أو الوصول لبيانات الإشارة قبل الإدراج لـ {symbol}: {convert_err} - بيانات الإشارة: {signal}")
+    except (TypeError, ValueError) as convert_err:
+         logger.error(f"❌ [DB Insert] خطأ في تحويل بيانات الإشارة قبل الإدراج لـ {symbol}: {convert_err} - بيانات الإشارة: {signal}")
          if conn: conn.rollback()
          return False
     except Exception as e:
@@ -1301,8 +1280,8 @@ def save_signal_to_db(signal: Dict[str, Any]) -> bool:
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
-    """Tracks open signals, checks for target hits, and manages trailing stop loss."""
-    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة (مع وقف خسارة متحرك)...")
+    """Tracks open signals and checks targets. Calculates time to target upon hit."""
+    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة...")
     while True:
         active_signals_summary: List[str] = []
         processed_in_cycle = 0
@@ -1313,12 +1292,10 @@ def track_signals() -> None:
                 continue
 
             with conn.cursor() as track_cur:
-                 # Fetch all necessary fields for tracking, including stop loss and highest price
                  track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time,
-                           initial_stop_loss, current_stop_loss, highest_price_reached
+                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time
                     FROM signals
-                    WHERE achieved_target = FALSE AND closing_price IS NULL; -- Only track truly open signals
+                    WHERE achieved_target = FALSE;
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1333,28 +1310,11 @@ def track_signals() -> None:
                 symbol = signal_row['symbol']
                 processed_in_cycle += 1
                 update_executed = False
-                close_reason = None # To track why a signal is closed
 
                 try:
                     entry_price = float(signal_row['entry_price'])
                     entry_time = signal_row['entry_time']
                     current_target = float(signal_row['current_target'])
-                    # Load stop loss and highest price data
-                    initial_stop_loss = float(signal_row.get('initial_stop_loss', 0.0))
-                    current_stop_loss = float(signal_row.get('current_stop_loss', 0.0))
-                    highest_price_reached = float(signal_row.get('highest_price_reached', entry_price))
-
-                    # Ensure initial values are sensible if they were somehow null in DB
-                    if initial_stop_loss <= 0:
-                        initial_stop_loss = entry_price * (1 - (TRAILING_STOP_PERCENTAGE / 100.0))
-                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Initial stop loss was invalid, recalculating: {initial_stop_loss:.6f}")
-                    if current_stop_loss <= 0:
-                        current_stop_loss = initial_stop_loss
-                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current stop loss was invalid, resetting to initial: {current_stop_loss:.6f}")
-                    if highest_price_reached < entry_price:
-                        highest_price_reached = entry_price
-                        logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Highest price reached was invalid, resetting to entry: {highest_price_reached:.6f}")
-
 
                     current_price = ticker_data.get(symbol)
 
@@ -1362,106 +1322,88 @@ def track_signals() -> None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
                          continue
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss:.4f} High={highest_price_reached:.4f}")
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}")
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
                     notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'current_price': current_price}
 
-                    # --- Trailing Stop Loss Logic ---
-                    new_highest_price = highest_price_reached
-                    new_current_stop_loss = current_stop_loss
-                    stop_loss_updated = False
 
-                    # 1. Update Highest Price Reached
-                    if current_price > highest_price_reached:
-                        new_highest_price = current_price
-                        logger.debug(f"📈 [Tracker] {symbol}(ID:{signal_id}): New highest price reached: {new_highest_price:.6f} (was {highest_price_reached:.6f})")
-
-                    # 2. Calculate Potential New Stop Loss
-                    potential_new_stop = new_highest_price * (1 - (TRAILING_STOP_PERCENTAGE / 100.0))
-
-                    # 3. Update Current Stop Loss if it has moved up
-                    if potential_new_stop > current_stop_loss:
-                        new_current_stop_loss = potential_new_stop
-                        stop_loss_updated = True
-                        logger.info(f"⬆️ [Tracker] {symbol}(ID:{signal_id}): Trailing stop loss updated to {new_current_stop_loss:.6f} (was {current_stop_loss:.6f}) based on new high {new_highest_price:.6f}")
-
-                    # 4. Check if Trailing Stop Loss is Hit
-                    if current_price <= new_current_stop_loss: # Use the potentially updated stop loss for the check
-                        loss_pct = ((new_current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
-                        closed_at = datetime.now()
-                        time_open_duration = closed_at - entry_time if entry_time else timedelta(0)
-                        time_open_str = str(time_open_duration)
-
-                        # Update query to close the signal due to stop loss
-                        update_query = sql.SQL("""
-                            UPDATE signals
-                            SET closing_price = %s, closed_at = %s, profit_percentage = %s,
-                                time_to_target = %s, achieved_target = FALSE, -- Explicitly set achieved_target to FALSE
-                                current_stop_loss = %s, highest_price_reached = %s -- Save final values
-                            WHERE id = %s;
-                        """)
-                        update_params = (new_current_stop_loss, closed_at, loss_pct, time_open_duration, new_current_stop_loss, new_highest_price, signal_id)
-                        log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): تم ضرب وقف الخسارة المتحرك عند {new_current_stop_loss:.8g} (الخسارة/الربح: {loss_pct:+.2f}%, الوقت: {time_open_str})."
-                        notification_details.update({'type': 'stop_loss_hit', 'closing_price': new_current_stop_loss, 'profit_pct': loss_pct, 'time_open': time_open_str})
-                        update_executed = True
-                        close_reason = "Stop Loss Hit"
-
-                    # --- Check for Target Hit (Only if Stop Loss NOT Hit) ---
-                    if not update_executed and current_price >= current_target:
+                    # --- Check and Update Logic ---
+                    # 1. Check for Target Hit
+                    if current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
                         closed_at = datetime.now()
                         time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
                         time_to_target_str = str(time_to_target_duration)
 
-                        # Update query to close the signal due to target hit
-                        update_query = sql.SQL("""
-                            UPDATE signals
-                            SET achieved_target = TRUE, closing_price = %s, closed_at = %s,
-                                profit_percentage = %s, time_to_target = %s,
-                                current_stop_loss = %s, highest_price_reached = %s -- Save final values
-                            WHERE id = %s;
-                        """)
-                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, new_current_stop_loss, new_highest_price, signal_id)
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
+                        update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
                         log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%, الوقت: {time_to_target_str})."
                         notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str})
                         update_executed = True
-                        close_reason = "Target Hit"
 
-                    # --- Update DB if only highest price or stop loss changed (and signal not closed) ---
-                    if not update_executed and (new_highest_price != highest_price_reached or stop_loss_updated):
-                        update_query = sql.SQL("""
-                            UPDATE signals
-                            SET current_stop_loss = %s, highest_price_reached = %s
-                            WHERE id = %s;
-                        """)
-                        update_params = (new_current_stop_loss, new_highest_price, signal_id)
-                        log_message = f"🔄 [Tracker] {symbol}(ID:{signal_id}): تم تحديث حالة التتبع (أعلى سعر: {new_highest_price:.6f}, وقف الخسارة: {new_current_stop_loss:.6f})."
-                        # No notification for simple tracking updates, only for state changes (SL update, hit, target hit)
-                        if stop_loss_updated:
-                             notification_details.update({'type': 'stop_loss_updated', 'new_stop_loss': new_current_stop_loss, 'highest_price': new_highest_price})
-                        else: # Only highest price changed, no notification needed
-                             notification_details = {} # Clear notification details
-                        update_executed = True # Mark as executed to commit the change
+                    # 2. Check for Target Extension (Only if Target not hit)
+                    if not update_executed:
+                        if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
+                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرار...")
+
+                             df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+
+                             if df_continuation is not None and not df_continuation.empty:
+                                 continuation_strategy = ScalpingTradingStrategy(symbol)
+                                 # Ensure ML model is loaded for continuation strategy
+                                 if continuation_strategy.ml_model is None:
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML غير محمل لاستراتيجية الاستمرار. تخطي تحديث الهدف.")
+                                     continue
+
+                                 df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
+
+                                 if df_continuation_indicators is not None:
+                                     # Pass the populated indicators to generate_buy_signal
+                                     continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
+
+                                     if continuation_signal:
+                                         latest_row = df_continuation_indicators.iloc[-1]
+                                         current_atr_for_new_target = latest_row.get('atr')
+
+                                         if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
+                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_new_target)
+
+                                             if potential_new_target > current_target:
+                                                 old_target = current_target
+                                                 new_target = potential_new_target
+                                                 update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
+                                                 update_params = (new_target, signal_id)
+                                                 log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target:.8g} إلى {new_target:.8g} بناءً على إشارة الاستمرار."
+                                                 notification_details.update({'type': 'target_updated', 'old_target': old_target, 'new_target': new_target})
+                                                 update_executed = True
+                                             else:
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) ليس أعلى من الهدف الحالي ({current_target:.8g}). عدم تحديث الهدف.")
+                                         else:
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف الجديد بسبب ATR غير صالح ({current_atr_for_new_target}) من بيانات الاستمرار.")
+                                     else:
+                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم إنشاء إشارة استمرار.")
+                                 else:
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في ملء المؤشرات للتحقق من الاستمرار.")
+                             else:
+                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن جلب البيانات التاريخية للتحقق من الاستمرار.")
 
 
-                    # --- Execute DB Update --- 
                     if update_executed and update_query:
                         try:
                              with conn.cursor() as update_cur:
                                   update_cur.execute(update_query, update_params)
                              conn.commit()
                              if log_message: logger.info(log_message)
-                             # Send notification only if type is set (Target Hit, SL Hit, SL Updated)
                              if notification_details.get('type'):
                                 send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في قاعدة البيانات أثناء التحديث ({close_reason or 'Tracking Update'}): {db_err}")
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في قاعدة البيانات أثناء التحديث: {db_err}")
                             if conn: conn.rollback()
                         except Exception as exec_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار ({close_reason or 'Tracking Update'}): {exec_err}", exc_info=True)
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار: {exec_err}", exc_info=True)
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
@@ -1474,7 +1416,7 @@ def track_signals() -> None:
             if active_signals_summary:
                 logger.debug(f"ℹ️ [Tracker] نهاية حالة الدورة ({processed_in_cycle} معالجة): {'; '.join(active_signals_summary)}")
 
-            time.sleep(3) # Check every 3 seconds
+            time.sleep(3)
 
         except psycopg2.Error as db_cycle_err:
              logger.error(f"❌ [Tracker] خطأ في قاعدة البيانات في دورة التتبع الرئيسية: {db_cycle_err}. محاولة إعادة الاتصال...")
