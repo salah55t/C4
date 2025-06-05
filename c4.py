@@ -1297,7 +1297,9 @@ def save_signal_to_db(signal: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"❌ [DB Insert] خطأ غير متوقع أثناء إدراج إشارة لـ {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
-        return False--------- Open Signal Tracking Function ----------------------
+        return False
+
+# ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
     """Tracks open signals, checks for target hits, and manages trailing stop loss."""
     logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة (مع وقف خسارة متحرك)...")
