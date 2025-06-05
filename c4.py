@@ -70,7 +70,7 @@ SUPERTRAND_PERIOD: int = 10 # فترة Supertrend
 SUPERTRAND_MULTIPLIER: float = 3.0 # مضاعف Supertrend
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0 # Essential filter
-MIN_VOLUME_15M_USDT: float = 80000.0 # Essential filter
+MIN_VOLUME_15M_USDT: float = 50000.0 # Essential filter
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -465,7 +465,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     time_to_target INTERVAL,
                     profit_percentage DOUBLE PRECISION,
                     strategy_name TEXT,
-                    signal_details JSONB
+                    signal_details JSONB,
+                    stop_loss DOUBLE PRECISION  -- Added stop loss column
                 );""")
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
@@ -1027,10 +1028,25 @@ class ScalpingTradingStrategy:
         signal_details['Supertrend_Direction_Value'] = last_row.get('supertrend_direction', 0)
 
 
-        # If ML model is not bullish or failed, no signal
-        if not ml_is_bullish:
+        # --- NEW: Add additional filters ---
+        # Filter 1: Supertrend must be bullish
+        current_supertrend_direction = last_row.get('supertrend_direction')
+        if current_supertrend_direction != 1:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] Supertrend is not bullish ({current_supertrend_direction}). تم رفض الإشارة.")
+            signal_details['Supertrend_Filter'] = f'فشل: Supertrend ليس صاعداً ({current_supertrend_direction})'
             return None
-        
+        else:
+            signal_details['Supertrend_Filter'] = f'نجاح: Supertrend صاعد ({current_supertrend_direction})'
+
+        # Filter 2: Bitcoin trend should not be strongly bearish (allow neutral or bullish)
+        current_btc_trend = last_row.get('btc_trend_feature')
+        if current_btc_trend == -1.0:
+            logger.info(f"ℹ️ [Strategy {self.symbol}] Bitcoin trend is bearish ({current_btc_trend}). تم رفض الإشارة.")
+            signal_details['BTC_Trend_Filter'] = f'فشل: اتجاه البيتكوين هابط ({current_btc_trend})'
+            return None
+        else:
+            signal_details['BTC_Trend_Filter'] = f'نجاح: اتجاه البيتكوين ليس هابطاً ({current_btc_trend})'
+
         # --- Volume Check (Essential filter) ---
         volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
         if volume_recent < MIN_VOLUME_15M_USDT:
@@ -1042,14 +1058,17 @@ class ScalpingTradingStrategy:
 
 
         current_atr = last_row.get('atr')
+        current_supertrend_value = last_row.get('supertrend') # Get the actual Supertrend line value
 
-        if pd.isna(current_atr) or current_atr <= 0:
-             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR غير صالحة ({current_atr}) لحساب الهدف. لا يمكن إنشاء إشارة.")
+        if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_supertrend_value):
+             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR أو Supertrend غير صالحة ({current_atr}, {current_supertrend_value}) لحساب الهدف/الوقف. لا يمكن إنشاء إشارة.")
              return None
 
+        # --- Calculate Initial Target ---
         target_multiplier = ENTRY_ATR_MULTIPLIER
         initial_target = current_price + (target_multiplier * current_atr)
 
+        # --- Profit Margin Check (Essential filter) ---
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
@@ -1058,21 +1077,41 @@ class ScalpingTradingStrategy:
         else:
             signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_margin_pct:.2f}%)'
 
+        # --- NEW: Calculate Initial Stop Loss ---
+        # Option 1: Based on ATR (e.g., 1x ATR below entry)
+        # stop_loss_atr_multiplier = 1.0
+        # initial_stop_loss = current_price - (stop_loss_atr_multiplier * current_atr)
+        # Option 2: Based on Supertrend value (more dynamic)
+        # Ensure Supertrend value is below the current price for a long signal
+        if current_supertrend_value < current_price:
+            initial_stop_loss = current_supertrend_value
+            signal_details['Stop_Loss_Method'] = f'Supertrend ({current_supertrend_value:.8g})'
+        else:
+            # Fallback to ATR if Supertrend is above entry (shouldn't happen if direction is 1, but as safety)
+            stop_loss_atr_multiplier = 1.0
+            initial_stop_loss = current_price - (stop_loss_atr_multiplier * current_atr)
+            signal_details['Stop_Loss_Method'] = f'ATR Fallback ({initial_stop_loss:.8g})'
+            logger.warning(f"⚠️ [Strategy {self.symbol}] Supertrend ({current_supertrend_value:.8g}) is above entry price ({current_price:.8g}) despite bullish direction. Using ATR for stop loss.")
+
+        # Ensure stop loss is not negative
+        initial_stop_loss = max(0.00000001, initial_stop_loss) # Avoid zero or negative stop loss
+
 
         signal_output = {
             'symbol': self.symbol,
             'entry_price': float(f"{current_price:.8g}"),
             'initial_target': float(f"{initial_target:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
+            'stop_loss': float(f"{initial_stop_loss:.8g}"), # NEW: Add stop loss
             'r2_score': 1.0, # Placeholder score as it's ML-driven now
-            'strategy_name': 'Scalping_ML_Only', # Updated strategy name
+            'strategy_name': 'Scalping_ML_Supertrend_Filtered', # Updated strategy name
             'signal_details': signal_details,
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
             'total_possible_score': 1.0 # Placeholder
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML فقط). السعر: {current_price:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}, BTC Trend Feature: {last_row.get('btc_trend_feature', 0.0)}, Supertrend Direction: {last_row.get('supertrend_direction', 0)}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + Filters). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, الوقف: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, تنبؤ ML: {ml_prediction_result_text}, BTC Trend: {current_btc_trend}, Supertrend Dir: {current_supertrend_direction}")
         return signal_output
 
 
@@ -1293,9 +1332,9 @@ def track_signals() -> None:
 
             with conn.cursor() as track_cur:
                  track_cur.execute("""
-                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time
+                    SELECT id, symbol, entry_price, initial_target, current_target, entry_time, stop_loss -- Added stop_loss
                     FROM signals
-                    WHERE achieved_target = FALSE;
+                    WHERE achieved_target = FALSE AND closing_price IS NULL; -- Ensure we only track truly open signals
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1314,7 +1353,8 @@ def track_signals() -> None:
                 try:
                     entry_price = float(signal_row['entry_price'])
                     entry_time = signal_row['entry_time']
-                    current_target = float(signal_row['current_target'])
+                    current_target = float(signal_row["current_target"])
+                    current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None # Fetch stop loss
 
                     current_price = ticker_data.get(symbol)
 
@@ -1322,17 +1362,42 @@ def track_signals() -> None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات التيكر.")
                          continue
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f}")
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss if current_stop_loss else 'N/A'}") # Include SL in summary
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
                     log_message: Optional[str] = None
-                    notification_details: Dict[str, Any] = {'symbol': symbol, 'id': signal_id, 'current_price': current_price}
+                    notification_details: Dict[str, Any] = {
+                        'symbol': symbol,
+                        'id': signal_id,
+                        'current_price': current_price,
+                        'entry_price': entry_price,
+                        'current_target': current_target,
+                        'stop_loss': current_stop_loss
+                    }
 
 
                     # --- Check and Update Logic ---
-                    # 1. Check for Target Hit
-                    if current_price >= current_target:
+                    # 0. Check for Stop Loss Hit (PRIORITY)
+                    if current_stop_loss is not None and current_price <= current_stop_loss:
+                        profit_pct = ((current_stop_loss / entry_price) - 1) * 100 if entry_price > 0 else 0
+                        closed_at = datetime.now()
+                        time_to_close = closed_at - entry_time if entry_time else timedelta(0)
+                        time_to_close_str = str(time_to_close)
+
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") # achieved_target is FALSE for stop loss
+                        update_params = (current_stop_loss, closed_at, profit_pct, time_to_close, signal_id)
+                        log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى وقف الخسارة عند {current_stop_loss:.8g} (الخسارة: {profit_pct:+.2f}%, الوقت: {time_to_close_str})."
+                        notification_details.update({
+                            'type': 'stop_loss_hit',
+                            'closing_price': current_stop_loss,
+                            'profit_pct': profit_pct,
+                            'time_to_target': time_to_close_str # Reusing field name for duration
+                        })
+                        update_executed = True
+
+                    # 1. Check for Target Hit (Only if Stop Loss not hit)
+                    if not update_executed and current_price >= current_target:
                         profit_pct = ((current_target / entry_price) - 1) * 100 if entry_price > 0 else 0
                         closed_at = datetime.now()
                         time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
@@ -1341,50 +1406,100 @@ def track_signals() -> None:
                         update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
                         update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
                         log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%, الوقت: {time_to_target_str})."
-                        notification_details.update({'type': 'target_hit', 'closing_price': current_target, 'profit_pct': profit_pct, 'time_to_target': time_to_target_str})
+                        notification_details.update({
+                            'type': 'target_hit',
+                            'closing_price': current_target,
+                            'profit_pct': profit_pct,
+                            'time_to_target': time_to_target_str
+                        })
                         update_executed = True
 
-                    # 2. Check for Target Extension (Only if Target not hit)
+                    # 2. Check for Target/Stop Loss Update (Dynamic Target & Trailing Stop) (Only if not closed)
                     if not update_executed:
-                        if current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT):
-                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرار...")
+                        # Condition to check for update: e.g., price made significant progress towards target
+                        # Let's say price reached 50% of the way to the current target
+                        progress_to_target = (current_price - entry_price) / (current_target - entry_price) if (current_target - entry_price) != 0 else 0
+                        # Or simply check if price is near target (already implemented)
+                        should_check_update = current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT)
+
+                        if should_check_update:
+                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} vs {current_target:.8g}). التحقق من إشارة الاستمرار لتحديث الهدف/الوقف...")
 
                              df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 # Ensure ML model is loaded for continuation strategy
                                  if continuation_strategy.ml_model is None:
-                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML غير محمل لاستراتيجية الاستمرار. تخطي تحديث الهدف.")
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML غير محمل لاستراتيجية الاستمرار. تخطي تحديث الهدف/الوقف.")
                                      continue
 
                                  df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
 
-                                 if df_continuation_indicators is not None:
-                                     # Pass the populated indicators to generate_buy_signal
-                                     continuation_signal = continuation_strategy.generate_buy_signal(df_continuation_indicators)
+                                 if df_continuation_indicators is not None and not df_continuation_indicators.empty:
+                                     # Use generate_buy_signal to check if conditions *still* hold for a buy
+                                     # We don't need the full signal output, just whether it passes filters
+                                     continuation_signal_check = continuation_strategy.generate_buy_signal(df_continuation_indicators)
 
-                                     if continuation_signal:
+                                     if continuation_signal_check: # If conditions still look bullish
                                          latest_row = df_continuation_indicators.iloc[-1]
-                                         current_atr_for_new_target = latest_row.get('atr')
+                                         current_atr_for_update = latest_row.get('atr')
+                                         current_supertrend_for_update = latest_row.get('supertrend') # Supertrend value for trailing stop
 
-                                         if pd.notna(current_atr_for_new_target) and current_atr_for_new_target > 0:
-                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_new_target)
+                                         if pd.notna(current_atr_for_update) and current_atr_for_update > 0 and pd.notna(current_supertrend_for_update):
+                                             # --- Calculate Potential New Target ---
+                                             potential_new_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr_for_update)
 
-                                             if potential_new_target > current_target:
+                                             # --- Calculate Potential New Stop Loss (Trailing Stop) ---
+                                             # Option 1: Trail using Supertrend
+                                             potential_new_stop_loss = current_supertrend_for_update
+                                             # Option 2: Trail using ATR below current price
+                                             # potential_new_stop_loss = current_price - (1.0 * current_atr_for_update)
+                                             # Option 3: Move stop loss to entry price or previous target (less dynamic)
+                                             # potential_new_stop_loss = max(entry_price, current_target * 0.99) # Example: lock in some profit
+
+                                             # Ensure new stop loss is higher than the current one AND below current price
+                                             new_stop_loss_valid = potential_new_stop_loss > (current_stop_loss or 0) and potential_new_stop_loss < current_price
+
+                                             # --- Decide whether to update Target and/or Stop Loss ---
+                                             update_target = potential_new_target > current_target
+                                             update_stop_loss = new_stop_loss_valid
+
+                                             if update_target or update_stop_loss:
                                                  old_target = current_target
-                                                 new_target = potential_new_target
-                                                 update_query = sql.SQL("UPDATE signals SET current_target = %s WHERE id = %s;")
-                                                 update_params = (new_target, signal_id)
-                                                 log_message = f"↗️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث الهدف من {old_target:.8g} إلى {new_target:.8g} بناءً على إشارة الاستمرار."
-                                                 notification_details.update({'type': 'target_updated', 'old_target': old_target, 'new_target': new_target})
+                                                 old_stop_loss = current_stop_loss
+                                                 new_target = potential_new_target if update_target else current_target
+                                                 new_stop_loss = potential_new_stop_loss if update_stop_loss else current_stop_loss
+
+                                                 update_fields = []
+                                                 update_params_list = []
+                                                 log_parts = []
+                                                 notification_details.update({'type': 'target_stoploss_updated'}) # Assume both might update
+
+                                                 if update_target:
+                                                     update_fields.append("current_target = %s")
+                                                     update_params_list.append(new_target)
+                                                     log_parts.append(f"الهدف من {old_target:.8g} إلى {new_target:.8g}")
+                                                     notification_details['old_target'] = old_target
+                                                     notification_details['new_target'] = new_target
+
+                                                 if update_stop_loss:
+                                                     update_fields.append("stop_loss = %s")
+                                                     update_params_list.append(new_stop_loss)
+                                                     log_parts.append(f"وقف الخسارة من {old_stop_loss if old_stop_loss else 'N/A'} إلى {new_stop_loss:.8g}")
+                                                     notification_details['old_stop_loss'] = old_stop_loss
+                                                     notification_details['new_stop_loss'] = new_stop_loss
+
+                                                 update_params_list.append(signal_id)
+                                                 update_query = sql.SQL(f"UPDATE signals SET {', '.join(update_fields)} WHERE id = %s;")
+                                                 update_params = tuple(update_params_list)
+                                                 log_message = f"↔️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث {' و '.join(log_parts)} بناءً على استمرار الإشارة."
                                                  update_executed = True
                                              else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) ليس أعلى من الهدف الحالي ({current_target:.8g}). عدم تحديث الهدف.")
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرار، لكن الهدف الجديد ({potential_new_target:.8g}) أو الوقف الجديد ({potential_new_stop_loss:.8g}) لا يستدعي التحديث.")
                                          else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف الجديد بسبب ATR غير صالح ({current_atr_for_new_target}) من بيانات الاستمرار.")
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب الهدف/الوقف الجديد بسبب ATR/Supertrend غير صالح ({current_atr_for_update}, {current_supertrend_for_update}) من بيانات الاستمرار.")
                                      else:
-                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم إنشاء إشارة استمرار.")
+                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، ولكن لم يتم تأكيد إشارة الاستمرار (فشل الفلاتر أو تنبؤ ML). عدم تحديث الهدف/الوقف.")
                                  else:
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في ملء المؤشرات للتحقق من الاستمرار.")
                              else:

@@ -123,7 +123,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     time_to_target INTERVAL,
                     profit_percentage DOUBLE PRECISION,
                     strategy_name TEXT,
-                    signal_details JSONB
+                    signal_details JSONB,
+                    stop_loss DOUBLE PRECISION -- Added stop loss column
                 );""")
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.")
