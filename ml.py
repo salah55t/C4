@@ -112,7 +112,10 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
                     initial_target DOUBLE PRECISION NOT NULL,
-                    current_target DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL, -- Keep for now, might be redundant with trailing stop
+                    initial_stop_loss DOUBLE PRECISION, -- NEW
+                    current_stop_loss DOUBLE PRECISION, -- NEW
+                    highest_price_reached DOUBLE PRECISION, -- NEW
                     r2_score DOUBLE PRECISION,
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
