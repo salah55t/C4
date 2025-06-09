@@ -776,7 +776,8 @@ def generate_performance_report() -> str:
         return "❌ لا يمكن إنشاء التقرير، مشكلة في اتصال قاعدة البيانات."
     try:
         with conn.cursor() as report_cur:
-            report_cur.execute("SELECT id, symbol, entry_price, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
+            # تعديل الاستعلام ليشمل الهدف الحالي (current_target) وإضافة السعر الحالي من ticker_data
+            report_cur.execute("SELECT id, symbol, entry_price, current_target, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
             open_signals = report_cur.fetchall()
             open_signals_count = len(open_signals)
 
@@ -828,7 +829,21 @@ def generate_performance_report() -> str:
             for signal in open_signals:
                 safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
-                report += f"    - `{safe_symbol}` (دخول: ${signal['entry_price']:.8g} | فتح: {entry_time_str})\n"
+                
+                # الحصول على السعر الحالي من بيانات التيكر
+                current_price = ticker_data.get(signal['symbol'], 0.0)
+                
+                # حساب نسبة التقدم نحو الهدف
+                progress_pct = 0.0
+                if current_price > 0 and signal['entry_price'] > 0 and signal['current_target'] > signal['entry_price']:
+                    progress_pct = ((current_price - signal['entry_price']) / (signal['current_target'] - signal['entry_price'])) * 100
+                
+                # إضافة سعر الدخول والهدف والسعر الحالي للتقرير
+                report += (f"    - `{safe_symbol}` (دخول: ${signal['entry_price']:.8g} | "
+                          f"الهدف: ${signal['current_target']:.8g} | "
+                          f"السعر الحالي: ${current_price:.8g} | "
+                          f"التقدم: {progress_pct:.1f}% | "
+                          f"فتح: {entry_time_str})\n")
         else:
             report += "  • لا توجد إشارات مفتوحة حالياً.\n"
 
