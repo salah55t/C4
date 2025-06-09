@@ -826,7 +826,7 @@ def generate_performance_report() -> str:
 
         if open_signals:
             report += "  • التفاصيل:\n"
-            for signal in open_signals:
+            for i, signal in enumerate(open_signals):
                 safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
                 
@@ -838,12 +838,26 @@ def generate_performance_report() -> str:
                 if current_price > 0 and signal['entry_price'] > 0 and signal['current_target'] > signal['entry_price']:
                     progress_pct = ((current_price - signal['entry_price']) / (signal['current_target'] - signal['entry_price'])) * 100
                 
-                # إضافة سعر الدخول والهدف والسعر الحالي للتقرير
-                report += (f"    - `{safe_symbol}` (دخول: ${signal['entry_price']:.8g} | "
-                          f"الهدف: ${signal['current_target']:.8g} | "
-                          f"السعر الحالي: ${current_price:.8g} | "
-                          f"التقدم: {progress_pct:.1f}% | "
-                          f"فتح: {entry_time_str})\n")
+                # تحديد رمز التقدم بناءً على النسبة المئوية
+                progress_icon = "🔴"  # أقل من 25%
+                if progress_pct >= 75:
+                    progress_icon = "🟢"  # أكثر من 75%
+                elif progress_pct >= 50:
+                    progress_icon = "🟡"  # بين 50% و 75%
+                elif progress_pct >= 25:
+                    progress_icon = "🟠"  # بين 25% و 50%
+                
+                # إضافة سعر الدخول والهدف والسعر الحالي للتقرير بتنسيق منظم
+                report += f"    *{i+1}. {safe_symbol}*\n"
+                report += f"       💲 *دخول:* `${signal['entry_price']:.8g}`\n"
+                report += f"       🎯 *الهدف:* `${signal['current_target']:.8g}`\n"
+                report += f"       💵 *السعر الحالي:* `${current_price:.8g}`\n"
+                report += f"       {progress_icon} *التقدم:* `{progress_pct:.1f}%`\n"
+                report += f"       ⏰ *فتح:* `{entry_time_str}`\n"
+                
+                # إضافة فاصل بين الإشارات إلا إذا كانت الإشارة الأخيرة
+                if i < len(open_signals) - 1:
+                    report += "       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         else:
             report += "  • لا توجد إشارات مفتوحة حالياً.\n"
 
