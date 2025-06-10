@@ -1636,14 +1636,16 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
 
             logger.info(f"✅ [Close Trade] تم إغلاق الصفقة ID: {signal_id} لـ {symbol} عند {current_price:.8g} (الربح: {profit_pct:+.2f}%، الوقت: {time_to_close_str}).")
 
-            # Moved the comment to a separate line to avoid SyntaxError
+            # Pre-format symbol to avoid issues with f-string and backslashes
+            formatted_symbol_for_message = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
+            if '`' in formatted_symbol_for_message:
+                formatted_symbol_for_message = formatted_symbol_for_message.replace('`', '\\`')
+
+            # The comment is now on a separate line as intended.
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
-🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')}`
-ℹ️ تم الإغلاق بناءً على طلبك.""" 
-            # Corrected: escape backticks if present in symbol
-            if '`' in notification_message:
-                notification_message = notification_message.replace('`', '\\`')
+🪙 **الزوج:** `{formatted_symbol_for_message}`
+ℹ️ تم الإغلاق بناءً على طلبك."""
 
             send_telegram_message(chat_id, notification_message, parse_mode='Markdown')
 
@@ -2100,7 +2102,7 @@ def handle_status_command(chat_id_msg: int) -> None:
 - تتبع الإشارات: {tracker_status}
 - حلقة البوت الرئيسية: {main_bot_alive}
 - الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES}
-- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}"""
+- وقت الخادم الحالي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
 
         edit_telegram_message(chat_id_msg, message_id_to_edit, final_status_msg, parse_mode='Markdown')
 
