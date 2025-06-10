@@ -51,15 +51,15 @@ logger.info(f"عنوان URL للخطاف الويب: {WEBHOOK_URL if WEBHOOK_UR
 # ---------------------- Constants and Global Variables Setup ----------------------
 TRADE_VALUE: float = 10.0
 MAX_OPEN_TRADES: int = 5
-SIGNAL_GENERATION_TIMEFRAME: str = '15m' # Changed to 15 minutes
+SIGNAL_GENERATION_TIMEFRAME: str = '15m' 
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
-SIGNAL_TRACKING_TIMEFRAME: str = '15m' # Changed to 15 minutes
+SIGNAL_TRACKING_TIMEFRAME: str = '15m' 
 SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 
 # Indicator Parameters (MUST match ml.py)
 RSI_PERIOD: int = 9 
-RSI_OVERSOLD: int = 30 # Not directly used for signal, but good to keep for context if needed later
-RSI_OVERBOUGHT: int = 70 # Not directly used for signal, but good to keep for context if needed later
+RSI_OVERSOLD: int = 30 
+RSI_OVERBOUGHT: int = 70 
 VOLUME_LOOKBACK_CANDLES: int = 1 
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2 
 
@@ -85,14 +85,14 @@ TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
 BINANCE_FEE_RATE: float = 0.001
 
-BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' # Must match the base name used in ml.py
+BASE_ML_MODEL_NAME: str = 'DecisionTree_Scalping_V1' 
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 ticker_data: Dict[str, float] = {}
-ml_models: Dict[str, Any] = {} # Global dictionary to hold loaded ML models, keyed by symbol
+ml_models: Dict[str, Any] = {} 
 
 # ---------------------- Binance Client Setup ----------------------
 try:
@@ -280,12 +280,12 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
         logger.warning("⚠️ [Indicator Supertrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة. لا يمكن حساب Supertrend.") 
         df['supertrend'] = np.nan
-        df['supertrend_direction'] = 0 # Neutral if cannot calculate
+        df['supertrend_direction'] = 0 
         return df
 
     # Ensure ATR is already calculated
     if 'atr' not in df.columns:
-        df = calculate_atr_indicator(df, period=period) # Use Supertrend period for ATR if not already calculated
+        df = calculate_atr_indicator(df, period=period) 
         if 'atr' not in df.columns or df['atr'].isnull().all().any():
             logger.warning("⚠️ [Indicator Supertrend] فشل حساب ATR. لا يمكن حساب Supertrend.") 
             df['supertrend'] = np.nan
@@ -302,7 +302,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
 
     # Initialize Supertrend and Direction
     df['supertrend'] = 0.0
-    df['supertrend_direction'] = 0 # 1 for uptrend, -1 for downtrend, 0 for neutral/flat
+    df['supertrend_direction'] = 0 
 
     # Determine Supertrend value and direction
     for i in range(1, len(df)):
@@ -321,21 +321,21 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
             df.loc[df.index[i], 'final_lower_band'] = df['final_lower_band'].iloc[i-1]
 
         # Supertrend logic
-        if df['supertrend_direction'].iloc[i-1] == 1: # Previous was uptrend
+        if df['supertrend_direction'].iloc[i-1] == 1: 
             if df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
                 df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
-                df.loc[df.index[i], 'supertrend_direction'] = -1 # Change to downtrend
+                df.loc[df.index[i], 'supertrend_direction'] = -1 
             else:
                 df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
-                df.loc[df.index[i], 'supertrend_direction'] = 1 # Remain uptrend
-        elif df['supertrend_direction'].iloc[i-1] == -1: # Previous was downtrend
+                df.loc[df.index[i], 'supertrend_direction'] = 1 
+        elif df['supertrend_direction'].iloc[i-1] == -1: 
             if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
                 df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
-                df.loc[df.index[i], 'supertrend_direction'] = 1 # Change to uptrend
+                df.loc[df.index[i], 'supertrend_direction'] = 1 
             else:
                 df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
-                df.loc[df.index[i], 'supertrend_direction'] = -1 # Remain downtrend
-        else: # Initial state or neutral
+                df.loc[df.index[i], 'supertrend_direction'] = -1 
+        else: 
             if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
                 df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
                 df.loc[df.index[i], 'supertrend_direction'] = 1
@@ -343,7 +343,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
                 df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
                 df.loc[df.index[i], 'supertrend_direction'] = -1
             else:
-                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] # Fallback
+                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] 
                 df.loc[df.index[i], 'supertrend_direction'] = 0
 
 
@@ -359,7 +359,7 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     """
     logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين للميزات...") 
     # Need enough data for EMA50, plus a few extra candles for robustness
-    min_data_for_ema = 50 + 5 # 50 for EMA50, 5 buffer
+    min_data_for_ema = 50 + 5 
 
     if df_btc is None or df_btc.empty or len(df_btc) < min_data_for_ema:
         logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية ({len(df_btc) if df_btc is not None else 0} < {min_data_for_ema}) لحساب اتجاه البيتكوين للميزات.") 
@@ -372,18 +372,18 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
 
     if len(df_btc_copy) < min_data_for_ema:
         logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية بعد إزالة NaN لحساب الاتجاه.") 
-        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if not enough data after dropna
+        return pd.Series(index=df_btc.index, data=0.0) 
 
     ema20 = calculate_ema(df_btc_copy['close'], 20)
     ema50 = calculate_ema(df_btc_copy['close'], 50)
 
     # Combine EMAs and close into a single DataFrame for easier comparison
     ema_df = pd.DataFrame({'ema20': ema20, 'ema50': ema50, 'close': df_btc_copy['close']})
-    ema_df.dropna(inplace=True) # Drop rows where any EMA or close is NaN
+    ema_df.dropna(inplace=True) 
 
     if ema_df.empty:
         logger.warning("⚠️ [Indicators] EMA DataFrame فارغ بعد إزالة NaN. لا يمكن حساب اتجاه البيتكوين.") 
-        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if no valid EMA data
+        return pd.Series(index=df_btc.index, data=0.0) 
 
     # Initialize trend column with neutral (0.0)
     trend_series = pd.Series(index=ema_df.index, data=0.0)
@@ -447,16 +447,16 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
                         (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
 
     # Price vs Cloud Position (using current close price vs future cloud)
-    df_ichimoku['ichimoku_price_cloud_position'] = 0 # 0 for inside, 1 for above, -1 for below
+    df_ichimoku['ichimoku_price_cloud_position'] = 0 
     # Price above cloud
     df_ichimoku.loc[(df_ichimoku['close'] > df_ichimoku[['senkou_span_a', 'senkou_span_b']].max(axis=1)), 'ichimoku_price_cloud_position'] = 1
     # Price below cloud
     df_ichimoku.loc[(df_ichimoku['close'] < df_ichimoku[['senkou_span_a', 'senkou_span_b']].min(axis=1)), 'ichimoku_price_cloud_position'] = -1
 
     # Cloud Outlook (future cloud's color)
-    df_ichimoku['ichimoku_cloud_outlook'] = 0 # 0 for flat/mixed, 1 for bullish (green), -1 for bearish (red)
-    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = 1 # Green Cloud
-    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = -1 # Red Cloud
+    df_ichimoku['ichimoku_cloud_outlook'] = 0 
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = 1 
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = -1 
 
     logger.debug(f"✅ [Indicator Ichimoku] تم حساب مكونات وميزات Ichimoku Cloud.") 
     return df_ichimoku
@@ -560,8 +560,8 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = (current_close - recent_low) / price_range
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = (recent_high - current_close) / price_range
         else:
-            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0 # Price is at the low
-            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0 # Price is at the high (if range is 0)
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0 
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0 
 
     logger.debug(f"✅ [Indicator S/R] تم حساب ميزات الدعم والمقاومة.") 
     return df_sr
@@ -600,7 +600,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     profit_percentage DOUBLE PRECISION,
                     strategy_name TEXT,
                     signal_details JSONB,
-                    stop_loss DOUBLE PRECISION  -- Added stop loss column
+                    stop_loss DOUBLE PRECISION  
                 );""")
             conn.commit()
             logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.") 
@@ -702,7 +702,7 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
             result = db_cur.fetchone()
             if result and result['model_data']:
                 model = pickle.loads(result['model_data'])
-                ml_models[model_name] = model # Store in global dictionary
+                ml_models[model_name] = model 
                 logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.") 
                 return model
             else:
@@ -903,7 +903,7 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
          return raw_symbols
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
-def generate_performance_report() -> str:
+def generate_performance_report() -> Tuple[str, Optional[Dict]]:
     """Generates a comprehensive performance report from the database in Arabic, including recent closed trades and USD profit/loss."""
     logger.info("ℹ️ [Report] إنشاء تقرير الأداء...") 
     if not check_db_connection() or not conn or not cur:
@@ -945,7 +945,7 @@ def generate_performance_report() -> str:
             # Total fees for all closed trades (entry and exit)
             total_fees_usd = total_closed * (TRADE_VALUE * BINANCE_FEE_RATE + (TRADE_VALUE * (1 + (avg_win_pct / 100.0 if avg_win_pct > 0 else 0))) * BINANCE_FEE_RATE)
 
-            net_profit_usd = gross_profit_usd + gross_loss_usd - total_fees_usd # gross_loss_usd is already negative
+            net_profit_usd = gross_profit_usd + gross_loss_usd - total_fees_usd 
             net_profit_pct = (net_profit_usd / (total_closed * TRADE_VALUE)) * 100 if total_closed * TRADE_VALUE > 0 else 0.0
 
 
@@ -974,13 +974,13 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
                     progress_pct = ((current_price - signal['entry_price']) / (signal['current_target'] - signal['entry_price'])) * 100
                 
                 # Determine progress icon based on percentage
-                progress_icon = "🔴"  # Less than 25%
+                progress_icon = "🔴"  
                 if progress_pct >= 75:
-                    progress_icon = "🟢"  # More than 75%
+                    progress_icon = "🟢"  
                 elif progress_pct >= 50:
-                    progress_icon = "🟡"  # Between 50% and 75%
+                    progress_icon = "🟡"  
                 elif progress_pct >= 25:
-                    progress_icon = "🟠"  # Between 25% and 50%
+                    progress_icon = "🟠"  
                 
                 # Add entry price, target, and current price to report in an organized format
                 report_text += f"""    *{i+1}. {safe_symbol}*
@@ -1034,7 +1034,7 @@ class ScalpingTradingStrategy:
 
     def __init__(self, symbol: str):
         self.symbol = symbol
-        self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol
+        self.ml_model = load_ml_model_from_db(symbol) 
         if self.ml_model is None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج ML لـ {symbol}. لن تتمكن الإستراتيجية من إنشاء إشارات.") 
 
@@ -1074,8 +1074,8 @@ class ScalpingTradingStrategy:
             SENKOU_SPAN_B_PERIOD,
             CHIKOU_LAG, 
             FIB_SR_LOOKBACK_WINDOW,
-            55 # For BTC EMA calculation (50 + buffer)
-        ) + 5 # Additional buffer for safe calculations
+            55 
+        ) + 5 
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب مؤشر ML.") 
@@ -1136,14 +1136,14 @@ class ScalpingTradingStrategy:
             for col in self.feature_columns_for_ml:
                 if col not in df_calc.columns:
                     logger.warning(f"⚠️ [Strategy {self.symbol}] عمود ميزة مفقود لنموذج ML: {col}") 
-                    df_calc[col] = np.nan # Add missing column as NaN
+                    df_calc[col] = np.nan 
                 else:
                     df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
             initial_len = len(df_calc)
             # Use all required columns for dropna, including ML features and ATR for target
             all_required_cols = list(set(self.feature_columns_for_ml + [
-                'open', 'high', 'low', 'close', 'volume', 'atr', 'supertrend' # 'supertrend' for debugging, not strictly for ML features
+                'open', 'high', 'low', 'close', 'volume', 'atr', 'supertrend' 
             ]))
             df_cleaned = df_calc.dropna(subset=all_required_cols).copy()
             dropped_count = initial_len - len(df_cleaned)
@@ -1155,7 +1155,7 @@ class ScalpingTradingStrategy:
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. الأحدث: {latest.to_dict()}") # Log full latest row
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. الأحدث: {latest.to_dict()}") 
             return df_cleaned
 
         except KeyError as ke:
@@ -1185,8 +1185,8 @@ class ScalpingTradingStrategy:
             SENKOU_SPAN_B_PERIOD,
             CHIKOU_LAG, 
             FIB_SR_LOOKBACK_WINDOW,
-            55 # For BTC EMA calculation (50 + buffer)
-        ) + 1 # At least one candle for the latest calculations
+            55 
+        ) + 1 
 
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.") 
@@ -1205,7 +1205,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price is None:
+        if current_price === None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات المؤشر. لا يمكن إنشاء إشارة.") 
             return None
 
@@ -1213,18 +1213,18 @@ class ScalpingTradingStrategy:
              logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات التاريخية تحتوي على قيم NaN في أعمدة المؤشرات المطلوبة. لا يمكن إنشاء إشارة.") 
              return None
 
-        signal_details = {} # Initialize signal_details
+        signal_details = {} 
 
         # --- ML Model Prediction (Primary decision maker) ---
         ml_prediction_result_text = "N/A (لم يتم تحميل النموذج)" 
         ml_is_bullish = False
 
-        if self.ml_model: # Use self.ml_model which is loaded per symbol
+        if self.ml_model: 
             try:
                 # Ensure the order of features for prediction matches the training order
                 features_for_prediction = pd.DataFrame([last_row[self.feature_columns_for_ml].values], columns=self.feature_columns_for_ml)
                 ml_pred = self.ml_model.predict(features_for_prediction)[0]
-                if ml_pred == 1: # If ML model predicts upward movement
+                if ml_pred == 1: 
                     ml_is_bullish = True
                     ml_prediction_result_text = 'صعودي ✅' 
                     logger.info(f"✨ [Strategy {self.symbol}] توقع نموذج ML صعودي.") 
@@ -1282,7 +1282,7 @@ class ScalpingTradingStrategy:
 
 
         current_atr = last_row.get('atr')
-        current_supertrend_value = last_row.get('supertrend') # Get the actual Supertrend line value
+        current_supertrend_value = last_row.get('supertrend') 
 
         if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_supertrend_value):
              logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR أو Supertrend غير صالحة ({current_atr}, {current_supertrend_value}) لحساب الهدف/الوقف. لا يمكن إنشاء إشارة.") 
@@ -1314,7 +1314,7 @@ class ScalpingTradingStrategy:
             logger.warning(f"⚠️ [Strategy {self.symbol}] Supertrend ({current_supertrend_value:.8g}) أعلى من سعر الدخول ({current_price:.8g}) على الرغم من الاتجاه الصعودي. استخدام ATR لوقف الخسارة.") 
 
         # Ensure stop loss is not negative
-        initial_stop_loss = max(0.00000001, initial_stop_loss) # Avoid zero or negative stop loss
+        initial_stop_loss = max(0.00000001, initial_stop_loss) 
 
 
         signal_output = {
@@ -1323,12 +1323,12 @@ class ScalpingTradingStrategy:
             'initial_target': float(f"{initial_target:.8g}"),
             'current_target': float(f"{initial_target:.8g}"),
             'stop_loss': float(f"{initial_stop_loss:.8g}"),
-            'r2_score': 1.0, # Placeholder score as it's ML-driven now
-            'strategy_name': 'Scalping_ML_Enhanced_Filtered', # Updated strategy name
+            'r2_score': 1.0, 
+            'strategy_name': 'Scalping_ML_Enhanced_Filtered', 
             'signal_details': signal_details,
             'volume_15m': volume_recent,
             'trade_value': TRADE_VALUE,
-            'total_possible_score': 1.0 # Placeholder
+            'total_possible_score': 1.0 
         }
 
         logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_result_text}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}") 
@@ -1474,7 +1474,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         dist_to_recent_low = signal_details.get('Dist_to_Recent_Low_Norm', np.nan)
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
         
-        sr_display_content = "" # Initialize here
+        sr_display_content = "" 
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
             # Add newline directly to the string if it's present
             sr_display_content = f"  - المسافة إلى أدنى مستوى حديث: {dist_to_recent_low:.2f} | المسافة إلى أعلى مستوى حديث: {dist_to_recent_high:.2f}\n" 
@@ -1554,13 +1554,13 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 💔 **الخسارة المحققة:** {profit_pct:+.2f}%
 ⏱️ **الوقت المستغرق:** {time_to_target}"""
     elif notification_type == 'target_stoploss_updated':
-         update_parts_formatted = [] # Renamed for clarity
+         update_parts_formatted = [] 
          if 'old_target' in details and 'new_target' in details:
              update_parts_formatted.append(f"  🎯 *الهدف:* `${old_target:,.8g}` -> `${new_target:,.8g}`") 
          if 'old_stop_loss' in details and 'new_stop_loss' in details:
              update_parts_formatted.append(f"  🛑 *وقف الخسارة:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`") 
 
-         update_block = "\n".join(update_parts_formatted) # Pre-join to avoid backslash in f-string expression
+         update_block = "\n".join(update_parts_formatted) 
 
          message = f"""🔄 *تحديث الإشارة (ID: {signal_id})* ——————————————
 🪙 **الزوج:** `{safe_symbol}` 
@@ -1602,7 +1602,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             entry_time = signal_data['entry_time']
 
             current_price = ticker_data.get(symbol)
-            if current_price is None:
+            if current_price === None:
                 send_telegram_message(chat_id, f"❌ لا يمكن الحصول على السعر الحالي لـ {symbol}. يرجى المحاولة مرة أخرى.", parse_mode='Markdown')
                 logger.error(f"❌ [Close Trade] السعر الحالي غير متاح لـ {symbol} لإغلاق الصفقة ID: {signal_id}.")
                 return
@@ -1722,15 +1722,15 @@ def track_signals() -> None:
                     entry_price = float(signal_row['entry_price'])
                     entry_time = signal_row['entry_time']
                     current_target = float(signal_row["current_target"])
-                    current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None # Fetch stop loss
+                    current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None 
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price is None:
+                    if current_price === None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات المؤشر.") 
                          continue
 
-                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss if current_stop_loss else 'N/A'}") # Include SL in summary
+                    active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss if current_stop_loss else 'N/A'}") 
 
                     update_query: Optional[sql.SQL] = None
                     update_params: Tuple = ()
@@ -1753,14 +1753,14 @@ def track_signals() -> None:
                         time_to_close = closed_at - entry_time if entry_time else timedelta(0)
                         time_to_close_str = str(time_to_close)
 
-                        update_query = sql.SQL("UPDATE signals SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") # achieved_target is FALSE for stop loss
+                        update_query = sql.SQL("UPDATE signals SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") 
                         update_params = (current_stop_loss, closed_at, profit_pct, time_to_close, signal_id)
                         log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): تم ضرب وقف الخسارة عند {current_stop_loss:.8g} (الخسارة: {profit_pct:+.2f}%، الوقت: {time_to_close_str})." 
                         notification_details.update({
                             'type': 'stop_loss_hit',
                             'closing_price': current_stop_loss,
                             'profit_pct': profit_pct,
-                            'time_to_target': time_to_close_str # Reusing field name for duration
+                            'time_to_target': time_to_close_str 
                         })
                         update_executed = True
 
@@ -1795,7 +1795,7 @@ def track_signals() -> None:
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 if continuation_strategy.ml_model is None:
+                                 if continuation_strategy.ml_model === None:
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML لم يتم تحميله لإستراتيجية الاستمرارية. تخطي تحديث الهدف/وقف الخسارة.") 
                                      continue
 
@@ -1806,10 +1806,10 @@ def track_signals() -> None:
                                      # We don't need the full signal output, just whether it passes filters
                                      continuation_signal_check = continuation_strategy.generate_buy_signal(df_continuation_indicators)
 
-                                     if continuation_signal_check: # If conditions still look bullish
+                                     if continuation_signal_check: 
                                          latest_row = df_continuation_indicators.iloc[-1]
                                          current_atr_for_update = latest_row.get('atr')
-                                         current_supertrend_for_update = latest_row.get('supertrend') # Supertrend value for trailing stop
+                                         current_supertrend_for_update = latest_row.get('supertrend') 
 
                                          if pd.notna(current_atr_for_update) and current_atr_for_update > 0 and pd.notna(current_supertrend_for_update):
                                              # --- Calculate Potential New Target ---
@@ -1835,7 +1835,7 @@ def track_signals() -> None:
                                                  update_fields = []
                                                  update_params_list = []
                                                  log_parts = []
-                                                 notification_details.update({'type': 'target_stoploss_updated'}) # Assume both might update
+                                                 notification_details.update({'type': 'target_stoploss_updated'}) 
 
                                                  if update_target:
                                                      update_fields.append("current_target = %s")
@@ -1995,7 +1995,7 @@ def webhook() -> Tuple[str, int]:
 
             if callback_data == "get_report":
                 logger.info(f"ℹ️ [Flask] تم استلام طلب 'get_report' من الدردشة {chat_id_callback}. إنشاء التقرير...") 
-                report_content, reply_markup = generate_performance_report() # Get text and reply_markup
+                report_content, reply_markup = generate_performance_report() 
                 if report_content:
                     # Edit the original message that contained the button
                     report_thread = Thread(target=lambda: edit_telegram_message(chat_id_callback, message_id, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
@@ -2064,7 +2064,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit is None:
+    if message_id_to_edit === None:
         logger.error(f"❌ [Flask Status] فشل الحصول على message_id لتحديث الحالة في الدردشة {chat_id_msg}") 
         return
 
@@ -2169,17 +2169,17 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty:
+                    if df_hist === None or df_hist.empty:
                         continue
 
-                    strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
+                    strategy = ScalpingTradingStrategy(symbol) 
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model is None:
+                    if strategy.ml_model === None:
                         logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح.") 
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None:
+                    if df_indicators === None:
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
@@ -2257,7 +2257,7 @@ if __name__ == "__main__":
     ws_thread: Optional[Thread] = None
     tracker_thread: Optional[Thread] = None
     flask_thread: Optional[Thread] = None
-    main_bot_thread: Optional[Thread] = None # New thread for main_loop
+    main_bot_thread: Optional[Thread] = None 
 
     try:
         # 1. Initialize the database first
