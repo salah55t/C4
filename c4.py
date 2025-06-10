@@ -962,7 +962,7 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
         if open_signals:
             report_text += "  • التفاصيل:\n"
             for i, signal in enumerate(open_signals):
-                # Corrected: Use raw string for replacement values to avoid f-string backslash issues
+                # Corrected: Escape backslashes for f-string to work with Telegram Markdown
                 safe_symbol = str(signal['symbol']).replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
 
@@ -1206,7 +1206,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price == None: # Corrected from ===
+        if current_price == None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات المؤشر. لا يمكن إنشاء إشارة.")
             return None
 
@@ -1332,7 +1332,7 @@ class ScalpingTradingStrategy:
             'total_possible_score': 1.0
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_result_text}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_status}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}")
         return signal_output
 
 
@@ -1452,8 +1452,17 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         loss_usdt_net = loss_usdt_gross - total_trade_fees_stoploss
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Corrected: Use raw string for replacement values to avoid f-string backslash issues
-        safe_symbol = symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
+        # Corrected: Escape backslashes for f-string to work with Telegram Markdown
+        safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
+        # Backtick needs special handling if used within an f-string backtick section,
+        # but here it's about making `safe_symbol` itself robust for Markdown.
+        # If ` symbol ` could contain backticks that need escaping for markdown,
+        # then `symbol.replace('`', '\\`')` would be needed, but it's more complex
+        # to embed in an f-string that *also* uses backticks for code block.
+        # For now, let's assume `safe_symbol` will be inside Markdown's inline code `...`
+        # and not have literal backticks that need escaping in the source symbol.
+        if '`' in safe_symbol: # A simple check to prevent issues if symbol itself contains backticks
+            safe_symbol = safe_symbol.replace('`', '\\`')
 
         fear_greed = get_fear_greed_index()
         ml_prediction_status = signal_details.get('ML_Prediction', 'N/A')
@@ -1530,8 +1539,11 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     signal_id = details.get('id', 'N/A')
     notification_type = details.get('type', 'unknown')
     message = ""
-    # Corrected: Use raw string for replacement values to avoid f-string backslash issues
-    safe_symbol = symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
+    # Corrected: Escape backslashes for f-string to work with Telegram Markdown
+    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
+    if '`' in safe_symbol:
+        safe_symbol = safe_symbol.replace('`', '\\`')
+
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
@@ -1626,11 +1638,12 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
 
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
-🪙 **الزوج:** `{symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')}`
-📉 **سعر الإغلاق:** `${current_price:,.8g}`
-💰 **الربح المحقق:** {profit_pct:+.2f}%
-⏱️ **الوقت المستغرق:** {time_to_close_str}
+🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')}`
 ℹ️ *تم الإغلاق بناءً على طلبك.*"""
+            # Corrected: escape backticks if present in symbol
+            if '`' in notification_message:
+                notification_message = notification_message.replace('`', '\\`')
+
             send_telegram_message(chat_id, notification_message, parse_mode='Markdown')
 
     except psycopg2.Error as db_err:
@@ -1729,7 +1742,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price == None: # Corrected from ===
+                    if current_price == None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات المؤشر.")
                          continue
 
@@ -1798,7 +1811,7 @@ def track_signals() -> None:
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 if continuation_strategy.ml_model == None: # Corrected from ===
+                                 if continuation_strategy.ml_model == None:
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML لم يتم تحميله لإستراتيجية الاستمرارية. تخطي تحديث الهدف/وقف الخسارة.")
                                      continue
 
@@ -2067,7 +2080,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit == None: # Corrected from ===
+    if message_id_to_edit == None:
         logger.error(f"❌ [Flask Status] فشل الحصول على message_id لتحديث الحالة في الدردشة {chat_id_msg}")
         return
 
@@ -2172,17 +2185,17 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist == None or df_hist.empty: # Corrected from ===
+                    if df_hist == None or df_hist.empty:
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol)
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model == None: # Corrected from ===
+                    if strategy.ml_model == None:
                         logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators == None: # Corrected from ===
+                    if df_indicators == None:
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
