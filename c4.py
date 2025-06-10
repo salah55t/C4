@@ -79,7 +79,7 @@ CHIKOU_LAG: int = 26
 FIB_SR_LOOKBACK_WINDOW: int = 50
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 200000.0
+MIN_VOLUME_15M_USDT: float = 50000.0
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -911,12 +911,12 @@ def generate_performance_report() -> Tuple[str, Optional[Dict]]:
         return "❌ لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات.", None
     try:
         with conn.cursor() as report_cur:
-            # Modify query to include current_target and add current price from ticker_data
-            report_cur.execute("SELECT id, symbol, entry_price, current_target, entry_time FROM signals WHERE achieved_target = FALSE ORDER BY entry_time DESC;")
+            # Query for currently open signals
+            report_cur.execute("SELECT id, symbol, entry_price, current_target, entry_time FROM signals WHERE closed_at IS NULL ORDER BY entry_time DESC;")
             open_signals = report_cur.fetchall()
             open_signals_count = len(open_signals)
 
-            # Updated query to include all closed trades (manual or target hit)
+            # Query for all closed signals (including manually closed and target hit)
             report_cur.execute("""
                 SELECT
                     COUNT(*) AS total_closed,
@@ -944,15 +944,17 @@ def generate_performance_report() -> Tuple[str, Optional[Dict]]:
             gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE
 
             # Total fees for all closed trades (entry and exit)
-            # Assuming average win/loss applies to estimate exit value for fees
-            total_fees_usd = total_closed * (TRADE_VALUE * BINANCE_FEE_RATE) # Entry fee for each trade
-            # Add exit fees. For simplicity, average the exit value, or calculate separately for wins/losses if more precise
+            total_fees_usd = 0.0
             if total_closed > 0:
+                total_fees_usd += total_closed * (TRADE_VALUE * BINANCE_FEE_RATE) # Entry fee for each trade
+                # Estimate exit fees based on whether it was a win or loss
                 if winning_signals > 0:
-                    avg_win_exit_value = TRADE_VALUE * (1 + avg_win_pct / 100.0)
+                    # For winning trades, exit value is TRADE_VALUE + gross profit
+                    avg_win_exit_value = TRADE_VALUE + (TRADE_VALUE * (avg_win_pct / 100.0))
                     total_fees_usd += winning_signals * avg_win_exit_value * BINANCE_FEE_RATE
                 if losing_signals > 0:
-                    avg_loss_exit_value = TRADE_VALUE * (1 + avg_loss_pct / 100.0)
+                    # For losing trades, exit value is TRADE_VALUE + gross loss (loss is negative)
+                    avg_loss_exit_value = TRADE_VALUE + (TRADE_VALUE * (avg_loss_pct / 100.0))
                     total_fees_usd += losing_signals * avg_loss_exit_value * BINANCE_FEE_RATE
 
 
@@ -982,24 +984,28 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
 
                 # Calculate progress towards target
                 progress_pct = 0.0
-                if current_price > 0 and signal['entry_price'] > 0 and signal['current_target'] > signal['entry_price']:
-                    progress_pct = ((current_price - signal['entry_price']) / (signal['current_target'] - signal['entry_price'])) * 100
+                if current_price > 0 and signal['entry_price'] > 0:
+                    # Calculate percentage change from entry price
+                    price_change_pct = ((current_price - signal['entry_price']) / signal['entry_price']) * 100
 
-                # Determine progress icon based on percentage
-                progress_icon = "🔴"
-                if progress_pct >= 75:
-                    progress_icon = "🟢"
-                elif progress_pct >= 50:
-                    progress_icon = "🟡"
-                elif progress_pct >= 25:
-                    progress_icon = "🟠"
+                    # Determine progress icon based on percentage change from entry
+                    if price_change_pct >= (MIN_PROFIT_MARGIN_PCT + 0.1): # Well into profit
+                        progress_icon = "🟢"
+                    elif price_change_pct >= 0.0: # Break-even or slight profit
+                        progress_icon = "🟡"
+                    elif price_change_pct > -2.0: # Small loss
+                        progress_icon = "🟠"
+                    else: # Larger loss
+                        progress_icon = "🔴"
+
+                    progress_pct = price_change_pct # Use the actual percentage change from entry
 
                 # Add entry price, target, and current price to report in an organized format
                 report_text += f"""    *{i+1}. {safe_symbol}*
        💲 *الدخول:* `${signal['entry_price']:.8g}`
        🎯 *الهدف:* `${signal['current_target']:.8g}`
        💵 *السعر الحالي:* `${current_price:.8g}`
-       {progress_icon} *التقدم:* `{progress_pct:.1f}%`
+       {progress_icon} *التقدم:* `{progress_pct:+.1f}%`
        ⏰ *تاريخ الفتح:* `{entry_time_str}`
 """
                 # Add an "Exit Trade" button for each open signal
@@ -1471,15 +1477,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         loss_usdt_net = loss_usdt_gross - total_trade_fees_stoploss
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # Corrected: Escape backslashes for f-string to work with Telegram Markdown
+        # Pre-format symbol to avoid issues with f-string and backslashes
         safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')
-        # Backtick needs special handling if used within an f-string backtick section,
-        # but here it's about making `safe_symbol` itself robust for Markdown.
-        # If ` symbol ` could contain backticks that need escaping for markdown,
-        # then `symbol.replace('`', '\\`')` would be needed, but it's more complex
-        # to embed in an f-string that *also* uses backticks for code block.
-        # For now, let's assume `safe_symbol` will be inside Markdown's inline code `...`
-        # and not have literal backticks that need escaping in the source symbol.
         if '`' in safe_symbol: # A simple check to prevent issues if symbol itself contains backticks
             safe_symbol = safe_symbol.replace('`', '\\`')
 
@@ -1667,6 +1666,13 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
 ℹ️ تم الإغلاق بناءً على طلبك."""
 
             send_telegram_message(chat_id, notification_message, parse_mode='Markdown')
+
+            # Send an updated performance report after the trade is closed
+            report_content, reply_markup = generate_performance_report()
+            if report_content:
+                send_telegram_message(chat_id, report_content, reply_markup=reply_markup, parse_mode='Markdown')
+                logger.info(f"✅ [Close Trade] تم إرسال تقرير الأداء المحدث بعد إغلاق الصفقة ID: {signal_id}.")
+
 
     except psycopg2.Error as db_err:
         logger.error(f"❌ [Close Trade] خطأ في قاعدة البيانات أثناء إغلاق الصفقة ID: {signal_id}: {db_err}", exc_info=True)
@@ -2037,23 +2043,21 @@ def webhook() -> Tuple[str, int]:
                 logger.info(f"ℹ️ [Flask] تم استلام طلب 'get_report' من الدردشة {chat_id_callback}. إنشاء التقرير...")
                 report_content, reply_markup = generate_performance_report()
                 if report_content:
-                    # Edit the original message that contained the button
-                    report_thread = Thread(target=lambda: edit_telegram_message(chat_id_callback, message_id, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
+                    # Send a NEW message with the full report
+                    report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
                     report_thread.start()
-                    logger.info(f"✅ [Flask] تم بدء مؤشر ترابط تحديث التقرير للدردشة {chat_id_callback}.")
+                    logger.info(f"✅ [Flask] تم بدء مؤشر ترابط إرسال التقرير الجديد للدردشة {chat_id_callback}.")
             elif callback_data and callback_data.startswith("exit_trade_"):
                 signal_id_str = callback_data.replace("exit_trade_", "")
                 try:
                     signal_id = int(signal_id_str)
                     logger.info(f"ℹ️ [Flask] تم استلام طلب 'exit_trade' للصفقة ID: {signal_id} من الدردشة {chat_id_callback}.")
                     # Call close_trade_by_id in a new thread to avoid blocking the webhook
+                    # The close_trade_by_id will now also trigger a new report.
                     close_thread = Thread(target=close_trade_by_id, args=(signal_id, chat_id_callback,))
                     close_thread.start()
                     logger.info(f"✅ [Flask] تم بدء مؤشر ترابط إغلاق الصفقة ID: {signal_id}.")
-                    # Immediately re-send updated report to reflect change
-                    report_content, reply_markup = generate_performance_report()
-                    if report_content:
-                        edit_telegram_message(chat_id_callback, message_id, report_content, reply_markup=reply_markup, parse_mode='Markdown')
+                    # Removed immediate re-send of report here, as close_trade_by_id will handle it.
                 except ValueError:
                     logger.error(f"❌ [Flask] callback_data غير صالح لمعرف الصفقة: {callback_data}")
                     send_telegram_message(chat_id_callback, "❌ معرف الصفقة غير صالح.", parse_mode='Markdown')
@@ -2080,6 +2084,7 @@ def webhook() -> Tuple[str, int]:
             if text_msg.lower() == '/report':
                  report_content, reply_markup = generate_performance_report()
                  if report_content:
+                    # Send a NEW message with the full report
                     report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
                     report_thread.start()
             elif text_msg.lower() == '/status':
