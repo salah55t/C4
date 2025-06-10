@@ -1639,7 +1639,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
 🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')}`
-ℹ️ \*تم الإغلاق بناءً على طلبك.\*""" # FIXED: Escaped asterisks to avoid SyntaxError
+ℹ️ \\*تم الإغلاق بناءً على طلبك.\\*""" # FIXED: Escaped asterisks to avoid SyntaxError
             # Corrected: escape backticks if present in symbol
             if '`' in notification_message:
                 notification_message = notification_message.replace('`', '\\`')
