@@ -440,10 +440,10 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     df_ichimoku['ichimoku_tenkan_kijun_cross_signal'] = 0
     if len(df_ichimoku) > 1:
         # Bullish cross: Tenkan-sen crosses above Kijun-sen
-        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) &
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) & \
                         (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = 1
         # Bearish cross: Tenkan-sen crosses below Kijun-sen
-        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) &
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) & \
                         (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
 
     # Price vs Cloud Position (using current close price vs future cloud)
@@ -1003,7 +1003,7 @@ _(Assumed Trade Value: ${TRADE_VALUE:,.2f} and Binance Fees: {BINANCE_FEE_RATE*1
 ——————————————
 💰 *Overall Profitability:*
   • Gross Profit: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)
-  • Gross Loss: *{gross_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*)
+  • Gross Loss: *{gross_loss_pct_sum:+.2f}%* (≈ *${loss_usdt_gross:+.2f}*)
   • Estimated Total Fees: *${total_fees_usd:,.2f}*
   • *Net Profit:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)
   • Avg. Winning Trade: *{avg_win_pct:+.2f}%*
@@ -1428,9 +1428,10 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         dist_to_recent_low = signal_details.get('Dist_to_Recent_Low_Norm', np.nan)
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
         
-        sr_display_content = ""
+        sr_display_content = "" # Initialize here
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
-            sr_display_content = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}"
+            # Add newline directly to the string if it's present
+            sr_display_content = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}\n"
 
         message = f"""💡 *New Trading Signal (ML-Only Based)* 💡
 ——————————————
@@ -1462,7 +1463,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
   - Ichimoku Price vs Cloud: {ichimoku_price_cloud_display}
   - Ichimoku Cloud Outlook: {ichimoku_cloud_outlook_display}
   - Fibonacci Retracement (50%): {fib_above_50_display}
-{sr_display_content + '\n' if sr_display_content else ''}——————————————
+{sr_display_content}——————————————
 ⏰ {timestamp_str}"""
 
         reply_markup = {
