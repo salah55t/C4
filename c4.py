@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',\
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Removed backslash for line continuation
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
         logging.StreamHandler()
@@ -1432,8 +1432,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
         sr_display = ""
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
-            sr_display = f"\\n  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}"
-
+            sr_display = f"\n  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}" # Removed extra backslash
 
         message = (
             f"💡 *New Trading Signal (ML-Only Based)* 💡\n"
@@ -1532,7 +1531,7 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
              f"——————————————\n"
              f"🪙 **Pair:** `{safe_symbol}`\n"
              f"📈 **Current Price:** `${current_price:,.8g}`\n"
-             f"{'  \\n'.join(update_parts)}\n" 
+             f"{'  \n'.join(update_parts)}\n" # Removed extra backslash
              f"ℹ️ *Updated based on continued bullish momentum or market conditions.*"
          )
     else:
