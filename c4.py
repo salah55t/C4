@@ -1641,7 +1641,6 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             if '`' in formatted_symbol_for_message:
                 formatted_symbol_for_message = formatted_symbol_for_message.replace('`', '\\`')
 
-            # The comment is now on a separate line as intended.
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
 🪙 **الزوج:** `{formatted_symbol_for_message}`
@@ -2188,17 +2187,20 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist == None or df_hist.empty:
+                    # Corrected: Use 'is None' and then '.empty' for DataFrame checks
+                    if df_hist is None or df_hist.empty:
+                        logger.warning(f"⚠️ [Main] تخطي {symbol} بسبب عدم توفر بيانات تاريخية أو كونها فارغة.")
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol)
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model == None:
+                    if strategy.ml_model is None: # Use 'is None' for consistency
                         logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators == None:
+                    if df_indicators is None: # Use 'is None' for consistency
+                        logger.warning(f"⚠️ [Main] تخطي {symbol} بسبب فشل حساب المؤشرات.")
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
