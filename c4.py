@@ -441,10 +441,10 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     if len(df_ichimoku) > 1:
         # Bullish cross: Tenkan-sen crosses above Kijun-sen
         df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) &
-                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen'], 'ichimoku_tenkan_kijun_cross_signal')] = 1
+                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = 1
         # Bearish cross: Tenkan-sen crosses below Kijun-sen
         df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) &
-                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen'], 'ichimoku_tenkan_kijun_cross_signal')] = -1
+                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
 
     # Price vs Cloud Position (using current close price vs future cloud)
     df_ichimoku['ichimoku_price_cloud_position'] = 0 # 0 for inside, 1 for above, -1 for below
@@ -1201,7 +1201,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price === None:
+        if current_price is None: # Corrected from === None
             logger.warning(f"⚠️ [Strategy {self.symbol}] Current price not available from ticker data. Cannot generate signal.")
             return None
 
@@ -1596,7 +1596,7 @@ def track_signals() -> None:
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_target, current_target, entry_time, stop_loss
                     FROM signals
-                    WHERE achieved_target = FALSE AND closing_price IS NULL;
+                    WHERE achieved_target = FALSE AND closing_price is NULL;
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1620,7 +1620,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price === None:
+                    if current_price is None: # Corrected from === None
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in ticker data.")
                          continue
 
@@ -1689,7 +1689,7 @@ def track_signals() -> None:
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 if continuation_strategy.ml_model is None:
+                                 if continuation_strategy.ml_model is None: # Corrected from === None
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): ML model not loaded for continuation strategy. Skipping target/stop loss update.")
                                      continue
 
@@ -1939,7 +1939,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit === None:
+    if message_id_to_edit is None: # Corrected from === None
         logger.error(f"❌ [Flask Status] Failed to get message_id to update status in chat {chat_id_msg}")
         return
 
@@ -2031,7 +2031,7 @@ def main_loop() -> None:
             logger.info(f"ℹ️ [Main] Currently open signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"⚠️ [Main] Maximum number of open signals reached. Waiting...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
+                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAMe) * 60)
                 continue
 
             processed_in_loop = 0
@@ -2053,17 +2053,17 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist === None or df_hist.empty:
+                    if df_hist is None or df_hist.empty: # Corrected from === None
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model === None:
+                    if strategy.ml_model is None: # Corrected from === None
                         logger.warning(f"⚠️ [Main] Skipping {symbol} because its ML model was not loaded successfully.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators === None:
+                    if df_indicators is None: # Corrected from === None
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
