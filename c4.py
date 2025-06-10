@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 # ---------------------- Logging Setup ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', # Removed backslash for line continuation
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
         logging.StreamHandler()
@@ -441,10 +441,10 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     if len(df_ichimoku) > 1:
         # Bullish cross: Tenkan-sen crosses above Kijun-sen
         df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) &
-                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = 1
+                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen'], 'ichimoku_tenkan_kijun_cross_signal')] = 1
         # Bearish cross: Tenkan-sen crosses below Kijun-sen
         df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) &
-                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
+                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen'], 'ichimoku_tenkan_kijun_cross_signal')] = -1
 
     # Price vs Cloud Position (using current close price vs future cloud)
     df_ichimoku['ichimoku_price_cloud_position'] = 0 # 0 for inside, 1 for above, -1 for below
@@ -952,12 +952,11 @@ def generate_performance_report() -> str:
             win_rate = (winning_signals / total_closed) * 100 if total_closed > 0 else 0.0
             profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
 
-        report = (
-            f"📊 *Comprehensive Performance Report:*\n"
-            f"_(Assumed Trade Value: ${TRADE_VALUE:,.2f} and Binance Fees: {BINANCE_FEE_RATE*100:.2f}% per trade)_ \n"
-            f"——————————————\n"
-            f"📈 Currently Open Signals: *{open_signals_count}*\n"
-        )
+        report = f"""📊 *Comprehensive Performance Report:*
+_(Assumed Trade Value: ${TRADE_VALUE:,.2f} and Binance Fees: {BINANCE_FEE_RATE*100:.2f}% per trade)_ 
+——————————————
+📈 Currently Open Signals: *{open_signals_count}*
+"""
 
         if open_signals:
             report += "  • Details:\n"
@@ -983,37 +982,35 @@ def generate_performance_report() -> str:
                     progress_icon = "🟠"  # Between 25% and 50%
                 
                 # Add entry price, target, and current price to report in an organized format
-                report += f"    *{i+1}. {safe_symbol}*\n"
-                report += f"       💲 *Entry:* `${signal['entry_price']:.8g}`\n"
-                report += f"       🎯 *Target:* `${signal['current_target']:.8g}`\n"
-                report += f"       💵 *Current Price:* `${current_price:.8g}`\n"
-                report += f"       {progress_icon} *Progress:* `{progress_pct:.1f}%`\n"
-                report += f"       ⏰ *Opened:* `{entry_time_str}`\n"
-                
+                report += f"""    *{i+1}. {safe_symbol}*
+       💲 *Entry:* `${signal['entry_price']:.8g}`
+       🎯 *Target:* `${signal['current_target']:.8g}`
+       💵 *Current Price:* `${current_price:.8g}`
+       {progress_icon} *Progress:* `{progress_pct:.1f}%`
+       ⏰ *Opened:* `{entry_time_str}`
+"""
                 # Add separator between signals unless it's the last signal
                 if i < len(open_signals) - 1:
                     report += "       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         else:
             report += "  • No open signals currently.\n"
 
-        report += (
-            f"——————————————\n"
-            f"📉 *Closed Signal Statistics:*\n"
-            f"  • Total Closed Signals: *{total_closed}*\n"
-            f"  ✅ Winning Signals: *{winning_signals}* ({win_rate:.2f}%)\n"
-            f"  ❌ Losing Signals: *{losing_signals}*\n"
-            f"——————————————\n"
-            f"💰 *Overall Profitability:*\n"
-            f"  • Gross Profit: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)\n"
-            f"  • Gross Loss: *{gross_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*)\n"
-            f"  • Estimated Total Fees: *${total_fees_usd:,.2f}*\n"
-            f"  • *Net Profit:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)\n"
-            f"  • Avg. Winning Trade: *{avg_win_pct:+.2f}%*\n"
-            f"  • Avg. Losing Trade: *{avg_loss_pct:+.2f}%*\n"
-            f"  • Profit Factor: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*\n"
-            f"——————————————\n"
-            f"🕰️ _Report updated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"
-        )
+        report += f"""——————————————
+📉 *Closed Signal Statistics:*
+  • Total Closed Signals: *{total_closed}*
+  ✅ Winning Signals: *{winning_signals}* ({win_rate:.2f}%)
+  ❌ Losing Signals: *{losing_signals}*
+——————————————
+💰 *Overall Profitability:*
+  • Gross Profit: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)
+  • Gross Loss: *{gross_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*)
+  • Estimated Total Fees: *${total_fees_usd:,.2f}*
+  • *Net Profit:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)
+  • Avg. Winning Trade: *{avg_win_pct:+.2f}%*
+  • Avg. Losing Trade: *{avg_loss_pct:+.2f}%*
+  • Profit Factor: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*
+——————————————
+🕰️ _Report updated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"""
 
         logger.info("✅ [Report] Performance report generated successfully.")
         return report
@@ -1204,7 +1201,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price is None:
+        if current_price === None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] Current price not available from ticker data. Cannot generate signal.")
             return None
 
@@ -1430,44 +1427,44 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         fib_above_50_display = "Above 50% Fib 🟢" if fib_above_50 == 1 else "Below 50% Fib 🔴"
         dist_to_recent_low = signal_details.get('Dist_to_Recent_Low_Norm', np.nan)
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
+        
         sr_display = ""
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
-            sr_display = f"\n  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}" # Removed extra backslash
+            sr_display = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}"
 
-        message = (
-            f"💡 *New Trading Signal (ML-Only Based)* 💡\n"
-            f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"📈 **Signal Type:** Buy (Long)\n"
-            f"🕰️ **Timeframe:** {timeframe}\n"
-            f"💧 **Liquidity (last 15m):** {volume_15m:,.0f} USDT\n"
-            f"——————————————\n"
-            f"➡️ **Suggested Entry Price:** `${entry_price:,.8g}`\n"
-            f"🎯 **Initial Target:** `${target_price:,.8g}`\n"
-            f"🛑 **Stop Loss:** `${stop_loss_price:,.8g}`\n"
-            f"💰 **Expected Profit (Gross):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})\n"
-            f"💸 **Expected Loss (Gross):** ({loss_pct:+.2f}% / ≈ ${loss_usdt_gross:+.2f})\n" 
-            f"📈 **Net Profit (Expected):** ${profit_usdt_net:+.2f}\n"
-            f"📉 **Net Loss (Expected):** ${loss_usdt_net:+.2f}\n"
-            f"——————————————\n"
-            f"🤖 *ML Model Prediction:* *{ml_prediction_status}*\n"
-            f"✅ *Additional Conditions Met:*\n"
-            f"  - Liquidity Check: {signal_details.get('Volume_Check', 'N/A')}\n"
-            f"  - Profit Margin Check: {signal_details.get('Profit_Margin_Check', 'N/A')}\n"
-            f"  - Supertrend Filter: {signal_details.get('Supertrend_Filter', 'N/A')}\n" 
-            f"  - BTC Trend Filter: {signal_details.get('BTC_Trend_Filter', 'N/A')}\n"
-            f"——————————————\n"
-            f"📊 *Indicator Insights:*\n"
-            f"  - Fear & Greed Index: {fear_greed}\n"
-            f"  - Bitcoin Trend: {btc_trend_display}\n"
-            f"  - Supertrend Direction: {supertrend_display}\n"
-            f"  - Ichimoku Tenkan/Kijun: {ichimoku_cross_display}\n"
-            f"  - Ichimoku Price vs Cloud: {ichimoku_price_cloud_display}\n"
-            f"  - Ichimoku Cloud Outlook: {ichimoku_cloud_outlook_display}\n"
-            f"  - Fibonacci Retracement (50%): {fib_above_50_display}{sr_display}\n" # Combined S/R with Fib
-            f"——————————————\n"
-            f"⏰ {timestamp_str}"
-        )
+        message = f"""💡 *New Trading Signal (ML-Only Based)* 💡
+——————————————
+🪙 **Pair:** `{safe_symbol}`
+📈 **Signal Type:** Buy (Long)
+🕰️ **Timeframe:** {timeframe}
+💧 **Liquidity (last 15m):** {volume_15m:,.0f} USDT
+——————————————
+➡️ **Suggested Entry Price:** `${entry_price:,.8g}`
+🎯 **Initial Target:** `${target_price:,.8g}`
+🛑 **Stop Loss:** `${stop_loss_price:,.8g}`
+💰 **Expected Profit (Gross):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})
+💸 **Expected Loss (Gross):** ({loss_pct:+.2f}% / ≈ ${loss_usdt_gross:+.2f})
+📈 **Net Profit (Expected):** ${profit_usdt_net:+.2f}
+📉 **Net Loss (Expected):** ${loss_usdt_net:+.2f}
+——————————————
+🤖 *ML Model Prediction:* *{ml_prediction_status}*
+✅ *Additional Conditions Met:*
+  - Liquidity Check: {signal_details.get('Volume_Check', 'N/A')}
+  - Profit Margin Check: {signal_details.get('Profit_Margin_Check', 'N/A')}
+  - Supertrend Filter: {signal_details.get('Supertrend_Filter', 'N/A')}
+  - BTC Trend Filter: {signal_details.get('BTC_Trend_Filter', 'N/A')}
+——————————————
+📊 *Indicator Insights:*
+  - Fear & Greed Index: {fear_greed}
+  - Bitcoin Trend: {btc_trend_display}
+  - Supertrend Direction: {supertrend_display}
+  - Ichimoku Tenkan/Kijun: {ichimoku_cross_display}
+  - Ichimoku Price vs Cloud: {ichimoku_price_cloud_display}
+  - Ichimoku Cloud Outlook: {ichimoku_cloud_outlook_display}
+  - Fibonacci Retracement (50%): {fib_above_50_display}
+{'  ' + sr_display if sr_display else ''}
+——————————————
+⏰ {timestamp_str}"""
 
         reply_markup = {
             "inline_keyboard": [
@@ -1502,23 +1499,19 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
 
     if notification_type == 'target_hit':
-        message = (
-            f"✅ *Target Reached (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"🎯 **Closing Price (Target):** `${closing_price:,.8g}`\n"
-            f"💰 **Realized Profit:** {profit_pct:+.2f}%\n"
-            f"⏱️ **Time Taken:** {time_to_target}"
-        )
+        message = f"""✅ *Target Reached (ID: {signal_id})*
+——————————————
+🪙 **Pair:** `{safe_symbol}`
+🎯 **Closing Price (Target):** `${closing_price:,.8g}`
+💰 **Realized Profit:** {profit_pct:+.2f}%
+⏱️ **Time Taken:** {time_to_target}"""
     elif notification_type == 'stop_loss_hit':
-        message = (
-            f"🛑 *Stop Loss Hit (ID: {signal_id})*\n"
-            f"——————————————\n"
-            f"🪙 **Pair:** `{safe_symbol}`\n"
-            f"📉 **Closing Price (Stop Loss):** `${closing_price:,.8g}`\n"
-            f"💔 **Realized Loss:** {profit_pct:+.2f}%\n"
-            f"⏱️ **Time Taken:** {time_to_target}"
-        )
+        message = f"""🛑 *Stop Loss Hit (ID: {signal_id})*
+——————————————
+🪙 **Pair:** `{safe_symbol}`
+📉 **Closing Price (Stop Loss):** `${closing_price:,.8g}`
+💔 **Realized Loss:** {profit_pct:+.2f}%
+⏱️ **Time Taken:** {time_to_target}"""
     elif notification_type == 'target_stoploss_updated':
          update_parts = []
          if 'old_target' in details and 'new_target' in details:
@@ -1526,14 +1519,12 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
          if 'old_stop_loss' in details and 'new_stop_loss' in details:
              update_parts.append(f"🛑 *Stop Loss:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`")
 
-         message = (
-             f"🔄 *Signal Update (ID: {signal_id})*\n"
-             f"——————————————\n"
-             f"🪙 **Pair:** `{safe_symbol}`\n"
-             f"📈 **Current Price:** `${current_price:,.8g}`\n"
-             f"{'  \n'.join(update_parts)}\n" # Removed extra backslash
-             f"ℹ️ *Updated based on continued bullish momentum or market conditions.*"
-         )
+         message = f"""🔄 *Signal Update (ID: {signal_id})*
+——————————————
+🪙 **Pair:** `{safe_symbol}`
+📈 **Current Price:** `${current_price:,.8g}`
+{'  \n'.join(update_parts)}
+ℹ️ *Updated based on continued bullish momentum or market conditions.*"""
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
         return
@@ -1629,7 +1620,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price is None:
+                    if current_price === None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in ticker data.")
                          continue
 
@@ -1948,7 +1939,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit is None:
+    if message_id_to_edit === None:
         logger.error(f"❌ [Flask Status] Failed to get message_id to update status in chat {chat_id_msg}")
         return
 
@@ -1963,14 +1954,12 @@ def handle_status_command(chat_id_msg: int) -> None:
         ws_status = 'Active ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'Inactive ❌'
         tracker_status = 'Active ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'Inactive ❌'
         main_bot_alive = 'Active ✅' if 'main_bot_thread' in globals() and main_bot_thread and main_bot_thread.is_alive() else 'Inactive ❌'
-        final_status_msg = (
-            f"🤖 *Bot Status:*\n"
-            f"- Price Tracking (WS): {ws_status}\n"
-            f"- Signal Tracking: {tracker_status}\n"
-            f"- Main Bot Loop: {main_bot_alive}\n"
-            f"- Active Signals: *{open_count}* / {MAX_OPEN_TRADES}\n"
-            f"- Current Server Time: {datetime.now().strftime('%H:%M:%S')}"
-        )
+        final_status_msg = f"""🤖 *Bot Status:*
+- Price Tracking (WS): {ws_status}
+- Signal Tracking: {tracker_status}
+- Main Bot Loop: {main_bot_alive}
+- Active Signals: *{open_count}* / {MAX_OPEN_TRADES}
+- Current Server Time: {datetime.now().strftime('%H:%M:%S')}"""
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
             'chat_id': chat_id_msg,
@@ -2064,17 +2053,17 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty:
+                    if df_hist === None or df_hist.empty:
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model is None:
+                    if strategy.ml_model === None:
                         logger.warning(f"⚠️ [Main] Skipping {symbol} because its ML model was not loaded successfully.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None:
+                    if df_indicators === None:
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
