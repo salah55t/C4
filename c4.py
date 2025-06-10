@@ -1636,10 +1636,11 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
 
             logger.info(f"✅ [Close Trade] تم إغلاق الصفقة ID: {signal_id} لـ {symbol} عند {current_price:.8g} (الربح: {profit_pct:+.2f}%، الوقت: {time_to_close_str}).")
 
+            # Moved the comment to a separate line to avoid SyntaxError
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
 🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')}`
-ℹ️ تم الإغلاق بناءً على طلبك.""" # FIXED: Removed asterisks and backslashes to avoid SyntaxError
+ℹ️ تم الإغلاق بناءً على طلبك.""" 
             # Corrected: escape backticks if present in symbol
             if '`' in notification_message:
                 notification_message = notification_message.replace('`', '\\`')
