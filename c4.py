@@ -908,7 +908,7 @@ def generate_performance_report() -> str:
     logger.info("ℹ️ [Report] إنشاء تقرير الأداء...") 
     if not check_db_connection() or not conn or not cur:
         logger.error("❌ [Report] لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات.") 
-        return "❌ لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات." 
+        return "❌ لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات.", None 
     try:
         with conn.cursor() as report_cur:
             # Modify query to include current_target and add current price from ticker_data
@@ -952,14 +952,15 @@ def generate_performance_report() -> str:
             win_rate = (winning_signals / total_closed) * 100 if total_closed > 0 else 0.0
             profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
 
-        report = f"""📊 *تقرير الأداء الشامل:*
+        report_text = f"""📊 *تقرير الأداء الشامل:*
 _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل تداول)_
 ——————————————
 📈 الإشارات المفتوحة حاليًا: *{open_signals_count}*
 """ 
+        inline_keyboard_buttons = []
 
         if open_signals:
-            report += "  • التفاصيل:\n" 
+            report_text += "  • التفاصيل:\n" 
             for i, signal in enumerate(open_signals):
                 safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
@@ -982,20 +983,24 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
                     progress_icon = "🟠"  # Between 25% and 50%
                 
                 # Add entry price, target, and current price to report in an organized format
-                report += f"""    *{i+1}. {safe_symbol}*
+                report_text += f"""    *{i+1}. {safe_symbol}*
        💲 *الدخول:* `${signal['entry_price']:.8g}` 
        🎯 *الهدف:* `${signal['current_target']:.8g}` 
        💵 *السعر الحالي:* `${current_price:.8g}` 
        {progress_icon} *التقدم:* `{progress_pct:.1f}%` 
        ⏰ *تاريخ الفتح:* `{entry_time_str}` 
 """
+                # Add an "Exit Trade" button for each open signal
+                inline_keyboard_buttons.append([
+                    {"text": f"❌ إغلاق {safe_symbol}", "callback_data": f"exit_trade_{signal['id']}"}
+                ])
                 # Add separator between signals unless it's the last signal
                 if i < len(open_signals) - 1:
-                    report += "       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+                    report_text += "       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         else:
-            report += "  • لا توجد إشارات مفتوحة حاليًا.\n" 
+            report_text += "  • لا توجد إشارات مفتوحة حاليًا.\n" 
 
-        report += f"""——————————————
+        report_text += f"""——————————————
 📉 *إحصائيات الإشارات المغلقة:* • إجمالي الإشارات المغلقة: *{total_closed}* ✅ الإشارات الرابحة: *{winning_signals}* ({win_rate:.2f}%) 
   ❌ الإشارات الخاسرة: *{losing_signals}* ——————————————
 💰 *الربحية الإجمالية:* • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*) 
@@ -1005,15 +1010,22 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
 🕰️ _تم تحديث التقرير في: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_""" 
 
         logger.info("✅ [Report] تم إنشاء تقرير الأداء بنجاح.") 
-        return report
+        
+        reply_markup = None
+        if inline_keyboard_buttons:
+            # Add a refresh button at the very bottom
+            inline_keyboard_buttons.append([{"text": "🔄 تحديث التقرير", "callback_data": "get_report"}])
+            reply_markup = {"inline_keyboard": inline_keyboard_buttons}
+            
+        return report_text, reply_markup
 
     except psycopg2.Error as db_err:
         logger.error(f"❌ [Report] خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء: {db_err}") 
         if conn: conn.rollback()
-        return "❌ خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء." 
+        return "❌ خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء.", None 
     except Exception as e:
         logger.error(f"❌ [Report] حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء: {e}", exc_info=True) 
-        return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء." 
+        return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء.", None 
 
 # ---------------------- Trading Strategy (Adjusted for ML-Only) -------------------
 
@@ -1364,6 +1376,48 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
          logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}", exc_info=True) 
          return None
 
+def edit_telegram_message(target_chat_id: str, message_id: int, text: str, reply_markup: Optional[Dict] = None, parse_mode: str = 'Markdown', disable_web_page_preview: bool = True, timeout: int = 20) -> Optional[Dict]:
+    """Edits an existing message via Telegram Bot API."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+    payload = {
+        'chat_id': str(target_chat_id),
+        'message_id': message_id,
+        'text': text,
+        'parse_mode': parse_mode,
+        'disable_web_page_preview': disable_web_page_preview
+    }
+    if reply_markup:
+        try:
+            payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
+        except (TypeError, ValueError) as json_err:
+            logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON للتعديل: {json_err} - Markup: {reply_markup}")
+            return None
+
+    logger.debug(f"ℹ️ [Telegram] تعديل رسالة {message_id} في {target_chat_id}...")
+    try:
+        response = requests.post(url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        logger.info(f"✅ [Telegram] تم تعديل الرسالة بنجاح {message_id} في {target_chat_id}.")
+        return response.json()
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ [Telegram] فشل تعديل الرسالة {message_id} في {target_chat_id} (مهلة).")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"❌ [Telegram] فشل تعديل الرسالة {message_id} في {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).")
+        try:
+            error_details = http_err.response.json()
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}")
+        except json.JSONDecodeError:
+            logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ للتعديل: {http_err.response.text}")
+        return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"❌ [Telegram] فشل تعديل الرسالة {message_id} في {target_chat_id} (خطأ في الطلب): {req_err}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء تعديل الرسالة: {e}", exc_info=True)
+        return None
+
+
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the ML prediction and new indicator details."""
     logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه الإشارة: {signal_data.get('symbol', 'N/A')}") 
@@ -1454,7 +1508,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
   - فيبوناتشي (50%): {fib_above_50_display} 
 {sr_display_content}——————————————
 ⏰ {timestamp_str}"""
-
+        # For new signal alerts, we add a single button to view the full report
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}] 
@@ -1519,6 +1573,70 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 
     if message:
         send_telegram_message(CHAT_ID, message, parse_mode='Markdown')
+
+def close_trade_by_id(signal_id: int, chat_id: str) -> None:
+    """Closes a specific trade by ID at the current market price and sends a notification."""
+    logger.info(f"ℹ️ [Close Trade] محاولة إغلاق الصفقة ID: {signal_id} بناءً على طلب المستخدم.")
+    
+    if not check_db_connection() or not conn:
+        send_telegram_message(chat_id, "❌ لا يمكن إغلاق الصفقة، مشكلة في الاتصال بقاعدة البيانات.", parse_mode='Markdown')
+        logger.error(f"❌ [Close Trade] لا يمكن إغلاق الصفقة ID: {signal_id} بسبب مشكلة في الاتصال بقاعدة البيانات.")
+        return
+
+    try:
+        with conn.cursor() as cur_close:
+            cur_close.execute("""
+                SELECT id, symbol, entry_price, entry_time
+                FROM signals
+                WHERE id = %s AND achieved_target = FALSE;
+            """, (signal_id,))
+            signal_data = cur_close.fetchone()
+
+            if not signal_data:
+                send_telegram_message(chat_id, f"⚠️ الصفقة ID: *{signal_id}* غير موجودة أو تم إغلاقها بالفعل.", parse_mode='Markdown')
+                logger.warning(f"⚠️ [Close Trade] الصفقة ID: {signal_id} غير موجودة أو تم إغلاقها بالفعل.")
+                return
+
+            symbol = signal_data['symbol']
+            entry_price = float(signal_data['entry_price'])
+            entry_time = signal_data['entry_time']
+
+            current_price = ticker_data.get(symbol)
+            if current_price is None:
+                send_telegram_message(chat_id, f"❌ لا يمكن الحصول على السعر الحالي لـ {symbol}. يرجى المحاولة مرة أخرى.", parse_mode='Markdown')
+                logger.error(f"❌ [Close Trade] السعر الحالي غير متاح لـ {symbol} لإغلاق الصفقة ID: {signal_id}.")
+                return
+
+            profit_pct = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+            closed_at = datetime.now()
+            time_to_close = closed_at - entry_time if entry_time else timedelta(0)
+            time_to_close_str = str(time_to_close)
+
+            cur_close.execute("""
+                UPDATE signals
+                SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s
+                WHERE id = %s;
+            """, (current_price, closed_at, profit_pct, time_to_close, signal_id))
+            conn.commit()
+
+            logger.info(f"✅ [Close Trade] تم إغلاق الصفقة ID: {signal_id} لـ {symbol} عند {current_price:.8g} (الربح: {profit_pct:+.2f}%، الوقت: {time_to_close_str}).")
+            
+            notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
+——————————————
+🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')}`
+📉 **سعر الإغلاق:** `${current_price:,.8g}`
+💰 **الربح المحقق:** {profit_pct:+.2f}%
+⏱️ **الوقت المستغرق:** {time_to_close_str}
+ℹ️ *تم الإغلاق بناءً على طلبك.*"""
+            send_telegram_message(chat_id, notification_message, parse_mode='Markdown')
+
+    except psycopg2.Error as db_err:
+        logger.error(f"❌ [Close Trade] خطأ في قاعدة البيانات أثناء إغلاق الصفقة ID: {signal_id}: {db_err}", exc_info=True)
+        if conn: conn.rollback()
+        send_telegram_message(chat_id, f"❌ خطأ في قاعدة البيانات أثناء إغلاق الصفقة ID: *{signal_id}*.", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"❌ [Close Trade] خطأ غير متوقع أثناء إغلاق الصفقة ID: {signal_id}: {e}", exc_info=True)
+        send_telegram_message(chat_id, f"❌ حدث خطأ غير متوقع أثناء إغلاق الصفقة ID: *{signal_id}*.", parse_mode='Markdown')
 
 # ---------------------- Database Functions (Insert and Update) ----------------------
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
@@ -1821,7 +1939,7 @@ def webhook() -> Tuple[str, int]:
     # Only process webhook if WEBHOOK_URL is configured
     if not WEBHOOK_URL:
         logger.warning("⚠️ [Flask] تم استلام طلب Webhook، ولكن WEBHOOK_URL غير مكوّن. تجاهل الطلب.") 
-        return "Webhook غير مكوّن", 200 # Return OK to Telegram to avoid repeated attempts
+        return "Webhook غير مكوّن", 200 
 
     if not request.is_json:
         logger.warning("⚠️ [Flask] تم استلام طلب Webhook غير بصيغة JSON.") 
@@ -1830,7 +1948,7 @@ def webhook() -> Tuple[str, int]:
     try:
         data = request.get_json()
         logger.info(f"✅ [Flask] تم استلام بيانات Webhook. حجم البيانات: {len(json.dumps(data))} بايت.") 
-        logger.debug(f"ℹ️ [Flask] بيانات Webhook كاملة: {json.dumps(data)}") # Log full payload for debugging
+        logger.debug(f"ℹ️ [Flask] بيانات Webhook كاملة: {json.dumps(data)}") 
 
 
         if 'callback_query' in data:
@@ -1877,11 +1995,28 @@ def webhook() -> Tuple[str, int]:
 
             if callback_data == "get_report":
                 logger.info(f"ℹ️ [Flask] تم استلام طلب 'get_report' من الدردشة {chat_id_callback}. إنشاء التقرير...") 
-                report_content = generate_performance_report()
-                logger.info(f"✅ [Flask] تم إنشاء التقرير. طول التقرير: {len(report_content)} حرفًا.") 
-                report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, report_content, parse_mode='Markdown'))
-                report_thread.start()
-                logger.info(f"✅ [Flask] تم بدء مؤشر ترابط إرسال التقرير للدردشة {chat_id_callback}.") 
+                report_content, reply_markup = generate_performance_report() # Get text and reply_markup
+                if report_content:
+                    # Edit the original message that contained the button
+                    report_thread = Thread(target=lambda: edit_telegram_message(chat_id_callback, message_id, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
+                    report_thread.start()
+                    logger.info(f"✅ [Flask] تم بدء مؤشر ترابط تحديث التقرير للدردشة {chat_id_callback}.") 
+            elif callback_data and callback_data.startswith("exit_trade_"):
+                signal_id_str = callback_data.replace("exit_trade_", "")
+                try:
+                    signal_id = int(signal_id_str)
+                    logger.info(f"ℹ️ [Flask] تم استلام طلب 'exit_trade' للصفقة ID: {signal_id} من الدردشة {chat_id_callback}.")
+                    # Call close_trade_by_id in a new thread to avoid blocking the webhook
+                    close_thread = Thread(target=close_trade_by_id, args=(signal_id, chat_id_callback,))
+                    close_thread.start()
+                    logger.info(f"✅ [Flask] تم بدء مؤشر ترابط إغلاق الصفقة ID: {signal_id}.")
+                    # Immediately re-send updated report to reflect change
+                    report_content, reply_markup = generate_performance_report()
+                    if report_content:
+                        edit_telegram_message(chat_id_callback, message_id, report_content, reply_markup=reply_markup, parse_mode='Markdown')
+                except ValueError:
+                    logger.error(f"❌ [Flask] callback_data غير صالح لمعرف الصفقة: {callback_data}")
+                    send_telegram_message(chat_id_callback, "❌ معرف الصفقة غير صالح.", parse_mode='Markdown')
             else:
                 logger.warning(f"⚠️ [Flask] تم استلام بيانات رد اتصال غير معالجة: '{callback_data}'") 
 
@@ -1903,8 +2038,10 @@ def webhook() -> Tuple[str, int]:
             logger.info(f"ℹ️ [Flask] تم استلام رسالة: النص='{text_msg}', المستخدم={username}({user_id}), الدردشة={chat_id_msg}") 
 
             if text_msg.lower() == '/report':
-                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
-                 report_thread.start()
+                 report_content, reply_markup = generate_performance_report()
+                 if report_content:
+                    report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, report_content, reply_markup=reply_markup, parse_mode='Markdown'))
+                    report_thread.start()
             elif text_msg.lower() == '/status':
                  status_thread = Thread(target=handle_status_command, args=(chat_id_msg,))
                  status_thread.start()
@@ -1947,16 +2084,8 @@ def handle_status_command(chat_id_msg: int) -> None:
 - حلقة البوت الرئيسية: {main_bot_alive} 
 - الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES} 
 - وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}""" 
-        edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
-        edit_payload = {
-            'chat_id': chat_id_msg,
-             'message_id': message_id_to_edit,
-            'text': final_status_msg,
-            'parse_mode': 'Markdown'
-        }
-        response = requests.post(edit_url, json=edit_payload, timeout=10)
-        response.raise_for_status()
-        logger.info(f"✅ [Flask Status] تم تحديث الحالة للدردشة {chat_id_msg}") 
+        
+        edit_telegram_message(chat_id_msg, message_id_to_edit, final_status_msg, parse_mode='Markdown')
 
     except Exception as status_err:
         logger.error(f"❌ [Flask Status] خطأ أثناء جلب/تعديل تفاصيل الحالة للدردشة {chat_id_msg}: {status_err}", exc_info=True) 
