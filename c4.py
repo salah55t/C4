@@ -236,7 +236,7 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
         logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
         df['rsi'] = np.nan
         return df
-
+    
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -1297,10 +1297,10 @@ class ScalpingTradingStrategy:
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
             logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.")
-            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_pct:.2f}%)'
+            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_margin_pct:.2f}%)' # Changed profit_pct to profit_margin_pct
             return None
         else:
-            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_pct:.2f}%)'
+            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_margin_pct:.2f}%)' # Changed profit_pct to profit_margin_pct
 
         # --- Calculate Initial Stop Loss ---
         # Ensure Supertrend value is below the current price for a long signal
@@ -1332,7 +1332,7 @@ class ScalpingTradingStrategy:
             'total_possible_score': 1.0
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_status}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_result_text}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}") # Changed ml_prediction_status to ml_prediction_result_text
         return signal_output
 
 
@@ -1639,7 +1639,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
 🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[')}`
-ℹ️ *تم الإغلاق بناءً على طلبك.*"""
+ℹ️ \*تم الإغلاق بناءً على طلبك.\*""" # FIXED: Escaped asterisks to avoid SyntaxError
             # Corrected: escape backticks if present in symbol
             if '`' in notification_message:
                 notification_message = notification_message.replace('`', '\\`')
