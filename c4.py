@@ -916,6 +916,7 @@ def generate_performance_report() -> Tuple[str, Optional[Dict]]:
             open_signals = report_cur.fetchall()
             open_signals_count = len(open_signals)
 
+            # Updated query to include all closed trades (manual or target hit)
             report_cur.execute("""
                 SELECT
                     COUNT(*) AS total_closed,
@@ -926,7 +927,7 @@ def generate_performance_report() -> Tuple[str, Optional[Dict]]:
                     COALESCE(AVG(profit_percentage) FILTER (WHERE profit_percentage > 0), 0) AS avg_win_pct,
                     COALESCE(AVG(profit_percentage) FILTER (WHERE profit_percentage <= 0), 0) AS avg_loss_pct
                 FROM signals
-                WHERE achieved_target = TRUE;
+                WHERE closed_at IS NOT NULL;
             """)
             closed_stats = report_cur.fetchone() or {}
 
@@ -943,7 +944,17 @@ def generate_performance_report() -> Tuple[str, Optional[Dict]]:
             gross_loss_usd = (gross_loss_pct_sum / 100.0) * TRADE_VALUE
 
             # Total fees for all closed trades (entry and exit)
-            total_fees_usd = total_closed * (TRADE_VALUE * BINANCE_FEE_RATE + (TRADE_VALUE * (1 + (avg_win_pct / 100.0 if avg_win_pct > 0 else 0))) * BINANCE_FEE_RATE)
+            # Assuming average win/loss applies to estimate exit value for fees
+            total_fees_usd = total_closed * (TRADE_VALUE * BINANCE_FEE_RATE) # Entry fee for each trade
+            # Add exit fees. For simplicity, average the exit value, or calculate separately for wins/losses if more precise
+            if total_closed > 0:
+                if winning_signals > 0:
+                    avg_win_exit_value = TRADE_VALUE * (1 + avg_win_pct / 100.0)
+                    total_fees_usd += winning_signals * avg_win_exit_value * BINANCE_FEE_RATE
+                if losing_signals > 0:
+                    avg_loss_exit_value = TRADE_VALUE * (1 + avg_loss_pct / 100.0)
+                    total_fees_usd += losing_signals * avg_loss_exit_value * BINANCE_FEE_RATE
+
 
             net_profit_usd = gross_profit_usd + gross_loss_usd - total_fees_usd
             net_profit_pct = (net_profit_usd / (total_closed * TRADE_VALUE)) * 100 if total_closed * TRADE_VALUE > 0 else 0.0
@@ -1002,12 +1013,20 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
             report_text += "  • لا توجد إشارات مفتوحة حاليًا.\n"
 
         report_text += f"""——————————————
-📉 *إحصائيات الإشارات المغلقة:* • إجمالي الإشارات المغلقة: *{total_closed}* ✅ الإشارات الرابحة: *{winning_signals}* ({win_rate:.2f}%)
-  ❌ الإشارات الخاسرة: *{losing_signals}* ——————————————
-💰 *الربحية الإجمالية:* • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)
+📉 *إحصائيات الإشارات المغلقة:*
+  • إجمالي الإشارات المغلقة: *{total_closed}*
+  • ✅ الإشارات الرابحة: *{winning_signals}* ({win_rate:.2f}%)
+  • ❌ الإشارات الخاسرة: *{losing_signals}*
+——————————————
+💰 *الربحية الإجمالية:*
+  • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)
   • إجمالي الخسارة: *{gross_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*)
-  • إجمالي الرسوم المقدرة: *${total_fees_usd:,.2f}* • *صافي الربح:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)
-  • متوسط الربح لكل صفقة رابحة: *{avg_win_pct:+.2f}%* • متوسط الخسارة لكل صفقة خاسرة: *{avg_loss_pct:+.2f}%* • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}* ——————————————
+  • إجمالي الرسوم المقدرة: *${total_fees_usd:,.2f}*
+  • *صافي الربح:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)
+  • متوسط الربح لكل صفقة رابحة: *{avg_win_pct:+.2f}%*
+  • متوسط الخسارة لكل صفقة خاسرة: *{avg_loss_pct:+.2f}%*
+  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*
+——————————————
 🕰️ _تم تحديث التقرير في: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"""
 
         logger.info("✅ [Report] تم إنشاء تقرير الأداء بنجاح.")
@@ -1206,7 +1225,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price == None:
+        if current_price is None: # Changed to 'is None' for consistency
             logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات المؤشر. لا يمكن إنشاء إشارة.")
             return None
 
@@ -1603,7 +1622,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             cur_close.execute("""
                 SELECT id, symbol, entry_price, entry_time
                 FROM signals
-                WHERE id = %s AND achieved_target = FALSE;
+                WHERE id = %s AND closed_at IS NULL; -- Ensure we only target open trades
             """, (signal_id,))
             signal_data = cur_close.fetchone()
 
@@ -1617,7 +1636,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             entry_time = signal_data['entry_time']
 
             current_price = ticker_data.get(symbol)
-            if current_price == None:
+            if current_price is None: # Changed to 'is None' for consistency
                 send_telegram_message(chat_id, f"❌ لا يمكن الحصول على السعر الحالي لـ {symbol}. يرجى المحاولة مرة أخرى.", parse_mode='Markdown')
                 logger.error(f"❌ [Close Trade] السعر الحالي غير متاح لـ {symbol} لإغلاق الصفقة ID: {signal_id}.")
                 return
@@ -1627,9 +1646,10 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             time_to_close = closed_at - entry_time if entry_time else timedelta(0)
             time_to_close_str = str(time_to_close)
 
+            # Mark achieved_target as FALSE for manual closures to distinguish from auto-target hits
             cur_close.execute("""
                 UPDATE signals
-                SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s
+                SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s
                 WHERE id = %s;
             """, (current_price, closed_at, profit_pct, time_to_close, signal_id))
             conn.commit()
@@ -1720,7 +1740,7 @@ def track_signals() -> None:
                  track_cur.execute("""
                     SELECT id, symbol, entry_price, initial_target, current_target, entry_time, stop_loss
                     FROM signals
-                    WHERE achieved_target = FALSE AND closing_price is NULL;
+                    WHERE closed_at IS NULL; -- Changed from achieved_target = FALSE
                 """)
                  open_signals: List[Dict] = track_cur.fetchall()
 
@@ -1744,7 +1764,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price == None:
+                    if current_price is None: # Changed to 'is None' for consistency
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات المؤشر.")
                          continue
 
@@ -1771,6 +1791,7 @@ def track_signals() -> None:
                         time_to_close = closed_at - entry_time if entry_time else timedelta(0)
                         time_to_close_str = str(time_to_close)
 
+                        # Set achieved_target to FALSE for stop loss to distinguish from target hits
                         update_query = sql.SQL("UPDATE signals SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
                         update_params = (current_stop_loss, closed_at, profit_pct, time_to_close, signal_id)
                         log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): تم ضرب وقف الخسارة عند {current_stop_loss:.8g} (الخسارة: {profit_pct:+.2f}%، الوقت: {time_to_close_str})."
@@ -1789,6 +1810,7 @@ def track_signals() -> None:
                         time_to_target_duration = closed_at - entry_time if entry_time else timedelta(0)
                         time_to_target_str = str(time_to_target_duration)
 
+                        # Set achieved_target to TRUE for target hits
                         update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
                         update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
                         log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%، الوقت: {time_to_target_str})."
@@ -1813,13 +1835,13 @@ def track_signals() -> None:
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 if continuation_strategy.ml_model == None:
+                                 if continuation_strategy.ml_model is None: # Changed to 'is None' for consistency
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML لم يتم تحميله لإستراتيجية الاستمرارية. تخطي تحديث الهدف/وقف الخسارة.")
                                      continue
 
                                  df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
 
-                                 if df_continuation_indicators is not None and not df_continuation_indicators.empty:
+                                 if df_continuation_indicators is not None and not df_continuation_indicators.empty: # Changed to 'is None' for consistency
                                      # Use generate_buy_signal to check if conditions *still* hold for a buy
                                      # We don't need the full signal output, just whether it passes filters
                                      continuation_signal_check = continuation_strategy.generate_buy_signal(df_continuation_indicators)
@@ -2082,7 +2104,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit == None:
+    if message_id_to_edit is None: # Changed to 'is None' for consistency
         logger.error(f"❌ [Flask Status] فشل الحصول على message_id لتحديث الحالة في الدردشة {chat_id_msg}")
         return
 
@@ -2091,7 +2113,7 @@ def handle_status_command(chat_id_msg: int) -> None:
         open_count = 0
         if check_db_connection() and conn:
             with conn.cursor() as status_cur:
-                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
+                status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE closed_at IS NULL;") # Changed from achieved_target = FALSE
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
         ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌'
@@ -2154,7 +2176,7 @@ def main_loop() -> None:
             open_count = 0
             try:
                  with conn.cursor() as cur_check:
-                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
+                    cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE closed_at IS NULL;") # Changed from achieved_target = FALSE
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err:
                  logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء التحقق من عدد الإشارات المفتوحة: {db_err}. تخطي الدورة.")
@@ -2182,8 +2204,10 @@ def main_loop() -> None:
 
                  try:
                     with conn.cursor() as symbol_cur:
-                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND achieved_target = FALSE LIMIT 1;", (symbol,))
+                        # Check for existing open trade by symbol. Use closed_at IS NULL
+                        symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND closed_at IS NULL LIMIT 1;", (symbol,))
                         if symbol_cur.fetchone():
+                            logger.debug(f"ℹ️ [Main] تخطي {symbol} لأنه يوجد بالفعل تداول مفتوح لهذا الرمز.")
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
@@ -2208,7 +2232,8 @@ def main_loop() -> None:
                     if potential_signal:
                         logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي والإدراج...")
                         with conn.cursor() as final_check_cur:
-                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
+                             # Check open trades again before inserting to ensure slots are still available
+                             final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE closed_at IS NULL;") # Changed from achieved_target = FALSE
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
 
                              if final_open_count < MAX_OPEN_TRADES:
