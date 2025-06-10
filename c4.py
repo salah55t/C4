@@ -1201,7 +1201,7 @@ class ScalpingTradingStrategy:
 
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
-        if current_price is None: # Corrected from === None
+        if current_price is None:
             logger.warning(f"⚠️ [Strategy {self.symbol}] Current price not available from ticker data. Cannot generate signal.")
             return None
 
@@ -1428,9 +1428,9 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         dist_to_recent_low = signal_details.get('Dist_to_Recent_Low_Norm', np.nan)
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
         
-        sr_display = ""
+        sr_display_content = ""
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
-            sr_display = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}"
+            sr_display_content = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}"
 
         message = f"""💡 *New Trading Signal (ML-Only Based)* 💡
 ——————————————
@@ -1462,8 +1462,7 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
   - Ichimoku Price vs Cloud: {ichimoku_price_cloud_display}
   - Ichimoku Cloud Outlook: {ichimoku_cloud_outlook_display}
   - Fibonacci Retracement (50%): {fib_above_50_display}
-{'  ' + sr_display if sr_display else ''}
-——————————————
+{sr_display_content + '\n' if sr_display_content else ''}——————————————
 ⏰ {timestamp_str}"""
 
         reply_markup = {
@@ -1513,17 +1512,19 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 💔 **Realized Loss:** {profit_pct:+.2f}%
 ⏱️ **Time Taken:** {time_to_target}"""
     elif notification_type == 'target_stoploss_updated':
-         update_parts = []
+         update_parts_formatted = [] # Renamed for clarity
          if 'old_target' in details and 'new_target' in details:
-             update_parts.append(f"🎯 *Target:* `${old_target:,.8g}` -> `${new_target:,.8g}`")
+             update_parts_formatted.append(f"  🎯 *Target:* `${old_target:,.8g}` -> `${new_target:,.8g}`")
          if 'old_stop_loss' in details and 'new_stop_loss' in details:
-             update_parts.append(f"🛑 *Stop Loss:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`")
+             update_parts_formatted.append(f"  🛑 *Stop Loss:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`")
+
+         update_block = "\n".join(update_parts_formatted) # Pre-join to avoid backslash in f-string expression
 
          message = f"""🔄 *Signal Update (ID: {signal_id})*
 ——————————————
 🪙 **Pair:** `{safe_symbol}`
 📈 **Current Price:** `${current_price:,.8g}`
-{'  \n'.join(update_parts)}
+{update_block}
 ℹ️ *Updated based on continued bullish momentum or market conditions.*"""
     else:
         logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
@@ -1620,7 +1621,7 @@ def track_signals() -> None:
 
                     current_price = ticker_data.get(symbol)
 
-                    if current_price is None: # Corrected from === None
+                    if current_price is None:
                          logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in ticker data.")
                          continue
 
@@ -1689,7 +1690,7 @@ def track_signals() -> None:
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
-                                 if continuation_strategy.ml_model is None: # Corrected from === None
+                                 if continuation_strategy.ml_model is None:
                                      logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): ML model not loaded for continuation strategy. Skipping target/stop loss update.")
                                      continue
 
@@ -1939,7 +1940,7 @@ def handle_status_command(chat_id_msg: int) -> None:
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
-    if message_id_to_edit is None: # Corrected from === None
+    if message_id_to_edit is None:
         logger.error(f"❌ [Flask Status] Failed to get message_id to update status in chat {chat_id_msg}")
         return
 
@@ -2031,7 +2032,7 @@ def main_loop() -> None:
             logger.info(f"ℹ️ [Main] Currently open signals: {open_count} / {MAX_OPEN_TRADES}")
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"⚠️ [Main] Maximum number of open signals reached. Waiting...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAMe) * 60)
+                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
                 continue
 
             processed_in_loop = 0
@@ -2053,17 +2054,17 @@ def main_loop() -> None:
                             continue
 
                     df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty: # Corrected from === None
+                    if df_hist is None or df_hist.empty:
                         continue
 
                     strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
                     # Check if ML model was loaded successfully for this symbol
-                    if strategy.ml_model is None: # Corrected from === None
+                    if strategy.ml_model is None:
                         logger.warning(f"⚠️ [Main] Skipping {symbol} because its ML model was not loaded successfully.")
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
-                    if df_indicators is None: # Corrected from === None
+                    if df_indicators is None:
                         continue
 
                     potential_signal = strategy.generate_buy_signal(df_indicators)
