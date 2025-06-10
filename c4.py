@@ -530,7 +530,7 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
     """
     df_sr = df.copy()
     required_cols = ['high', 'low', 'close']
-    if not all(col in df_sr.columns for col in required_cols) or df_sr[required_cols].isnull().all().any():
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
         logger.warning("⚠️ [Indicator S/R] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب ميزات الدعم/المقاومة.")
         for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
             df_sr[col] = np.nan
@@ -962,7 +962,8 @@ _(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binan
         if open_signals:
             report_text += "  • التفاصيل:\n"
             for i, signal in enumerate(open_signals):
-                safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+                # Corrected: Use raw string for replacement values to avoid f-string backslash issues
+                safe_symbol = str(signal['symbol']).replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
 
                 # Get current price from ticker data
@@ -1451,7 +1452,8 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         loss_usdt_net = loss_usdt_gross - total_trade_fees_stoploss
 
         timestamp_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+        # Corrected: Use raw string for replacement values to avoid f-string backslash issues
+        safe_symbol = symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
 
         fear_greed = get_fear_greed_index()
         ml_prediction_status = signal_details.get('ML_Prediction', 'N/A')
@@ -1528,7 +1530,8 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     signal_id = details.get('id', 'N/A')
     notification_type = details.get('type', 'unknown')
     message = ""
-    safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+    # Corrected: Use raw string for replacement values to avoid f-string backslash issues
+    safe_symbol = symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')
     closing_price = details.get('closing_price', 0.0)
     profit_pct = details.get('profit_pct', 0.0)
     current_price = details.get('current_price', 0.0)
@@ -1602,7 +1605,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
             entry_time = signal_data['entry_time']
 
             current_price = ticker_data.get(symbol)
-            if current_price == None: # Corrected from ===
+            if current_price == None:
                 send_telegram_message(chat_id, f"❌ لا يمكن الحصول على السعر الحالي لـ {symbol}. يرجى المحاولة مرة أخرى.", parse_mode='Markdown')
                 logger.error(f"❌ [Close Trade] السعر الحالي غير متاح لـ {symbol} لإغلاق الصفقة ID: {signal_id}.")
                 return
@@ -1623,7 +1626,7 @@ def close_trade_by_id(signal_id: int, chat_id: str) -> None:
 
             notification_message = f"""✅ *تم إغلاق الصفقة يدوياً (ID: {signal_id})*
 ——————————————
-🪙 **الزوج:** `{symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')}`
+🪙 **الزوج:** `{symbol.replace('_', r'\_').replace('*', r'\*').replace('[', r'\[').replace('`', r'\`')}`
 📉 **سعر الإغلاق:** `${current_price:,.8g}`
 💰 **الربح المحقق:** {profit_pct:+.2f}%
 ⏱️ **الوقت المستغرق:** {time_to_close_str}
