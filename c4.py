@@ -39,14 +39,14 @@ try:
     # WEBHOOK_URL is optional, but Flask will always run for Render compatibility
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
 except Exception as e:
-     logger.critical(f"❌ Failed to load essential environment variables: {e}")
+     logger.critical(f"❌ فشل تحميل متغيرات البيئة الأساسية: {e}") # Changed to Arabic
      exit(1)
 
-logger.info(f"Binance API Key: {'Available' if API_KEY else 'Not available'}")
-logger.info(f"Telegram Token: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}")
-logger.info(f"Telegram Chat ID: {CHAT_ID}")
-logger.info(f"Database URL: {'Available' if DB_URL else 'Not available'}")
-logger.info(f"Webhook URL: {WEBHOOK_URL if WEBHOOK_URL else 'Not specified'} (Flask will always run for Render)")
+logger.info(f"مفتاح API الخاص بـ Binance: {'متاح' if API_KEY else 'غير متاح'}") # Changed to Arabic
+logger.info(f"رمز Telegram: {TELEGRAM_TOKEN[:10]}...{'*' * (len(TELEGRAM_TOKEN)-10)}") # Changed to Arabic
+logger.info(f"معرف دردشة Telegram: {CHAT_ID}") # Changed to Arabic
+logger.info(f"عنوان URL لقاعدة البيانات: {'متاح' if DB_URL else 'غير متاح'}") # Changed to Arabic
+logger.info(f"عنوان URL للخطاف الويب: {WEBHOOK_URL if WEBHOOK_URL else 'غير محدد'} (سيتم تشغيل Flask دائمًا لتوافق Render)") # Changed to Arabic
 
 # ---------------------- Constants and Global Variables Setup ----------------------
 TRADE_VALUE: float = 10.0
@@ -96,19 +96,19 @@ ml_models: Dict[str, Any] = {} # Global dictionary to hold loaded ML models, key
 
 # ---------------------- Binance Client Setup ----------------------
 try:
-    logger.info("ℹ️ [Binance] Initializing Binance client...")
+    logger.info("ℹ️ [Binance] تهيئة عميل Binance...") # Changed to Arabic
     client = Client(API_KEY, API_SECRET)
     client.ping()
     server_time = client.get_server_time()
-    logger.info(f"✅ [Binance] Binance client initialized. Server time: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
+    logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}") # Changed to Arabic
 except BinanceRequestException as req_err:
-     logger.critical(f"❌ [Binance] Binance request error (network or request issue): {req_err}")
+     logger.critical(f"❌ [Binance] خطأ في طلب Binance (مشكلة في الشبكة أو الطلب): {req_err}") # Changed to Arabic
      exit(1)
 except BinanceAPIException as api_err:
-     logger.critical(f"❌ [Binance] Binance API error (invalid keys or server issue): {api_err}")
+     logger.critical(f"❌ [Binance] خطأ في واجهة برمجة تطبيقات Binance (مفاتيح غير صالحة أو مشكلة في الخادم): {api_err}") # Changed to Arabic
      exit(1)
 except Exception as e:
-    logger.critical(f"❌ [Binance] Unexpected failure in Binance client initialization: {e}")
+    logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}") # Changed to Arabic
     exit(1)
 
 # ---------------------- Additional Indicator Functions ----------------------
@@ -119,7 +119,7 @@ def get_fear_greed_index() -> str:
         "Greed": "جشع", "Extreme Greed": "جشع شديد",
     }
     url = "https://api.alternative.me/fng/" 
-    logger.debug(f"ℹ️ [Indicators] Fetching Fear & Greed Index from {url}...")
+    logger.debug(f"ℹ️ [Indicators] جلب مؤشر الخوف والجشع من {url}...") # Changed to Arabic
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
@@ -127,17 +127,17 @@ def get_fear_greed_index() -> str:
         value = int(data["data"][0]["value"])
         classification_en = data["data"][0]["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
-        logger.debug(f"✅ [Indicators] Fear & Greed Index: {value} ({classification_ar})")
+        logger.debug(f"✅ [Indicators] مؤشر الخوف والجشع: {value} ({classification_ar})") # Changed to Arabic
         return f"{value} ({classification_ar})"
     except requests.exceptions.RequestException as e:
-         logger.error(f"❌ [Indicators] Network error while fetching Fear & Greed Index: {e}")
-         return "N/A (Network Error)"
+         logger.error(f"❌ [Indicators] خطأ في الشبكة أثناء جلب مؤشر الخوف والجشع: {e}") # Changed to Arabic
+         return "N/A (خطأ في الشبكة)" # Changed to Arabic
     except (KeyError, IndexError, ValueError, json.JSONDecodeError) as e:
-        logger.error(f"❌ [Indicators] Data format error for Fear & Greed Index: {e}")
-        return "N/A (Data Error)"
+        logger.error(f"❌ [Indicators] خطأ في تنسيق البيانات لمؤشر الخوف والجشع: {e}") # Changed to Arabic
+        return "N/A (خطأ في البيانات)" # Changed to Arabic
     except Exception as e:
-        logger.error(f"❌ [Indicators] Unexpected error while fetching Fear & Greed Index: {e}", exc_info=True)
-        return "N/A (Unknown Error)"
+        logger.error(f"❌ [Indicators] خطأ غير متوقع أثناء جلب مؤشر الخوف والجشع: {e}", exc_info=True) # Changed to Arabic
+        return "N/A (خطأ غير معروف)" # Changed to Arabic
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     """
@@ -146,14 +146,14 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     internal pagination for large data ranges.
     """
     if not client:
-        logger.error("❌ [Data] Binance client not initialized for data fetching.")
+        logger.error("❌ [Data] عميل Binance غير مهيأ لجلب البيانات.") # Changed to Arabic
         return None
     try:
         # Calculate the start date for the entire data range needed
         start_dt = datetime.utcnow() - timedelta(days=days + 1)
         start_str_overall = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        logger.debug(f"ℹ️ [Data] Fetching {interval} data for {symbol} from {start_str_overall} onwards...")
+        logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} فصاعدًا...") # Changed to Arabic
 
         # Map interval string to Binance client constant
         binance_interval = None
@@ -168,7 +168,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         elif interval == '1d':
             binance_interval = Client.KLINE_INTERVAL_1DAY
         else:
-            logger.error(f"❌ [Data] Unsupported interval: {interval}")
+            logger.error(f"❌ [Data] فترة غير مدعومة: {interval}") # Changed to Arabic
             return None
 
         # Call get_historical_klines for the entire period.
@@ -177,7 +177,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         klines = client.get_historical_klines(symbol, binance_interval, start_str_overall)
 
         if not klines:
-            logger.warning(f"⚠️ [Data] No historical ({interval}) data for {symbol} for the requested period.")
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية ({interval}) لـ {symbol} للفترة المطلوبة.") # Changed to Arabic
             return None
 
         df = pd.DataFrame(klines, columns=[
@@ -196,26 +196,26 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df.dropna(subset=numeric_cols, inplace=True)
 
         if len(df) < initial_len:
-            logger.debug(f"ℹ️ [Data] {symbol}: Dropped {initial_len - len(df)} rows due to NaN values in OHLCV data.")
+            logger.debug(f"ℹ️ [Data] {symbol}: تم حذف {initial_len - len(df)} صفوف بسبب قيم NaN في بيانات OHLCV.") # Changed to Arabic
 
         if df.empty:
-            logger.warning(f"⚠️ [Data] DataFrame for {symbol} is empty after removing essential NaN values.")
+            logger.warning(f"⚠️ [Data] DataFrame لـ {symbol} فارغ بعد إزالة قيم NaN الأساسية.") # Changed to Arabic
             return None
 
         # Sort by index (timestamp) to ensure chronological order
         df.sort_index(inplace=True)
 
-        logger.debug(f"✅ [Data] Fetched and processed {len(df)} historical ({interval}) candles for {symbol}.")
+        logger.debug(f"✅ [Data] تم جلب ومعالجة {len(df)} شمعة تاريخية ({interval}) لـ {symbol}.") # Changed to Arabic
         return df
 
     except BinanceAPIException as api_err:
-         logger.error(f"❌ [Data] Binance API error while fetching data for {symbol}: {api_err}")
+         logger.error(f"❌ [Data] خطأ في Binance API أثناء جلب البيانات لـ {symbol}: {api_err}") # Changed to Arabic
          return None
     except BinanceRequestException as req_err:
-         logger.error(f"❌ [Data] Request or network error while fetching data for {symbol}: {req_err}")
+         logger.error(f"❌ [Data] خطأ في الطلب أو الشبكة أثناء جلب البيانات لـ {symbol}: {req_err}") # Changed to Arabic
          return None
     except Exception as e:
-        logger.error(f"❌ [Data] Unexpected error while fetching historical data for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [Data] خطأ غير متوقع أثناء جلب البيانات التاريخية لـ {symbol}: {e}", exc_info=True) # Changed to Arabic
         return None
 
 
@@ -229,11 +229,11 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
     """Calculates Relative Strength Index (RSI)."""
     df = df.copy()
     if 'close' not in df.columns or df['close'].isnull().all():
-        logger.warning("⚠️ [Indicator RSI] 'close' column is missing or empty.")
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.") # Changed to Arabic
         df['rsi'] = np.nan
         return df
     if len(df) < period:
-        logger.warning(f"⚠️ [Indicator RSI] Insufficient data ({len(df)} < {period}) to calculate RSI.")
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.") # Changed to Arabic
         df['rsi'] = np.nan
         return df
 
@@ -256,11 +256,11 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
     df = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator ATR] 'high', 'low', 'close' columns are missing or empty.")
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.") # Changed to Arabic
         df['atr'] = np.nan
         return df
     if len(df) < period + 1:
-        logger.warning(f"⚠️ [Indicator ATR] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.") # Changed to Arabic
         df['atr'] = np.nan
         return df
 
@@ -278,7 +278,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
     df = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator Supertrend] 'high', 'low', 'close' columns are missing or empty. Cannot calculate Supertrend.")
+        logger.warning("⚠️ [Indicator Supertrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة. لا يمكن حساب Supertrend.") # Changed to Arabic
         df['supertrend'] = np.nan
         df['supertrend_direction'] = 0 # Neutral if cannot calculate
         return df
@@ -287,7 +287,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
     if 'atr' not in df.columns:
         df = calculate_atr_indicator(df, period=period) # Use Supertrend period for ATR if not already calculated
         if 'atr' not in df.columns or df['atr'].isnull().all().any():
-            logger.warning("⚠️ [Indicator Supertrend] ATR calculation failed. Cannot calculate Supertrend.")
+            logger.warning("⚠️ [Indicator Supertrend] فشل حساب ATR. لا يمكن حساب Supertrend.") # Changed to Arabic
             df['supertrend'] = np.nan
             df['supertrend_direction'] = 0
             return df
@@ -349,7 +349,7 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
 
     # Drop temporary columns
     df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True, errors='ignore')
-    logger.debug(f"✅ [Indicator Supertrend] Supertrend calculated.")
+    logger.debug(f"✅ [Indicator Supertrend] تم حساب Supertrend.") # Changed to Arabic
     return df
 
 def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
@@ -357,12 +357,12 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     Calculates a numerical representation of Bitcoin's trend based on EMA20 and EMA50.
     Returns 1 for bullish (صعودي), -1 for bearish (هبوطي), 0 for neutral/sideways (محايد/تذبذب).
     """
-    logger.debug("ℹ️ [Indicators] Calculating Bitcoin trend for features...")
+    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين للميزات...") # Changed to Arabic
     # Need enough data for EMA50, plus a few extra candles for robustness
     min_data_for_ema = 50 + 5 # 50 for EMA50, 5 buffer
 
     if df_btc is None or df_btc.empty or len(df_btc) < min_data_for_ema:
-        logger.warning(f"⚠️ [Indicators] Insufficient BTC/USDT data ({len(df_btc) if df_btc is not None else 0} < {min_data_for_ema}) to calculate Bitcoin trend for features.")
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية ({len(df_btc) if df_btc is not None else 0} < {min_data_for_ema}) لحساب اتجاه البيتكوين للميزات.") # Changed to Arabic
         # Return a series of zeros (neutral) with the original index if data is insufficient
         return pd.Series(index=df_btc.index if df_btc is not None else None, data=0.0)
 
@@ -371,7 +371,7 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     df_btc_copy.dropna(subset=['close'], inplace=True)
 
     if len(df_btc_copy) < min_data_for_ema:
-        logger.warning(f"⚠️ [Indicators] Insufficient BTC/USDT data after NaN removal to calculate trend.")
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية بعد إزالة NaN لحساب الاتجاه.") # Changed to Arabic
         return pd.Series(index=df_btc.index, data=0.0) # Return neutral if not enough data after dropna
 
     ema20 = calculate_ema(df_btc_copy['close'], 20)
@@ -382,7 +382,7 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     ema_df.dropna(inplace=True) # Drop rows where any EMA or close is NaN
 
     if ema_df.empty:
-        logger.warning("⚠️ [Indicators] EMA DataFrame is empty after NaN removal. Cannot calculate Bitcoin trend.")
+        logger.warning("⚠️ [Indicators] EMA DataFrame فارغ بعد إزالة NaN. لا يمكن حساب اتجاه البيتكوين.") # Changed to Arabic
         return pd.Series(index=df_btc.index, data=0.0) # Return neutral if no valid EMA data
 
     # Initialize trend column with neutral (0.0)
@@ -397,7 +397,7 @@ def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
     # Reindex to original df_btc index and fill any remaining NaNs with 0 (neutral)
     # This ensures the series has the same index as the altcoin DataFrame for merging
     final_trend_series = trend_series.reindex(df_btc.index).fillna(0.0)
-    logger.debug(f"✅ [Indicators] Bitcoin trend feature calculated. Examples: {final_trend_series.tail().tolist()}")
+    logger.debug(f"✅ [Indicators] تم حساب ميزة اتجاه البيتكوين. أمثلة: {final_trend_series.tail().tolist()}") # Changed to Arabic
     return final_trend_series
 
 
@@ -407,7 +407,7 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     df_ichimoku = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df_ichimoku.columns for col in required_cols) or df_ichimoku[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator Ichimoku] Missing or empty OHLC columns. Cannot calculate Ichimoku.")
+        logger.warning("⚠️ [Indicator Ichimoku] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب Ichimoku.") # Changed to Arabic
         for col in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b', 'chikou_span',
                     'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook']:
             df_ichimoku[col] = np.nan
@@ -458,7 +458,7 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     df_ichimoku.loc[(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = 1 # Green Cloud
     df_ichimoku.loc[(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = -1 # Red Cloud
 
-    logger.debug(f"✅ [Indicator Ichimoku] Ichimoku Cloud and derived features calculated.")
+    logger.debug(f"✅ [Indicator Ichimoku] تم حساب مكونات وميزات Ichimoku Cloud.") # Changed to Arabic
     return df_ichimoku
 
 
@@ -471,12 +471,12 @@ def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR
     df_fib = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df_fib.columns for col in required_cols) or df_fib[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator Fibonacci] Missing or empty OHLC columns. Cannot calculate Fibonacci features.")
+        logger.warning("⚠️ [Indicator Fibonacci] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب ميزات Fibonacci.") # Changed to Arabic
         for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
             df_fib[col] = np.nan
         return df_fib
     if len(df_fib) < lookback_window:
-        logger.warning(f"⚠️ [Indicator Fibonacci] Insufficient data ({len(df_fib)} < {lookback_window}) for Fibonacci calculation.")
+        logger.warning(f"⚠️ [Indicator Fibonacci] بيانات غير كافية ({len(df_fib)} < {lookback_window}) لحساب Fibonacci.") # Changed to Arabic
         for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
             df_fib[col] = np.nan
         return df_fib
@@ -518,7 +518,7 @@ def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR
             else:
                 df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 0
 
-    logger.debug(f"✅ [Indicator Fibonacci] Fibonacci features calculated.")
+    logger.debug(f"✅ [Indicator Fibonacci] تم حساب ميزات Fibonacci.") # Changed to Arabic
     return df_fib
 
 
@@ -531,12 +531,12 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
     df_sr = df.copy()
     required_cols = ['high', 'low', 'close']
     if not all(col in df_sr.columns for col in required_cols) or df_sr[required_cols].isnull().all().any():
-        logger.warning("⚠️ [Indicator S/R] Missing or empty OHLC columns. Cannot calculate S/R features.")
+        logger.warning("⚠️ [Indicator S/R] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب ميزات الدعم/المقاومة.") # Changed to Arabic
         for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
             df_sr[col] = np.nan
         return df_sr
     if len(df_sr) < lookback_window:
-        logger.warning(f"⚠️ [Indicator S/R] Insufficient data ({len(df_sr)} < {lookback_window}) for S/R calculation.")
+        logger.warning(f"⚠️ [Indicator S/R] بيانات غير كافية ({len(df_sr)} < {lookback_window}) لحساب S/R.") # Changed to Arabic
         for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
             df_sr[col] = np.nan
         return df_sr
@@ -563,7 +563,7 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0 # Price is at the low
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0 # Price is at the high (if range is 0)
 
-    logger.debug(f"✅ [Indicator S/R] Support and Resistance features calculated.")
+    logger.debug(f"✅ [Indicator S/R] تم حساب ميزات الدعم والمقاومة.") # Changed to Arabic
     return df_sr
 
 
@@ -571,17 +571,17 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
 def init_db(retries: int = 5, delay: int = 5) -> None:
     """Initializes database connection and creates tables if they don't exist."""
     global conn, cur
-    logger.info("[DB] Starting database initialization...")
+    logger.info("[DB] بدء تهيئة قاعدة البيانات...") # Changed to Arabic
     for attempt in range(retries):
         try:
-            logger.info(f"[DB] Attempting to connect to database (Attempt {attempt + 1}/{retries})...")
+            logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (المحاولة {attempt + 1}/{retries})...") # Changed to Arabic
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             cur = conn.cursor()
-            logger.info("✅ [DB] Successfully connected to database.")
+            logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.") # Changed to Arabic
 
             # --- Create or update signals table (Modified schema) ---
-            logger.info("[DB] Checking/creating 'signals' table...")
+            logger.info("[DB] التحقق من/إنشاء جدول 'signals'...") # Changed to Arabic
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY,
@@ -603,10 +603,10 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     stop_loss DOUBLE PRECISION  -- Added stop loss column
                 );""")
             conn.commit()
-            logger.info("✅ [DB] 'signals' table exists or created.")
+            logger.info("✅ [DB] جدول 'signals' موجود أو تم إنشاؤه.") # Changed to Arabic
 
             # --- Create ml_models table (NEW) ---
-            logger.info("[DB] Checking/creating 'ml_models' table...")
+            logger.info("[DB] التحقق من/إنشاء جدول 'ml_models'...") # Changed to Arabic
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ml_models (
                     id SERIAL PRIMARY KEY,
@@ -616,10 +616,10 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     metrics JSONB
                 );""")
             conn.commit()
-            logger.info("✅ [DB] 'ml_models' table exists or created.")
+            logger.info("✅ [DB] جدول 'ml_models' موجود أو تم إنشاؤه.") # Changed to Arabic
 
             # --- Create market_dominance table (if it doesn't exist) ---
-            logger.info("[DB] Checking/creating 'market_dominance' table...")
+            logger.info("[DB] التحقق من/إنشاء جدول 'market_dominance'...") # Changed to Arabic
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS market_dominance (
                     id SERIAL PRIMARY KEY,
@@ -629,27 +629,27 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 );
             """)
             conn.commit()
-            logger.info("✅ [DB] 'market_dominance' table exists or created.")
+            logger.info("✅ [DB] جدول 'market_dominance' موجود أو تم إنشاؤه.") # Changed to Arabic
 
-            logger.info("✅ [DB] Database initialized successfully.")
+            logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.") # Changed to Arabic
             return
 
         except OperationalError as op_err:
-            logger.error(f"❌ [DB] Operational error connecting (Attempt {attempt + 1}): {op_err}")
+            logger.error(f"❌ [DB] خطأ في التشغيل أثناء الاتصال (المحاولة {attempt + 1}): {op_err}") # Changed to Arabic
             if conn: conn.rollback()
             if attempt == retries - 1:
-                 logger.critical("❌ [DB] All database connection attempts failed.")
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.") # Changed to Arabic
                  raise op_err
             time.sleep(delay)
         except Exception as e:
-            logger.critical(f"❌ [DB] Unexpected failure in database initialization (Attempt {attempt + 1}): {e}", exc_info=True)
+            logger.critical(f"❌ [DB] فشل غير متوقع في تهيئة قاعدة البيانات (المحاولة {attempt + 1}): {e}", exc_info=True) # Changed to Arabic
             if conn: conn.rollback()
             if attempt == retries - 1:
-                 logger.critical("❌ [DB] All database connection attempts failed.")
+                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.") # Changed to Arabic
                  raise e
             time.sleep(delay)
 
-    logger.critical("❌ [DB] Failed to connect to the database after multiple attempts.")
+    logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات بعد عدة محاولات.") # Changed to Arabic
     exit(1)
 
 
@@ -658,7 +658,7 @@ def check_db_connection() -> bool:
     global conn, cur
     try:
         if conn is None or conn.closed != 0:
-            logger.warning("⚠️ [DB] Connection closed or non-existent. Re-initializing...")
+            logger.warning("⚠️ [DB] تم إغلاق الاتصال أو غير موجود. إعادة التهيئة...") # Changed to Arabic
             init_db()
             return True
         else:
@@ -667,20 +667,20 @@ def check_db_connection() -> bool:
                   check_cur.fetchone()
              return True
     except (OperationalError, InterfaceError) as e:
-        logger.error(f"❌ [DB] Database connection lost ({e}). Re-initializing...")
+        logger.error(f"❌ [DB] فقد الاتصال بقاعدة البيانات ({e}). إعادة التهيئة...") # Changed to Arabic
         try:
              init_db()
              return True
         except Exception as recon_err:
-            logger.error(f"❌ [DB] Re-connection attempt failed after loss: {recon_err}")
+            logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد الفقدان: {recon_err}") # Changed to Arabic
             return False
     except Exception as e:
-        logger.error(f"❌ [DB] Unexpected error while checking connection: {e}", exc_info=True)
+        logger.error(f"❌ [DB] خطأ غير متوقع أثناء فحص الاتصال: {e}", exc_info=True) # Changed to Arabic
         try:
             init_db()
             return True
         except Exception as recon_err:
-             logger.error(f"❌ [DB] Re-connection attempt failed after unexpected error: {recon_err}")
+             logger.error(f"❌ [DB] فشلت محاولة إعادة الاتصال بعد خطأ غير متوقع: {recon_err}") # Changed to Arabic
              return False
 
 def load_ml_model_from_db(symbol: str) -> Optional[Any]:
@@ -689,11 +689,11 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
 
     if model_name in ml_models:
-        logger.debug(f"ℹ️ [ML Model] Model '{model_name}' already in memory.")
+        logger.debug(f"ℹ️ [ML Model] النموذج '{model_name}' موجود بالفعل في الذاكرة.") # Changed to Arabic
         return ml_models[model_name]
 
     if not check_db_connection() or not conn:
-        logger.error(f"❌ [ML Model] Cannot load ML model for {symbol} due to database connection issue.")
+        logger.error(f"❌ [ML Model] لا يمكن تحميل نموذج ML لـ {symbol} بسبب مشكلة في الاتصال بقاعدة البيانات.") # Changed to Arabic
         return None
 
     try:
@@ -703,19 +703,19 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
             if result and result['model_data']:
                 model = pickle.loads(result['model_data'])
                 ml_models[model_name] = model # Store in global dictionary
-                logger.info(f"✅ [ML Model] Successfully loaded ML model '{model_name}' from database.")
+                logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات بنجاح.") # Changed to Arabic
                 return model
             else:
-                logger.warning(f"⚠️ [ML Model] No ML model found with name '{model_name}' in database. Please train the model first.")
+                logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج ML بالاسم '{model_name}' في قاعدة البيانات. يرجى تدريب النموذج أولاً.") # Changed to Arabic
                 return None
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [ML Model] Database error while loading ML model for {symbol}: {db_err}", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ في قاعدة البيانات أثناء تحميل نموذج ML لـ {symbol}: {db_err}", exc_info=True) # Changed to Arabic
         return None
     except pickle.UnpicklingError as unpickle_err:
-        logger.error(f"❌ [ML Model] Error unpickling ML model for {symbol}: {unpickle_err}. Model might be corrupted or saved with a different version.", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ في فك حزمة نموذج ML لـ {symbol}: {unpickle_err}. قد يكون النموذج تالفًا أو تم حفظه بإصدار مختلف.", exc_info=True) # Changed to Arabic
         return None
     except Exception as e:
-        logger.error(f"❌ [ML Model] Unexpected error while loading ML model for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [ML Model] خطأ غير متوقع أثناء تحميل نموذج ML لـ {symbol}: {e}", exc_info=True) # Changed to Arabic
         return None
 
 
@@ -751,10 +751,10 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                     try:
                         ticker_data[symbol] = float(price_str)
                     except ValueError:
-                         logger.warning(f"⚠️ [WS] Invalid price value for symbol {symbol}: '{price_str}'")
+                         logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol}: '{price_str}'") # Changed to Arabic
         elif isinstance(msg, dict):
              if msg.get('e') == 'error':
-                 logger.error(f"❌ [WS] Error message from WebSocket: {msg.get('m', 'No error details')}")
+                 logger.error(f"❌ [WS] رسالة خطأ من WebSocket: {msg.get('m', 'لا توجد تفاصيل خطأ')}") # Changed to Arabic
              elif msg.get('stream') and msg.get('data'):
                  for ticker_item in msg.get('data', []):
                     symbol = ticker_item.get('s')
@@ -763,30 +763,30 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                         try:
                             ticker_data[symbol] = float(price_str)
                         except ValueError:
-                             logger.warning(f"⚠️ [WS] Invalid price value for symbol {symbol} in combined stream: '{price_str}'")
+                             logger.warning(f"⚠️ [WS] قيمة سعر غير صالحة للرمز {symbol} في التدفق المدمج: '{price_str}'") # Changed to Arabic
         else:
-             logger.warning(f"⚠️ [WS] Received WebSocket message in unexpected format: {type(msg)}")
+             logger.warning(f"⚠️ [WS] تم استلام رسالة WebSocket بتنسيق غير متوقع: {type(msg)}") # Changed to Arabic
 
     except Exception as e:
-        logger.error(f"❌ [WS] Error processing ticker message: {e}", exc_info=True)
+        logger.error(f"❌ [WS] خطأ في معالجة رسالة المؤشر: {e}", exc_info=True) # Changed to Arabic
 
 
 def run_ticker_socket_manager() -> None:
     """Runs and manages the WebSocket connection for mini-ticker."""
     while True:
         try:
-            logger.info("ℹ️ [WS] Starting WebSocket manager for ticker prices...")
+            logger.info("ℹ️ [WS] بدء مدير WebSocket لأسعار المؤشرات...") # Changed to Arabic
             twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
             twm.start()
 
             stream_name = twm.start_miniticker_socket(callback=handle_ticker_message)
-            logger.info(f"✅ [WS] WebSocket stream started: {stream_name}")
+            logger.info(f"✅ [WS] تم بدء تدفق WebSocket: {stream_name}") # Changed to Arabic
 
             twm.join()
-            logger.warning("⚠️ [WS] WebSocket manager stopped. Restarting...")
+            logger.warning("⚠️ [WS] تم إيقاف مدير WebSocket. إعادة التشغيل...") # Changed to Arabic
 
         except Exception as e:
-            logger.error(f"❌ [WS] Fatal error in WebSocket manager: {e}. Restarting in 15 seconds...", exc_info=True)
+            logger.error(f"❌ [WS] خطأ فادح في مدير WebSocket: {e}. إعادة التشغيل في 15 ثانية...", exc_info=True) # Changed to Arabic
 
         time.sleep(15)
 
@@ -794,10 +794,10 @@ def run_ticker_socket_manager() -> None:
 def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
     """Fetches the trading volume in USDT for the last `num_candles` of the specified `interval`."""
     if not client:
-         logger.error(f"❌ [Data Volume] Binance client not initialized for fetching volume for {symbol}.")
+         logger.error(f"❌ [Data Volume] عميل Binance غير مهيأ لجلب حجم التداول لـ {symbol}.") # Changed to Arabic
          return 0.0
     try:
-        logger.debug(f"ℹ️ [Data Volume] Fetching volume for last {num_candles} {interval} candles for {symbol}...")
+        logger.debug(f"ℹ️ [Data Volume] جلب حجم التداول لآخر {num_candles} شمعة {interval} لـ {symbol}...") # Changed to Arabic
 
         # Map interval string to Binance client constant
         binance_interval = None
@@ -812,23 +812,23 @@ def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME
         elif interval == '1d':
             binance_interval = Client.KLINE_INTERVAL_1DAY
         else:
-            logger.error(f"❌ [Data Volume] Unsupported interval: {interval}")
+            logger.error(f"❌ [Data Volume] فترة غير مدعومة: {interval}") # Changed to Arabic
             return 0.0
 
         klines = client.get_klines(symbol=symbol, interval=binance_interval, limit=num_candles)
         if not klines or len(klines) < num_candles:
-             logger.warning(f"⚠️ [Data Volume] Insufficient {interval} data (less than {num_candles} candles) for {symbol}.")
+             logger.warning(f"⚠️ [Data Volume] بيانات {interval} غير كافية (أقل من {num_candles} شمعة) لـ {symbol}.") # Changed to Arabic
              return 0.0
 
         # k[7] is the quote asset volume (e.g., USDT volume)
         volume_usdt = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-        logger.debug(f"✅ [Data Volume] Liquidity for last {num_candles} {interval} candles for {symbol}: {volume_usdt:.2f} USDT")
+        logger.debug(f"✅ [Data Volume] السيولة لآخر {num_candles} شمعة {interval} لـ {symbol}: {volume_usdt:.2f} USDT") # Changed to Arabic
         return volume_usdt
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Volume] Binance API or network error while fetching volume for {symbol}: {binance_err}")
+         logger.error(f"❌ [Data Volume] خطأ في Binance API أو الشبكة أثناء جلب حجم التداول لـ {symbol}: {binance_err}") # Changed to Arabic
          return 0.0
     except Exception as e:
-        logger.error(f"❌ [Data Volume] Unexpected error while fetching volume for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [Data Volume] خطأ غير متوقع أثناء جلب حجم التداول لـ {symbol}: {e}", exc_info=True) # Changed to Arabic
         return 0.0
 
 # ---------------------- Reading and Validating Symbols List ----------------------
@@ -838,7 +838,7 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     then validates them as valid USDT pairs available for Spot trading on Binance.
     """
     raw_symbols: List[str] = []
-    logger.info(f"ℹ️ [Data] Reading symbol list from '{filename}' file...")
+    logger.info(f"ℹ️ [Data] قراءة قائمة الرموز من الملف '{filename}'...") # Changed to Arabic
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
@@ -846,35 +846,35 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         if not os.path.exists(file_path):
             file_path = os.path.abspath(filename)
             if not os.path.exists(file_path):
-                 logger.error(f"❌ [Data] File '{filename}' not found in script directory or current directory.")
+                 logger.error(f"❌ [Data] الملف '{filename}' غير موجود في دليل السكريبت أو الدليل الحالي.") # Changed to Arabic
                  return []
             else:
-                 logger.warning(f"⚠️ [Data] File '{filename}' not found in script directory. Using file in current directory: '{file_path}'")
+                 logger.warning(f"⚠️ [Data] الملف '{filename}' غير موجود في دليل السكريبت. استخدام الملف في الدليل الحالي: '{file_path}'") # Changed to Arabic
 
         with open(file_path, 'r', encoding='utf-8') as f:
             # Append USDT to each symbol if not already present
             raw_symbols = [f"{line.strip().upper()}USDT" if not line.strip().upper().endswith('USDT') else line.strip().upper()
                            for line in f if line.strip() and not line.startswith('#')]
         raw_symbols = sorted(list(set(raw_symbols)))
-        logger.info(f"ℹ️ [Data] Read {len(raw_symbols)} initial symbols from '{file_path}'.")
+        logger.info(f"ℹ️ [Data] تم قراءة {len(raw_symbols)} رمزًا مبدئيًا من '{file_path}'.") # Changed to Arabic
 
     except FileNotFoundError:
-         logger.error(f"❌ [Data] File '{filename}' not found.")
+         logger.error(f"❌ [Data] الملف '{filename}' غير موجود.") # Changed to Arabic
          return []
     except Exception as e:
-        logger.error(f"❌ [Data] Error reading file '{filename}': {e}", exc_info=True)
+        logger.error(f"❌ [Data] خطأ في قراءة الملف '{filename}': {e}", exc_info=True) # Changed to Arabic
         return []
 
     if not raw_symbols:
-         logger.warning("⚠️ [Data] Initial symbol list is empty.")
+         logger.warning("⚠️ [Data] قائمة الرموز الأولية فارغة.") # Changed to Arabic
          return []
 
     if not client:
-        logger.error("❌ [Data Validation] Binance client not initialized. Cannot validate symbols.")
+        logger.error("❌ [Data Validation] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.") # Changed to Arabic
         return raw_symbols
 
     try:
-        logger.info("ℹ️ [Data Validation] Validating symbols and trading status from Binance API...")
+        logger.info("ℹ️ [Data Validation] التحقق من الرموز وحالة التداول من Binance API...") # Changed to Arabic
         exchange_info = client.get_exchange_info()
         valid_trading_usdt_symbols = {
             s['symbol'] for s in exchange_info['symbols']
@@ -882,33 +882,33 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
                s.get('status') == 'TRADING' and
                s.get('isSpotTradingAllowed') is True
         }
-        logger.info(f"ℹ️ [Data Validation] Found {len(valid_trading_usdt_symbols)} valid USDT Spot trading pairs on Binance.")
+        logger.info(f"ℹ️ [Data Validation] تم العثور على {len(valid_trading_usdt_symbols)} أزواج تداول USDT صالحة في Spot على Binance.") # Changed to Arabic
         validated_symbols = [symbol for symbol in raw_symbols if symbol in valid_trading_usdt_symbols]
 
         removed_count = len(raw_symbols) - len(validated_symbols)
         if removed_count > 0:
             removed_symbols = set(raw_symbols) - set(validated_symbols)
-            logger.warning(f"⚠️ [Data Validation] Removed {removed_count} invalid or unavailable USDT trading symbols from list: {', '.join(removed_symbols)}")
+            logger.warning(f"⚠️ [Data Validation] تم إزالة {removed_count} رمز تداول USDT غير صالح أو غير متاح من القائمة: {', '.join(removed_symbols)}") # Changed to Arabic
 
-        logger.info(f"✅ [Data Validation] Symbols validated. Using {len(validated_symbols)} valid symbols.")
+        logger.info(f"✅ [Data Validation] تم التحقق من الرموز. استخدام {len(validated_symbols)} رمزًا صالحًا.") # Changed to Arabic
         return validated_symbols
 
     except (BinanceAPIException, BinanceRequestException) as binance_err:
-         logger.error(f"❌ [Data Validation] Binance API or network error while validating symbols: {binance_err}")
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
+         logger.error(f"❌ [Data Validation] خطأ في Binance API أو الشبكة أثناء التحقق من الرموز: {binance_err}") # Changed to Arabic
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون تحقق Binance.") # Changed to Arabic
          return raw_symbols
     except Exception as api_err:
-         logger.error(f"❌ [Data Validation] Unexpected error while validating Binance symbols: {api_err}", exc_info=True)
-         logger.warning("⚠️ [Data Validation] Using initial list from file without Binance validation.")
+         logger.error(f"❌ [Data Validation] خطأ غير متوقع أثناء التحقق من رموز Binance: {api_err}", exc_info=True) # Changed to Arabic
+         logger.warning("⚠️ [Data Validation] استخدام القائمة الأولية من الملف بدون تحقق Binance.") # Changed to Arabic
          return raw_symbols
 
 # ---------------------- Comprehensive Performance Report Generation Function ----------------------
 def generate_performance_report() -> str:
     """Generates a comprehensive performance report from the database in Arabic, including recent closed trades and USD profit/loss."""
-    logger.info("ℹ️ [Report] Generating performance report...")
+    logger.info("ℹ️ [Report] إنشاء تقرير الأداء...") # Changed to Arabic
     if not check_db_connection() or not conn or not cur:
-        logger.error("❌ [Report] Cannot generate report, database connection issue.")
-        return "❌ Cannot generate report, database connection issue."
+        logger.error("❌ [Report] لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات.") # Changed to Arabic
+        return "❌ لا يمكن إنشاء التقرير، مشكلة في الاتصال بقاعدة البيانات." # Changed to Arabic
     try:
         with conn.cursor() as report_cur:
             # Modify query to include current_target and add current price from ticker_data
@@ -952,14 +952,14 @@ def generate_performance_report() -> str:
             win_rate = (winning_signals / total_closed) * 100 if total_closed > 0 else 0.0
             profit_factor = float('inf') if gross_loss_pct_sum == 0 else (gross_profit_pct_sum / abs(gross_loss_pct_sum))
 
-        report = f"""📊 *Comprehensive Performance Report:*
-_(Assumed Trade Value: ${TRADE_VALUE:,.2f} and Binance Fees: {BINANCE_FEE_RATE*100:.2f}% per trade)_ 
+        report = f"""📊 *تقرير الأداء الشامل:*
+_(قيمة التداول المفترضة: ${TRADE_VALUE:,.2f} ورسوم Binance: {BINANCE_FEE_RATE*100:.2f}% لكل تداول)_
 ——————————————
-📈 Currently Open Signals: *{open_signals_count}*
-"""
+📈 الإشارات المفتوحة حاليًا: *{open_signals_count}*
+""" # Changed to Arabic
 
         if open_signals:
-            report += "  • Details:\n"
+            report += "  • التفاصيل:\n" # Changed to Arabic
             for i, signal in enumerate(open_signals):
                 safe_symbol = str(signal['symbol']).replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
                 entry_time_str = signal['entry_time'].strftime('%Y-%m-%d %H:%M') if signal['entry_time'] else 'N/A'
@@ -983,45 +983,45 @@ _(Assumed Trade Value: ${TRADE_VALUE:,.2f} and Binance Fees: {BINANCE_FEE_RATE*1
                 
                 # Add entry price, target, and current price to report in an organized format
                 report += f"""    *{i+1}. {safe_symbol}*
-       💲 *Entry:* `${signal['entry_price']:.8g}`
-       🎯 *Target:* `${signal['current_target']:.8g}`
-       💵 *Current Price:* `${current_price:.8g}`
-       {progress_icon} *Progress:* `{progress_pct:.1f}%`
-       ⏰ *Opened:* `{entry_time_str}`
+       💲 *الدخول:* `${signal['entry_price']:.8g}` # Changed to Arabic
+       🎯 *الهدف:* `${signal['current_target']:.8g}` # Changed to Arabic
+       💵 *السعر الحالي:* `${current_price:.8g}` # Changed to Arabic
+       {progress_icon} *التقدم:* `{progress_pct:.1f}%` # Changed to Arabic
+       ⏰ *تاريخ الفتح:* `{entry_time_str}` # Changed to Arabic
 """
                 # Add separator between signals unless it's the last signal
                 if i < len(open_signals) - 1:
                     report += "       ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         else:
-            report += "  • No open signals currently.\n"
+            report += "  • لا توجد إشارات مفتوحة حاليًا.\n" # Changed to Arabic
 
         report += f"""——————————————
-📉 *Closed Signal Statistics:*
-  • Total Closed Signals: *{total_closed}*
-  ✅ Winning Signals: *{winning_signals}* ({win_rate:.2f}%)
-  ❌ Losing Signals: *{losing_signals}*
+📉 *إحصائيات الإشارات المغلقة:* # Changed to Arabic
+  • إجمالي الإشارات المغلقة: *{total_closed}* # Changed to Arabic
+  ✅ الإشارات الرابحة: *{winning_signals}* ({win_rate:.2f}%) # Changed to Arabic
+  ❌ الإشارات الخاسرة: *{losing_signals}* # Changed to Arabic
 ——————————————
-💰 *Overall Profitability:*
-  • Gross Profit: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*)
-  • Gross Loss: *{gross_loss_pct_sum:+.2f}%* (≈ *${loss_usdt_gross:+.2f}*)
-  • Estimated Total Fees: *${total_fees_usd:,.2f}*
-  • *Net Profit:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*)
-  • Avg. Winning Trade: *{avg_win_pct:+.2f}%*
-  • Avg. Losing Trade: *{avg_loss_pct:+.2f}%*
-  • Profit Factor: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}*
+💰 *الربحية الإجمالية:* # Changed to Arabic
+  • إجمالي الربح: *{gross_profit_pct_sum:+.2f}%* (≈ *${gross_profit_usd:+.2f}*) # Changed to Arabic
+  • إجمالي الخسارة: *{gross_loss_pct_sum:+.2f}%* (≈ *${gross_loss_usd:+.2f}*) # Changed to Arabic # Fixed variable name
+  • إجمالي الرسوم المقدرة: *${total_fees_usd:,.2f}* # Changed to Arabic
+  • *صافي الربح:* *{net_profit_pct:+.2f}%* (≈ *${net_profit_usd:+.2f}*) # Changed to Arabic
+  • متوسط الربح لكل صفقة رابحة: *{avg_win_pct:+.2f}%* # Changed to Arabic
+  • متوسط الخسارة لكل صفقة خاسرة: *{avg_loss_pct:+.2f}%* # Changed to Arabic
+  • عامل الربح: *{'∞' if profit_factor == float('inf') else f'{profit_factor:.2f}'}* # Changed to Arabic
 ——————————————
-🕰️ _Report updated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_"""
+🕰️ _تم تحديث التقرير في: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}_""" # Changed to Arabic
 
-        logger.info("✅ [Report] Performance report generated successfully.")
+        logger.info("✅ [Report] تم إنشاء تقرير الأداء بنجاح.") # Changed to Arabic
         return report
 
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [Report] Database error while generating performance report: {db_err}")
+        logger.error(f"❌ [Report] خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء: {db_err}") # Changed to Arabic
         if conn: conn.rollback()
-        return "❌ Database error while generating performance report."
+        return "❌ خطأ في قاعدة البيانات أثناء إنشاء تقرير الأداء." # Changed to Arabic
     except Exception as e:
-        logger.error(f"❌ [Report] Unexpected error while generating performance report: {e}", exc_info=True)
-        return "❌ An unexpected error occurred while generating performance report."
+        logger.error(f"❌ [Report] حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء: {e}", exc_info=True) # Changed to Arabic
+        return "❌ حدث خطأ غير متوقع أثناء إنشاء تقرير الأداء." # Changed to Arabic
 
 # ---------------------- Trading Strategy (Adjusted for ML-Only) -------------------
 
@@ -1032,7 +1032,7 @@ class ScalpingTradingStrategy:
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol) # Load model specific to this symbol
         if self.ml_model is None:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] ML model for {symbol} not loaded. Strategy will not be able to generate signals.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] لم يتم تحميل نموذج ML لـ {symbol}. لن تتمكن الإستراتيجية من إنشاء إشارات.") # Changed to Arabic
 
         # Updated feature columns to include all new indicators (MUST match ml.py)
         self.feature_columns_for_ml = [ 
@@ -1056,7 +1056,7 @@ class ScalpingTradingStrategy:
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """Calculates all required indicators for the ML model's features."""
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Calculating indicators for ML model...")
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] حساب المؤشرات لنموذج ML...") # Changed to Arabic
         
         # min_len_required should reflect the max lookback of all indicators
         min_len_required = max(
@@ -1074,7 +1074,7 @@ class ScalpingTradingStrategy:
         ) + 5 # Additional buffer for safe calculations
 
         if len(df) < min_len_required:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame too short ({len(df)} < {min_len_required}) for ML indicator calculation.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جدًا ({len(df)} < {min_len_required}) لحساب مؤشر ML.") # Changed to Arabic
             return None
 
         try:
@@ -1107,31 +1107,31 @@ class ScalpingTradingStrategy:
                     df_calc = df_calc.merge(btc_trend_series.rename('btc_trend_feature'),
                                             left_index=True, right_index=True, how='left')
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
-                    logger.debug(f"ℹ️ [Strategy {self.symbol}] Bitcoin trend feature merged.")
+                    logger.debug(f"ℹ️ [Strategy {self.symbol}] تم دمج ميزة اتجاه البيتكوين.") # Changed to Arabic
                 else:
-                    logger.warning(f"⚠️ [Strategy {self.symbol}] Bitcoin trend feature calculation failed. Defaulting 'btc_trend_feature' to 0.")
+                    logger.warning(f"⚠️ [Strategy {self.symbol}] فشل حساب ميزة اتجاه البيتكوين. تعيين 'btc_trend_feature' إلى 0.") # Changed to Arabic
                     df_calc['btc_trend_feature'] = 0.0
             else:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] Failed to fetch Bitcoin historical data. Defaulting 'btc_trend_feature' to 0.")
+                logger.warning(f"⚠️ [Strategy {self.symbol}] فشل جلب البيانات التاريخية للبيتكوين. تعيين 'btc_trend_feature' إلى 0.") # Changed to Arabic
                 df_calc['btc_trend_feature'] = 0.0
 
             # NEW: Calculate Ichimoku Cloud components and features
             df_calc = calculate_ichimoku_cloud(df_calc, TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_SPAN_B_PERIOD, CHIKOU_LAG)
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Ichimoku Cloud features calculated.")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حساب ميزات Ichimoku Cloud.") # Changed to Arabic
 
             # NEW: Calculate Fibonacci Retracement features
             df_calc = calculate_fibonacci_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Fibonacci Retracement features calculated.")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حساب ميزات Fibonacci Retracement.") # Changed to Arabic
 
             # NEW: Calculate Support and Resistance features
             df_calc = calculate_support_resistance_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
-            logger.debug(f"ℹ️ [Strategy {self.symbol}] Support and Resistance features calculated.")
+            logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حساب ميزات الدعم والمقاومة.") # Changed to Arabic
 
 
             # Ensure all feature columns for ML exist and are numeric
             for col in self.feature_columns_for_ml:
                 if col not in df_calc.columns:
-                    logger.warning(f"⚠️ [Strategy {self.symbol}] Missing feature column for ML model: {col}")
+                    logger.warning(f"⚠️ [Strategy {self.symbol}] عمود ميزة مفقود لنموذج ML: {col}") # Changed to Arabic
                     df_calc[col] = np.nan # Add missing column as NaN
                 else:
                     df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
@@ -1145,20 +1145,20 @@ class ScalpingTradingStrategy:
             dropped_count = initial_len - len(df_cleaned)
 
             if dropped_count > 0:
-                 logger.debug(f"ℹ️ [Strategy {self.symbol}] Dropped {dropped_count} rows due to NaN values in indicators.")
+                 logger.debug(f"ℹ️ [Strategy {self.symbol}] تم حذف {dropped_count} صفوف بسبب قيم NaN في المؤشرات.") # Changed to Arabic
             if df_cleaned.empty:
-                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty after removing NaN values for indicators.")
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة قيم NaN للمؤشرات.") # Changed to Arabic
                 return None
 
             latest = df_cleaned.iloc[-1]
-            logger.debug(f"✅ [Strategy {self.symbol}] ML indicators calculated. Latest: {latest.to_dict()}") # Log full latest row
+            logger.debug(f"✅ [Strategy {self.symbol}] تم حساب مؤشرات ML. الأحدث: {latest.to_dict()}") # Changed to Arabic # Log full latest row
             return df_cleaned
 
         except KeyError as ke:
-             logger.error(f"❌ [Strategy {self.symbol}] Error: Required column not found during indicator calculation: {ke}", exc_info=True)
+             logger.error(f"❌ [Strategy {self.symbol}] خطأ: لم يتم العثور على العمود المطلوب أثناء حساب المؤشر: {ke}", exc_info=True) # Changed to Arabic
              return None
         except Exception as e:
-            logger.error(f"❌ [Strategy {self.symbol}] Unexpected error during indicator calculation: {e}", exc_info=True)
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ غير متوقع أثناء حساب المؤشر: {e}", exc_info=True) # Changed to Arabic
             return None
 
 
@@ -1167,7 +1167,7 @@ class ScalpingTradingStrategy:
         Generates a buy signal based solely on the ML model's bullish prediction,
         followed by essential filters (volume, profit margin).
         """
-        logger.debug(f"ℹ️ [Strategy {self.symbol}] Generating buy signal (ML-only based)...")
+        logger.debug(f"ℹ️ [Strategy {self.symbol}] إنشاء إشارة شراء (تعتمد على ML فقط)...") # Changed to Arabic
 
         # min_signal_data_len should reflect the max lookback of all indicators
         min_signal_data_len = max(
@@ -1185,7 +1185,7 @@ class ScalpingTradingStrategy:
         ) + 1 # At least one candle for the latest calculations
 
         if df_processed is None or df_processed.empty or len(df_processed) < min_signal_data_len:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame is empty or too short (<{min_signal_data_len}), cannot generate signal.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ أو قصير جدًا (<{min_signal_data_len})، لا يمكن إنشاء إشارة.") # Changed to Arabic
             return None
 
         # Ensure all required columns for signal generation, including ML features, are present
@@ -1194,7 +1194,7 @@ class ScalpingTradingStrategy:
         ]))
         missing_cols = [col for col in required_cols_for_signal if col not in df_processed.columns]
         if missing_cols:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame missing required columns for signal: {missing_cols}.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame يفتقد أعمدة مطلوبة للإشارة: {missing_cols}.") # Changed to Arabic
             return None
 
         last_row = df_processed.iloc[-1]
@@ -1202,17 +1202,17 @@ class ScalpingTradingStrategy:
         # --- Get current real-time price from ticker_data ---
         current_price = ticker_data.get(self.symbol)
         if current_price is None:
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Current price not available from ticker data. Cannot generate signal.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] السعر الحالي غير متاح من بيانات المؤشر. لا يمكن إنشاء إشارة.") # Changed to Arabic
             return None
 
         if last_row[self.feature_columns_for_ml].isnull().values.any() or pd.isna(last_row.get('atr')) or pd.isna(last_row.get('supertrend')):
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Historical data contains NaN values in required indicator columns. Cannot generate signal.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] البيانات التاريخية تحتوي على قيم NaN في أعمدة المؤشرات المطلوبة. لا يمكن إنشاء إشارة.") # Changed to Arabic
              return None
 
         signal_details = {} # Initialize signal_details
 
         # --- ML Model Prediction (Primary decision maker) ---
-        ml_prediction_result_text = "N/A (Model not loaded)"
+        ml_prediction_result_text = "N/A (لم يتم تحميل النموذج)" # Changed to Arabic
         ml_is_bullish = False
 
         if self.ml_model: # Use self.ml_model which is loaded per symbol
@@ -1222,14 +1222,14 @@ class ScalpingTradingStrategy:
                 ml_pred = self.ml_model.predict(features_for_prediction)[0]
                 if ml_pred == 1: # If ML model predicts upward movement
                     ml_is_bullish = True
-                    ml_prediction_result_text = 'Bullish ✅'
-                    logger.info(f"✨ [Strategy {self.symbol}] ML model prediction is bullish.")
+                    ml_prediction_result_text = 'صعودي ✅' # Changed to Arabic
+                    logger.info(f"✨ [Strategy {self.symbol}] توقع نموذج ML صعودي.") # Changed to Arabic
                 else:
-                    ml_prediction_result_text = 'Bearish ❌'
-                    logger.info(f"ℹ️ [Strategy {self.symbol}] ML model prediction is bearish. Signal rejected.")
+                    ml_prediction_result_text = 'هبوطي ❌' # Changed to Arabic
+                    logger.info(f"ℹ️ [Strategy {self.symbol}] توقع نموذج ML هبوطي. تم رفض الإشارة.") # Changed to Arabic
             except Exception as ml_err:
-                logger.error(f"❌ [Strategy {self.symbol}] Error in ML model prediction: {ml_err}", exc_info=True)
-                ml_prediction_result_text = "Prediction Error (0)"
+                logger.error(f"❌ [Strategy {self.symbol}] خطأ في توقع نموذج ML: {ml_err}", exc_info=True) # Changed to Arabic
+                ml_prediction_result_text = "خطأ في التوقع (0)" # Changed to Arabic
         
         signal_details['ML_Prediction'] = ml_prediction_result_text
         # Add values of relevant features to signal_details for logging/reporting
@@ -1245,43 +1245,43 @@ class ScalpingTradingStrategy:
 
         # If ML model is not bullish, or was not loaded, reject the signal early.
         if not ml_is_bullish:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] ML model did not predict bullish. Signal rejected.")
+            logger.info(f"ℹ️ [Strategy {self.symbol}] نموذج ML لم يتوقع صعودًا. تم رفض الإشارة.") # Changed to Arabic
             return None
 
         # --- NEW: Add additional filters (these are hard-coded rules on top of ML prediction) ---
         # Filter 1: Supertrend must be bullish
         current_supertrend_direction = last_row.get('supertrend_direction')
         if current_supertrend_direction != 1:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Supertrend is not bullish ({current_supertrend_direction}). Signal rejected.")
-            signal_details['Supertrend_Filter'] = f'Failed: Supertrend not bullish ({current_supertrend_direction})'
+            logger.info(f"ℹ️ [Strategy {self.symbol}] Supertrend ليس صعوديًا ({current_supertrend_direction}). تم رفض الإشارة.") # Changed to Arabic
+            signal_details['Supertrend_Filter'] = f'فشل: Supertrend ليس صعوديًا ({current_supertrend_direction})' # Changed to Arabic
             return None
         else:
-            signal_details['Supertrend_Filter'] = f'Success: Supertrend bullish ({current_supertrend_direction})'
+            signal_details['Supertrend_Filter'] = f'نجاح: Supertrend صعودي ({current_supertrend_direction})' # Changed to Arabic
 
         # Filter 2: Bitcoin trend should not be strongly bearish (allow neutral or bullish)
         current_btc_trend = last_row.get('btc_trend_feature')
         if current_btc_trend == -1.0:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Bitcoin trend is bearish ({current_btc_trend}). Signal rejected.")
-            signal_details['BTC_Trend_Filter'] = f'Failed: Bitcoin trend bearish ({current_btc_trend})'
+            logger.info(f"ℹ️ [Strategy {self.symbol}] اتجاه البيتكوين هبوطي ({current_btc_trend}). تم رفض الإشارة.") # Changed to Arabic
+            signal_details['BTC_Trend_Filter'] = f'فشل: اتجاه البيتكوين هبوطي ({current_btc_trend})' # Changed to Arabic
             return None
         else:
-            signal_details['BTC_Trend_Filter'] = f'Success: Bitcoin trend not bearish ({current_btc_trend})'
+            signal_details['BTC_Trend_Filter'] = f'نجاح: اتجاه البيتكوين ليس هبوطيًا ({current_btc_trend})' # Changed to Arabic
 
         # --- Volume Check (Essential filter) ---
         volume_recent = fetch_recent_volume(self.symbol, interval=SIGNAL_GENERATION_TIMEFRAME, num_candles=VOLUME_LOOKBACK_CANDLES)
         if volume_recent < MIN_VOLUME_15M_USDT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Liquidity ({volume_recent:,.0f} USDT) is below required minimum ({MIN_VOLUME_15M_USDT:,.0f} USDT). Signal rejected.")
-            signal_details['Volume_Check'] = f'Failed: Insufficient liquidity ({volume_recent:,.0f} USDT)'
+            logger.info(f"ℹ️ [Strategy {self.symbol}] السيولة ({volume_recent:,.0f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT:,.0f} USDT). تم رفض الإشارة.") # Changed to Arabic
+            signal_details['Volume_Check'] = f'فشل: سيولة غير كافية ({volume_recent:,.0f} USDT)' # Changed to Arabic
             return None
         else:
-            signal_details['Volume_Check'] = f'Success: Sufficient liquidity ({volume_recent:,.0f} USDT)'
+            signal_details['Volume_Check'] = f'نجاح: سيولة كافية ({volume_recent:,.0f} USDT)' # Changed to Arabic
 
 
         current_atr = last_row.get('atr')
         current_supertrend_value = last_row.get('supertrend') # Get the actual Supertrend line value
 
         if pd.isna(current_atr) or current_atr <= 0 or pd.isna(current_supertrend_value):
-             logger.warning(f"⚠️ [Strategy {self.symbol}] Invalid ATR or Supertrend value ({current_atr}, {current_supertrend_value}) for target/stop calculation. Cannot generate signal.")
+             logger.warning(f"⚠️ [Strategy {self.symbol}] قيمة ATR أو Supertrend غير صالحة ({current_atr}, {current_supertrend_value}) لحساب الهدف/الوقف. لا يمكن إنشاء إشارة.") # Changed to Arabic
              return None
 
         # --- Calculate Initial Target ---
@@ -1291,11 +1291,11 @@ class ScalpingTradingStrategy:
         # --- Profit Margin Check (Essential filter) ---
         profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.info(f"ℹ️ [Strategy {self.symbol}] Profit margin ({profit_margin_pct:.2f}%) is below required minimum ({MIN_PROFIT_MARGIN_PCT:.2f}%). Signal rejected.")
-            signal_details['Profit_Margin_Check'] = f'Failed: Insufficient profit margin ({profit_margin_pct:.2f}%)'
+            logger.info(f"ℹ️ [Strategy {self.symbol}] هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى المطلوب ({MIN_PROFIT_MARGIN_PCT:.2f}%). تم رفض الإشارة.") # Changed to Arabic
+            signal_details['Profit_Margin_Check'] = f'فشل: هامش ربح غير كافٍ ({profit_margin_pct:.2f}%)' # Changed to Arabic
             return None
         else:
-            signal_details['Profit_Margin_Check'] = f'Success: Sufficient profit margin ({profit_margin_pct:.2f}%)'
+            signal_details['Profit_Margin_Check'] = f'نجاح: هامش ربح كافٍ ({profit_margin_pct:.2f}%)' # Changed to Arabic
 
         # --- Calculate Initial Stop Loss ---
         # Ensure Supertrend value is below the current price for a long signal
@@ -1307,7 +1307,7 @@ class ScalpingTradingStrategy:
             stop_loss_atr_multiplier = 1.0
             initial_stop_loss = current_price - (stop_loss_atr_multiplier * current_atr)
             signal_details['Stop_Loss_Method'] = f'ATR Fallback ({initial_stop_loss:.8g})'
-            logger.warning(f"⚠️ [Strategy {self.symbol}] Supertrend ({current_supertrend_value:.8g}) is above entry price ({current_price:.8g}) despite bullish direction. Using ATR for stop loss.")
+            logger.warning(f"⚠️ [Strategy {self.symbol}] Supertrend ({current_supertrend_value:.8g}) أعلى من سعر الدخول ({current_price:.8g}) على الرغم من الاتجاه الصعودي. استخدام ATR لوقف الخسارة.") # Changed to Arabic
 
         # Ensure stop loss is not negative
         initial_stop_loss = max(0.00000001, initial_stop_loss) # Avoid zero or negative stop loss
@@ -1327,7 +1327,7 @@ class ScalpingTradingStrategy:
             'total_possible_score': 1.0 # Placeholder
         }
 
-        logger.info(f"✅ [Strategy {self.symbol}] Buy signal confirmed (ML + Filters). Price: {current_price:.6f}, Target: {initial_target:.6f}, Stop Loss: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, Volume: {volume_recent:,.0f}, ML Prediction: {ml_prediction_result_text}, BTC Trend: {signal_details.get('BTC_Trend_Feature_Value')}, Supertrend Dir: {signal_details.get('Supertrend_Direction_Value')}, Ichimoku Cross: {signal_details.get('Ichimoku_Cross_Signal')}, Price Cloud Pos: {signal_details.get('Ichimoku_Price_Cloud_Position')}, Cloud Outlook: {signal_details.get('Ichimoku_Cloud_Outlook')}, Fib Above 50: {signal_details.get('Fib_Above_50')}")
+        logger.info(f"✅ [Strategy {self.symbol}] تم تأكيد إشارة الشراء (ML + المرشحات). السعر: {current_price:.6f}, الهدف: {initial_target:.6f}, وقف الخسارة: {initial_stop_loss:.6f}, ATR: {current_atr:.6f}, الحجم: {volume_recent:,.0f}, توقع ML: {ml_prediction_result_text}, اتجاه BTC: {signal_details.get('BTC_Trend_Feature_Value')}, اتجاه Supertrend: {signal_details.get('Supertrend_Direction_Value')}, تقاطع Ichimoku: {signal_details.get('Ichimoku_Cross_Signal')}, موضع السعر السحابي: {signal_details.get('Ichimoku_Price_Cloud_Position')}, نظرة السحابة: {signal_details.get('Ichimoku_Cloud_Outlook')}, فيبوناتشي فوق 50: {signal_details.get('Fib_Above_50')}") # Changed to Arabic
         return signal_output
 
 
@@ -1345,36 +1345,36 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         try:
             payload['reply_markup'] = json.dumps(convert_np_values(reply_markup))
         except (TypeError, ValueError) as json_err:
-             logger.error(f"❌ [Telegram] Failed to convert reply_markup to JSON: {json_err} - Markup: {reply_markup}")
+             logger.error(f"❌ [Telegram] فشل تحويل reply_markup إلى JSON: {json_err} - Markup: {reply_markup}") # Changed to Arabic
              return None
 
-    logger.debug(f"ℹ️ [Telegram] Sending message to {target_chat_id}...")
+    logger.debug(f"ℹ️ [Telegram] إرسال رسالة إلى {target_chat_id}...") # Changed to Arabic
     try:
         response = requests.post(url, json=payload, timeout=timeout)
         response.raise_for_status()
-        logger.info(f"✅ [Telegram] Message sent successfully to {target_chat_id}.")
+        logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح إلى {target_chat_id}.") # Changed to Arabic
         return response.json()
     except requests.exceptions.Timeout:
-         logger.error(f"❌ [Telegram] Failed to send message to {target_chat_id} (timeout).")
+         logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (مهلة).") # Changed to Arabic
          return None
     except requests.exceptions.HTTPError as http_err:
-        logger.error(f"❌ [Telegram] Failed to send message to {target_chat_id} (HTTP error: {http_err.response.status_code}).")
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ HTTP: {http_err.response.status_code}).") # Changed to Arabic
         try:
             error_details = http_err.response.json()
-            logger.error(f"❌ [Telegram] API error details: {error_details}")
+            logger.error(f"❌ [Telegram] تفاصيل خطأ API: {error_details}") # Changed to Arabic
         except json.JSONDecodeError:
-            logger.error(f"❌ [Telegram] Could not decode error response: {http_err.response.text}")
+            logger.error(f"❌ [Telegram] تعذر فك تشفير استجابة الخطأ: {http_err.response.text}") # Changed to Arabic
         return None
     except requests.exceptions.RequestException as req_err:
-        logger.error(f"❌ [Telegram] Failed to send message to {target_chat_id} (request error): {req_err}")
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {target_chat_id} (خطأ في الطلب): {req_err}") # Changed to Arabic
         return None
     except Exception as e:
-         logger.error(f"❌ [Telegram] Unexpected error while sending message: {e}", exc_info=True)
+         logger.error(f"❌ [Telegram] خطأ غير متوقع أثناء إرسال الرسالة: {e}", exc_info=True) # Changed to Arabic
          return None
 
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     """Formats and sends a new trading signal alert to Telegram in Arabic, displaying the ML prediction and new indicator details."""
-    logger.debug(f"ℹ️ [Telegram Alert] Formatting and sending signal alert: {signal_data.get('symbol', 'N/A')}")
+    logger.debug(f"ℹ️ [Telegram Alert] تنسيق وإرسال تنبيه الإشارة: {signal_data.get('symbol', 'N/A')}") # Changed to Arabic
     try:
         entry_price = float(signal_data['entry_price'])
         target_price = float(signal_data['initial_target'])
@@ -1410,74 +1410,74 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
         fear_greed = get_fear_greed_index()
         ml_prediction_status = signal_details.get('ML_Prediction', 'N/A')
         btc_trend_feature_value = signal_details.get('BTC_Trend_Feature_Value', 0.0)
-        btc_trend_display = "Bullish 📈" if btc_trend_feature_value == 1.0 else ("Bearish 📉" if btc_trend_feature_value == -1.0 else "Neutral 🔄")
+        btc_trend_display = "صعودي 📈" if btc_trend_feature_value == 1.0 else ("هبوطي 📉" if btc_trend_feature_value == -1.0 else "محايد 🔄") # Changed to Arabic
         supertrend_direction_value = signal_details.get('Supertrend_Direction_Value', 0)
-        supertrend_display = "Uptrend ⬆️" if supertrend_direction_value == 1 else ("Downtrend ⬇️" if supertrend_direction_value == -1 else "Neutral ↔️")
+        supertrend_display = "اتجاه صاعد ⬆️" if supertrend_direction_value == 1 else ("اتجاه هابط ⬇️" if supertrend_direction_value == -1 else "محايد ↔️") # Changed to Arabic
 
         # Ichimoku display
         ichimoku_cross_signal = signal_details.get('Ichimoku_Cross_Signal', 0)
-        ichimoku_cross_display = "Bullish Cross (TK) ✅" if ichimoku_cross_signal == 1 else ("Bearish Cross (TK) ❌" if ichimoku_cross_signal == -1 else "No Cross ↔️")
+        ichimoku_cross_display = "تقاطع صعودي (TK) ✅" if ichimoku_cross_signal == 1 else ("تقاطع هبوطي (TK) ❌" if ichimoku_cross_signal == -1 else "لا يوجد تقاطع ↔️") # Changed to Arabic
         ichimoku_price_cloud_pos = signal_details.get('Ichimoku_Price_Cloud_Position', 0)
-        ichimoku_price_cloud_display = "Above Cloud ☁️⬆️" if ichimoku_price_cloud_pos == 1 else ("Below Cloud ☁️⬇️" if ichimoku_price_cloud_pos == -1 else "Inside Cloud ☁️↔️")
+        ichimoku_price_cloud_display = "فوق السحابة ☁️⬆️" if ichimoku_price_cloud_pos == 1 else ("تحت السحابة ☁️⬇️" if ichimoku_price_cloud_pos == -1 else "داخل السحابة ☁️↔️") # Changed to Arabic
         ichimoku_cloud_outlook = signal_details.get('Ichimoku_Cloud_Outlook', 0)
-        ichimoku_cloud_outlook_display = "Bullish Cloud 🟩" if ichimoku_cloud_outlook == 1 else ("Bearish Cloud 🟥" if ichimoku_cloud_outlook == -1 else "Flat Cloud ⬜")
+        ichimoku_cloud_outlook_display = "سحابة صعودية 🟩" if ichimoku_cloud_outlook == 1 else ("سحابة هبوطية 🟥" if ichimoku_cloud_outlook == -1 else "سحابة مسطحة ⬜") # Changed to Arabic
 
         # Fibonacci & S/R display (simplified, for context)
         fib_above_50 = signal_details.get('Fib_Above_50', 0)
-        fib_above_50_display = "Above 50% Fib 🟢" if fib_above_50 == 1 else "Below 50% Fib 🔴"
+        fib_above_50_display = "فوق 50% فيب 🟢" if fib_above_50 == 1 else "تحت 50% فيب 🔴" # Changed to Arabic
         dist_to_recent_low = signal_details.get('Dist_to_Recent_Low_Norm', np.nan)
         dist_to_recent_high = signal_details.get('Dist_to_Recent_High_Norm', np.nan)
         
         sr_display_content = "" # Initialize here
         if not pd.isna(dist_to_recent_low) and not pd.isna(dist_to_recent_high):
             # Add newline directly to the string if it's present
-            sr_display_content = f"  - Dist to Recent Low: {dist_to_recent_low:.2f} | Dist to Recent High: {dist_to_recent_high:.2f}\n"
+            sr_display_content = f"  - المسافة إلى أدنى مستوى حديث: {dist_to_recent_low:.2f} | المسافة إلى أعلى مستوى حديث: {dist_to_recent_high:.2f}\n" # Changed to Arabic
 
-        message = f"""💡 *New Trading Signal (ML-Only Based)* 💡
+        message = f"""💡 *إشارة تداول جديدة (تعتمد على ML فقط)* 💡 # Changed to Arabic
 ——————————————
-🪙 **Pair:** `{safe_symbol}`
-📈 **Signal Type:** Buy (Long)
-🕰️ **Timeframe:** {timeframe}
-💧 **Liquidity (last 15m):** {volume_15m:,.0f} USDT
+🪙 **الزوج:** `{safe_symbol}` # Changed to Arabic
+📈 **نوع الإشارة:** شراء (طويل) # Changed to Arabic
+🕰️ **الإطار الزمني:** {timeframe} # Changed to Arabic
+💧 **السيولة (آخر 15 دقيقة):** {volume_15m:,.0f} USDT # Changed to Arabic
 ——————————————
-➡️ **Suggested Entry Price:** `${entry_price:,.8g}`
-🎯 **Initial Target:** `${target_price:,.8g}`
-🛑 **Stop Loss:** `${stop_loss_price:,.8g}`
-💰 **Expected Profit (Gross):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f})
-💸 **Expected Loss (Gross):** ({loss_pct:+.2f}% / ≈ ${loss_usdt_gross:+.2f})
-📈 **Net Profit (Expected):** ${profit_usdt_net:+.2f}
-📉 **Net Loss (Expected):** ${loss_usdt_net:+.2f}
+➡️ **سعر الدخول المقترح:** `${entry_price:,.8g}` # Changed to Arabic
+🎯 **الهدف الأولي:** `${target_price:,.8g}` # Changed to Arabic
+🛑 **وقف الخسارة:** `${stop_loss_price:,.8g}` # Changed to Arabic
+💰 **الربح المتوقع (الإجمالي):** ({profit_pct:+.2f}% / ≈ ${profit_usdt_gross:+.2f}) # Changed to Arabic
+💸 **الخسارة المتوقعة (الإجمالية):** ({loss_pct:+.2f}% / ≈ ${loss_usdt_gross:+.2f}) # Changed to Arabic
+📈 **صافي الربح (المتوقع):** ${profit_usdt_net:+.2f} # Changed to Arabic
+📉 **صافي الخسارة (المتوقعة):** ${loss_usdt_net:+.2f} # Changed to Arabic
 ——————————————
-🤖 *ML Model Prediction:* *{ml_prediction_status}*
-✅ *Additional Conditions Met:*
-  - Liquidity Check: {signal_details.get('Volume_Check', 'N/A')}
-  - Profit Margin Check: {signal_details.get('Profit_Margin_Check', 'N/A')}
-  - Supertrend Filter: {signal_details.get('Supertrend_Filter', 'N/A')}
-  - BTC Trend Filter: {signal_details.get('BTC_Trend_Filter', 'N/A')}
+🤖 *توقع نموذج ML:* *{ml_prediction_status}* # Changed to Arabic
+✅ *الشروط الإضافية المحققة:* # Changed to Arabic
+  - فحص السيولة: {signal_details.get('Volume_Check', 'N/A')} # Changed to Arabic
+  - فحص هامش الربح: {signal_details.get('Profit_Margin_Check', 'N/A')} # Changed to Arabic
+  - فلتر Supertrend: {signal_details.get('Supertrend_Filter', 'N/A')} # Changed to Arabic
+  - فلتر اتجاه البيتكوين: {signal_details.get('BTC_Trend_Filter', 'N/A')} # Changed to Arabic
 ——————————————
-📊 *Indicator Insights:*
-  - Fear & Greed Index: {fear_greed}
-  - Bitcoin Trend: {btc_trend_display}
-  - Supertrend Direction: {supertrend_display}
-  - Ichimoku Tenkan/Kijun: {ichimoku_cross_display}
-  - Ichimoku Price vs Cloud: {ichimoku_price_cloud_display}
-  - Ichimoku Cloud Outlook: {ichimoku_cloud_outlook_display}
-  - Fibonacci Retracement (50%): {fib_above_50_display}
+📊 *رؤى المؤشرات:* # Changed to Arabic
+  - مؤشر الخوف والجشع: {fear_greed} # Changed to Arabic
+  - اتجاه البيتكوين: {btc_trend_display} # Changed to Arabic
+  - اتجاه Supertrend: {supertrend_display} # Changed to Arabic
+  - إيشيموكو تينكان/كيجون: {ichimoku_cross_display} # Changed to Arabic
+  - سعر إيشيموكو مقابل السحابة: {ichimoku_price_cloud_display} # Changed to Arabic
+  - نظرة سحابة إيشيموكو: {ichimoku_cloud_outlook_display} # Changed to Arabic
+  - فيبوناتشي (50%): {fib_above_50_display} # Changed to Arabic
 {sr_display_content}——————————————
 ⏰ {timestamp_str}"""
 
         reply_markup = {
             "inline_keyboard": [
-                [{"text": "📊 View Performance Report", "callback_data": "get_report"}]
+                [{"text": "📊 عرض تقرير الأداء", "callback_data": "get_report"}] # Changed to Arabic
             ]
         }
 
         send_telegram_message(CHAT_ID, message, reply_markup=reply_markup, parse_mode='Markdown')
 
     except KeyError as ke:
-        logger.error(f"❌ [Telegram Alert] Incomplete signal data for symbol {signal_data.get('symbol', 'N/A')}: missing key {ke}", exc_info=True)
+        logger.error(f"❌ [Telegram Alert] بيانات إشارة غير مكتملة للرمز {signal_data.get('symbol', 'N/A')}: مفتاح مفقود {ke}", exc_info=True) # Changed to Arabic
     except Exception as e:
-        logger.error(f"❌ [Telegram Alert] Failed to send signal alert for symbol {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
+        logger.error(f"❌ [Telegram Alert] فشل إرسال تنبيه الإشارة للرمز {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True) # Changed to Arabic
 
 def send_tracking_notification(details: Dict[str, Any]) -> None:
     """Formats and sends enhanced Telegram notifications for tracking events in Arabic."""
@@ -1496,39 +1496,39 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     new_stop_loss = details.get('new_stop_loss', 0.0)
 
 
-    logger.debug(f"ℹ️ [Notification] Formatting tracking notification: ID={signal_id}, Type={notification_type}, Symbol={symbol}")
+    logger.debug(f"ℹ️ [Notification] تنسيق إشعار التتبع: ID={signal_id}, النوع={notification_type}, الرمز={symbol}") # Changed to Arabic
 
     if notification_type == 'target_hit':
-        message = f"""✅ *Target Reached (ID: {signal_id})*
+        message = f"""✅ *تم الوصول إلى الهدف (ID: {signal_id})* # Changed to Arabic
 ——————————————
-🪙 **Pair:** `{safe_symbol}`
-🎯 **Closing Price (Target):** `${closing_price:,.8g}`
-💰 **Realized Profit:** {profit_pct:+.2f}%
-⏱️ **Time Taken:** {time_to_target}"""
+🪙 **الزوج:** `{safe_symbol}` # Changed to Arabic
+🎯 **سعر الإغلاق (الهدف):** `${closing_price:,.8g}` # Changed to Arabic
+💰 **الربح المحقق:** {profit_pct:+.2f}% # Changed to Arabic
+⏱️ **الوقت المستغرق:** {time_to_target}""" # Changed to Arabic
     elif notification_type == 'stop_loss_hit':
-        message = f"""🛑 *Stop Loss Hit (ID: {signal_id})*
+        message = f"""🛑 *تم ضرب وقف الخسارة (ID: {signal_id})* # Changed to Arabic
 ——————————————
-🪙 **Pair:** `{safe_symbol}`
-📉 **Closing Price (Stop Loss):** `${closing_price:,.8g}`
-💔 **Realized Loss:** {profit_pct:+.2f}%
-⏱️ **Time Taken:** {time_to_target}"""
+🪙 **الزوج:** `{safe_symbol}` # Changed to Arabic
+📉 **سعر الإغلاق (وقف الخسارة):** `${closing_price:,.8g}` # Changed to Arabic
+💔 **الخسارة المحققة:** {profit_pct:+.2f}% # Changed to Arabic
+⏱️ **الوقت المستغرق:** {time_to_target}""" # Changed to Arabic
     elif notification_type == 'target_stoploss_updated':
          update_parts_formatted = [] # Renamed for clarity
          if 'old_target' in details and 'new_target' in details:
-             update_parts_formatted.append(f"  🎯 *Target:* `${old_target:,.8g}` -> `${new_target:,.8g}`")
+             update_parts_formatted.append(f"  🎯 *الهدف:* `${old_target:,.8g}` -> `${new_target:,.8g}`") # Changed to Arabic
          if 'old_stop_loss' in details and 'new_stop_loss' in details:
-             update_parts_formatted.append(f"  🛑 *Stop Loss:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`")
+             update_parts_formatted.append(f"  🛑 *وقف الخسارة:* `${old_stop_loss:,.8g}` -> `${new_stop_loss:,.8g}`") # Changed to Arabic
 
          update_block = "\n".join(update_parts_formatted) # Pre-join to avoid backslash in f-string expression
 
-         message = f"""🔄 *Signal Update (ID: {signal_id})*
+         message = f"""🔄 *تحديث الإشارة (ID: {signal_id})* # Changed to Arabic
 ——————————————
-🪙 **Pair:** `{safe_symbol}`
-📈 **Current Price:** `${current_price:,.8g}`
+🪙 **الزوج:** `{safe_symbol}` # Changed to Arabic
+📈 **السعر الحالي:** `${current_price:,.8g}` # Changed to Arabic
 {update_block}
-ℹ️ *Updated based on continued bullish momentum or market conditions.*"""
+ℹ️ *تم التحديث بناءً على الزخم الصعودي المستمر أو ظروف السوق.*""" # Changed to Arabic
     else:
-        logger.warning(f"⚠️ [Notification] Unknown notification type: {notification_type} for details: {details}")
+        logger.warning(f"⚠️ [Notification] نوع إشعار غير معروف: {notification_type} للتفاصيل: {details}") # Changed to Arabic
         return
 
     if message:
@@ -1538,11 +1538,11 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     """Inserts a new signal into the signals table with the weighted score and entry time."""
     if not check_db_connection() or not conn:
-        logger.error(f"❌ [DB Insert] Failed to insert signal {signal.get('symbol', 'N/A')} due to database connection issue.")
+        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة {signal.get('symbol', 'N/A')} بسبب مشكلة في الاتصال بقاعدة البيانات.") # Changed to Arabic
         return False
 
     symbol = signal.get('symbol', 'N/A')
-    logger.debug(f"ℹ️ [DB Insert] Attempting to insert signal for {symbol}...")
+    logger.debug(f"ℹ️ [DB Insert] محاولة إدراج إشارة لـ {symbol}...") # Changed to Arabic
     try:
         signal_prepared = convert_np_values(signal)
         signal_details_json = json.dumps(signal_prepared.get('signal_details', {}))
@@ -1566,31 +1566,31 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
                 signal_prepared.get('volume_15m')
             ))
         conn.commit()
-        logger.info(f"✅ [DB Insert] Signal for {symbol} inserted into database (Score: {signal_prepared.get('r2_score')}).")
+        logger.info(f"✅ [DB Insert] تم إدراج إشارة لـ {symbol} في قاعدة البيانات (النتيجة: {signal_prepared.get('r2_score')}).") # Changed to Arabic
         return True
     except psycopg2.Error as db_err:
-        logger.error(f"❌ [DB Insert] Database error while inserting signal for {symbol}: {db_err}")
+        logger.error(f"❌ [DB Insert] خطأ في قاعدة البيانات أثناء إدراج الإشارة لـ {symbol}: {db_err}") # Changed to Arabic
         if conn: conn.rollback()
         return False
     except (TypeError, ValueError) as convert_err:
-         logger.error(f"❌ [DB Insert] Error converting signal data before insertion for {symbol}: {convert_err} - Signal data: {signal}")
+         logger.error(f"❌ [DB Insert] خطأ في تحويل بيانات الإشارة قبل الإدراج لـ {symbol}: {convert_err} - بيانات الإشارة: {signal}") # Changed to Arabic
          if conn: conn.rollback()
          return False
     except Exception as e:
-        logger.error(f"❌ [DB Insert] Unexpected error while inserting signal for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Insert] خطأ غير متوقع أثناء إدراج الإشارة لـ {symbol}: {e}", exc_info=True) # Changed to Arabic
         if conn: conn.rollback()
         return False
 
 # ---------------------- Open Signal Tracking Function ----------------------
 def track_signals() -> None:
     """Tracks open signals and checks targets. Calculates time to target upon hit."""
-    logger.info("ℹ️ [Tracker] Starting open signal tracking process...")
+    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات المفتوحة...") # Changed to Arabic
     while True:
         active_signals_summary: List[str] = []
         processed_in_cycle = 0
         try:
             if not check_db_connection() or not conn:
-                logger.warning("⚠️ [Tracker] Skipping tracking cycle due to database connection issue.")
+                logger.warning("⚠️ [Tracker] تخطي دورة التتبع بسبب مشكلة في الاتصال بقاعدة البيانات.") # Changed to Arabic
                 time.sleep(15)
                 continue
 
@@ -1606,7 +1606,7 @@ def track_signals() -> None:
                 time.sleep(10)
                 continue
 
-            logger.debug(f"ℹ️ [Tracker] Tracking {len(open_signals)} open signals...")
+            logger.debug(f"ℹ️ [Tracker] تتبع {len(open_signals)} إشارة مفتوحة...") # Changed to Arabic
 
             for signal_row in open_signals:
                 signal_id = signal_row['id']
@@ -1623,7 +1623,7 @@ def track_signals() -> None:
                     current_price = ticker_data.get(symbol)
 
                     if current_price is None:
-                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Current price not available in ticker data.")
+                         logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): السعر الحالي غير متاح في بيانات المؤشر.") # Changed to Arabic
                          continue
 
                     active_signals_summary.append(f"{symbol}({signal_id}): P={current_price:.4f} T={current_target:.4f} SL={current_stop_loss if current_stop_loss else 'N/A'}") # Include SL in summary
@@ -1651,7 +1651,7 @@ def track_signals() -> None:
 
                         update_query = sql.SQL("UPDATE signals SET achieved_target = FALSE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;") # achieved_target is FALSE for stop loss
                         update_params = (current_stop_loss, closed_at, profit_pct, time_to_close, signal_id)
-                        log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): Stop Loss hit at {current_stop_loss:.8g} (Loss: {profit_pct:+.2f}%, Time: {time_to_close_str})."
+                        log_message = f"🛑 [Tracker] {symbol}(ID:{signal_id}): تم ضرب وقف الخسارة عند {current_stop_loss:.8g} (الخسارة: {profit_pct:+.2f}%، الوقت: {time_to_close_str})." # Changed to Arabic
                         notification_details.update({
                             'type': 'stop_loss_hit',
                             'closing_price': current_stop_loss,
@@ -1669,7 +1669,7 @@ def track_signals() -> None:
 
                         update_query = sql.SQL("UPDATE signals SET achieved_target = TRUE, closing_price = %s, closed_at = %s, profit_percentage = %s, time_to_target = %s WHERE id = %s;")
                         update_params = (current_target, closed_at, profit_pct, time_to_target_duration, signal_id)
-                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): Target reached at {current_target:.8g} (Profit: {profit_pct:+.2f}%, Time: {time_to_target_str})."
+                        log_message = f"🎯 [Tracker] {symbol}(ID:{signal_id}): تم الوصول إلى الهدف عند {current_target:.8g} (الربح: {profit_pct:+.2f}%، الوقت: {time_to_target_str})." # Changed to Arabic
                         notification_details.update({
                             'type': 'target_hit',
                             'closing_price': current_target,
@@ -1685,14 +1685,14 @@ def track_signals() -> None:
                         should_check_update = current_price >= current_target * (1 - TARGET_APPROACH_THRESHOLD_PCT)
 
                         if should_check_update:
-                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price is near target ({current_price:.8g} vs {current_target:.8g}). Checking for continuation signal to update target/stop loss...")
+                             logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف ({current_price:.8g} مقابل {current_target:.8g}). التحقق من إشارة الاستمرارية لتحديث الهدف/وقف الخسارة...") # Changed to Arabic
 
                              df_continuation = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
 
                              if df_continuation is not None and not df_continuation.empty:
                                  continuation_strategy = ScalpingTradingStrategy(symbol)
                                  if continuation_strategy.ml_model is None:
-                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): ML model not loaded for continuation strategy. Skipping target/stop loss update.")
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): نموذج ML لم يتم تحميله لإستراتيجية الاستمرارية. تخطي تحديث الهدف/وقف الخسارة.") # Changed to Arabic
                                      continue
 
                                  df_continuation_indicators = continuation_strategy.populate_indicators(df_continuation)
@@ -1736,32 +1736,32 @@ def track_signals() -> None:
                                                  if update_target:
                                                      update_fields.append("current_target = %s")
                                                      update_params_list.append(new_target)
-                                                     log_parts.append(f"Target from {old_target:.8g} to {new_target:.8g}")
+                                                     log_parts.append(f"الهدف من {old_target:.8g} إلى {new_target:.8g}") # Changed to Arabic
                                                      notification_details['old_target'] = old_target
                                                      notification_details['new_target'] = new_target
 
                                                  if update_stop_loss:
                                                      update_fields.append("stop_loss = %s")
                                                      update_params_list.append(new_stop_loss)
-                                                     log_parts.append(f"Stop Loss from {old_stop_loss if old_stop_loss else 'N/A'} to {new_stop_loss:.8g}")
+                                                     log_parts.append(f"وقف الخسارة من {old_stop_loss if old_stop_loss else 'N/A'} إلى {new_stop_loss:.8g}") # Changed to Arabic
                                                      notification_details['old_stop_loss'] = old_stop_loss
                                                      notification_details['new_stop_loss'] = new_stop_loss
 
                                                  update_params_list.append(signal_id)
                                                  update_query = sql.SQL(f"UPDATE signals SET {', '.join(update_fields)} WHERE id = %s;")
                                                  update_params = tuple(update_params_list)
-                                                 log_message = f"↔️ [Tracker] {symbol}(ID:{signal_id}): Updated {' and '.join(log_parts)} based on signal continuation."
+                                                 log_message = f"↔️ [Tracker] {symbol}(ID:{signal_id}): تم تحديث {' و '.join(log_parts)} بناءً على استمرارية الإشارة." # Changed to Arabic
                                                  update_executed = True
                                              else:
-                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Continuation signal detected, but new target ({potential_new_target:.8g}) or new stop loss ({potential_new_stop_loss:.8g}) does not warrant an update.")
+                                                 logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): تم اكتشاف إشارة استمرارية، لكن الهدف الجديد ({potential_new_target:.8g}) أو وقف الخسارة الجديد ({potential_new_stop_loss:.8g}) لا يستدعي تحديثًا.") # Changed to Arabic
                                          else:
-                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Cannot calculate new target/stop loss due to invalid ATR/Supertrend ({current_atr_for_update}, {current_supertrend_for_update}) from continuation data.")
+                                             logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): لا يمكن حساب هدف/وقف خسارة جديد بسبب ATR/Supertrend غير صالحين ({current_atr_for_update}, {current_supertrend_for_update}) من بيانات الاستمرارية.") # Changed to Arabic
                                      else:
-                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): Price near target, but continuation signal not confirmed (filters or ML prediction failed). Not updating target/stop loss.")
+                                         logger.debug(f"ℹ️ [Tracker] {symbol}(ID:{signal_id}): السعر قريب من الهدف، لكن إشارة الاستمرارية لم يتم تأكيدها (فشلت المرشحات أو توقع ML). عدم تحديث الهدف/وقف الخسارة.") # Changed to Arabic
                                  else:
-                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Failed to populate indicators for continuation check.")
+                                     logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): فشل في تعبئة المؤشرات للتحقق من الاستمرارية.") # Changed to Arabic
                              else:
-                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): Could not fetch historical data for continuation check.")
+                                 logger.warning(f"⚠️ [Tracker] {symbol}(ID:{signal_id}): تعذر جلب البيانات التاريخية للتحقق من الاستمرارية.") # Changed to Arabic
 
 
                     if update_executed and update_query:
@@ -1773,31 +1773,31 @@ def track_signals() -> None:
                              if notification_details.get('type'):
                                 send_tracking_notification(notification_details)
                         except psycopg2.Error as db_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Database error during update: {db_err}")
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في قاعدة البيانات أثناء التحديث: {db_err}") # Changed to Arabic
                             if conn: conn.rollback()
                         except Exception as exec_err:
-                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error during update/notification execution: {exec_err}", exc_info=True)
+                            logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء تنفيذ التحديث/الإشعار: {exec_err}", exc_info=True) # Changed to Arabic
                             if conn: conn.rollback()
 
                 except (TypeError, ValueError) as convert_err:
-                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Error converting initial signal values: {convert_err}")
+                    logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ في تحويل قيم الإشارة الأولية: {convert_err}") # Changed to Arabic
                     continue
                 except Exception as inner_loop_err:
-                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): Unexpected error while processing signal: {inner_loop_err}", exc_info=True)
+                     logger.error(f"❌ [Tracker] {symbol}(ID:{signal_id}): خطأ غير متوقع أثناء معالجة الإشارة: {inner_loop_err}", exc_info=True) # Changed to Arabic
                      continue
 
             if active_signals_summary:
-                logger.debug(f"ℹ️ [Tracker] End of cycle state ({processed_in_cycle} processed): {'; '.join(active_signals_summary)}")
+                logger.debug(f"ℹ️ [Tracker] نهاية حالة الدورة ({processed_in_cycle} معالجة): {'; '.join(active_signals_summary)}") # Changed to Arabic
 
             time.sleep(3)
 
         except psycopg2.Error as db_cycle_err:
-             logger.error(f"❌ [Tracker] Database error in main tracking cycle: {db_cycle_err}. Attempting to reconnect...")
+             logger.error(f"❌ [Tracker] خطأ في قاعدة البيانات في دورة التتبع الرئيسية: {db_cycle_err}. محاولة إعادة الاتصال...") # Changed to Arabic
              if conn: conn.rollback()
              time.sleep(30)
              check_db_connection()
         except Exception as cycle_err:
-            logger.error(f"❌ [Tracker] Unexpected error in signal tracking cycle: {cycle_err}", exc_info=True)
+            logger.error(f"❌ [Tracker] خطأ غير متوقع في دورة تتبع الإشارة: {cycle_err}", exc_info=True) # Changed to Arabic
             time.sleep(30)
 
 def get_interval_minutes(interval: str) -> int:
@@ -1821,8 +1821,8 @@ def home() -> Response:
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() and ws_thread else False
     tracker_alive = tracker_thread.is_alive() if 'tracker_thread' in globals() and tracker_thread else False
     main_bot_alive = main_bot_thread.is_alive() if 'main_bot_thread' in globals() and main_bot_thread else False
-    status = "running" if ws_alive and tracker_alive and main_bot_alive else "partially running"
-    return Response(f"📈 Crypto Signal Bot ({status}) - Last Check: {now}", status=200, mimetype='text/plain')
+    status = "يعمل" if ws_alive and tracker_alive and main_bot_alive else "يعمل جزئياً" # Changed to Arabic
+    return Response(f"📈 بوت إشارات العملات الرقمية ({status}) - آخر تحقق: {now}", status=200, mimetype='text/plain') # Changed to Arabic
 
 @app.route('/favicon.ico')
 def favicon() -> Response:
@@ -1834,17 +1834,17 @@ def webhook() -> Tuple[str, int]:
     """Handles incoming requests from Telegram (like button presses and commands)."""
     # Only process webhook if WEBHOOK_URL is configured
     if not WEBHOOK_URL:
-        logger.warning("⚠️ [Flask] Webhook request received, but WEBHOOK_URL is not configured. Ignoring request.")
-        return "Webhook not configured", 200 # Return OK to Telegram to avoid repeated attempts
+        logger.warning("⚠️ [Flask] تم استلام طلب Webhook، ولكن WEBHOOK_URL غير مكوّن. تجاهل الطلب.") # Changed to Arabic
+        return "Webhook غير مكوّن", 200 # Changed to Arabic # Return OK to Telegram to avoid repeated attempts
 
     if not request.is_json:
-        logger.warning("⚠️ [Flask] Non-JSON webhook request received.")
-        return "Invalid request format", 400
+        logger.warning("⚠️ [Flask] تم استلام طلب Webhook غير بصيغة JSON.") # Changed to Arabic
+        return "تنسيق طلب غير صالح", 400 # Changed to Arabic
 
     try:
         data = request.get_json()
-        logger.info(f"✅ [Flask] Webhook data received. Data size: {len(json.dumps(data))} bytes.")
-        logger.debug(f"ℹ️ [Flask] Full webhook data: {json.dumps(data)}") # Log full payload for debugging
+        logger.info(f"✅ [Flask] تم استلام بيانات Webhook. حجم البيانات: {len(json.dumps(data))} بايت.") # Changed to Arabic
+        logger.debug(f"ℹ️ [Flask] بيانات Webhook كاملة: {json.dumps(data)}") # Log full payload for debugging
 
 
         if 'callback_query' in data:
@@ -1853,24 +1853,24 @@ def webhook() -> Tuple[str, int]:
             callback_data = callback_query.get('data')
             message_info = callback_query.get('message')
 
-            logger.info(f"ℹ️ [Flask] Callback Query received. ID: {callback_id}, Data: '{callback_data}'")
+            logger.info(f"ℹ️ [Flask] تم استلام استعلام رد الاتصال. المعرف: {callback_id}, البيانات: '{callback_data}'") # Changed to Arabic
 
             if not message_info or not callback_data:
-                 logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing message or data. Ignoring.")
+                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (المعرف: {callback_id}) يفتقد الرسالة أو البيانات. تجاهل.") # Changed to Arabic
                  try:
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
                  except Exception as ack_err:
-                     logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
+                     logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال غير الصالح {callback_id}: {ack_err}") # Changed to Arabic
                  return "OK", 200
             chat_id_callback = message_info.get('chat', {}).get('id')
             if not chat_id_callback:
-                 logger.warning(f"⚠️ [Flask] Callback query (ID: {callback_id}) missing chat ID. Ignoring.")
+                 logger.warning(f"⚠️ [Flask] استعلام رد الاتصال (المعرف: {callback_id}) يفتقد معرف الدردشة. تجاهل.") # Changed to Arabic
                  try:
                      ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                      requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
                  except Exception as ack_err:
-                     logger.warning(f"⚠️ [Flask] Failed to acknowledge invalid callback query {callback_id}: {ack_err}")
+                     logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال غير الصالح {callback_id}: {ack_err}") # Changed to Arabic
                  return "OK", 200
 
 
@@ -1879,25 +1879,25 @@ def webhook() -> Tuple[str, int]:
             user_id = user_info.get('id')
             username = user_info.get('username', 'N/A')
 
-            logger.info(f"ℹ️ [Flask] Processing callback query: Data='{callback_data}', User={username}({user_id}), Chat={chat_id_callback}")
+            logger.info(f"ℹ️ [Flask] معالجة استعلام رد الاتصال: البيانات='{callback_data}', المستخدم={username}({user_id}), الدردشة={chat_id_callback}") # Changed to Arabic
 
             try:
                 # Always acknowledge the callback query to remove the loading animation from the button
                 ack_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
                 requests.post(ack_url, json={'callback_query_id': callback_id}, timeout=5)
-                logger.debug(f"✅ [Flask] Callback query {callback_id} acknowledged.")
+                logger.debug(f"✅ [Flask] تم تأكيد استعلام رد الاتصال {callback_id}.") # Changed to Arabic
             except Exception as ack_err:
-                 logger.warning(f"⚠️ [Flask] Failed to acknowledge callback query {callback_id}: {ack_err}")
+                 logger.warning(f"⚠️ [Flask] فشل تأكيد استعلام رد الاتصال {callback_id}: {ack_err}") # Changed to Arabic
 
             if callback_data == "get_report":
-                logger.info(f"ℹ️ [Flask] Received 'get_report' request from chat {chat_id_callback}. Generating report...")
+                logger.info(f"ℹ️ [Flask] تم استلام طلب 'get_report' من الدردشة {chat_id_callback}. إنشاء التقرير...") # Changed to Arabic
                 report_content = generate_performance_report()
-                logger.info(f"✅ [Flask] Report generated. Report length: {len(report_content)} characters.")
+                logger.info(f"✅ [Flask] تم إنشاء التقرير. طول التقرير: {len(report_content)} حرفًا.") # Changed to Arabic
                 report_thread = Thread(target=lambda: send_telegram_message(chat_id_callback, report_content, parse_mode='Markdown'))
                 report_thread.start()
-                logger.info(f"✅ [Flask] Started report sending thread for chat {chat_id_callback}.")
+                logger.info(f"✅ [Flask] تم بدء مؤشر ترابط إرسال التقرير للدردشة {chat_id_callback}.") # Changed to Arabic
             else:
-                logger.warning(f"⚠️ [Flask] Unhandled callback data received: '{callback_data}'")
+                logger.warning(f"⚠️ [Flask] تم استلام بيانات رد اتصال غير معالجة: '{callback_data}'") # Changed to Arabic
 
 
         elif 'message' in data:
@@ -1907,14 +1907,14 @@ def webhook() -> Tuple[str, int]:
             text_msg = message_data.get('text', '').strip()
 
             if not chat_info or not text_msg:
-                 logger.debug("ℹ️ [Flask] Message received without chat info or text.")
+                 logger.debug("ℹ️ [Flask] تم استلام رسالة بدون معلومات دردشة أو نص.") # Changed to Arabic
                  return "OK", 200
 
             chat_id_msg = chat_info['id']
             user_id = user_info.get('id')
             username = user_info.get('username', 'N/A')
 
-            logger.info(f"ℹ️ [Flask] Message received: Text='{text_msg}', User={username}({user_id}), Chat={chat_id_msg}")
+            logger.info(f"ℹ️ [Flask] تم استلام رسالة: النص='{text_msg}', المستخدم={username}({user_id}), الدردشة={chat_id_msg}") # Changed to Arabic
 
             if text_msg.lower() == '/report':
                  report_thread = Thread(target=lambda: send_telegram_message(chat_id_msg, generate_performance_report(), parse_mode='Markdown'))
@@ -1924,25 +1924,25 @@ def webhook() -> Tuple[str, int]:
                  status_thread.start()
 
         else:
-            logger.debug("ℹ️ [Flask] Webhook data received without 'callback_query' or 'message'.")
+            logger.debug("ℹ️ [Flask] تم استلام بيانات Webhook بدون 'callback_query' أو 'message'.") # Changed to Arabic
 
         return "OK", 200
     except Exception as e:
-         logger.error(f"❌ [Flask] Error processing webhook: {e}", exc_info=True)
-         return "Internal Server Error", 500
+         logger.error(f"❌ [Flask] خطأ في معالجة Webhook: {e}", exc_info=True) # Changed to Arabic
+         return "خطأ داخلي في الخادم", 500 # Changed to Arabic
 
 def handle_status_command(chat_id_msg: int) -> None:
     """Separate function to handle /status command to avoid blocking the Webhook."""
-    logger.info(f"ℹ️ [Flask Status] Processing /status command for chat {chat_id_msg}")
-    status_msg = "⏳ Fetching status..."
+    logger.info(f"ℹ️ [Flask Status] معالجة أمر /status للدردشة {chat_id_msg}") # Changed to Arabic
+    status_msg = "⏳ جلب الحالة..." # Changed to Arabic
     msg_sent = send_telegram_message(chat_id_msg, status_msg)
     if not (msg_sent and msg_sent.get('ok')):
-         logger.error(f"❌ [Flask Status] Failed to send initial status message to {chat_id_msg}")
+         logger.error(f"❌ [Flask Status] فشل إرسال رسالة الحالة الأولية إلى {chat_id_msg}") # Changed to Arabic
          return
     message_id_to_edit = msg_sent['result']['message_id'] if msg_sent and msg_sent.get('result') else None
 
     if message_id_to_edit is None:
-        logger.error(f"❌ [Flask Status] Failed to get message_id to update status in chat {chat_id_msg}")
+        logger.error(f"❌ [Flask Status] فشل الحصول على message_id لتحديث الحالة في الدردشة {chat_id_msg}") # Changed to Arabic
         return
 
 
@@ -1953,15 +1953,15 @@ def handle_status_command(chat_id_msg: int) -> None:
                 status_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                 open_count = (status_cur.fetchone() or {}).get('count', 0)
 
-        ws_status = 'Active ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'Inactive ❌'
-        tracker_status = 'Active ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'Inactive ❌'
-        main_bot_alive = 'Active ✅' if 'main_bot_thread' in globals() and main_bot_thread and main_bot_thread.is_alive() else 'Inactive ❌'
-        final_status_msg = f"""🤖 *Bot Status:*
-- Price Tracking (WS): {ws_status}
-- Signal Tracking: {tracker_status}
-- Main Bot Loop: {main_bot_alive}
-- Active Signals: *{open_count}* / {MAX_OPEN_TRADES}
-- Current Server Time: {datetime.now().strftime('%H:%M:%S')}"""
+        ws_status = 'نشط ✅' if 'ws_thread' in globals() and ws_thread and ws_thread.is_alive() else 'غير نشط ❌' # Changed to Arabic
+        tracker_status = 'نشط ✅' if 'tracker_thread' in globals() and tracker_thread and tracker_thread.is_alive() else 'غير نشط ❌' # Changed to Arabic
+        main_bot_alive = 'نشط ✅' if 'main_bot_thread' in globals() and main_bot_thread and main_bot_thread.is_alive() else 'غير نشط ❌' # Changed to Arabic
+        final_status_msg = f"""🤖 *حالة البوت:* # Changed to Arabic
+- تتبع الأسعار (WS): {ws_status} # Changed to Arabic
+- تتبع الإشارات: {tracker_status} # Changed to Arabic
+- حلقة البوت الرئيسية: {main_bot_alive} # Changed to Arabic
+- الإشارات النشطة: *{open_count}* / {MAX_OPEN_TRADES} # Changed to Arabic
+- وقت الخادم الحالي: {datetime.now().strftime('%H:%M:%S')}""" # Changed to Arabic
         edit_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
         edit_payload = {
             'chat_id': chat_id_msg,
@@ -1971,51 +1971,51 @@ def handle_status_command(chat_id_msg: int) -> None:
         }
         response = requests.post(edit_url, json=edit_payload, timeout=10)
         response.raise_for_status()
-        logger.info(f"✅ [Flask Status] Status updated for chat {chat_id_msg}")
+        logger.info(f"✅ [Flask Status] تم تحديث الحالة للدردشة {chat_id_msg}") # Changed to Arabic
 
     except Exception as status_err:
-        logger.error(f"❌ [Flask Status] Error fetching/editing status details for chat {chat_id_msg}: {status_err}", exc_info=True)
-        send_telegram_message(chat_id_msg, "❌ An error occurred while fetching status details.")
+        logger.error(f"❌ [Flask Status] خطأ أثناء جلب/تعديل تفاصيل الحالة للدردشة {chat_id_msg}: {status_err}", exc_info=True) # Changed to Arabic
+        send_telegram_message(chat_id_msg, "❌ حدث خطأ أثناء جلب تفاصيل الحالة.") # Changed to Arabic
 
 
 def run_flask() -> None:
     """Runs the Flask application to listen for the Webhook using a production server if available."""
     host = "0.0.0.0"
     port = int(os.environ.get('PORT', 10000))
-    logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
+    logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...") # Changed to Arabic
     try:
         from waitress import serve
-        logger.info("✅ [Flask] Using 'waitress' server.")
+        logger.info("✅ [Flask] استخدام خادم 'waitress'.") # Changed to Arabic
         serve(app, host=host, port=port, threads=6)
     except ImportError:
-         logger.warning("⚠️ [Flask] 'waitress' not installed. Falling back to Flask development server (not recommended for production).")
+         logger.warning("⚠️ [Flask] 'waitress' غير مثبت. الرجوع إلى خادم تطوير Flask (لا يوصى به للإنتاج).") # Changed to Arabic
          try:
              app.run(host=host, port=port)
          except Exception as flask_run_err:
-              logger.critical(f"❌ [Flask] Failed to start development server: {flask_run_err}", exc_info=True)
+              logger.critical(f"❌ [Flask] فشل بدء خادم التطوير: {flask_run_err}", exc_info=True) # Changed to Arabic
     except Exception as serve_err:
-         logger.critical(f"❌ [Flask] Failed to start server (waitress?): {serve_err}", exc_info=True)
+         logger.critical(f"❌ [Flask] فشل بدء الخادم (waitress؟): {serve_err}", exc_info=True) # Changed to Arabic
 
 # ---------------------- Main Loop and Check Function ----------------------
 def main_loop() -> None:
     """Main loop to scan pairs and generate signals."""
     symbols_to_scan = get_crypto_symbols()
     if not symbols_to_scan:
-        logger.critical("❌ [Main] No valid symbols loaded or validated. Cannot proceed.")
+        logger.critical("❌ [Main] لم يتم تحميل أو التحقق من أي رموز صالحة. لا يمكن المتابعة.") # Changed to Arabic
         return
 
-    logger.info(f"✅ [Main] Loaded {len(symbols_to_scan)} valid symbols for scanning.")
+    logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمزًا صالحًا للمسح.") # Changed to Arabic
     last_full_scan_time = time.time()
 
     while True:
         try:
             scan_start_time = time.time()
             logger.info("+" + "-"*60 + "+")
-            logger.info(f"🔄 [Main] Starting market scan cycle - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"🔄 [Main] بدء دورة مسح السوق - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}") # Changed to Arabic
             logger.info("+" + "-"*60 + "+")
 
             if not check_db_connection() or not conn:
-                logger.error("❌ [Main] Skipping scan cycle due to database connection failure.")
+                logger.error("❌ [Main] تخطي دورة المسح بسبب فشل الاتصال بقاعدة البيانات.") # Changed to Arabic
                 time.sleep(60)
                 continue
 
@@ -2025,14 +2025,14 @@ def main_loop() -> None:
                     cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                     open_count = (cur_check.fetchone() or {}).get('count', 0)
             except psycopg2.Error as db_err:
-                 logger.error(f"❌ [Main] Database error while checking open signal count: {db_err}. Skipping cycle.")
+                 logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء التحقق من عدد الإشارات المفتوحة: {db_err}. تخطي الدورة.") # Changed to Arabic
                  if conn: conn.rollback()
                  time.sleep(60)
                  continue
 
-            logger.info(f"ℹ️ [Main] Currently open signals: {open_count} / {MAX_OPEN_TRADES}")
+            logger.info(f"ℹ️ [Main] الإشارات المفتوحة حاليًا: {open_count} / {MAX_OPEN_TRADES}") # Changed to Arabic
             if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"⚠️ [Main] Maximum number of open signals reached. Waiting...")
+                logger.info(f"⚠️ [Main] تم الوصول إلى الحد الأقصى لعدد الإشارات المفتوحة. في انتظار...") # Changed to Arabic
                 time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
                 continue
 
@@ -2042,11 +2042,11 @@ def main_loop() -> None:
 
             for symbol in symbols_to_scan:
                  if slots_available <= 0:
-                      logger.info(f"ℹ️ [Main] Max open trades ({MAX_OPEN_TRADES}) reached during scan. Stopping symbol scan for this cycle.")
+                      logger.info(f"ℹ️ [Main] تم الوصول إلى الحد الأقصى للتداولات المفتوحة ({MAX_OPEN_TRADES}) أثناء المسح. إيقاف مسح الرموز لهذه الدورة.") # Changed to Arabic
                       break
 
                  processed_in_loop += 1
-                 logger.debug(f"🔍 [Main] Scanning {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...")
+                 logger.debug(f"🔍 [Main] مسح {symbol} ({processed_in_loop}/{len(symbols_to_scan)})...") # Changed to Arabic
 
                  try:
                     with conn.cursor() as symbol_cur:
@@ -2061,7 +2061,7 @@ def main_loop() -> None:
                     strategy = ScalpingTradingStrategy(symbol) # ML model loaded here
                     # Check if ML model was loaded successfully for this symbol
                     if strategy.ml_model is None:
-                        logger.warning(f"⚠️ [Main] Skipping {symbol} because its ML model was not loaded successfully.")
+                        logger.warning(f"⚠️ [Main] تخطي {symbol} لأن نموذج ML الخاص به لم يتم تحميله بنجاح.") # Changed to Arabic
                         continue
 
                     df_indicators = strategy.populate_indicators(df_hist)
@@ -2071,7 +2071,7 @@ def main_loop() -> None:
                     potential_signal = strategy.generate_buy_signal(df_indicators)
 
                     if potential_signal:
-                        logger.info(f"✨ [Main] Potential signal found for {symbol}! Final check and insertion...")
+                        logger.info(f"✨ [Main] تم العثور على إشارة محتملة لـ {symbol}! التحقق النهائي والإدراج...") # Changed to Arabic
                         with conn.cursor() as final_check_cur:
                              final_check_cur.execute("SELECT COUNT(*) AS count FROM signals WHERE achieved_target = FALSE;")
                              final_open_count = (final_check_cur.fetchone() or {}).get('count', 0)
@@ -2083,62 +2083,62 @@ def main_loop() -> None:
                                      slots_available -= 1
                                      time.sleep(2)
                                  else:
-                                     logger.error(f"❌ [Main] Failed to insert signal for {symbol} into database.")
+                                     logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.") # Changed to Arabic
                              else:
-                                 logger.warning(f"⚠️ [Main] Max open trades ({final_open_count}) reached before inserting signal for {symbol}. Signal ignored.")
+                                 logger.warning(f"⚠️ [Main] تم الوصول إلى الحد الأقصى للتداولات المفتوحة ({final_open_count}) قبل إدراج الإشارة لـ {symbol}. تم تجاهل الإشارة.") # Changed to Arabic
                                  break
 
                  except psycopg2.Error as db_loop_err:
-                      logger.error(f"❌ [Main] Database error while processing symbol {symbol}: {db_loop_err}. Moving to next...")
+                      logger.error(f"❌ [Main] خطأ في قاعدة البيانات أثناء معالجة الرمز {symbol}: {db_loop_err}. الانتقال إلى التالي...") # Changed to Arabic
                       if conn: conn.rollback()
                       continue
                  except Exception as symbol_proc_err:
-                      logger.error(f"❌ [Main] General error processing symbol {symbol}: {symbol_proc_err}", exc_info=True)
+                      logger.error(f"❌ [Main] خطأ عام في معالجة الرمز {symbol}: {symbol_proc_err}", exc_info=True) # Changed to Arabic
                       continue
 
                  time.sleep(0.1)
 
             scan_duration = time.time() - scan_start_time
-            logger.info(f"🏁 [Main] Scan cycle finished. Signals generated: {signals_generated_in_loop}. Scan duration: {scan_duration:.2f} seconds.")
+            logger.info(f"🏁 [Main] انتهت دورة المسح. الإشارات التي تم إنشاؤها: {signals_generated_in_loop}. مدة المسح: {scan_duration:.2f} ثانية.") # Changed to Arabic
             frame_minutes = get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME)
             wait_time = max(frame_minutes * 60, 120 - scan_duration)
-            logger.info(f"⏳ [Main] Waiting {wait_time:.1f} seconds for next cycle...")
+            logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...") # Changed to Arabic
             time.sleep(wait_time)
 
         except KeyboardInterrupt:
-             logger.info("🛑 [Main] Stop requested (KeyboardInterrupt). Shutting down...")
+             logger.info("🛑 [Main] طلب إيقاف (KeyboardInterrupt). إيقاف التشغيل...") # Changed to Arabic
              break
         except psycopg2.Error as db_main_err:
-             logger.error(f"❌ [Main] Fatal database error in main loop: {db_main_err}. Attempting to reconnect...")
+             logger.error(f"❌ [Main] خطأ فادح في قاعدة البيانات في الحلقة الرئيسية: {db_main_err}. محاولة إعادة الاتصال...") # Changed to Arabic
              if conn: conn.rollback()
              time.sleep(60)
              try:
                  init_db()
              except Exception as recon_err:
-                 logger.critical(f"❌ [Main] Failed to reconnect to database: {recon_err}. Exiting...")
+                 logger.critical(f"❌ [Main] فشل إعادة الاتصال بقاعدة البيانات: {recon_err}. الخروج...") # Changed to Arabic
                  break
         except Exception as main_err:
-            logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
-            logger.info("ℹ️ [Main] Waiting 120 seconds before retrying...")
+            logger.error(f"❌ [Main] خطأ غير متوقع في الحلقة الرئيسية: {main_err}", exc_info=True) # Changed to Arabic
+            logger.info("ℹ️ [Main] انتظار 120 ثانية قبل إعادة المحاولة...") # Changed to Arabic
             time.sleep(120)
 
 def cleanup_resources() -> None:
     """Closes used resources like the database connection."""
     global conn
-    logger.info("ℹ️ [Cleanup] Closing resources...")
+    logger.info("ℹ️ [Cleanup] إغلاق الموارد...") # Changed to Arabic
     if conn:
         try:
             conn.close()
-            logger.info("✅ [DB] Database connection closed.")
+            logger.info("✅ [DB] تم إغلاق الاتصال بقاعدة البيانات.") # Changed to Arabic
         except Exception as close_err:
-            logger.error(f"⚠️ [DB] Error closing database connection: {close_err}")
-    logger.info("✅ [Cleanup] Resource cleanup complete.")
+            logger.error(f"⚠️ [DB] خطأ أثناء إغلاق الاتصال بقاعدة البيانات: {close_err}") # Changed to Arabic
+    logger.info("✅ [Cleanup] اكتمال تنظيف الموارد.") # Changed to Arabic
 
 
 # ---------------------- Main Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 Starting crypto trading signal bot...")
-    logger.info(f"Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | UTC Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("🚀 بدء بوت إشارات تداول العملات الرقمية...") # Changed to Arabic
+    logger.info(f"الوقت المحلي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | التوقيت العالمي المنسق: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}") # Changed to Arabic
 
     ws_thread: Optional[Thread] = None
     tracker_thread: Optional[Thread] = None
@@ -2152,37 +2152,38 @@ if __name__ == "__main__":
         # 2. Start WebSocket Ticker
         ws_thread = Thread(target=run_ticker_socket_manager, daemon=True, name="WebSocketThread")
         ws_thread.start()
-        logger.info("✅ [Main] WebSocket ticker started.")
-        logger.info("ℹ️ [Main] Waiting 5 seconds for WebSocket to initialize...")
+        logger.info("✅ [Main] تم بدء مؤشر WebSocket.") # Changed to Arabic
+        logger.info("ℹ️ [Main] انتظار 5 ثوانٍ لتهيئة WebSocket...") # Changed to Arabic
         time.sleep(5)
         if not ticker_data:
-             logger.warning("⚠️ [Main] No initial data received from WebSocket after 5 seconds.")
+             logger.warning("⚠️ [Main] لم يتم استلام أي بيانات أولية من WebSocket بعد 5 ثوانٍ.") # Changed to Arabic
         else:
-             logger.info(f"✅ [Main] Initial WebSocket data received for {len(ticker_data)} symbols.")
+             logger.info(f"✅ [Main] تم استلام بيانات WebSocket الأولية لـ {len(ticker_data)} رمزًا.") # Changed to Arabic
 
 
         # 3. Start Signal Tracker
         tracker_thread = Thread(target=track_signals, daemon=True, name="TrackerThread")
         tracker_thread.start()
-        logger.info("✅ [Main] Signal tracker started.")
+        logger.info("✅ [Main] تم بدء متتبع الإشارات.") # Changed to Arabic
 
         # 4. Start the main bot logic in a separate thread
         main_bot_thread = Thread(target=main_loop, daemon=True, name="MainBotLoopThread")
         main_bot_thread.start()
-        logger.info("✅ [Main] Main bot loop started in a separate thread.")
+        logger.info("✅ [Main] تم بدء حلقة البوت الرئيسية في مؤشر ترابط منفصل.") # Changed to Arabic
 
         # 5. Start Flask Server (ALWAYS run, daemon=False so it keeps the main program alive)
         flask_thread = Thread(target=run_flask, daemon=False, name="FlaskThread")
         flask_thread.start()
-        logger.info("✅ [Main] Flask server started.")
+        logger.info("✅ [Main] تم بدء خادم Flask.") # Changed to Arabic
 
         # Wait for the Flask thread to finish (it usually won't unless there's an error)
         flask_thread.join()
 
     except Exception as startup_err:
-        logger.critical(f"❌ [Main] A fatal error occurred during startup or in the main loop: {startup_err}", exc_info=True)
+        logger.critical(f"❌ [Main] حدث خطأ فادح أثناء بدء التشغيل أو في الحلقة الرئيسية: {startup_err}", exc_info=True) # Changed to Arabic
     finally:
-        logger.info("🛑 [Main] Shutting down program...")
+        logger.info("🛑 [Main] إيقاف تشغيل البرنامج...") # Changed to Arabic
         cleanup_resources()
-        logger.info("👋 [Main] Crypto trading signal bot stopped.")
+        logger.info("👋 [Main] تم إيقاف بوت إشارات تداول العملات الرقمية.") # Changed to Arabic
         os._exit(0)
+
