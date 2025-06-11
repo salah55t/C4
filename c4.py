@@ -197,153 +197,349 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     return None
 
 def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
     if series is None or series.isnull().all() or len(series) < span:
         return pd.Series(index=series.index if series is not None else None, dtype=float)
     return series.ewm(span=span, adjust=False).mean()
 
 def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
+    """Calculates Relative Strength Index (RSI)."""
     df = df.copy()
-    if 'close' not in df.columns or df['close'].isnull().all() or len(df) < period:
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] 'close' column is missing or empty.")
         df['rsi'] = np.nan
         return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] Insufficient data ({len(df)} < {period}) to calculate RSI.")
+        df['rsi'] = np.nan
+        return df
+
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    df['rsi'] = (100 - (100 / (1 + rs))).ffill().fillna(50)
+
+    rsi_series = 100 - (100 / (1 + rs))
+    df['rsi'] = rsi_series.ffill().fillna(50)
+
     return df
 
 def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
+    """Calculates Average True Range (ATR)."""
     df = df.copy()
     required_cols = ['high', 'low', 'close']
-    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any() or len(df) < period + 1:
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] 'high', 'low', 'close' columns are missing or empty.")
         df['atr'] = np.nan
         return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] Insufficient data ({len(df)} < {period + 1}) to calculate ATR.")
+        df['atr'] = np.nan
+        return df
+
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
+
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+
     df['atr'] = tr.ewm(span=period, adjust=False).mean()
     return df
 
 def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, multiplier: float = SUPERTRAND_MULTIPLIER) -> pd.DataFrame:
+    """Calculates the Supertrend indicator."""
     df = df.copy()
-    if 'high' not in df.columns or 'low' not in df.columns or 'close' not in df.columns:
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Supertrend] 'high', 'low', 'close' columns are missing or empty. Cannot calculate Supertrend.")
         df['supertrend'] = np.nan
-        df['supertrend_direction'] = 0
+        df['supertrend_direction'] = 0 # Neutral if cannot calculate
         return df
-    
+
+    # Ensure ATR is already calculated
     if 'atr' not in df.columns:
-        df = calculate_atr_indicator(df, period=period)
-    
-    if 'atr' not in df.columns or df['atr'].isnull().all():
-        df['supertrend'] = np.nan
-        df['supertrend_direction'] = 0
-        return df
-        
+        df = calculate_atr_indicator(df, period=period) # Use Supertrend period for ATR if not already calculated
+        if 'atr' not in df.columns or df['atr'].isnull().all().any():
+            logger.warning("⚠️ [Indicator Supertrend] ATR calculation failed. Cannot calculate Supertrend.")
+            df['supertrend'] = np.nan
+            df['supertrend_direction'] = 0
+            return df
+
+    # Calculate Basic Upper and Lower Bands
     df['basic_upper_band'] = ((df['high'] + df['low']) / 2) + (multiplier * df['atr'])
     df['basic_lower_band'] = ((df['high'] + df['low']) / 2) - (multiplier * df['atr'])
+
+    # Initialize Final Upper and Lower Bands
     df['final_upper_band'] = 0.0
     df['final_lower_band'] = 0.0
-    df['supertrend'] = 0.0
-    df['supertrend_direction'] = 0
 
+    # Initialize Supertrend and Direction
+    df['supertrend'] = 0.0
+    df['supertrend_direction'] = 0 # 1 for uptrend, -1 for downtrend, 0 for neutral/flat
+
+    # Determine Supertrend value and direction
     for i in range(1, len(df)):
-        if df['basic_upper_band'].iloc[i] < df['final_upper_band'].iloc[i-1] or df['close'].iloc[i-1] > df['final_upper_band'].iloc[i-1]:
+        # Final Upper Band
+        if df['basic_upper_band'].iloc[i] < df['final_upper_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] > df['final_upper_band'].iloc[i-1]:
             df.loc[df.index[i], 'final_upper_band'] = df['basic_upper_band'].iloc[i]
         else:
             df.loc[df.index[i], 'final_upper_band'] = df['final_upper_band'].iloc[i-1]
 
-        if df['basic_lower_band'].iloc[i] > df['final_lower_band'].iloc[i-1] or df['close'].iloc[i-1] < df['final_lower_band'].iloc[i-1]:
+        # Final Lower Band
+        if df['basic_lower_band'].iloc[i] > df['final_lower_band'].iloc[i-1] or \
+           df['close'].iloc[i-1] < df['final_lower_band'].iloc[i-1]:
             df.loc[df.index[i], 'final_lower_band'] = df['basic_lower_band'].iloc[i]
         else:
             df.loc[df.index[i], 'final_lower_band'] = df['final_lower_band'].iloc[i-1]
-        
-        if df['supertrend_direction'].iloc[i-1] in (0, 1) and df['close'].iloc[i] <= df['final_lower_band'].iloc[i]:
-            df.loc[df.index[i], 'supertrend_direction'] = -1
-            df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
-        elif df['supertrend_direction'].iloc[i-1] in (0, -1) and df['close'].iloc[i] >= df['final_upper_band'].iloc[i]:
-            df.loc[df.index[i], 'supertrend_direction'] = 1
-            df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
-        elif df['supertrend_direction'].iloc[i-1] == 1:
-            df.loc[df.index[i], 'supertrend_direction'] = 1
-            df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
-        else: # if supertrend_direction == -1
-            df.loc[df.index[i], 'supertrend_direction'] = -1
-            df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
 
-    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True)
+        # Supertrend logic
+        if df['supertrend_direction'].iloc[i-1] == 1: # Previous was uptrend
+            if df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Change to downtrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Remain uptrend
+        elif df['supertrend_direction'].iloc[i-1] == -1: # Previous was downtrend
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 # Change to uptrend
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 # Remain downtrend
+        else: # Initial state or neutral
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1
+            elif df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] # Fallback
+                df.loc[df.index[i], 'supertrend_direction'] = 0
+
+
+    # Drop temporary columns
+    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True, errors='ignore')
+    logger.debug(f"✅ [Indicator Supertrend] Supertrend calculated.")
     return df
 
 def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
-    logger.debug("ℹ️ [Indicators] حساب اتجاه البيتكوين للميزات...")
-    min_data_for_ema = 55
+    """
+    Calculates a numerical representation of Bitcoin's trend based on EMA20 and EMA50.
+    Returns 1 for bullish (صعودي), -1 for bearish (هبوطي), 0 for neutral/sideways (محايد/تذبذب).
+    """
+    logger.debug("ℹ️ [Indicators] Calculating Bitcoin trend for features...")
+    # Need enough data for EMA50, plus a few extra candles for robustness
+    min_data_for_ema = 50 + 5 # 50 for EMA50, 5 buffer
+
     if df_btc is None or df_btc.empty or len(df_btc) < min_data_for_ema:
+        logger.warning(f"⚠️ [Indicators] Insufficient BTC/USDT data ({len(df_btc) if df_btc is not None else 0} < {min_data_for_ema}) to calculate Bitcoin trend for features.")
+        # Return a series of zeros (neutral) with the original index if data is insufficient
         return pd.Series(index=df_btc.index if df_btc is not None else None, data=0.0)
+
     df_btc_copy = df_btc.copy()
-    df_btc_copy['close'] = pd.to_numeric(df_btc_copy['close'], errors='coerce').dropna()
+    df_btc_copy['close'] = pd.to_numeric(df_btc_copy['close'], errors='coerce')
+    df_btc_copy.dropna(subset=['close'], inplace=True)
+
     if len(df_btc_copy) < min_data_for_ema:
-        return pd.Series(index=df_btc.index, data=0.0)
+        logger.warning(f"⚠️ [Indicators] Insufficient BTC/USDT data after NaN removal to calculate trend.")
+        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if not enough data after dropna
+
     ema20 = calculate_ema(df_btc_copy['close'], 20)
     ema50 = calculate_ema(df_btc_copy['close'], 50)
-    ema_df = pd.DataFrame({'ema20': ema20, 'ema50': ema50, 'close': df_btc_copy['close']}).dropna()
-    if ema_df.empty:
-        return pd.Series(index=df_btc.index, data=0.0)
-    trend_series = pd.Series(index=ema_df.index, data=0.0)
-    trend_series[(ema_df['close'] > ema_df['ema20']) & (ema_df['ema20'] > ema_df['ema50'])] = 1.0
-    trend_series[(ema_df['close'] < ema_df['ema20']) & (ema_df['ema20'] < ema_df['ema50'])] = -1.0
-    return trend_series.reindex(df_btc.index).fillna(0.0)
 
+    # Combine EMAs and close into a single DataFrame for easier comparison
+    ema_df = pd.DataFrame({'ema20': ema20, 'ema50': ema50, 'close': df_btc_copy['close']})
+    ema_df.dropna(inplace=True) # Drop rows where any EMA or close is NaN
+
+    if ema_df.empty:
+        logger.warning("⚠️ [Indicators] EMA DataFrame is empty after NaN removal. Cannot calculate Bitcoin trend.")
+        return pd.Series(index=df_btc.index, data=0.0) # Return neutral if no valid EMA data
+
+    # Initialize trend column with neutral (0.0)
+    trend_series = pd.Series(index=ema_df.index, data=0.0)
+
+    # Apply trend logic:
+    # Bullish: current_close > ema20 > ema50
+    trend_series[(ema_df['close'] > ema_df['ema20']) & (ema_df['ema20'] > ema_df['ema50'])] = 1.0
+    # Bearish: current_close < ema20 < ema50
+    trend_series[(ema_df['close'] < ema_df['ema20']) & (ema_df['ema20'] < ema_df['ema50'])] = -1.0
+
+    # Reindex to original df_btc index and fill any remaining NaNs with 0 (neutral)
+    # This ensures the series has the same index as the altcoin DataFrame for merging
+    final_trend_series = trend_series.reindex(df_btc.index).fillna(0.0)
+    logger.debug(f"✅ [Indicators] Bitcoin trend feature calculated. Examples: {final_trend_series.tail().tolist()}")
+    return final_trend_series
+
+
+# NEW: Ichimoku Cloud Calculation (Copied from ml.py)
 def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIOD, kijun_period: int = KIJUN_PERIOD, senkou_span_b_period: int = SENKOU_SPAN_B_PERIOD, chikou_lag: int = CHIKOU_LAG) -> pd.DataFrame:
+    """Calculates Ichimoku Cloud components and derived features."""
     df_ichimoku = df.copy()
-    for col in ['high', 'low', 'close']: df_ichimoku[col] = pd.to_numeric(df_ichimoku[col], errors='coerce')
-    df_ichimoku['tenkan_sen'] = (df_ichimoku['high'].rolling(window=tenkan_period).max() + df_ichimoku['low'].rolling(window=tenkan_period).min()) / 2
-    df_ichimoku['kijun_sen'] = (df_ichimoku['high'].rolling(window=kijun_period).max() + df_ichimoku['low'].rolling(window=kijun_period).min()) / 2
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_ichimoku.columns for col in required_cols) or df_ichimoku[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Ichimoku] Missing or empty OHLC columns. Cannot calculate Ichimoku.")
+        for col in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b', 'chikou_span',
+                    'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook']:
+            df_ichimoku[col] = np.nan
+        return df_ichimoku
+
+    # Convert to numeric
+    for col in required_cols:
+        df_ichimoku[col] = pd.to_numeric(df_ichimoku[col], errors='coerce')
+
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    df_ichimoku['tenkan_sen'] = (df_ichimoku['high'].rolling(window=tenkan_period, min_periods=1).max() +
+                                 df_ichimoku['low'].rolling(window=tenkan_period, min_periods=1).min()) / 2
+
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    df_ichimoku['kijun_sen'] = (df_ichimoku['high'].rolling(window=kijun_period, min_periods=1).max() +
+                                df_ichimoku['low'].rolling(window=kijun_period, min_periods=1).min()) / 2
+
+    # Senkou Span A (Leading Span A): (Conversion Line + Base Line) / 2 plotted 26 periods ahead
     df_ichimoku['senkou_span_a'] = ((df_ichimoku['tenkan_sen'] + df_ichimoku['kijun_sen']) / 2).shift(kijun_period)
-    df_ichimoku['senkou_span_b'] = ((df_ichimoku['high'].rolling(window=senkou_span_b_period).max() + df_ichimoku['low'].rolling(window=senkou_span_b_period).min()) / 2).shift(kijun_period)
+
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2 plotted 26 periods ahead
+    df_ichimoku['senkou_span_b'] = ((df_ichimoku['high'].rolling(window=senkou_span_b_period, min_periods=1).max() +
+                                     df_ichimoku['low'].rolling(window=senkou_span_b_period, min_periods=1).min()) / 2).shift(kijun_period)
+
+    # Chikou Span (Lagging Span): Close plotted 26 periods back
     df_ichimoku['chikou_span'] = df_ichimoku['close'].shift(-chikou_lag)
-    df_ichimoku['ichimoku_tenkan_kijun_cross_signal'] = np.where((df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']) & (df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)), 1, np.where((df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']) & (df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)), -1, 0))
-    df_ichimoku['ichimoku_price_cloud_position'] = np.where(df_ichimoku['close'] > df_ichimoku[['senkou_span_a', 'senkou_span_b']].max(axis=1), 1, np.where(df_ichimoku['close'] < df_ichimoku[['senkou_span_a', 'senkou_span_b']].min(axis=1), -1, 0))
-    df_ichimoku['ichimoku_cloud_outlook'] = np.where(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b'], 1, np.where(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b'], -1, 0))
+
+    # --- Derived Ichimoku Features ---
+    # Tenkan/Kijun Cross Signal
+    df_ichimoku['ichimoku_tenkan_kijun_cross_signal'] = 0
+    if len(df_ichimoku) > 1:
+        # Bullish cross: Tenkan-sen crosses above Kijun-sen
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) &
+                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = 1
+        # Bearish cross: Tenkan-sen crosses below Kijun-sen
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) &
+                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
+
+    # Price vs Cloud Position (using current close price vs future cloud)
+    df_ichimoku['ichimoku_price_cloud_position'] = 0 # 0 for inside, 1 for above, -1 for below
+    # Price above cloud
+    df_ichimoku.loc[(df_ichimoku['close'] > df_ichimoku[['senkou_span_a', 'senkou_span_b']].max(axis=1)), 'ichimoku_price_cloud_position'] = 1
+    # Price below cloud
+    df_ichimoku.loc[(df_ichimoku['close'] < df_ichimoku[['senkou_span_a', 'senkou_span_b']].min(axis=1)), 'ichimoku_price_cloud_position'] = -1
+
+    # Cloud Outlook (future cloud's color)
+    df_ichimoku['ichimoku_cloud_outlook'] = 0 # 0 for flat/mixed, 1 for bullish (green), -1 for bearish (red)
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = 1 # Green Cloud
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = -1 # Red Cloud
+
+    logger.debug(f"✅ [Indicator Ichimoku] Ichimoku Cloud and derived features calculated.")
     return df_ichimoku
 
+
+# NEW: Fibonacci Retracement Features (Copied from ml.py)
 def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
+    """
+    Calculates Fibonacci Retracement levels from a recent swing (max/min in lookback window)
+    and generates features based on current price position relative to these levels.
+    """
     df_fib = df.copy()
-    if len(df_fib) < lookback_window: return df_fib
-    for col in ['high', 'low', 'close']: df_fib[col] = pd.to_numeric(df_fib[col], errors='coerce')
-    df_fib[['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm']] = np.nan
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_fib.columns for col in required_cols) or df_fib[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Fibonacci] Missing or empty OHLC columns. Cannot calculate Fibonacci features.")
+        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
+            df_fib[col] = np.nan
+        return df_fib
+    if len(df_fib) < lookback_window:
+        logger.warning(f"⚠️ [Indicator Fibonacci] Insufficient data ({len(df_fib)} < {lookback_window}) for Fibonacci calculation.")
+        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
+            df_fib[col] = np.nan
+        return df_fib
+
+    # Convert to numeric
+    for col in required_cols:
+        df_fib[col] = pd.to_numeric(df_fib[col], errors='coerce')
+
+    df_fib['fib_236_retrace_dist_norm'] = np.nan
+    df_fib['fib_382_retrace_dist_norm'] = np.nan
+    df_fib['fib_618_retrace_dist_norm'] = np.nan
     df_fib['is_price_above_fib_50'] = 0
+
     for i in range(lookback_window - 1, len(df_fib)):
-        window = df_fib.iloc[i - lookback_window + 1 : i + 1]
-        swing_high, swing_low = window['high'].max(), window['low'].min()
+        window_df = df_fib.iloc[i - lookback_window + 1 : i + 1]
+        swing_high = window_df['high'].max()
+        swing_low = window_df['low'].min()
+        current_close = df_fib['close'].iloc[i]
+
         price_range = swing_high - swing_low
+
         if price_range > 0:
-            current_close = df_fib['close'].iloc[i]
-            fib_500 = swing_high - (price_range * 0.5)
-            df_fib.loc[df_fib.index[i], 'fib_236_retrace_dist_norm'] = (current_close - (swing_high - price_range * 0.236)) / price_range
-            df_fib.loc[df_fib.index[i], 'fib_382_retrace_dist_norm'] = (current_close - (swing_high - price_range * 0.382)) / price_range
-            df_fib.loc[df_fib.index[i], 'fib_618_retrace_dist_norm'] = (current_close - (swing_high - price_range * 0.618)) / price_range
-            df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 1 if current_close > fib_500 else 0
+            # For Uptrend Retracement (price drops from high to low)
+            fib_0_236 = swing_high - (price_range * 0.236)
+            fib_0_382 = swing_high - (price_range * 0.382)
+            fib_0_500 = swing_high - (price_range * 0.500)
+            fib_0_618 = swing_high - (price_range * 0.618)
+
+            # Features: Normalized distance from current price to key Fib levels
+            if price_range != 0:
+                df_fib.loc[df_fib.index[i], 'fib_236_retrace_dist_norm'] = (current_close - fib_0_236) / price_range
+                df_fib.loc[df_fib.index[i], 'fib_382_retrace_dist_norm'] = (current_close - fib_0_382) / price_range
+                df_fib.loc[df_fib.index[i], 'fib_618_retrace_dist_norm'] = (current_close - fib_0_618) / price_range
+
+            # Is price above 0.5 Fibonacci retracement level?
+            if current_close > fib_0_500:
+                df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 1
+            else:
+                df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 0
+
+    logger.debug(f"✅ [Indicator Fibonacci] Fibonacci features calculated.")
     return df_fib
 
+
+# NEW: Support and Resistance Features (Copied from ml.py)
 def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
+    """
+    Calculates simplified support and resistance features based on the lowest low and highest high
+    within a rolling lookback window.
+    """
     df_sr = df.copy()
-    if len(df_sr) < lookback_window: return df_sr
-    for col in ['high', 'low', 'close']: df_sr[col] = pd.to_numeric(df_sr[col], errors='coerce')
-    df_sr[['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']] = np.nan
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_sr.columns for col in required_cols) or df_sr[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator S/R] Missing or empty OHLC columns. Cannot calculate S/R features.")
+        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
+            df_sr[col] = np.nan
+        return df_sr
+    if len(df_sr) < lookback_window:
+        logger.warning(f"⚠️ [Indicator S/R] Insufficient data ({len(df_sr)} < {lookback_window}) for S/R calculation.")
+        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
+            df_sr[col] = np.nan
+        return df_sr
+
+    # Convert to numeric
+    for col in required_cols:
+        df_sr[col] = pd.to_numeric(df_sr[col], errors='coerce')
+
+    df_sr['price_distance_to_recent_low_norm'] = np.nan
+    df_sr['price_distance_to_recent_high_norm'] = np.nan
+
     for i in range(lookback_window - 1, len(df_sr)):
-        window = df_sr.iloc[i - lookback_window + 1 : i + 1]
-        recent_high, recent_low = window['high'].max(), window['low'].min()
+        window_df = df_sr.iloc[i - lookback_window + 1 : i + 1]
+        recent_high = window_df['high'].max()
+        recent_low = window_df['low'].min()
+        current_close = df_sr['close'].iloc[i]
+
         price_range = recent_high - recent_low
+
         if price_range > 0:
-            current_close = df_sr['close'].iloc[i]
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = (current_close - recent_low) / price_range
             df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = (recent_high - current_close) / price_range
         else:
-            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0
-            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0 # Price is at the low
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0 # Price is at the high (if range is 0)
+
+    logger.debug(f"✅ [Indicator S/R] Support and Resistance features calculated.")
     return df_sr
 
 # ---------------------- إعداد قاعدة البيانات ----------------------
@@ -488,6 +684,7 @@ class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol)
+        # تحديث قائمة الميزات لتشمل المؤشرات الجديدة التي تم تدريب النموذج عليها
         self.feature_columns_for_ml = [
             'volume_15m_avg', 'rsi_momentum_bullish', 'btc_trend_feature', 'supertrend_direction',
             'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook',
@@ -496,8 +693,25 @@ class ScalpingTradingStrategy:
         ]
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        min_len_required = 60
-        if len(df) < min_len_required: return None
+        # الحد الأدنى لطول البيانات المطلوبة لجميع المؤشرات
+        min_len_required = max(
+            VOLUME_LOOKBACK_CANDLES,
+            RSI_PERIOD,
+            RSI_MOMENTUM_LOOKBACK_CANDLES,
+            ENTRY_ATR_PERIOD,
+            SUPERTRAND_PERIOD,
+            TENKAN_PERIOD,
+            KIJUN_PERIOD,
+            SENKOU_SPAN_B_PERIOD,
+            CHIKOU_LAG, # للحفاظ على توافق مؤشر تشيكو
+            FIB_SR_LOOKBACK_WINDOW,
+            55 # لحساب EMA البيتكوين
+        ) + 5 # بوفير إضافي
+
+        if len(df) < min_len_required:
+            logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جداً ({len(df)} < {min_len_required}) لحساب المؤشرات.")
+            return None
+        
         try:
             df_calc = df.copy()
             df_calc['volume_15m_avg'] = df_calc['volume'].rolling(window=VOLUME_LOOKBACK_CANDLES).mean()
@@ -507,20 +721,33 @@ class ScalpingTradingStrategy:
                 rsi_slice = df_calc['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
                 if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
                     df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
+            
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
             df_calc = calculate_supertrend(df_calc, SUPERTRAND_PERIOD, SUPERTRAND_MULTIPLIER)
+            
+            # جلب وحساب ميزة اتجاه البيتكوين
             btc_df = fetch_historical_data("BTCUSDT", interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
             if btc_df is not None:
                 btc_trend = _calculate_btc_trend_feature(btc_df)
                 if btc_trend is not None:
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
                     df_calc['btc_trend_feature'].fillna(0.0, inplace=True)
-            else: df_calc['btc_trend_feature'] = 0.0
-            df_calc = calculate_ichimoku_cloud(df_calc)
-            df_calc = calculate_fibonacci_features(df_calc)
-            df_calc = calculate_support_resistance_features(df_calc)
+            else:
+                df_calc['btc_trend_feature'] = 0.0 # الافتراضي إذا لم يتم جلب بيانات BTC
+            
+            # حساب مؤشرات إيشيموكو الجديدة
+            df_calc = calculate_ichimoku_cloud(df_calc, TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_SPAN_B_PERIOD, CHIKOU_LAG)
+            
+            # حساب ميزات فيبوناتشي الجديدة
+            df_calc = calculate_fibonacci_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
+            
+            # حساب ميزات الدعم والمقاومة الجديدة
+            df_calc = calculate_support_resistance_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
+
             for col in self.feature_columns_for_ml:
-                if col not in df_calc.columns: df_calc[col] = np.nan
+                if col not in df_calc.columns:
+                    df_calc[col] = np.nan # إضافة أي أعمدة مفقودة بقيم NaN
+            
             df_cleaned = df_calc.dropna(subset=self.feature_columns_for_ml).copy()
             return df_cleaned if not df_cleaned.empty else None
         except Exception as e:
@@ -541,26 +768,37 @@ class ScalpingTradingStrategy:
         signal_details = {col: last_row.get(col, 'N/A') for col in self.feature_columns_for_ml}
         signal_details['ML_Prediction'] = 'صعودي ✅'
 
-        if last_row.get('supertrend_direction') != 1: return None
-        if last_row.get('btc_trend_feature') == -1.0: return None
+        # الشروط الإضافية التي قد تصفى من قبل النموذج المدرب الآن
+        # if last_row.get('supertrend_direction') != 1: return None
+        # if last_row.get('btc_trend_feature') == -1.0: return None
         
         volume_recent = fetch_recent_volume(self.symbol)
-        if volume_recent < MIN_VOLUME_15M_USDT: return None
+        if volume_recent < MIN_VOLUME_15M_USDT:
+            logger.debug(f"⚠️ [Signal Gen] حجم منخفض لـ {self.symbol}: {volume_recent}")
+            return None
         
         current_atr = last_row.get('atr')
-        if pd.isna(current_atr) or current_atr <= 0: return None
+        if pd.isna(current_atr) or current_atr <= 0:
+            logger.debug(f"⚠️ [Signal Gen] ATR غير صالح لـ {self.symbol}.")
+            return None
         
+        # تحديد الهدف ووقف الخسارة بناءً على ATR مع استخدام ميزات النموذج لفلترة أفضل
         initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100
-        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT: return None
+        if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
+            logger.debug(f"⚠️ [Signal Gen] هامش ربح غير كافٍ لـ {self.symbol}: {profit_margin_pct:.2f}%")
+            return None
         
+        # استخدام Supertrend كوقف خسارة أولي
         initial_stop_loss = last_row.get('supertrend', current_price - (1.0 * current_atr))
-        if initial_stop_loss >= current_price: initial_stop_loss = current_price - (1.0 * current_atr)
-        initial_stop_loss = max(0.00000001, initial_stop_loss)
+        # التأكد من أن وقف الخسارة تحت سعر الدخول
+        if initial_stop_loss >= current_price:
+            initial_stop_loss = current_price - (1.0 * current_atr)
+        initial_stop_loss = max(0.00000001, initial_stop_loss) # منع وقف الخسارة من أن يكون صفراً أو سالباً
 
         return {
             'symbol': self.symbol, 'entry_price': current_price, 'initial_target': initial_target,
-            'current_target': initial_target, 'stop_loss': initial_stop_loss, 'r2_score': 1.0,
+            'current_target': initial_target, 'stop_loss': initial_stop_loss, 'r2_score': 1.0, # r2_score هنا هو مجرد قيمة وهمية للنموذج الثنائي
             'strategy_name': 'Scalping_ML_Filtered', 'signal_details': signal_details,
             'volume_15m': volume_recent, 'trade_value': TRADE_VALUE
         }
