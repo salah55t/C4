@@ -1,1 +1,315 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم بوت التداول</title>
+    <!-- تحميل Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- تحميل مكتبة الأيقونات Lucide -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* استخدام خط عصري وجميل */
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
+        body {
+            font-family: 'Tajawal', sans-serif;
+            background-color: #111827; /* خلفية داكنة */
+            color: #d1d5db; /* لون نص فاتح */
+        }
+        .card {
+            background-color: #1f2937;
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            border: 1px solid #374151;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            transition: all 0.3s ease-in-out;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+        }
+        .table-header {
+            background-color: #374151;
+            color: #e5e7eb;
+        }
+        .table-row-even { background-color: #1f2937; }
+        .table-row-odd { background-color: #263142; }
+        .loader {
+            border: 4px solid #4b5563;
+            border-top: 4px solid #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        .btn {
+            @apply inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="p-4 md:p-8">
 
+    <div class="max-w-7xl mx-auto">
+        <!-- ==== العناوين الرئيسية ==== -->
+        <header class="flex justify-between items-center mb-8 flex-wrap gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-white">لوحة تحكم بوت التداول</h1>
+                <p class="text-gray-400">مراقبة حية لأداء واستراتيجيات البوت</p>
+            </div>
+            <div class="flex items-center gap-4">
+                 <div id="status-indicator" class="flex items-center space-x-2 space-x-reverse">
+                    <span id="status-text" class="text-gray-300">جاري الاتصال...</span>
+                    <div id="status-dot" class="w-4 h-4 rounded-full bg-yellow-500 animate-pulse"></div>
+                </div>
+                <!-- زر التقرير العام الجديد -->
+                <button id="report-btn" class="btn">
+                    <i data-lucide="file-text" class="mr-2 h-4 w-4"></i>
+                    عرض التقرير العام
+                </button>
+            </div>
+        </header>
+
+        <!-- ==== إحصائيات الأداء ==== -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8" id="performance-stats">
+            <!-- سيتم ملء هذه البطاقات بواسطة JavaScript -->
+        </div>
+
+        <!-- ==== أقسام الصفقات ==== -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- قسم الصفقات المفتوحة -->
+            <div class="card">
+                <h2 class="text-xl font-bold text-white mb-4 flex items-center">
+                    <i data-lucide="activity" class="ml-2 text-blue-400"></i>
+                    الصفقات المفتوحة حالياً
+                </h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm text-right">
+                        <thead class="table-header">
+                            <tr>
+                                <th scope="col" class="px-4 py-3">الزوج</th>
+                                <th scope="col" class="px-4 py-3">سعر الدخول</th>
+                                <th scope="col" class="px-4 py-3">الهدف الحالي</th>
+                                <th scope="col" class="px-4 py-3">وقت الإشارة</th>
+                            </tr>
+                        </thead>
+                        <tbody id="open-signals-table"></tbody>
+                    </table>
+                     <div id="open-signals-loader" class="flex justify-center p-4"><div class="loader"></div></div>
+                </div>
+            </div>
+
+            <!-- قسم الصفقات المغلقة -->
+            <div class="card">
+                <h2 class="text-xl font-bold text-white mb-4 flex items-center">
+                    <i data-lucide="history" class="ml-2 text-green-400"></i>
+                    آخر الصفقات المغلقة
+                </h2>
+                <div class="overflow-x-auto">
+                     <table class="w-full text-sm text-right">
+                        <thead class="table-header">
+                            <tr>
+                                <th scope="col" class="px-4 py-3">الزوج</th>
+                                <th scope="col" class="px-4 py-3">نتيجة الربح</th>
+                                <th scope="col" class="px-4 py-3">الحالة</th>
+                                <th scope="col" class="px-4 py-3">وقت الإغلاق</th>
+                            </tr>
+                        </thead>
+                        <tbody id="closed-signals-table"></tbody>
+                    </table>
+                    <div id="closed-signals-loader" class="flex justify-center p-4"><div class="loader"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- نافذة التقرير العام المنبثقة (Modal) -->
+    <div id="report-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden flex items-center justify-center p-4 z-50">
+        <div class="card w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+             <div class="flex justify-between items-center mb-4">
+                <h2 class="text-2xl font-bold text-white">التقرير العام للأداء</h2>
+                <button id="close-modal-btn" class="text-gray-400 hover:text-white">
+                    <i data-lucide="x" class="h-6 w-6"></i>
+                </button>
+            </div>
+            <div id="report-content" class="space-y-4">
+                <!-- سيتم ملء المحتوى هنا بواسطة JavaScript -->
+                 <div class="flex justify-center items-center h-40">
+                    <div class="loader"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script>
+        // === إعدادات عامة ===
+        const API_BASE_URL = 'http://127.0.0.1:5000'; 
+
+        // === عناصر الـ DOM ===
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.getElementById('status-dot');
+        const performanceStatsDiv = document.getElementById('performance-stats');
+        const openSignalsTable = document.getElementById('open-signals-table');
+        const closedSignalsTable = document.getElementById('closed-signals-table');
+        const openSignalsLoader = document.getElementById('open-signals-loader');
+        const closedSignalsLoader = document.getElementById('closed-signals-loader');
+        const reportBtn = document.getElementById('report-btn');
+        const reportModal = document.getElementById('report-modal');
+        const closeModalBtn = document.getElementById('close-modal-btn');
+        const reportContent = document.getElementById('report-content');
+
+        // === دوال جلب البيانات ===
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`${API_BASE_URL}${endpoint}`);
+                if (!response.ok) {
+                    throw new Error(`Network error: ${response.statusText}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error(`Fetch failed from ${endpoint}:`, error);
+                statusText.textContent = 'فشل الاتصال بالبوت';
+                statusDot.classList.remove('bg-green-500', 'bg-yellow-500', 'animate-pulse');
+                statusDot.classList.add('bg-red-500');
+                return null;
+            }
+        }
+
+        async function updateStatus() {
+            const data = await fetchData('/api/status');
+            if (data) {
+                statusText.textContent = data.status || 'متصل';
+                statusDot.classList.remove('bg-yellow-500', 'bg-red-500');
+                statusDot.classList.add('bg-green-500', 'animate-pulse');
+            }
+        }
+
+        async function updatePerformance() {
+            const data = await fetchData('/api/performance');
+            if (data) {
+                performanceStatsDiv.innerHTML = `
+                    <div class="card"><h3 class="text-gray-400 text-sm font-medium">إجمالي الصفقات</h3><p class="text-2xl font-semibold text-white">${data.total_trades || 0}</p></div>
+                    <div class="card"><h3 class="text-gray-400 text-sm font-medium">الصفقات الرابحة</h3><p class="text-2xl font-semibold text-green-400">${data.winning_trades || 0}</p></div>
+                    <div class="card"><h3 class="text-gray-400 text-sm font-medium">نسبة النجاح</h3><p class="text-2xl font-semibold text-blue-400">${parseFloat(data.win_rate || 0).toFixed(2)}%</p></div>
+                    <div class="card"><h3 class="text-gray-400 text-sm font-medium">إجمالي الربح (%)</h3><p class="text-2xl font-semibold text-yellow-400">${parseFloat(data.total_profit_pct || 0).toFixed(2)}%</p></div>
+                `;
+            }
+        }
+
+        async function updateOpenSignals() {
+            openSignalsLoader.style.display = 'flex';
+            const data = await fetchData('/api/open-signals');
+            openSignalsLoader.style.display = 'none';
+            if (data) {
+                if (data.length === 0) {
+                    openSignalsTable.innerHTML = `<tr><td colspan="4" class="text-center p-4 text-gray-400">لا توجد صفقات مفتوحة حالياً.</td></tr>`;
+                    return;
+                }
+                openSignalsTable.innerHTML = data.map((signal, index) => {
+                    const rowClass = index % 2 === 0 ? 'table-row-even' : 'table-row-odd';
+                    return `
+                        <tr class="${rowClass}">
+                            <td class="px-4 py-3 font-medium text-white">${signal.symbol}</td>
+                            <td class="px-4 py-3">${parseFloat(signal.entry_price).toFixed(4)}</td>
+                            <td class="px-4 py-3 text-yellow-400">${parseFloat(signal.current_target).toFixed(4)}</td>
+                            <td class="px-4 py-3 text-gray-400">${new Date(signal.sent_at).toLocaleString('ar-EG')}</td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+        }
+
+        async function updateClosedSignals() {
+            closedSignalsLoader.style.display = 'flex';
+            const data = await fetchData('/api/closed-signals');
+            closedSignalsLoader.style.display = 'none';
+            if (data) {
+                if (data.length === 0) {
+                    closedSignalsTable.innerHTML = `<tr><td colspan="4" class="text-center p-4 text-gray-400">لا توجد صفقات مغلقة بعد.</td></tr>`;
+                    return;
+                }
+                closedSignalsTable.innerHTML = data.map((signal, index) => {
+                    const rowClass = index % 2 === 0 ? 'table-row-even' : 'table-row-odd';
+                    const profitClass = signal.achieved_target ? 'text-green-400' : 'text-red-400';
+                    const profitSign = signal.achieved_target ? '+' : '';
+                    return `
+                        <tr class="${rowClass}">
+                            <td class="px-4 py-3 font-medium text-white">${signal.symbol}</td>
+                            <td class="px-4 py-3 font-semibold ${profitClass}">${profitSign}${parseFloat(signal.profit_percentage).toFixed(2)}%</td>
+                            <td class="px-4 py-3 ${profitClass}">${signal.achieved_target ? 'ربح' : 'خسارة'}</td>
+                            <td class="px-4 py-3 text-gray-400">${new Date(signal.closed_at).toLocaleString('ar-EG')}</td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+        }
+        
+        async function showGeneralReport() {
+            reportModal.classList.remove('hidden');
+            reportContent.innerHTML = '<div class="flex justify-center items-center h-40"><div class="loader"></div></div>';
+            const data = await fetchData('/api/general-report');
+            if (data) {
+                const best = data.best_performing_symbol;
+                const worst = data.worst_performing_symbol;
+                reportContent.innerHTML = `
+                    <div class="grid grid-cols-2 md:grid-cols-3 gap-4 text-center">
+                        <div class="card p-4"><h4 class="text-sm text-gray-400">إجمالي الصفقات</h4><p class="text-xl font-bold">${data.total_trades}</p></div>
+                        <div class="card p-4 bg-green-900/50"><h4 class="text-sm text-gray-400">صفقات رابحة</h4><p class="text-xl font-bold text-green-400">${data.winning_trades}</p></div>
+                        <div class="card p-4 bg-red-900/50"><h4 class="text-sm text-gray-400">صفقات خاسرة</h4><p class="text-xl font-bold text-red-400">${data.losing_trades}</p></div>
+                        <div class="card p-4"><h4 class="text-sm text-gray-400">نسبة النجاح</h4><p class="text-xl font-bold text-blue-400">${parseFloat(data.win_rate || 0).toFixed(2)}%</p></div>
+                        <div class="card p-4"><h4 class="text-sm text-gray-400">إجمالي الربح (%)</h4><p class="text-xl font-bold text-yellow-400">${parseFloat(data.total_profit_pct || 0).toFixed(2)}%</p></div>
+                        <div class="card p-4"><h4 class="text-sm text-gray-400">متوسط الربح للصفقة</h4><p class="text-xl font-bold">${parseFloat(data.avg_profit_pct || 0).toFixed(2)}%</p></div>
+                    </div>
+                    <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="card p-4">
+                            <h4 class="font-bold text-lg text-green-400">الأفضل أداءً</h4>
+                            ${best && best.symbol ? `
+                                <p class="text-2xl font-bold">${best.symbol}</p>
+                                <p class="text-sm text-gray-300">متوسط الربح: <span class="font-semibold">${parseFloat(best.avg_profit).toFixed(2)}%</span></p>
+                                <p class="text-xs text-gray-400">(${best.trade_count} صفقات)</p>
+                            ` : '<p class="text-gray-400">لا توجد بيانات</p>'}
+                        </div>
+                        <div class="card p-4">
+                            <h4 class="font-bold text-lg text-red-400">الأسوأ أداءً</h4>
+                             ${worst && worst.symbol ? `
+                                <p class="text-2xl font-bold">${worst.symbol}</p>
+                                <p class="text-sm text-gray-300">متوسط الربح: <span class="font-semibold">${parseFloat(worst.avg_profit).toFixed(2)}%</span></p>
+                                <p class="text-xs text-gray-400">(${worst.trade_count} صفقات)</p>
+                            ` : '<p class="text-gray-400">لا توجد بيانات</p>'}
+                        </div>
+                    </div>
+                `;
+                 lucide.createIcons(); // To render any new icons in the modal
+            } else {
+                 reportContent.innerHTML = '<p class="text-center text-red-500">فشل تحميل التقرير. يرجى المحاولة مرة أخرى.</p>';
+            }
+        }
+
+
+        // === الدالة الرئيسية للتحديث الدوري ===
+        function fetchAllData() {
+            updateStatus();
+            updatePerformance();
+            updateOpenSignals();
+            updateClosedSignals();
+        }
+
+        // === نقطة البداية ===
+        document.addEventListener('DOMContentLoaded', () => {
+            lucide.createIcons();
+            fetchAllData();
+            setInterval(fetchAllData, 15000); // تحديث كل 15 ثانية
+            
+            // Event listeners for the modal
+            reportBtn.addEventListener('click', showGeneralReport);
+            closeModalBtn.addEventListener('click', () => reportModal.classList.add('hidden'));
+            reportModal.addEventListener('click', (e) => {
+                if (e.target === reportModal) {
+                    reportModal.classList.add('hidden');
+                }
+            });
+        });
+    </script>
+</body>
+</html>
