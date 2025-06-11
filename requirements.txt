@@ -11,3 +11,4 @@ waitress
 psycopg2-binary
 pandas_ta 
 ta
+lightgbm
