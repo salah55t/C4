@@ -144,7 +144,9 @@
 
     <script>
         // === إعدادات عامة ===
-        const API_BASE_URL = 'http://127.0.0.1:5000'; 
+        // تأكد أن هذا العنوان هو عنوان Render الصحيح لتطبيق البوت الخاص بك
+        const API_BASE_URL = 'https://c4-c5y5.onrender.com'; 
+        console.log('API Base URL:', API_BASE_URL); // إضافة لغرض التصحيح
 
         // === عناصر الـ DOM ===
         const statusText = document.getElementById('status-text');
@@ -161,12 +163,18 @@
 
         // === دوال جلب البيانات ===
         async function fetchData(endpoint) {
+            console.log(`Attempting to fetch from: ${API_BASE_URL}${endpoint}`); // إضافة لغرض التصحيح
             try {
                 const response = await fetch(`${API_BASE_URL}${endpoint}`);
+                console.log(`Response status for ${endpoint}: ${response.status}`); // إضافة لغرض التصحيح
                 if (!response.ok) {
+                    const errorBody = await response.text();
+                    console.error(`Network error for ${endpoint}: ${response.status} ${response.statusText} - Body: ${errorBody}`);
                     throw new Error(`Network error: ${response.statusText}`);
                 }
-                return await response.json();
+                const data = await response.json();
+                console.log(`Data received from ${endpoint}:`, data); // إضافة لغرض التصحيح
+                return data;
             } catch (error) {
                 console.error(`Fetch failed from ${endpoint}:`, error);
                 statusText.textContent = 'فشل الاتصال بالبوت';
