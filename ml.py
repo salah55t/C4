@@ -1071,7 +1071,7 @@ def home() -> Response:
     if last_training_time:
         status_message += f"- Last Training Time: {last_training_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
     if last_training_metrics:
-        status_message += f"- Last Training Metrics (Accuracy): {last_training_metrics.get('avg_accuracy', 'N/A'):.4f}\n"
+        status_message += f"- Last Training Metrics (Average Accuracy): {last_training_metrics.get('avg_accuracy', 'N/A'):.4f}\n"
         status_message += f"- Successful Models: {last_training_metrics.get('successful_models', 'N/A')}/{last_training_metrics.get('total_models_trained', 'N/A')}\n"
     if training_error:
         status_message += f"- Last Error: {training_error}\n"
