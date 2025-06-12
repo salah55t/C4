@@ -212,77 +212,57 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
     
     return df_ichimoku
 
-# (Other indicator functions like fibonacci, support/resistance can be kept as they are)
 def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
     df_fib = df.copy()
-    if len(df_fib) < lookback_window:
-        # If not enough data, return df with NaN columns to avoid KeyError
-        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
-            df_fib[col] = np.nan
-        return df_fib
 
-    # Calculate levels for the last window
-    window = df_fib.iloc[-lookback_window:]
-    high = window['high'].max()
-    low = window['low'].min()
-    price_range = high - low
+    # Calculate rolling high and low
+    rolling_high = df_fib['high'].rolling(window=lookback_window, min_periods=lookback_window).max()
+    rolling_low = df_fib['low'].rolling(window=lookback_window, min_periods=lookback_window).min()
+    price_range = rolling_high - rolling_low
+
+    # Calculate Fibonacci levels for each point in time based on its lookback window
+    fib_236 = rolling_high - (price_range * 0.236)
+    fib_382 = rolling_high - (price_range * 0.382)
+    fib_500 = rolling_high - (price_range * 0.500)
+    fib_618 = rolling_high - (price_range * 0.618)
+
+    # Calculate features, handle division by zero using .divide() and replacing inf
+    df_fib['fib_236_retrace_dist_norm'] = (df_fib['close'] - fib_236).divide(price_range).replace([np.inf, -np.inf], 0)
+    df_fib['fib_382_retrace_dist_norm'] = (df_fib['close'] - fib_382).divide(price_range).replace([np.inf, -np.inf], 0)
+    df_fib['fib_618_retrace_dist_norm'] = (df_fib['close'] - fib_618).divide(price_range).replace([np.inf, -np.inf], 0)
+    df_fib['is_price_above_fib_50'] = (df_fib['close'] > fib_500).astype(int)
     
-    if price_range > 0:
-        fib_236 = high - (price_range * 0.236)
-        fib_382 = high - (price_range * 0.382)
-        fib_500 = high - (price_range * 0.500)
-        fib_618 = high - (price_range * 0.618)
-        
-        last_close = df_fib['close'].iloc[-1]
-        
-        # Calculate normalized distance to each level. Normalization is by the price range.
-        df_fib.loc[df_fib.index[-1], 'fib_236_retrace_dist_norm'] = (last_close - fib_236) / price_range
-        df_fib.loc[df_fib.index[-1], 'fib_382_retrace_dist_norm'] = (last_close - fib_382) / price_range
-        df_fib.loc[df_fib.index[-1], 'fib_618_retrace_dist_norm'] = (last_close - fib_618) / price_range
-        df_fib.loc[df_fib.index[-1], 'is_price_above_fib_50'] = 1 if last_close > fib_500 else 0
-    else:
-        # If range is 0, distances are 0
-        df_fib.loc[df_fib.index[-1], 'fib_236_retrace_dist_norm'] = 0
-        df_fib.loc[df_fib.index[-1], 'fib_382_retrace_dist_norm'] = 0
-        df_fib.loc[df_fib.index[-1], 'fib_618_retrace_dist_norm'] = 0
-        df_fib.loc[df_fib.index[-1], 'is_price_above_fib_50'] = 0
-
+    # Where price_range is 0 or rolling values are NaN, the result of division can be NaN. Fill it with 0.
+    df_fib.fillna({
+        'fib_236_retrace_dist_norm': 0, 
+        'fib_382_retrace_dist_norm': 0, 
+        'fib_618_retrace_dist_norm': 0
+    }, inplace=True)
+    
     return df_fib
     
 def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
     df_sr = df.copy()
-    if len(df_sr) < lookback_window:
-        # If not enough data, return df with NaN columns to avoid KeyError
-        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
-             df_sr[col] = np.nan
-        return df_sr
 
-    # Calculate for the last window
-    window = df_sr.iloc[-lookback_window:]
-    recent_high = window['high'].max()
-    recent_low = window['low'].min()
-    price_range = recent_high - recent_low
-    
-    last_close = df_sr['close'].iloc[-1]
-    
-    if price_range > 0:
-        # Normalized distance from low (support) and high (resistance)
-        dist_to_low = (last_close - recent_low) / price_range
-        dist_to_high = (recent_high - last_close) / price_range
-        
-        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_low_norm'] = dist_to_low
-        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_high_norm'] = dist_to_high
-    else:
-        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_low_norm'] = 0
-        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_high_norm'] = 0
+    # Calculate rolling high and low
+    rolling_high = df_sr['high'].rolling(window=lookback_window, min_periods=lookback_window).max()
+    rolling_low = df_sr['low'].rolling(window=lookback_window, min_periods=lookback_window).min()
+    price_range = rolling_high - rolling_low
+
+    # Calculate features, handle division by zero
+    df_sr['price_distance_to_recent_low_norm'] = (df_sr['close'] - rolling_low).divide(price_range).replace([np.inf, -np.inf], 0)
+    df_sr['price_distance_to_recent_high_norm'] = (rolling_high - df_sr['close']).divide(price_range).replace([np.inf, -np.inf], 0)
+
+    # Where price_range is 0 or rolling values are NaN, the result of division can be NaN. Fill it with 0.
+    df_sr.fillna({
+        'price_distance_to_recent_low_norm': 0, 
+        'price_distance_to_recent_high_norm': 0
+    }, inplace=True)
 
     return df_sr
 
 # ---------------------- Database and Model Loading ----------------------
-# Functions init_db, check_db_connection, load_ml_model_from_db, convert_np_values remain unchanged
-
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    # Unchanged
     global conn, cur
     logger.info("[DB] بدء تهيئة قاعدة البيانات...")
     for attempt in range(retries):
@@ -311,7 +291,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             else: exit(1)
 
 def check_db_connection() -> bool:
-    # Unchanged
     global conn
     try:
         if conn is None or conn.closed != 0: init_db()
@@ -327,7 +306,6 @@ def check_db_connection() -> bool:
     return False
 
 def load_ml_model_from_db(symbol: str) -> Optional[Any]:
-    # Unchanged
     global ml_models
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models: return ml_models[model_name]
@@ -347,7 +325,6 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
         return None
 
 def convert_np_values(obj: Any) -> Any:
-    # Unchanged
     if isinstance(obj, (np.integer, np.int64)): return int(obj)
     if isinstance(obj, (np.floating, np.float64)): return float(obj)
     if isinstance(obj, np.ndarray): return obj.tolist()
@@ -356,9 +333,7 @@ def convert_np_values(obj: Any) -> Any:
     if pd.isna(obj): return None
     return obj
 # ---------------------- WebSocket and Helper Functions ----------------------
-# Functions handle_ticker_message, run_ticker_socket_manager, get_crypto_symbols remain unchanged
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    # Unchanged
     global ticker_data
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
@@ -370,7 +345,6 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
         logger.error(f"❌ [WS] خطأ في معالجة رسالة المؤشر: {e}")
 
 def run_ticker_socket_manager() -> None:
-    # Unchanged
     while True:
         try:
             logger.info("ℹ️ [WS] بدء مدير WebSocket...")
@@ -383,7 +357,6 @@ def run_ticker_socket_manager() -> None:
         time.sleep(15)
 
 def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # Unchanged
     try:
         with open(os.path.join(os.path.dirname(__file__), filename), 'r', encoding='utf-8') as f:
             raw_symbols = [line.strip().upper() for line in f if line.strip() and not line.startswith('#')]
@@ -407,14 +380,13 @@ class ScalpingTradingStrategy:
         ]
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        # --- MODIFIED: Ensure enough data for relative volume lookback ---
         min_len_required = max(
-            RSI_PERIOD + 2, # for momentum
+            RSI_PERIOD + 2,
             SUPERTRAND_PERIOD,
             SENKOU_SPAN_B_PERIOD,
             FIB_SR_LOOKBACK_WINDOW,
-            RELATIVE_VOLUME_LOOKBACK, # Added for relative volume
-            55 # for BTC EMA
+            RELATIVE_VOLUME_LOOKBACK,
+            55
         ) + 5 
 
         if len(df) < min_len_required:
@@ -423,7 +395,6 @@ class ScalpingTradingStrategy:
         
         try:
             df_calc = df.copy()
-            # --- MODIFIED: Added Relative Volume calculation ---
             df_calc['volume_avg_relative'] = df_calc['quote_volume'].rolling(window=RELATIVE_VOLUME_LOOKBACK, min_periods=RELATIVE_VOLUME_LOOKBACK).mean()
             
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
@@ -438,8 +409,10 @@ class ScalpingTradingStrategy:
                 if btc_trend is not None:
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
                     # --- FIXED FutureWarning ---
-                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].ffill() # Forward fill to handle any gaps
+                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].ffill()
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
+                else:
+                    df_calc['btc_trend_feature'] = 0.0
             else:
                 df_calc['btc_trend_feature'] = 0.0
             
@@ -451,10 +424,8 @@ class ScalpingTradingStrategy:
             df_cleaned = df_calc.dropna(subset=self.feature_columns_for_ml).copy()
             return df_cleaned if not df_cleaned.empty else None
         except Exception as e:
-            # --- MODIFIED: Log the specific failing key if it's a KeyError ---
             if isinstance(e, KeyError):
-                 missing_keys = [col for col in self.feature_columns_for_ml if col not in df_calc.columns]
-                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر (KeyError). الأعمدة المفقودة: {missing_keys}", exc_info=True)
+                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر (KeyError). الأعمدة المطلوبة غير موجودة.", exc_info=True)
             else:
                  logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر: {e}", exc_info=True)
             return None
@@ -467,15 +438,11 @@ class ScalpingTradingStrategy:
         current_price = ticker_data.get(self.symbol)
         if current_price is None: return None
         
-        # --- FILTER 1: Absolute Minimum Volume (Quote Volume) ---
-        # Checks the total USDT volume in the last N candles from the dataframe
-        min_volume_lookback = 5 # How many candles to sum for the check
         recent_quote_volume = last_row['quote_volume']
         if pd.isna(recent_quote_volume) or recent_quote_volume < MIN_VOLUME_15M_USDT:
              logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: حجم التداول المطلق ({recent_quote_volume:.2f}) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT}).")
              return None
 
-        # --- MODIFIED: FILTER 2: Relative Volume Check ---
         avg_volume = last_row.get('volume_avg_relative')
         last_candle_volume = last_row.get('quote_volume')
 
@@ -490,7 +457,6 @@ class ScalpingTradingStrategy:
         
         logger.info(f"✅ [Signal Gen {self.symbol}] نجح فلتر حجم التداول النسبي!")
 
-        # --- FILTER 3: ML Model Prediction ---
         if last_row[self.feature_columns_for_ml].isnull().any(): return None
         try:
             features_df = pd.DataFrame([last_row[self.feature_columns_for_ml]], columns=self.feature_columns_for_ml)
@@ -501,7 +467,6 @@ class ScalpingTradingStrategy:
             logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء تنبؤ نموذج ML: {e}")
             return None
         
-        # --- FILTER 4: Profit Margin and Stop Loss ---
         current_atr = last_row.get('atr')
         if pd.isna(current_atr) or current_atr <= 0: return None
         
@@ -523,12 +488,7 @@ class ScalpingTradingStrategy:
         }
 
 # ---------------------- Telegram, DB, Tracking, Main Loop ----------------------
-# All functions from here on remain the same as the previous version.
-# send_telegram_message, send_telegram_alert, send_tracking_notification, close_trade_by_id
-# insert_signal_into_db, get_interval_minutes, cleanup_resources, track_signals, main_loop
-# They do not need modification for this change. I will keep them for completeness.
 def send_telegram_message(target_chat_id: str, text: str, **kwargs):
-    # Unchanged
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown', **kwargs}
     if 'reply_markup' in payload: payload['reply_markup'] = json.dumps(convert_np_values(payload['reply_markup']))
@@ -536,7 +496,6 @@ def send_telegram_message(target_chat_id: str, text: str, **kwargs):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
-    # Unchanged
     symbol = signal_data['symbol'].replace('_', '\\_')
     entry = signal_data['entry_price']
     target = signal_data['initial_target']
@@ -555,7 +514,6 @@ def send_telegram_alert(signal_data: Dict[str, Any], timeframe: str) -> None:
     send_telegram_message(CHAT_ID, message, reply_markup=reply_markup)
 
 def send_tracking_notification(details: Dict[str, Any]) -> None:
-    # Unchanged
     symbol = details.get('symbol', 'N/A').replace('_', '\\_')
     profit_pct = details.get('profit_pct', 0.0)
     msg_type = details.get('type')
@@ -567,7 +525,6 @@ def send_tracking_notification(details: Dict[str, Any]) -> None:
     send_telegram_message(CHAT_ID, message)
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    # Unchanged
     if not check_db_connection() or not conn: return False
     try:
         with conn.cursor() as cur_ins:
@@ -585,7 +542,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
         return False
 
 def track_signals() -> None:
-    # Unchanged
     logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات...")
     while True:
         try:
@@ -625,7 +581,6 @@ def track_signals() -> None:
             time.sleep(30)
 
 def main_loop():
-    # Unchanged
     symbols_to_scan = get_crypto_symbols()
     logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمزًا للمسح.")
 
@@ -678,7 +633,6 @@ def main_loop():
             time.sleep(120)
 
 def get_interval_minutes(interval: str) -> int:
-    # Unchanged
     unit = interval[-1]
     value = int(interval[:-1])
     if unit == 'm': return value
@@ -687,13 +641,10 @@ def get_interval_minutes(interval: str) -> int:
     return 0
 
 def cleanup_resources():
-    # Unchanged
     if conn: conn.close()
     logger.info("✅ [Cleanup] تم إغلاق الموارد.")
 
 # ---------------------- Flask App (Unchanged) ----------------------
-# The Flask backend does not need any changes for this logic update.
-# I will keep it here for the file to be complete.
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
