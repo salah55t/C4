@@ -124,7 +124,7 @@ def get_fear_greed_index() -> str:
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response["data"][0]
+        data = response.json()["data"][0] # Corrected access to data
         value = int(data["value"])
         classification_en = data["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
@@ -660,13 +660,39 @@ def run_ticker_socket_manager() -> None:
 
 # ---------------------- دوال مساعدة أخرى ----------------------
 def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME, num_candles: int = VOLUME_LOOKBACK_CANDLES) -> float:
-    if not client: return 0.0
+    """
+    تجلب حجم التداول بالعملة المقابلة (Quote Volume، عادةً USDT) لآخر عدد محدد من الشموع.
+    """
+    if not client:
+        logger.error("❌ [Volume] عميل Binance غير مهيأ لجلب الحجم.")
+        return 0.0
     try:
         binance_interval = getattr(Client, f'KLINE_INTERVAL_{interval.upper()}', None)
-        if not binance_interval: return 0.0
+        if not binance_interval:
+            logger.warning(f"⚠️ [Volume] فترة زمنية غير مدعومة ({interval}) لجلب الحجم لـ {symbol}.")
+            return 0.0
+        
         klines = client.get_klines(symbol=symbol, interval=binance_interval, limit=num_candles)
-        return sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
-    except Exception: return 0.0
+        
+        if not klines:
+            logger.debug(f"ℹ️ [Volume] لا توجد بيانات شموع متاحة لـ {symbol} في فترة {interval} للحجم (ربما لا يوجد تداول).")
+            return 0.0
+        
+        # الحجم بالعملة المقابلة (Quote Volume) موجود في العنصر رقم 7 في بيانات الشمعة (kline data)
+        # العنصر رقم 5 هو حجم العملة الأساسية (Base Volume)
+        total_quote_volume = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
+        
+        logger.debug(f"✅ [Volume] تم جلب حجم تداول {symbol} في {interval} لآخر {num_candles} شمعة: {total_quote_volume:.2f} USDT")
+        return total_quote_volume
+    except BinanceAPIException as api_err:
+        logger.error(f"❌ [Volume] خطأ في Binance API أثناء جلب الحجم لـ {symbol}: {api_err}")
+        return 0.0
+    except BinanceRequestException as req_err:
+        logger.error(f"❌ [Volume] خطأ في طلب Binance (مشكلة في الشبكة أو الطلب) أثناء جلب الحجم لـ {symbol}: {req_err}")
+        return 0.0
+    except Exception as e:
+        logger.error(f"❌ [Volume] خطأ غير متوقع أثناء جلب الحجم لـ {symbol}: {e}", exc_info=True)
+        return 0.0
 
 def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     raw_symbols: List[str] = []
