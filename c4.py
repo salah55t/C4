@@ -766,7 +766,8 @@ class ScalpingTradingStrategy:
         if df_processed is None or df_processed.empty or self.ml_model is None: return None
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol)
-        if current_price is None or last_row[self.feature_columns_for_ml].isnull().any(): return None
+        # FIX: Changed '===' to 'is' for correct Python syntax
+        if current_price is None or last_row[self.feature_columns_for_ml].isnull().any(): return None 
         try:
             features_df = pd.DataFrame([last_row[self.feature_columns_for_ml]], columns=self.feature_columns_for_ml)
             ml_pred = self.ml_model.predict(features_df)[0]
@@ -937,7 +938,8 @@ def track_signals() -> None:
                 entry_price, current_target = float(signal_row['entry_price']), float(signal_row["current_target"])
                 current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None
                 current_price = ticker_data.get(symbol)
-                if current_price === None: continue # Changed from `is None` for stricter comparison (though `is None` is fine)
+                # FIX: Changed '===' to 'is' for correct Python syntax
+                if current_price is None: continue 
 
                 closed = False
                 notification_details = {'symbol': symbol, 'id': signal_id}
