@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG, # تم التغيير إلى DEBUG لعرض رسائل الرفض
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
@@ -779,7 +779,9 @@ class ScalpingTradingStrategy:
             return None
         
         if last_row[self.feature_columns_for_ml].isnull().any():
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: توجد قيم NaN في ميزات ML الأخيرة بعد المعالجة.")
+            # تحديد الأعمدة المحددة التي تحتوي على NaN للمزيد من التفاصيل في السجلات
+            nan_features = last_row[self.feature_columns_for_ml].isnull()[last_row[self.feature_columns_for_ml].isnull()].index.tolist()
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: توجد قيم NaN في ميزات ML الأخيرة بعد المعالجة. الميزات المتأثرة: {nan_features}")
             return None
         
         try:
@@ -1177,16 +1179,23 @@ def main_loop():
                 with conn.cursor() as symbol_cur:
                     symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND closed_at IS NULL LIMIT 1;", (symbol,))
                     if symbol_cur.fetchone():
-                        continue
+                        logger.debug(f"ℹ️ [Main] تخطي {symbol}: يوجد بالفعل إشارة مفتوحة لهذا الرمز.")
+                        continue # Skip if there's an open signal for this symbol
                 
                 df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_hist is None or df_hist.empty: continue
+                if df_hist is None or df_hist.empty:
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لا توجد بيانات تاريخية كافية أو متاحة.")
+                    continue
                 
                 strategy = ScalpingTradingStrategy(symbol)
-                if strategy.ml_model is None: continue
+                if strategy.ml_model is None:
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لم يتم تحميل نموذج ML لـ {symbol}.")
+                    continue
                 
                 df_indicators = strategy.populate_indicators(df_hist)
-                if df_indicators is None: continue
+                if df_indicators is None:
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: فشل في إعداد بيانات المؤشر.")
+                    continue
                 
                 potential_signal = strategy.generate_buy_signal(df_indicators)
                 if potential_signal:
@@ -1194,7 +1203,11 @@ def main_loop():
                         send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
                         slots_available -= 1
                         time.sleep(2)
-            
+                    else:
+                        logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
+                else:
+                    logger.debug(f"ℹ️ [Main] لا توجد إشارة شراء لـ {symbol} في هذه الدورة بناءً على معايير النموذج والفلاتر.")
+
             wait_time = max(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60 - 60, 60)
             logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
             time.sleep(wait_time)
