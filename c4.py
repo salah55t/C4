@@ -372,12 +372,15 @@ class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol)
+        # --- FIX START: Added 'volume_15m_avg' to the feature list ---
         self.feature_columns_for_ml = [
             'rsi_momentum_bullish', 'btc_trend_feature', 'supertrend_direction',
             'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook',
             'fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50',
-            'price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm'
+            'price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm',
+            'volume_15m_avg' # Added the missing feature
         ]
+        # --- FIX END ---
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         min_len_required = max(
@@ -395,7 +398,9 @@ class ScalpingTradingStrategy:
         
         try:
             df_calc = df.copy()
-            df_calc['volume_avg_relative'] = df_calc['quote_volume'].rolling(window=RELATIVE_VOLUME_LOOKBACK, min_periods=RELATIVE_VOLUME_LOOKBACK).mean()
+            # --- FIX START: Renamed 'volume_avg_relative' to 'volume_15m_avg' ---
+            df_calc['volume_15m_avg'] = df_calc['quote_volume'].rolling(window=RELATIVE_VOLUME_LOOKBACK, min_periods=RELATIVE_VOLUME_LOOKBACK).mean()
+            # --- FIX END ---
             
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
             df_calc['rsi_momentum_bullish'] = ((df_calc['rsi'].diff(1) > 0) & (df_calc['rsi'].diff(2) > 0)).astype(int)
@@ -443,7 +448,9 @@ class ScalpingTradingStrategy:
              logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: حجم التداول المطلق ({recent_quote_volume:.2f}) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT}).")
              return None
 
-        avg_volume = last_row.get('volume_avg_relative')
+        # --- FIX START: Changed get from 'volume_avg_relative' to 'volume_15m_avg' ---
+        avg_volume = last_row.get('volume_15m_avg')
+        # --- FIX END ---
         last_candle_volume = last_row.get('quote_volume')
 
         if pd.isna(avg_volume) or pd.isna(last_candle_volume):
