@@ -164,7 +164,12 @@
     </div>
 
     <script>
-        const API_BASE_URL = window.location.origin; // يفترض أن API هو نفس المضيف
+        // تحقق من API_BASE_URL للتأكد من أنه يشير إلى المكان الصحيح لتطبيقك الخلفي
+        // إذا كنت تستخدم Render، فإن window.location.origin هو عادةً الصحيح.
+        // إذا كنت تختبر محليًا، قد يكون 'http://localhost:10000' أو المنفذ الذي تعمل عليه Flask.
+        const API_BASE_URL = window.location.origin; 
+        console.log("Dashboard trying to connect to API_BASE_URL:", API_BASE_URL); // سجل هذا لتصحيح الأخطاء
+
         const botStatusElem = document.getElementById('botStatus');
         const totalTradesElem = document.getElementById('totalTrades');
         const winRateElem = document.getElementById('winRate');
@@ -179,6 +184,9 @@
         async function updateStatus() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/status`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const data = await response.json();
                 if (data.status === 'متصل') {
                     botStatusElem.textContent = 'متصل ✅';
@@ -201,6 +209,9 @@
         async function updatePerformance() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/performance`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const data = await response.json();
                 totalTradesElem.textContent = data.total_trades || 0;
                 winRateElem.textContent = `${(data.win_rate || 0).toFixed(2)}%`;
@@ -215,6 +226,9 @@
         async function updateOpenSignals() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/open-signals`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const signals = await response.json();
                 openSignalsTableBody.innerHTML = ''; // مسح المحتوى الحالي
 
@@ -245,28 +259,32 @@
                     let progressPercentage = 0;
                     if (signal.current_price && signal.entry_price && signal.current_target) {
                         const priceRange = signal.current_target - signal.entry_price;
-                        if (priceRange > 0) { // لصفقات الشراء
-                            progressPercentage = ((signal.current_price - signal.entry_price) / priceRange) * 100;
-                        } else if (priceRange < 0) { // لصفقات البيع (على افتراض أنها يمكن أن تحدث في المستقبل)
-                            // إذا كان الهدف أقل من سعر الدخول، فإننا نقيس التقدم عكسيا
-                            progressPercentage = ((signal.entry_price - signal.current_price) / Math.abs(priceRange)) * 100;
+                        // تأكد أن نقطة وقف الخسارة تستخدم كحد أدنى للنطاق في شريط التقدم إذا كانت الصفقة في الخسارة
+                        const minVal = signal.stop_loss !== undefined && signal.stop_loss !== null ? signal.stop_loss : signal.entry_price;
+                        const fullRange = signal.current_target - minVal;
+
+                        if (fullRange > 0) {
+                            progressPercentage = ((signal.current_price - minVal) / fullRange) * 100;
+                        } else if (fullRange < 0) { // Should not happen for long trades, but for robustness
+                            progressPercentage = ((minVal - signal.current_price) / Math.abs(fullRange)) * 100;
                         }
                     }
                     // تحديد النسبة بين 0 و 100%
                     progressPercentage = Math.max(0, Math.min(100, progressPercentage));
 
-                    // تحديد لون شريط التقدم (مثال: أخضر للتقدم، أحمر للخسارة إذا كان أقل من 0)
-                    // يمكن تعديل هذا ليكون تدرجًا أو ألوانًا مختلفة
-                    let progressBarColor = 'bg-green-500'; // اللون الافتراضي للتقدم الجيد
-                    if (progressPercentage < 50) {
-                        progressBarColor = 'bg-yellow-500';
+                    // تحديد لون شريط التقدم (تدرج ألوان)
+                    // للحصول على تدرج أكثر تعقيدًا، يمكنك استخدام دالة لحساب اللون بناءً على النسبة
+                    // هنا، سنستخدم ألوان Tailwind بسيطة بناءً على الشرائح
+                    let progressBarColorClass = 'bg-gray-400'; // default for 0%
+                    if (progressPercentage > 0 && progressPercentage <= 25) {
+                        progressBarColorClass = 'bg-red-500'; // بداية التقدم (لا يزال في منطقة SL)
+                    } else if (progressPercentage > 25 && progressPercentage <= 50) {
+                        progressBarColorClass = 'bg-orange-500'; // يقترب من نقطة الدخول أو يتجاوزها قليلاً
+                    } else if (progressPercentage > 50 && progressPercentage <= 75) {
+                        progressBarColorClass = 'bg-yellow-500'; // تقدم جيد نحو الهدف
+                    } else if (progressPercentage > 75) {
+                        progressBarColorClass = 'bg-green-500'; // قريب جداً من الهدف أو وصل إليه
                     }
-                    if (progressPercentage === 0 && signal.current_price < signal.entry_price) {
-                        progressBarColor = 'bg-red-500'; // إذا كان السعر أقل من سعر الدخول
-                    }
-                    // إذا كان هناك تدرج، يمكن استخدام `linear-gradient` في CSS
-                    // For a gradient from red to green, you might need a more complex calculation or Tailwind JIT compiler
-                    // For simplicity, we'll use a direct color based on range for now.
 
                     openSignalsTableBody.innerHTML += `
                         <tr class="${rowClass}">
@@ -277,7 +295,7 @@
                             <td class="px-4 py-2 whitespace-nowrap text-right">${stopLossDisplay}</td> <!-- عرض وقف الخسارة -->
                             <td class="px-4 py-2 text-right">
                                 <div class="progress-bar-container">
-                                    <div class="progress-bar-fill ${progressBarColor}" style="width: ${progressPercentage}%;">
+                                    <div class="progress-bar-fill ${progressBarColorClass}" style="width: ${progressPercentage}%;">
                                         ${progressPercentage.toFixed(0)}%
                                     </div>
                                 </div>
@@ -296,7 +314,7 @@
                 console.error('Error fetching open signals:', error);
                 openSignalsTableBody.innerHTML = `
                     <tr>
-                        <td colspan="8" class="px-4 py-3 text-center text-red-500">فشل تحميل الإشارات المفتوحة.</td>
+                        <td colspan="8" class="px-4 py-3 text-center text-red-500">فشل تحميل الإشارات المفتوحة. يرجى التحقق من اتصال البوت.</td>
                     </tr>
                 `;
             }
@@ -306,6 +324,9 @@
         async function updateClosedSignals() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/closed-signals`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const signals = await response.json();
                 closedSignalsTableBody.innerHTML = ''; // مسح المحتوى الحالي
 
@@ -351,8 +372,7 @@
 
         // === دالة إرسال إشارة الإغلاق اليدوي ===
         async function sendExitSignal(signalId) {
-            // استخدام صندوق حوار مخصص بدلاً من alert/confirm
-            // For brevity, using direct confirmation as per instruction.
+            // استخدام صندوق حوار مخصص بدلاً من alert/confirm (تذكير)
             if (!confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدويًا؟')) {
                 return;
             }
@@ -360,12 +380,9 @@
                 console.log(`Sending manual exit signal for ID: ${signalId}`);
                 // بما أن الإغلاق يتم عبر Telegram webhook، لا يوجد استدعاء مباشر لـ API من هنا.
                 // هذا الجزء في الواجهة الأمامية هو مجرد مؤشر على أن الإغلاق يتم في مكان آخر.
-                // يمكننا تحديث UI مباشرة بعد فترة قصيرة كما لو أن الإغلاق قد تم.
                 setTimeout(() => {
                     fetchAllData(); // تحديث البيانات بعد الإغلاق
                 }, 2000); // انتظر ثانيتين لمحاكاة وقت معالجة الإغلاق
-                // لا تستخدم alert() أو confirm() مباشرة في التطبيقات النهائية داخل Canvas
-                // استخدم بدلاً من ذلك مكونات UI مخصصة للمودال
                 alert('تم إرسال طلب إغلاق الصفقة يدوياً. سيتم تحديث لوحة التحكم قريباً.');
             } catch (error) {
                 console.error('Error sending exit signal:', error);
@@ -380,6 +397,9 @@
             reportContent.innerHTML = '<p class="text-center text-gray-500 p-8">جاري تحميل التقرير...</p>';
             try {
                 const response = await fetch(`${API_BASE_URL}/api/general-report`);
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
                 const report = await response.json();
 
                 if (response.ok) {
