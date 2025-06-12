@@ -124,9 +124,9 @@ def get_fear_greed_index() -> str:
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response.json()
-        value = int(data["data"][0]["value"])
-        classification_en = data["data"][0]["value_classification"]
+        data = response["data"][0]
+        value = int(data["value"])
+        classification_en = data["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
         logger.debug(f"✅ [Indicators] مؤشر الخوف والجشع: {value} ({classification_ar})")
         return f"{value} ({classification_ar})"
@@ -453,7 +453,7 @@ def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR
             df_fib[col] = np.nan
         return df_fib
     if len(df_fib) < lookback_window:
-        logger.warning(f"⚠️ [Indicator Fibonacci] Insufficient data ({len(df_fib)} < {lookback_window}) for Fibonacci calculation.")
+        logger.warning(f"⚠️ [Indicator Fibonacci] Insufficient data ({len(df)} < {lookback_window}) for Fibonacci calculation.")
         for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
             df_fib[col] = np.nan
         return df_fib
@@ -512,7 +512,7 @@ def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int
             df_sr[col] = np.nan
         return df_sr
     if len(df_sr) < lookback_window:
-        logger.warning(f"⚠️ [Indicator S/R] Insufficient data ({len(df_sr)} < {lookback_window}) for S/R calculation.")
+        logger.warning(f"⚠️ [Indicator S/R] Insufficient data ({len(df)} < {lookback_window}) for S/R calculation.")
         for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
             df_sr[col] = np.nan
         return df_sr
@@ -617,9 +617,9 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
 
 def convert_np_values(obj: Any) -> Any:
     # تم تحديث هذه الدالة لمعالجة أنواع NumPy بشكل صحيح مع إصدارات NumPy 2.0+
-    if isinstance(obj, (np.integer, np.int_, np.int64)): # إضافة np.int64
+    if isinstance(obj, (np.integer, np.int_, np.int64)):
         return int(obj)
-    if isinstance(obj, (np.floating, np.float64)): # استبدال np.float_ بـ np.float64
+    if isinstance(obj, (np.floating, np.float64)):
         return float(obj)
     if isinstance(obj, np.ndarray):
         return obj.tolist()
@@ -763,46 +763,69 @@ class ScalpingTradingStrategy:
             return None
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if df_processed is None or df_processed.empty or self.ml_model is None: return None
+        # logging reason for rejection
+        if df_processed is None or df_processed.empty:
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: بيانات المؤشر غير كافية أو فارغة.")
+            return None
+        if self.ml_model is None:
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: لم يتم تحميل نموذج ML.")
+            return None
+        
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol)
-        # FIX: Changed '===' to 'is' for correct Python syntax
-        if current_price is None or last_row[self.feature_columns_for_ml].isnull().any(): return None 
+        
+        if current_price is None:
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: سعر العملة الحالي غير متاح (الويب سوكيت).")
+            return None
+        
+        if last_row[self.feature_columns_for_ml].isnull().any():
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: توجد قيم NaN في ميزات ML الأخيرة بعد المعالجة.")
+            return None
+        
         try:
             features_df = pd.DataFrame([last_row[self.feature_columns_for_ml]], columns=self.feature_columns_for_ml)
             ml_pred = self.ml_model.predict(features_df)[0]
-            if ml_pred != 1: return None
-        except Exception: return None
+            if ml_pred != 1:
+                logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: نموذج ML لم يتنبأ بإشارة شراء (predicted: {ml_pred}).")
+                return None
+        except Exception as e:
+            logger.debug(f"❌ [Signal Gen {self.symbol}] رفض الإشارة: خطأ أثناء تنبؤ نموذج ML: {e}")
+            return None
         
         signal_details = {col: last_row.get(col, 'N/A') for col in self.feature_columns_for_ml}
         signal_details['ML_Prediction'] = 'صعودي ✅'
 
-        # الشروط الإضافية التي قد تصفى من قبل النموذج المدرب الآن
-        # if last_row.get('supertrend_direction') != 1: return None
-        # if last_row.get('btc_trend_feature') == -1.0: return None
-        
         volume_recent = fetch_recent_volume(self.symbol)
         if volume_recent < MIN_VOLUME_15M_USDT:
-            logger.debug(f"⚠️ [Signal Gen] حجم منخفض لـ {self.symbol}: {volume_recent}")
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: حجم التداول الأخير منخفض ({volume_recent:.2f} USDT) وهو أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT:.2f} USDT).")
             return None
         
         current_atr = last_row.get('atr')
         if pd.isna(current_atr) or current_atr <= 0:
-            logger.debug(f"⚠️ [Signal Gen] ATR غير صالح لـ {self.symbol}.")
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: قيمة ATR غير صالحة أو صفرية ({current_atr}).")
             return None
         
         # تحديد الهدف ووقف الخسارة بناءً على ATR مع استخدام ميزات النموذج لفلترة أفضل
         initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
         profit_margin_pct = ((initial_target / current_price) - 1) * 100
         if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-            logger.debug(f"⚠️ [Signal Gen] هامش ربح غير كافٍ لـ {self.symbol}: {profit_margin_pct:.2f}%")
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: هامش ربح غير كافٍ ({profit_margin_pct:.2f}%) وهو أقل من الحد الأدنى ({MIN_PROFIT_MARGIN_PCT:.2f}%).")
             return None
         
         # استخدام Supertrend كوقف خسارة أولي
         initial_stop_loss = last_row.get('supertrend', current_price - (1.0 * current_atr))
         # التأكد من أن وقف الخسارة تحت سعر الدخول
         if initial_stop_loss >= current_price:
-            initial_stop_loss = current_price - (1.0 * current_atr)
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: وقف الخسارة الأولي ({initial_stop_loss:.8g}) أعلى أو يساوي سعر الدخول الحالي ({current_price:.8g}).")
+            # يتم إعادة حساب وقف الخسارة ليكون تحت سعر الدخول بـ 1.0 * ATR كحل بديل
+            initial_stop_loss = current_price - (1.0 * current_atr) 
+            # إذا كان لا يزال أعلى من سعر الدخول (وهذا يعني أن السعر قد انخفض بسرعة كبيرة بعد حساب ATR)
+            # أو كان لا يزال إيجابياً ولكنه قد يسبب مشكلة، نعتبره رفضاً فعلياً
+            if initial_stop_loss >= current_price: # التحقق مرة أخرى بعد التعديل
+                logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض الإشارة: لا يمكن تحديد وقف خسارة فعال تحت سعر الدخول بعد المعالجة.")
+                return None
+
+
         initial_stop_loss = max(0.00000001, initial_stop_loss) # منع وقف الخسارة من أن يكون صفراً أو سالباً
 
         return {
@@ -938,8 +961,7 @@ def track_signals() -> None:
                 entry_price, current_target = float(signal_row['entry_price']), float(signal_row["current_target"])
                 current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None
                 current_price = ticker_data.get(symbol)
-                # FIX: Changed '===' to 'is' for correct Python syntax
-                if current_price is None: continue 
+                if current_price is None: continue
 
                 closed = False
                 notification_details = {'symbol': symbol, 'id': signal_id}
