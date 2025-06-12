@@ -1127,11 +1127,28 @@ def main_loop():
 
 # ---------------------- خدمة Flask (الواجهة الخلفية للوحة التحكم) ----------------------
 app = Flask(__name__)
-CORS(app) # تفعيل CORS لجميع المسارات
+
+# ---! التعديل الرئيسي هنا: تكوين CORS لـ Render !---
+# Render تقوم بتعيين متغير بيئة يسمى RENDER_EXTERNAL_URL
+render_url = os.environ.get('RENDER_EXTERNAL_URL') 
+origins = []
+if render_url:
+    # أضف رابط Render إلى قائمة المصادر المسموح بها
+    origins.append(render_url)
+# أضف الروابط المحلية للتجربة على الجهاز
+origins.append("http://127.0.0.1:10000")
+origins.append("http://localhost:10000")
+
+# قم بتطبيق CORS بشكل محدد على مسارات API
+CORS(app, resources={r"/api/*": {"origins": origins}})
+logger.info(f"✅ [Flask] تم تكوين CORS للسماح بالاتصال من: {origins}")
+# ---! نهاية التعديل الرئيسي !---
+
 
 @app.route('/')
 def serve_dashboard():
     # هذه الدالة تخدم ملف لوحة التحكم
+    logger.info(f"ℹ️ [Flask] طلب وارد لـ / من {request.remote_addr}")
     try:
         # تأكد من أن dashboard.html موجود في نفس الدليل
         return send_from_directory('.', 'dashboard.html')
@@ -1141,6 +1158,7 @@ def serve_dashboard():
 
 @app.route('/api/status')
 def api_status():
+    logger.info(f"ℹ️ [Flask] طلب وارد لـ /api/status من {request.remote_addr}")
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() else False
     return jsonify({'status': 'متصل' if ws_alive else 'غير متصل'})
 
