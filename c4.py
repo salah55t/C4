@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # تم التغيير من DEBUG إلى INFO
+    level=logging.INFO, # تم التغيير من DEBUG إلى INFO لتقليل الضوضاء
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
