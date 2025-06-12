@@ -1131,13 +1131,7 @@ app = Flask(__name__)
 # ---! التعديل الرئيسي هنا: تكوين CORS لـ Render !---
 # Render تقوم بتعيين متغير بيئة يسمى RENDER_EXTERNAL_URL
 render_url = os.environ.get('RENDER_EXTERNAL_URL') 
-origins = []
-if render_url:
-    # أضف رابط Render إلى قائمة المصادر المسموح بها
-    origins.append(render_url)
-# أضف الروابط المحلية للتجربة على الجهاز
-origins.append("http://127.0.0.1:10000")
-origins.append("http://localhost:10000")
+origins = ["*"] # السماح لجميع المصادر للتبسيط، يمكن تقييده لاحقًا
 
 # قم بتطبيق CORS بشكل محدد على مسارات API
 CORS(app, resources={r"/api/*": {"origins": origins}})
@@ -1161,27 +1155,6 @@ def api_status():
     logger.info(f"ℹ️ [Flask] طلب وارد لـ /api/status من {request.remote_addr}")
     ws_alive = ws_thread.is_alive() if 'ws_thread' in globals() else False
     return jsonify({'status': 'متصل' if ws_alive else 'غير متصل'})
-
-@app.route('/api/performance')
-def api_performance():
-    if not check_db_connection() or not conn: return jsonify({'error': 'DB connection failed'}), 500
-    try:
-        with conn.cursor() as db_cur:
-            db_cur.execute("""
-                SELECT
-                    COUNT(*) AS total_trades,
-                    COUNT(*) FILTER (WHERE profit_percentage > 0) AS winning_trades,
-                    COALESCE(SUM(profit_percentage), 0) AS total_profit_pct
-                FROM signals WHERE closed_at IS NOT NULL;
-            """)
-            stats = db_cur.fetchone() or {}
-            total = stats.get('total_trades', 0)
-            winning = stats.get('winning_trades', 0)
-            stats['win_rate'] = (winning / total * 100) if total > 0 else 0
-            return jsonify(convert_np_values(stats))
-    except Exception as e:
-        logger.error(f"API Error in /api/performance: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/open-signals')
 def api_open_signals():
@@ -1215,7 +1188,7 @@ def api_general_report():
     if not check_db_connection() or not conn: return jsonify({'error': 'DB connection failed'}), 500
     try:
         with conn.cursor() as db_cur:
-            # General stats
+            # General stats (aggregate)
             db_cur.execute("""
                 SELECT
                     COUNT(*) AS total_trades,
@@ -1229,6 +1202,26 @@ def api_general_report():
             total = report.get('total_trades', 0)
             winning = report.get('winning_trades', 0)
             report['win_rate'] = (winning / total * 100) if total > 0 else 0
+            
+            # --- New USDT Profit Calculation ---
+            db_cur.execute("SELECT entry_price, closing_price FROM signals WHERE closed_at IS NOT NULL AND closing_price IS NOT NULL;")
+            all_closed_trades = db_cur.fetchall()
+            
+            total_profit_usdt = 0
+            for trade in all_closed_trades:
+                entry_price = trade['entry_price']
+                closing_price = trade['closing_price']
+                if entry_price and closing_price and entry_price > 0:
+                    # Calculate net profit for a single 10 USDT trade
+                    initial_quantity = TRADE_VALUE / entry_price
+                    quantity_after_entry_fee = initial_quantity * (1 - BINANCE_FEE_RATE)
+                    final_usdt_value = quantity_after_entry_fee * closing_price
+                    final_usdt_after_exit_fee = final_usdt_value * (1 - BINANCE_FEE_RATE)
+                    net_profit_usdt = final_usdt_after_exit_fee - TRADE_VALUE
+                    total_profit_usdt += net_profit_usdt
+            
+            report['total_profit_usdt'] = total_profit_usdt
+            # --- End of New Calculation ---
             
             # Best performing
             db_cur.execute("""

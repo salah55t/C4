@@ -14,7 +14,9 @@
         /* Apply Cairo font to the body */
         body {
             font-family: 'Cairo', sans-serif;
-            background-color: #111827; /* Dark gray background */
+            background-color: #0d1117; /* GitHub dark background */
+            background-image: radial-gradient(circle at 1px 1px, #21262d 1px, transparent 0);
+            background-size: 20px 20px;
         }
         /* Custom scrollbar for a better look in dark theme */
         ::-webkit-scrollbar {
@@ -39,6 +41,29 @@
                 opacity: .5;
             }
         }
+        .kpi-card {
+            background-color: rgba(31, 41, 55, 0.5); /* Semi-transparent background */
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        .kpi-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0, 255, 135, 0.05);
+        }
+        .progress-bar-container {
+            background-color: #374151; /* gray-700 */
+            border-radius: 0.5rem;
+            overflow: hidden;
+            height: 10px;
+            width: 100%;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #34d399, #10b981); /* green gradient */
+            border-radius: 0.5rem;
+            transition: width 0.5s ease-in-out;
+        }
     </style>
 </head>
 <body class="text-gray-200">
@@ -51,10 +76,10 @@
         </header>
 
         <!-- Main Grid Layout -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6">
 
             <!-- KPI Cards Section -->
-            <div class="bg-gray-800 p-6 rounded-xl shadow-lg flex items-center justify-between col-span-1">
+            <div class="kpi-card p-6 rounded-xl shadow-lg flex items-center justify-between col-span-1">
                 <div>
                     <h2 class="text-lg text-gray-400">حالة البوت</h2>
                     <p id="bot-status" class="text-2xl font-bold flex items-center">
@@ -64,34 +89,39 @@
                 </div>
             </div>
 
-            <div class="bg-gray-800 p-6 rounded-xl shadow-lg col-span-1">
-                <h2 class="text-lg text-gray-400">إجمالي الأرباح</h2>
+            <div class="kpi-card p-6 rounded-xl shadow-lg col-span-1">
+                <h2 class="text-lg text-gray-400">إجمالي الربح (USDT)</h2>
+                <p id="total-profit-usdt" class="text-2xl font-bold text-emerald-400">--</p>
+            </div>
+
+            <div class="kpi-card p-6 rounded-xl shadow-lg col-span-1">
+                <h2 class="text-lg text-gray-400">إجمالي الربح (%)</h2>
                 <p id="total-profit" class="text-2xl font-bold">--%</p>
             </div>
 
-            <div class="bg-gray-800 p-6 rounded-xl shadow-lg col-span-1">
+            <div class="kpi-card p-6 rounded-xl shadow-lg col-span-1">
                 <h2 class="text-lg text-gray-400">معدل الربح</h2>
                 <p id="win-rate" class="text-2xl font-bold">--%</p>
             </div>
 
-            <div class="bg-gray-800 p-6 rounded-xl shadow-lg col-span-1">
+            <div class="kpi-card p-6 rounded-xl shadow-lg col-span-1">
                 <h2 class="text-lg text-gray-400">إجمالي الصفقات</h2>
                 <p id="total-trades" class="text-2xl font-bold">--</p>
             </div>
 
             <!-- Open Signals Table -->
-            <div class="md:col-span-2 lg:col-span-4 bg-gray-800 p-6 rounded-xl shadow-lg">
+            <div class="lg:col-span-5 bg-gray-800/50 backdrop-filter backdrop-blur-md border border-gray-700/50 p-6 rounded-xl shadow-lg">
                 <h2 class="text-2xl font-bold mb-4 text-white">الإشارات المفتوحة حالياً</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-right">
                         <thead class="border-b-2 border-gray-700">
                             <tr>
-                                <th class="p-3">الرمز</th>
-                                <th class="p-3">سعر الدخول</th>
-                                <th class="p-3">السعر الحالي</th>
-                                <th class="p-3">الهدف</th>
-                                <th class="p-3">وقف الخسارة</th>
-                                <th class="p-3 hidden sm:table-cell">وقت الإرسال</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-left">الرمز</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">سعر الدخول</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">السعر الحالي</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">الهدف</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">وقف الخسارة</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right hidden sm:table-cell">وقت الإرسال</th>
                             </tr>
                         </thead>
                         <tbody id="open-signals-body">
@@ -102,16 +132,16 @@
             </div>
 
              <!-- Closed Signals Table -->
-            <div class="md:col-span-2 lg:col-span-2 bg-gray-800 p-6 rounded-xl shadow-lg">
+            <div class="md:col-span-2 lg:col-span-3 bg-gray-800/50 backdrop-filter backdrop-blur-md border border-gray-700/50 p-6 rounded-xl shadow-lg">
                 <h2 class="text-2xl font-bold mb-4 text-white">آخر الصفقات المغلقة</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-right">
                         <thead class="border-b-2 border-gray-700">
                             <tr>
-                                <th class="p-3">الرمز</th>
-                                <th class="p-3">نسبة الربح</th>
-                                <th class="p-3">الحالة</th>
-                                <th class="p-3 hidden sm:table-cell">وقت الإغلاق</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-left">الرمز</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">نسبة الربح</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right">الحالة</th>
+                                <th class="p-3 text-sm font-semibold tracking-wider text-right hidden sm:table-cell">وقت الإغلاق</th>
                             </tr>
                         </thead>
                         <tbody id="closed-signals-body">
@@ -122,26 +152,26 @@
             </div>
 
             <!-- General Report Section -->
-            <div class="md:col-span-2 lg:col-span-2 bg-gray-800 p-6 rounded-xl shadow-lg">
+            <div class="md:col-span-2 lg:col-span-2 bg-gray-800/50 backdrop-filter backdrop-blur-md border border-gray-700/50 p-6 rounded-xl shadow-lg">
                 <h2 class="text-2xl font-bold mb-4 text-white">تقرير الأداء العام</h2>
                 <div id="general-report-content" class="space-y-4">
-                    <div class="flex justify-between items-center bg-gray-700 p-3 rounded-lg">
+                    <div class="flex justify-between items-center bg-gray-700/50 p-3 rounded-lg">
                         <span class="font-semibold text-gray-300">الصفقات الرابحة:</span>
                         <span id="winning-trades" class="font-bold text-green-400">--</span>
                     </div>
-                    <div class="flex justify-between items-center bg-gray-700 p-3 rounded-lg">
+                    <div class="flex justify-between items-center bg-gray-700/50 p-3 rounded-lg">
                         <span class="font-semibold text-gray-300">الصفقات الخاسرة:</span>
                         <span id="losing-trades" class="font-bold text-red-400">--</span>
                     </div>
-                    <div class="flex justify-between items-center bg-gray-700 p-3 rounded-lg">
+                    <div class="flex justify-between items-center bg-gray-700/50 p-3 rounded-lg">
                         <span class="font-semibold text-gray-300">متوسط الربح لكل صفقة:</span>
                         <span id="avg-profit-pct" class="font-bold">--%</span>
                     </div>
-                     <div class="flex justify-between items-center bg-gray-700 p-3 rounded-lg">
+                     <div class="flex justify-between items-center bg-gray-700/50 p-3 rounded-lg">
                         <span class="font-semibold text-gray-300">أفضل عملة أداءً:</span>
                         <span id="best-performing" class="font-bold">--</span>
                     </div>
-                     <div class="flex justify-between items-center bg-gray-700 p-3 rounded-lg">
+                     <div class="flex justify-between items-center bg-gray-700/50 p-3 rounded-lg">
                         <span class="font-semibold text-gray-300">أسوأ عملة أداءً:</span>
                         <span id="worst-performing" class="font-bold">--</span>
                     </div>
@@ -161,9 +191,13 @@
         const API_BASE_URL = ''; 
 
         // Function to safely format numbers to a specific number of decimal places
-        function formatNumber(num, decimals = 4) {
+        function formatNumber(num, decimals = 4, showSign = false) {
             if (typeof num !== 'number' || isNaN(num)) return '--';
-            return num.toFixed(decimals);
+            const formattedNum = num.toFixed(decimals);
+            if (showSign) {
+                return num > 0 ? `+${formattedNum}` : formattedNum;
+            }
+            return formattedNum;
         }
 
         // Function to format dates for display
@@ -194,20 +228,6 @@
                 document.getElementById('bot-status').innerHTML = `<span class="h-4 w-4 rounded-full bg-red-500 mr-2"></span> خطأ في الاتصال`;
             }
         }
-
-        // Fetch and display Performance Metrics
-        async function fetchPerformance() {
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/performance`);
-                if (!response.ok) throw new Error('Network response was not ok');
-                const data = await response.json();
-                document.getElementById('total-profit').textContent = `${formatNumber(data.total_profit_pct, 2)}%`;
-                document.getElementById('win-rate').textContent = `${formatNumber(data.win_rate, 2)}%`;
-                document.getElementById('total-trades').textContent = data.total_trades || '0';
-            } catch (error) {
-                console.error('Error fetching performance:', error);
-            }
-        }
         
         // Fetch and display Open Signals
         async function fetchOpenSignals() {
@@ -226,17 +246,40 @@
                 signals.forEach(s => {
                     const profitLoss = s.current_price - s.entry_price;
                     const priceColor = profitLoss >= 0 ? 'text-green-400' : 'text-red-400';
-                    const row = `
-                        <tr class="border-b border-gray-700 hover:bg-gray-700/50">
-                            <td class="p-3 font-semibold">${s.symbol}</td>
-                            <td class="p-3">${formatNumber(s.entry_price, 8)}</td>
-                            <td class="p-3 font-bold ${priceColor}">${formatNumber(s.current_price, 8)}</td>
-                            <td class="p-3">${formatNumber(s.current_target, 8)}</td>
-                            <td class="p-3">${formatNumber(s.stop_loss, 8)}</td>
-                            <td class="p-3 hidden sm:table-cell">${formatDate(s.sent_at)}</td>
+                    
+                    // Progress bar calculation
+                    const entry = s.entry_price || 0;
+                    const target = s.current_target || 0;
+                    const current = s.current_price || 0;
+                    let progress = 0;
+                    if (target > entry) {
+                        progress = ((current - entry) / (target - entry)) * 100;
+                    }
+                    // Clamp progress between 0 and 100
+                    const clampedProgress = Math.max(0, Math.min(100, progress));
+
+                    const rowHtml = `
+                        <tr class="border-b border-gray-700/50 hover:bg-gray-700/50">
+                            <td class="p-3 font-semibold text-left text-white">${s.symbol}</td>
+                            <td class="p-3 text-right">${formatNumber(s.entry_price, 8)}</td>
+                            <td class="p-3 font-bold text-right ${priceColor}">${formatNumber(s.current_price, 8)}</td>
+                            <td class="p-3 text-right">${formatNumber(s.current_target, 8)}</td>
+                            <td class="p-3 text-right">${formatNumber(s.stop_loss, 8)}</td>
+                            <td class="p-3 text-right hidden sm:table-cell">${formatDate(s.sent_at)}</td>
+                        </tr>
+                        <tr class="bg-gray-800/20 hover:bg-gray-700/50">
+                            <td colspan="6" class="px-3 pb-3 pt-1">
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" style="width: ${clampedProgress}%;"></div>
+                                </div>
+                                <div class="flex justify-between text-xs text-gray-400 mt-1">
+                                     <span>${formatNumber(clampedProgress, 1)}%</span>
+                                     <span>التقدم نحو الهدف</span>
+                                </div>
+                            </td>
                         </tr>
                     `;
-                    tbody.innerHTML += row;
+                    tbody.innerHTML += rowHtml;
                 });
             } catch (error) {
                 console.error('Error fetching open signals:', error);
@@ -262,11 +305,11 @@
                     const statusClass = s.achieved_target ? 'text-green-400' : 'text-red-400';
                     const statusText = s.achieved_target ? 'ربح' : 'خسارة';
                     const row = `
-                        <tr class="border-b border-gray-700 hover:bg-gray-700/50">
-                            <td class="p-3 font-semibold">${s.symbol}</td>
-                            <td class="p-3 font-bold ${statusClass}">${formatNumber(s.profit_percentage, 2)}%</td>
-                            <td class="p-3 font-bold ${statusClass}">${statusText}</td>
-                            <td class="p-3 hidden sm:table-cell">${formatDate(s.closed_at)}</td>
+                        <tr class="border-b border-gray-700/50 hover:bg-gray-700/50">
+                            <td class="p-3 font-semibold text-left text-white">${s.symbol}</td>
+                            <td class="p-3 font-bold text-right ${statusClass}">${formatNumber(s.profit_percentage, 2, true)}%</td>
+                            <td class="p-3 font-bold text-right ${statusClass}">${statusText}</td>
+                            <td class="p-3 text-right hidden sm:table-cell">${formatDate(s.closed_at)}</td>
                         </tr>
                     `;
                     tbody.innerHTML += row;
@@ -284,17 +327,24 @@
                  if (!response.ok) throw new Error('Network response was not ok');
                 const report = await response.json();
                 
+                // Main KPIs
+                document.getElementById('total-profit-usdt').textContent = `${formatNumber(report.total_profit_usdt, 2, true)} $`;
+                document.getElementById('total-profit').textContent = `${formatNumber(report.total_profit_pct, 2, true)}%`;
+                document.getElementById('win-rate').textContent = `${formatNumber(report.win_rate, 2)}%`;
+                document.getElementById('total-trades').textContent = report.total_trades || '0';
+
+                // Report Details
                 document.getElementById('winning-trades').textContent = report.winning_trades || '0';
                 document.getElementById('losing-trades').textContent = report.losing_trades || '0';
                 const avgProfitEl = document.getElementById('avg-profit-pct');
-                avgProfitEl.textContent = `${formatNumber(report.avg_profit_pct, 2)}%`;
+                avgProfitEl.textContent = `${formatNumber(report.avg_profit_pct, 2, true)}%`;
                 avgProfitEl.className = `font-bold ${report.avg_profit_pct >= 0 ? 'text-green-400' : 'text-red-400'}`;
                 
                 const best = report.best_performing_symbol;
-                document.getElementById('best-performing').textContent = best ? `${best.symbol} (${formatNumber(best.avg_profit, 2)}%)` : '--';
+                document.getElementById('best-performing').textContent = best ? `${best.symbol} (${formatNumber(best.avg_profit, 2, true)}%)` : '--';
                 
                 const worst = report.worst_performing_symbol;
-                document.getElementById('worst-performing').textContent = worst ? `${worst.symbol} (${formatNumber(worst.avg_profit, 2)}%)` : '--';
+                document.getElementById('worst-performing').textContent = worst ? `${worst.symbol} (${formatNumber(worst.avg_profit, 2, true)}%)` : '--';
 
             } catch (error) {
                  console.error('Error fetching general report:', error);
@@ -310,6 +360,7 @@
                 placeholderHtml += `
                     <tr class="placeholder-row">
                         <td class="p-3"><div class="h-4 bg-gray-600 rounded w-3/4"></div></td>
+                        <td class="p-3"><div class="h-4 bg-gray-600 rounded w-1/2"></div></td>
                         <td class="p-3"><div class="h-4 bg-gray-600 rounded w-1/2"></div></td>
                         <td class="p-3"><div class="h-4 bg-gray-600 rounded w-1/2"></div></td>
                         <td class="p-3"><div class="h-4 bg-gray-600 rounded w-1/2"></div></td>
@@ -336,21 +387,18 @@
         function initializeDashboard() {
             showLoadingPlaceholders();
             
-            // Fetch all data immediately
-            fetchStatus();
-            fetchPerformance();
-            fetchOpenSignals();
-            fetchClosedSignals();
-            fetchGeneralReport();
-
-            // Set interval to update data every 5 seconds
-            setInterval(() => {
+            const fetchAllData = () => {
                 fetchStatus();
-                fetchPerformance();
                 fetchOpenSignals();
                 fetchClosedSignals();
-                fetchGeneralReport();
-            }, 5000);
+                fetchGeneralReport(); // This now fetches all KPIs
+            };
+            
+            // Fetch all data immediately
+            fetchAllData();
+
+            // Set interval to update data every 5 seconds
+            setInterval(fetchAllData, 5000);
         }
 
         // Run on page load
