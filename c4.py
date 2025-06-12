@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.DEBUG, # تم التغيير إلى DEBUG لعرض رسائل الرفض
+    level=logging.INFO, # تم التغيير من DEBUG إلى INFO
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
@@ -124,8 +124,7 @@ def get_fear_greed_index() -> str:
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        # FIX: Corrected to use .json() method for the response object
-        data = response.json()["data"][0]
+        data = response.json()["data"][0] 
         value = int(data["value"])
         classification_en = data["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
@@ -1207,26 +1206,26 @@ def main_loop():
             slots_available = MAX_OPEN_TRADES - open_count
             for symbol in symbols_to_scan:
                 if slots_available <= 0: break
-                logger.debug(f"🔍 [Main] مسح {symbol}...")
+                logger.debug(f"🔍 [Main] مسح {symbol}...") # Keep debug for scanning details
                 with conn.cursor() as symbol_cur:
                     symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND closed_at IS NULL LIMIT 1;", (symbol,))
                     if symbol_cur.fetchone():
-                        logger.debug(f"ℹ️ [Main] تخطي {symbol}: يوجد بالفعل إشارة مفتوحة لهذا الرمز.")
+                        logger.debug(f"ℹ️ [Main] تخطي {symbol}: يوجد بالفعل إشارة مفتوحة لهذا الرمز.") # Keep debug for skipping
                         continue # Skip if there's an open signal for this symbol
                 
                 df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_hist is None or df_hist.empty:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لا توجد بيانات تاريخية كافية أو متاحة.")
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لا توجد بيانات تاريخية كافية أو متاحة.") # Keep debug for skipping
                     continue
                 
                 strategy = ScalpingTradingStrategy(symbol)
                 if strategy.ml_model is None:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لم يتم تحميل نموذج ML لـ {symbol}.")
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لم يتم تحميل نموذج ML لـ {symbol}.") # Keep debug for skipping
                     continue
                 
                 df_indicators = strategy.populate_indicators(df_hist)
                 if df_indicators is None:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: فشل في إعداد بيانات المؤشر.")
+                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: فشل في إعداد بيانات المؤشر.") # Keep debug for skipping
                     continue
                 
                 potential_signal = strategy.generate_buy_signal(df_indicators)
@@ -1238,7 +1237,7 @@ def main_loop():
                     else:
                         logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
                 else:
-                    logger.debug(f"ℹ️ [Main] لا توجد إشارة شراء لـ {symbol} في هذه الدورة بناءً على معايير النموذج والفلاتر.")
+                    logger.debug(f"ℹ️ [Main] لا توجد إشارة شراء لـ {symbol} في هذه الدورة بناءً على معايير النموذج والفلاتر.") # Keep debug for no signal
 
             wait_time = max(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60 - 60, 60)
             logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
