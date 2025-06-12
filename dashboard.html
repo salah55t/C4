@@ -161,6 +161,17 @@
             </div>
         </div>
 
+        <!-- Generic Dialog Modal (إصلاح: لإدارة التأكيدات والتنبيهات) -->
+        <div id="genericDialogModal" class="fixed inset-0 hidden bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div class="modal-content card w-full max-w-sm relative">
+                <h3 id="dialogTitle" class="text-xl font-bold text-white mb-4"></h3>
+                <p id="dialogMessage" class="text-gray-300 mb-6"></p>
+                <div class="flex justify-end gap-3" id="dialogButtons">
+                    <!-- Buttons will be injected here -->
+                </div>
+            </div>
+        </div>
+
     </div>
 
     <script>
@@ -176,6 +187,43 @@
         const reportModal = document.getElementById('reportModal');
         const closeModalBtn = document.getElementById('closeModalBtn');
         const reportContent = document.getElementById('reportContent');
+
+        // Generic Dialog Management
+        const genericDialogModal = document.getElementById('genericDialogModal');
+        const dialogTitleElem = document.getElementById('dialogTitle');
+        const dialogMessageElem = document.getElementById('dialogMessage');
+        const dialogButtonsElem = document.getElementById('dialogButtons');
+
+        let resolveConfirmPromise; // To hold the resolve function for confirmation
+
+        function showGenericDialog(title, message, buttonsHtml) {
+            dialogTitleElem.textContent = title;
+            dialogMessageElem.textContent = message;
+            dialogButtonsElem.innerHTML = buttonsHtml;
+            genericDialogModal.classList.remove('hidden');
+            lucide.createIcons(); // Re-render icons if any in buttons
+        }
+
+        function closeGenericDialog() {
+            genericDialogModal.classList.add('hidden');
+        }
+
+        function showAlert(title, message) {
+            const okButton = `<button class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 ease-in-out" onclick="closeGenericDialog()">موافق</button>`;
+            showGenericDialog(title, message, okButton);
+        }
+
+        function showConfirm(title, message) {
+            return new Promise((resolve) => {
+                resolveConfirmPromise = resolve;
+                const confirmButtons = `
+                    <button class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 ease-in-out" onclick="resolveConfirmPromise(false); closeGenericDialog();">إلغاء</button>
+                    <button class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300 ease-in-out" onclick="resolveConfirmPromise(true); closeGenericDialog();">تأكيد</button>
+                `;
+                showGenericDialog(title, message, confirmButtons);
+            });
+        }
+
 
         // === دالة تحديث حالة البوت ===
         async function updateStatus() {
@@ -367,18 +415,34 @@
 
         // === دالة إرسال إشارة الإغلاق اليدوي ===
         async function sendExitSignal(signalId) {
-            if (!confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدويًا؟')) {
+            const confirmed = await showConfirm(
+                'تأكيد الإغلاق',
+                'هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدويًا؟'
+            );
+
+            if (!confirmed) {
                 return;
             }
+
             try {
                 console.log(`Sending manual exit signal for ID: ${signalId}`);
+                // Since there's no direct API to send exit signal from dashboard.html to c4.py,
+                // and the close_trade_by_id function in c4.py is triggered by Telegram webhook,
+                // this part of the dashboard is currently illustrative.
+                // If a direct API endpoint were added to Flask for manual close, it would be called here.
+                // For now, we simulate success and refresh.
+                
+                // Simulate API call success for demonstration purposes:
+                // In a real scenario, you'd fetch from an endpoint like:
+                // await fetch(`${API_BASE_URL}/api/close-signal/${signalId}`, { method: 'POST' });
+
                 setTimeout(() => {
-                    fetchAllData(); 
-                }, 2000); 
-                alert('تم إرسال طلب إغلاق الصفقة يدوياً. سيتم تحديث لوحة التحكم قريباً.');
+                    fetchAllData();
+                }, 2000);
+                showAlert('تم الإرسال', 'تم إرسال طلب إغلاق الصفقة يدوياً. سيتم تحديث لوحة التحكم قريباً.');
             } catch (error) {
                 console.error('Error sending exit signal:', error);
-                alert('فشل إرسال إشارة الإغلاق اليدوي. يرجى مراجعة السجلات.');
+                showAlert('خطأ', 'فشل إرسال إشارة الإغلاق اليدوي. يرجى مراجعة السجلات.');
             }
         }
 
@@ -394,25 +458,26 @@
                 }
                 const report = await response.json();
 
-                if (response.ok) {
-                    reportContent.innerHTML = `
-                        <div class="space-y-4">
-                            <p><strong>إجمالي الصفقات المغلقة:</strong> <span class="text-white">${report.total_trades || 0}</span></p>
-                            <p><strong>الصفقات الرابحة:</strong> <span class="text-green-500">${report.winning_trades || 0}</span></p>
-                            <p><strong>الصفقات الخاسرة:</strong> <span class="text-red-500">${report.losing_trades || 0}</span></p>
-                            <p><strong>معدل الفوز:</strong> <span class="text-white">${(report.win_rate || 0).toFixed(2)}%</span></p>
-                            <p><strong>إجمالي الربح/الخسارة (%):</strong> <span class="${report.total_profit_pct > 0 ? 'text-green-500' : (report.total_profit_pct < 0 ? 'text-red-500' : 'text-gray-400')}">${(report.total_profit_pct || 0).toFixed(2)}%</span></p>
-                            <p><strong>متوسط الربح/الخسارة لكل صفقة (%):</strong> <span class="${report.avg_profit_pct > 0 ? 'text-green-500' : (report.avg_profit_pct < 0 ? 'text-red-500' : 'text-gray-400')}">${(report.avg_profit_pct || 0).toFixed(2)}%</span></p>
-                            
-                            <hr class="border-gray-700 my-4">
+                // Removed the redundant and unreachable `if (response.ok)` block here.
+                reportContent.innerHTML = `
+                    <div class="space-y-4">
+                        <p><strong>إجمالي الصفقات المغلقة:</strong> <span class="text-white">${report.total_trades || 0}</span></p>
+                        <p><strong>الصفقات الرابحة:</strong> <span class="text-green-500">${report.winning_trades || 0}</span></p>
+                        <p><strong>الصفقات الخاسرة:</strong> <span class="text-red-500">${report.losing_trades || 0}</span></p>
+                        <p><strong>معدل الفوز:</strong> <span class="text-white">${(report.win_rate || 0).toFixed(2)}%</span></p>
+                        <p><strong>إجمالي الربح/الخسارة (%):</strong> <span class="${report.total_profit_pct > 0 ? 'text-green-500' : (report.total_profit_pct < 0 ? 'text-red-500' : 'text-gray-400')}">${(report.total_profit_pct || 0).toFixed(2)}%</span></p>
+                        <p><strong>متوسط الربح/الخسارة لكل صفقة (%):</strong> <span class="${report.avg_profit_pct > 0 ? 'text-green-500' : (report.avg_profit_pct < 0 ? 'text-red-500' : 'text-gray-400')}">${(report.avg_profit_pct || 0).toFixed(2)}%</span></p>
+                        
+                        <hr class="border-gray-700 my-4">
 
-                            <p><strong>الرمز الأفضل أداءً:</strong> ${report.best_performing_symbol ? `<span class="text-green-400">${report.best_performing_symbol.symbol}</span> (متوسط ربح: ${report.best_performing_symbol.avg_profit.toFixed(2)}%, عدد الصفقات: ${report.best_performing_symbol.trade_count})` : 'لا يوجد بيانات'}</p>
-                            <p><strong>الرمز الأسوأ أداءً:</strong> ${report.worst_performing_symbol ? `<span class="text-red-400">${report.worst_performing_symbol.symbol}</span> (متوسط ربح: ${report.worst_performing_symbol.avg_profit.toFixed(2)}%, عدد الصفقات: ${report.worst_performing_symbol.trade_count})` : 'لا يوجد بيانات'}</p>
-                        </div>
-                    `;
-                 lucide.createIcons(); 
-            } else {
-                 reportContent.innerHTML = '<p class="text-center text-red-500 p-8">فشل تحميل التقرير. يرجى المحاولة مرة أخرى.</p>';
+                        <p><strong>الرمز الأفضل أداءً:</strong> ${report.best_performing_symbol ? `<span class="text-green-400">${report.best_performing_symbol.symbol}</span> (متوسط ربح: ${report.best_performing_symbol.avg_profit.toFixed(2)}%, عدد الصفقات: ${report.best_performing_symbol.trade_count})` : 'لا يوجد بيانات'}</p>
+                        <p><strong>الرمز الأسوأ أداءً:</strong> ${report.worst_performing_symbol ? `<span class="text-red-400">${report.worst_performing_symbol.symbol}</span> (متوسط ربح: ${report.worst_performing_symbol.avg_profit.toFixed(2)}%, عدد الصفقات: ${report.worst_performing_symbol.trade_count})` : 'لا يوجد بيانات'}</p>
+                    </div>
+                `;
+                lucide.createIcons(); 
+            } catch (error) {
+                console.error('Error fetching general report from ' + API_BASE_URL + '/api/general-report:', error);
+                reportContent.innerHTML = '<p class="text-center text-red-500 p-8">فشل تحميل التقرير. يرجى المحاولة مرة أخرى.</p>';
             }
         }
 

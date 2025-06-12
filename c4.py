@@ -21,7 +21,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # تم التغيير من DEBUG إلى INFO لتقليل الضوضاء
+    level=logging.INFO, # مستوى التسجيل INFO لتقليل الضوضاء
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
@@ -95,7 +95,7 @@ client: Optional[Client] = None
 ticker_data: Dict[str, float] = {}
 ml_models: Dict[str, Any] = {}
 
-# هذا القاموس الجديد يربط بين سلاسل الفترات الزمنية وثوابت Binance الصحيحة
+# هذا القاموس يربط بين سلاسل الفترات الزمنية وثوابت Binance الصحيحة
 BINANCE_KLINE_INTERVAL_MAP = {
     '1m': Client.KLINE_INTERVAL_1MINUTE,
     '3m': Client.KLINE_INTERVAL_3MINUTE,
@@ -118,18 +118,18 @@ BINANCE_KLINE_INTERVAL_MAP = {
 try:
     logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
     client = Client(API_KEY, API_SECRET)
-    client.ping()
+    client.ping() # محاولة اتصال لاختبار المفاتيح
     server_time = client.get_server_time()
     logger.info(f"✅ [Binance] تم تهيئة عميل Binance. وقت الخادم: {datetime.fromtimestamp(server_time['serverTime']/1000)}")
 except BinanceRequestException as req_err:
      logger.critical(f"❌ [Binance] خطأ في طلب Binance (مشكلة في الشبكة أو الطلب): {req_err}")
-     exit(1)
+     exit(1) # الخروج إذا لم يتمكن من الاتصال بـ Binance
 except BinanceAPIException as api_err:
      logger.critical(f"❌ [Binance] خطأ في واجهة برمجة تطبيقات Binance (مفاتيح غير صالحة أو مشكلة في الخادم): {api_err}")
-     exit(1)
+     exit(1) # الخروج إذا كانت مفاتيح API غير صالحة
 except Exception as e:
     logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
-    exit(1)
+    exit(1) # الخروج لأي خطأ آخر أثناء التهيئة
 
 # ---------------------- دوال المؤشرات الإضافية ----------------------
 def get_fear_greed_index() -> str:
@@ -587,7 +587,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if conn: conn.rollback()
             if attempt == retries - 1:
                 logger.critical("❌ [DB] فشلت جميع محاولات الاتصال بقاعدة البيانات.")
-                exit(1)
+                exit(1) # الخروج إذا فشلت جميع محاولات الاتصال بقاعدة البيانات
             time.sleep(delay)
 
 def check_db_connection() -> bool:
@@ -1194,88 +1194,6 @@ def run_flask():
     except ImportError:
         logger.warning("⚠️ [Flask] 'waitress' غير مثبت. استخدام خادم تطوير Flask.")
         app.run(host=host, port=port)
-
-# ---------------------- الحلقة الرئيسية والتحقق ----------------------
-def main_loop():
-    symbols_to_scan = get_crypto_symbols()
-    if not symbols_to_scan:
-        logger.critical("❌ [Main] لا توجد رموز صالحة للمتابعة.")
-        return
-    logger.info(f"✅ [Main] تم تحميل {len(symbols_to_scan)} رمزًا للمسح.")
-
-    while True:
-        try:
-            logger.info(f"🔄 [Main] بدء دورة مسح السوق - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            if not check_db_connection() or not conn:
-                time.sleep(60)
-                continue
-            
-            with conn.cursor() as cur_check:
-                cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE closed_at IS NULL;")
-                open_count = (cur_check.fetchone() or {}).get('count', 0)
-            
-            if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"⚠️ [Main] تم الوصول للحد الأقصى للصفقات المفتوحة ({open_count}). في انتظار...")
-                time.sleep(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60)
-                continue
-
-            slots_available = MAX_OPEN_TRADES - open_count
-            for symbol in symbols_to_scan:
-                if slots_available <= 0: break
-                logger.debug(f"🔍 [Main] مسح {symbol}...") # Keep debug for scanning details
-                with conn.cursor() as symbol_cur:
-                    symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND closed_at IS NULL LIMIT 1;", (symbol,))
-                    if symbol_cur.fetchone():
-                        logger.debug(f"ℹ️ [Main] تخطي {symbol}: يوجد بالفعل إشارة مفتوحة لهذا الرمز.") # Keep debug for skipping
-                        continue # Skip if there's an open signal for this symbol
-                
-                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_hist is None or df_hist.empty:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لا توجد بيانات تاريخية كافية أو متاحة.") # Keep debug for skipping
-                    continue
-                
-                strategy = ScalpingTradingStrategy(symbol)
-                if strategy.ml_model is None:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: لم يتم تحميل نموذج ML لـ {symbol}.") # Keep debug for skipping
-                    continue
-                
-                df_indicators = strategy.populate_indicators(df_hist)
-                if df_indicators is None:
-                    logger.debug(f"ℹ️ [Main] تخطي {symbol}: فشل في إعداد بيانات المؤشر.") # Keep debug for skipping
-                    continue
-                
-                potential_signal = strategy.generate_buy_signal(df_indicators)
-                if potential_signal:
-                    if insert_signal_into_db(potential_signal):
-                        send_telegram_alert(potential_signal, SIGNAL_GENERATION_TIMEFRAME)
-                        slots_available -= 1
-                        time.sleep(2)
-                    else:
-                        logger.error(f"❌ [Main] فشل إدراج الإشارة لـ {symbol} في قاعدة البيانات.")
-                else:
-                    logger.debug(f"ℹ️ [Main] لا توجد إشارة شراء لـ {symbol} في هذه الدورة بناءً على معايير النموذج والفلاتر.") # Keep debug for no signal
-
-            wait_time = max(get_interval_minutes(SIGNAL_GENERATION_TIMEFRAME) * 60 - 60, 60)
-            logger.info(f"⏳ [Main] انتظار {wait_time:.1f} ثانية للدورة التالية...")
-            time.sleep(wait_time)
-
-        except (KeyboardInterrupt, SystemExit):
-            break
-        except Exception as main_err:
-            logger.error(f"❌ [Main] خطأ غير متوقع في الحلقة الرئيسية: {main_err}", exc_info=True)
-            time.sleep(120)
-
-def get_interval_minutes(interval: str) -> int:
-    unit = interval[-1]
-    value = int(interval[:-1])
-    if unit == 'm': return value
-    if unit == 'h': return value * 60
-    if unit == 'd': return value * 24 * 60
-    return 0
-
-def cleanup_resources():
-    if conn: conn.close()
-    logger.info("✅ [Cleanup] تم إغلاق الموارد.")
 
 # ---------------------- نقطة الدخول الرئيسية ----------------------
 if __name__ == "__main__":
