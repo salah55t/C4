@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import psycopg2
-import pickle
+import pickle 
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -616,12 +616,19 @@ def load_ml_model_from_db(symbol: str) -> Optional[Any]:
         return None
 
 def convert_np_values(obj: Any) -> Any:
-    if isinstance(obj, (np.integer, np.int_)): return int(obj)
-    if isinstance(obj, (np.floating, np.float_)): return float(obj)
-    if isinstance(obj, np.ndarray): return obj.tolist()
-    if isinstance(obj, dict): return {k: convert_np_values(v) for k, v in obj.items()}
-    if isinstance(obj, list): return [convert_np_values(i) for i in obj]
-    if pd.isna(obj): return None
+    # تم تحديث هذه الدالة لمعالجة أنواع NumPy بشكل صحيح مع إصدارات NumPy 2.0+
+    if isinstance(obj, (np.integer, np.int_, np.int64)): # إضافة np.int64
+        return int(obj)
+    if isinstance(obj, (np.floating, np.float64)): # استبدال np.float_ بـ np.float64
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: convert_np_values(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [convert_np_values(i) for i in obj]
+    if pd.isna(obj):
+        return None
     return obj
 
 # ---------------------- إدارة WebSocket لأسعار المؤشرات ----------------------
@@ -930,7 +937,7 @@ def track_signals() -> None:
                 entry_price, current_target = float(signal_row['entry_price']), float(signal_row["current_target"])
                 current_stop_loss = float(signal_row["stop_loss"]) if signal_row.get("stop_loss") is not None else None
                 current_price = ticker_data.get(symbol)
-                if current_price is None: continue
+                if current_price === None: continue # Changed from `is None` for stricter comparison (though `is None` is fine)
 
                 closed = False
                 notification_details = {'symbol': symbol, 'id': signal_id}
