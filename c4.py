@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler # استيراد StandardScaler
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.DEBUG, # *** تم التغيير من INFO إلى DEBUG هنا ***
+    level=logging.INFO, # تم إعادته إلى INFO، ولكن رسائل الرفض ستكون INFO الآن
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
@@ -608,36 +608,36 @@ class ScalpingTradingStrategy:
         symbol_log_prefix = f"🔍 [Signal Gen {self.symbol}]"
 
         if df_processed is None or df_processed.empty: 
-            logger.debug(f"{symbol_log_prefix} رفض: DataFrame المعالج فارغ أو لا يحتوي على بيانات كافية.")
+            logger.info(f"{symbol_log_prefix} رفض: DataFrame المعالج فارغ أو لا يحتوي على بيانات كافية.")
             return None
         
         if self.ml_model is None: 
-            logger.debug(f"{symbol_log_prefix} رفض: نموذج ML غير محمل لهذا الرمز. يجب تدريب النموذج أولاً.")
+            logger.info(f"{symbol_log_prefix} رفض: نموذج ML غير محمل لهذا الرمز. يجب تدريب النموذج أولاً.")
             return None
         
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol)
         if current_price is None: 
-            logger.debug(f"{symbol_log_prefix} رفض: السعر الحالي غير متوفر لـ {self.symbol} من بيانات التيكر.")
+            logger.info(f"{symbol_log_prefix} رفض: السعر الحالي غير متوفر لـ {self.symbol} من بيانات التيكر.")
             return None
         
         recent_quote_volume = last_row.get('quote_volume')
         if pd.isna(recent_quote_volume) or recent_quote_volume < MIN_VOLUME_15M_USDT:
-             logger.debug(f"{symbol_log_prefix} رفض: حجم التداول المطلق ({recent_quote_volume:.2f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT} USDT).")
+             logger.info(f"{symbol_log_prefix} رفض: حجم التداول المطلق ({recent_quote_volume:.2f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT} USDT).")
              return None
-        logger.debug(f"{symbol_log_prefix} تجاوز فحص حجم التداول المطلق: {recent_quote_volume:.2f} USDT.")
+        logger.info(f"{symbol_log_prefix} تجاوز فحص حجم التداول المطلق: {recent_quote_volume:.2f} USDT.")
 
 
         avg_volume = last_row.get('volume_15m_avg')
         last_candle_volume = last_row.get('quote_volume') # استخدام quote_volume هنا للاتساق
 
         if pd.isna(avg_volume) or pd.isna(last_candle_volume):
-             logger.debug(f"{symbol_log_prefix} رفض: قيم حجم التداول النسبي (المتوسط أو الشمعة الأخيرة) غير متاحة.")
+             logger.info(f"{symbol_log_prefix} رفض: قيم حجم التداول النسبي (المتوسط أو الشمعة الأخيرة) غير متاحة.")
              return None
 
         required_volume = avg_volume * RELATIVE_VOLUME_FACTOR
         if last_candle_volume < required_volume:
-            logger.debug(f"{symbol_log_prefix} رفض: حجم الشمعة الأخيرة ({last_candle_volume:,.0f} USDT) أقل من الحجم النسبي المطلوب ({required_volume:,.0f} USDT). نسبة الحجم: {last_candle_volume/avg_volume:.2f}x.")
+            logger.info(f"{symbol_log_prefix} رفض: حجم الشمعة الأخيرة ({last_candle_volume:,.0f} USDT) أقل من الحجم النسبي المطلوب ({required_volume:,.0f} USDT). نسبة الحجم: {last_candle_volume/avg_volume:.2f}x.")
             return None
         
         logger.info(f"✅ {symbol_log_prefix} نجح فلتر حجم التداول النسبي! حجم الشمعة: {last_candle_volume:,.0f}، متوسط الحجم: {avg_volume:,.0f}.")
@@ -645,7 +645,7 @@ class ScalpingTradingStrategy:
         # التأكد من عدم وجود قيم NaN في الميزات قبل التنبؤ
         if last_row[self.feature_columns_for_ml].isnull().any(): 
             missing_features = last_row[self.feature_columns_for_ml][last_row[self.feature_columns_for_ml].isnull()].index.tolist()
-            logger.debug(f"{symbol_log_prefix} رفض: توجد قيم NaN في الميزات المطلوبة للتنبؤ بـ ML. الميزات المفقودة: {', '.join(missing_features)}.")
+            logger.info(f"{symbol_log_prefix} رفض: توجد قيم NaN في الميزات المطلوبة للتنبؤ بـ ML. الميزات المفقودة: {', '.join(missing_features)}.")
             return None
         
         try:
@@ -665,7 +665,7 @@ class ScalpingTradingStrategy:
                 features_scaled = self.scaler.transform(features_df)
                 ml_prediction = self.ml_model.predict(features_scaled)[0]
                 if ml_prediction != 1:
-                    logger.debug(f"{symbol_log_prefix} رفض: نموذج ML لم يتنبأ بإشارة شراء (التنبؤ: {ml_prediction}).")
+                    logger.info(f"{symbol_log_prefix} رفض: نموذج ML لم يتنبأ بإشارة شراء (التنبؤ: {ml_prediction}).")
                     return None
                 logger.info(f"✅ {symbol_log_prefix} نجح تنبؤ نموذج ML (التنبؤ: {ml_prediction}).")
             else:
@@ -678,25 +678,25 @@ class ScalpingTradingStrategy:
         
         current_atr = last_row.get('atr')
         if pd.isna(current_atr) or current_atr <= 0: 
-            logger.debug(f"{symbol_log_prefix} رفض: قيمة ATR غير صالحة ({current_atr}).")
+            logger.info(f"{symbol_log_prefix} رفض: قيمة ATR غير صالحة ({current_atr}).")
             return None
-        logger.debug(f"{symbol_log_prefix} تجاوز فحص قيمة ATR: {current_atr:.4f}.")
+        logger.info(f"✅ {symbol_log_prefix} تجاوز فحص قيمة ATR: {current_atr:.4f}.")
         
         initial_target = current_price + (PRICE_CHANGE_THRESHOLD_FOR_TARGET * current_price) 
         profit_potential_pct = ((initial_target / current_price) - 1) * 100
         if profit_potential_pct < MIN_PROFIT_MARGIN_PCT:
-             logger.debug(f"{symbol_log_prefix} رفض: هامش الربح المحتمل غير كافٍ ({profit_potential_pct:.2f}%)، الحد الأدنى: {MIN_PROFIT_MARGIN_PCT:.2f}%).")
+             logger.info(f"{symbol_log_prefix} رفض: هامش الربح المحتمل غير كافٍ ({profit_potential_pct:.2f}%)، الحد الأدنى: {MIN_PROFIT_MARGIN_PCT:.2f}%).")
              return None
-        logger.debug(f"{symbol_log_prefix} تجاوز فحص هامش الربح المحتمل: {profit_potential_pct:.2f}%.")
+        logger.info(f"✅ {symbol_log_prefix} تجاوز فحص هامش الربح المحتمل: {profit_potential_pct:.2f}%.")
 
         initial_stop_loss = last_row.get('supertrend', current_price - (1.0 * current_atr))
         if initial_stop_loss >= current_price:
              # إذا كان Supertrend أعلى من السعر، استخدم ATR لحساب وقف الخسارة
              initial_stop_loss = current_price - (1.0 * current_atr)
              if initial_stop_loss >= current_price: 
-                 logger.debug(f"{symbol_log_prefix} رفض: وقف الخسارة المحسوب ({initial_stop_loss:.8g}) ليس أقل من السعر الحالي ({current_price:.8g}).")
+                 logger.info(f"{symbol_log_prefix} رفض: وقف الخسارة المحسوب ({initial_stop_loss:.8g}) ليس أقل من السعر الحالي ({current_price:.8g}).")
                  return None
-        logger.debug(f"{symbol_log_prefix} تجاوز فحص وقف الخسارة: {max(0.00000001, initial_stop_loss):.8g}.")
+        logger.info(f"✅ {symbol_log_prefix} تجاوز فحص وقف الخسارة: {max(0.00000001, initial_stop_loss):.8g}.")
 
 
         return {
@@ -822,7 +822,7 @@ def main_loop():
             slots_available = MAX_OPEN_TRADES - open_count
             for symbol in symbols_to_scan:
                 if slots_available <= 0: break
-                logger.debug(f"🔍 [Main] مسح {symbol}...")
+                logger.info(f"🔍 [Main] مسح {symbol}...") # تغيير مستوى التسجيل هنا أيضًا
                 with conn.cursor() as symbol_cur:
                     symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND closed_at IS NULL LIMIT 1;", (symbol,))
                     if symbol_cur.fetchone(): continue
