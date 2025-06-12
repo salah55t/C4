@@ -214,17 +214,68 @@ def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIO
 
 # (Other indicator functions like fibonacci, support/resistance can be kept as they are)
 def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
-    # This function remains unchanged
     df_fib = df.copy()
-    if len(df_fib) < lookback_window: return df_fib
-    # (Implementation is correct and does not need changes)
+    if len(df_fib) < lookback_window:
+        # If not enough data, return df with NaN columns to avoid KeyError
+        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
+            df_fib[col] = np.nan
+        return df_fib
+
+    # Calculate levels for the last window
+    window = df_fib.iloc[-lookback_window:]
+    high = window['high'].max()
+    low = window['low'].min()
+    price_range = high - low
+    
+    if price_range > 0:
+        fib_236 = high - (price_range * 0.236)
+        fib_382 = high - (price_range * 0.382)
+        fib_500 = high - (price_range * 0.500)
+        fib_618 = high - (price_range * 0.618)
+        
+        last_close = df_fib['close'].iloc[-1]
+        
+        # Calculate normalized distance to each level. Normalization is by the price range.
+        df_fib.loc[df_fib.index[-1], 'fib_236_retrace_dist_norm'] = (last_close - fib_236) / price_range
+        df_fib.loc[df_fib.index[-1], 'fib_382_retrace_dist_norm'] = (last_close - fib_382) / price_range
+        df_fib.loc[df_fib.index[-1], 'fib_618_retrace_dist_norm'] = (last_close - fib_618) / price_range
+        df_fib.loc[df_fib.index[-1], 'is_price_above_fib_50'] = 1 if last_close > fib_500 else 0
+    else:
+        # If range is 0, distances are 0
+        df_fib.loc[df_fib.index[-1], 'fib_236_retrace_dist_norm'] = 0
+        df_fib.loc[df_fib.index[-1], 'fib_382_retrace_dist_norm'] = 0
+        df_fib.loc[df_fib.index[-1], 'fib_618_retrace_dist_norm'] = 0
+        df_fib.loc[df_fib.index[-1], 'is_price_above_fib_50'] = 0
+
     return df_fib
     
 def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
-    # This function remains unchanged
     df_sr = df.copy()
-    if len(df_sr) < lookback_window: return df_sr
-    # (Implementation is correct and does not need changes)
+    if len(df_sr) < lookback_window:
+        # If not enough data, return df with NaN columns to avoid KeyError
+        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
+             df_sr[col] = np.nan
+        return df_sr
+
+    # Calculate for the last window
+    window = df_sr.iloc[-lookback_window:]
+    recent_high = window['high'].max()
+    recent_low = window['low'].min()
+    price_range = recent_high - recent_low
+    
+    last_close = df_sr['close'].iloc[-1]
+    
+    if price_range > 0:
+        # Normalized distance from low (support) and high (resistance)
+        dist_to_low = (last_close - recent_low) / price_range
+        dist_to_high = (recent_high - last_close) / price_range
+        
+        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_low_norm'] = dist_to_low
+        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_high_norm'] = dist_to_high
+    else:
+        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_low_norm'] = 0
+        df_sr.loc[df_sr.index[-1], 'price_distance_to_recent_high_norm'] = 0
+
     return df_sr
 
 # ---------------------- Database and Model Loading ----------------------
@@ -386,8 +437,9 @@ class ScalpingTradingStrategy:
                 btc_trend = _calculate_btc_trend_feature(btc_df)
                 if btc_trend is not None:
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
-                    df_calc['btc_trend_feature'].ffill(inplace=True) # Forward fill to handle any gaps
-                    df_calc['btc_trend_feature'].fillna(0.0, inplace=True)
+                    # --- FIXED FutureWarning ---
+                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].ffill() # Forward fill to handle any gaps
+                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
             else:
                 df_calc['btc_trend_feature'] = 0.0
             
@@ -399,7 +451,12 @@ class ScalpingTradingStrategy:
             df_cleaned = df_calc.dropna(subset=self.feature_columns_for_ml).copy()
             return df_cleaned if not df_cleaned.empty else None
         except Exception as e:
-            logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر: {e}", exc_info=True)
+            # --- MODIFIED: Log the specific failing key if it's a KeyError ---
+            if isinstance(e, KeyError):
+                 missing_keys = [col for col in self.feature_columns_for_ml if col not in df_calc.columns]
+                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر (KeyError). الأعمدة المفقودة: {missing_keys}", exc_info=True)
+            else:
+                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر: {e}", exc_info=True)
             return None
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
