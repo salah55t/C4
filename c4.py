@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import psycopg2
-import pickle 
+import pickle
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -731,7 +731,8 @@ class ScalpingTradingStrategy:
                 btc_trend = _calculate_btc_trend_feature(btc_df)
                 if btc_trend is not None:
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
-                    df_calc['btc_trend_feature'].fillna(0.0, inplace=True)
+                    # FIX: Removed inplace=True to avoid FutureWarning
+                    df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
             else:
                 df_calc['btc_trend_feature'] = 0.0 # الافتراضي إذا لم يتم جلب بيانات BTC
             
