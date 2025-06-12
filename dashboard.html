@@ -176,8 +176,8 @@
 
     <script>
         // --- التعديل الرئيسي هنا ---
-        // تم تغيير الرابط ليكون ثابتًا ويشير إلى الخادم المحلي الافتراضي
-        const API_BASE_URL = 'http://127.0.0.1:10000'; 
+        // هذا الكود يحدد عنوان الخادم تلقائيًا، سواء كان على Render أو على جهازك المحلي
+        const API_BASE_URL = window.location.origin; 
         console.log("Dashboard trying to connect to API_BASE_URL:", API_BASE_URL); 
 
         const botStatusElem = document.getElementById('botStatus');
