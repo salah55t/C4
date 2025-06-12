@@ -353,7 +353,8 @@
                     `;
                 });
                 lucide.createIcons();
-            } catch (error) {
+            }
+            catch (error) {
                 console.error('Error fetching open signals from ' + API_BASE_URL + '/api/open-signals:', error);
                 openSignalsTableBody.innerHTML = `
                     <tr>
@@ -458,7 +459,6 @@
                 }
                 const report = await response.json();
 
-                // Removed the redundant and unreachable `if (response.ok)` block here.
                 reportContent.innerHTML = `
                     <div class="space-y-4">
                         <p><strong>إجمالي الصفقات المغلقة:</strong> <span class="text-white">${report.total_trades || 0}</span></p>
