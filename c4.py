@@ -18,6 +18,7 @@ from threading import Thread
 from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
+from sklearn.preprocessing import StandardScaler # استيراد StandardScaler
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
@@ -517,7 +518,6 @@ class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol)
-        # --- FIX START: تحديث feature_columns_for_ml لتطابق ml.py بدقة ---
         self.feature_columns_for_ml = [
             'volume_15m_avg',
             'rsi_momentum_bullish',
@@ -533,11 +533,9 @@ class ScalpingTradingStrategy:
             'price_distance_to_recent_low_norm',
             'price_distance_to_recent_high_norm'
         ]
-        # --- FIX END ---
-        self.scaler: Optional[StandardScaler] = None # لإضافة StandardScaler
+        self.scaler: Optional[StandardScaler] = None 
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        # تم تحديث min_len_required ليعكس جميع المؤشرات المستخدمة في ml.py
         min_len_required = max(
             VOLUME_LOOKBACK_CANDLES,
             RSI_PERIOD,
@@ -549,8 +547,8 @@ class ScalpingTradingStrategy:
             SENKOU_SPAN_B_PERIOD,
             CHIKOU_LAG,
             FIB_SR_LOOKBACK_WINDOW,
-            55 # للحصول على بيانات كافية لاتجاه BTC
-        ) + 5 # مخزن إضافي
+            55 
+        ) + 5 
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جداً ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -559,11 +557,9 @@ class ScalpingTradingStrategy:
         try:
             df_calc = df.copy()
 
-            # حساب volume_15m_avg (باستخدام quote_volume كما هو الحال في fetch_historical_data)
             df_calc['volume_15m_avg'] = df_calc['quote_volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
             
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            # إضافة مؤشر زخم RSI الصعودي
             df_calc['rsi_momentum_bullish'] = 0
             if len(df_calc) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
                 for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_calc)):
@@ -578,7 +574,6 @@ class ScalpingTradingStrategy:
             if btc_df is not None:
                 btc_trend = _calculate_btc_trend_feature(btc_df)
                 if btc_trend is not None:
-                    # يجب أن نضمن أن مؤشر df_calc و btc_trend لهما تداخل زمني للدمج
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].ffill()
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
@@ -587,19 +582,16 @@ class ScalpingTradingStrategy:
             else:
                 df_calc['btc_trend_feature'] = 0.0
             
-            # إضافة مؤشرات Ichimoku, Fibonacci, Support/Resistance
             df_calc = calculate_ichimoku_cloud(df_calc, TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_SPAN_B_PERIOD, CHIKOU_LAG)
             df_calc = calculate_fibonacci_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
             df_calc = calculate_support_resistance_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
 
-            # التأكد من وجود جميع أعمدة الميزات وتعبئة أي قيم NaN
             for col in self.feature_columns_for_ml:
                 if col not in df_calc.columns:
                     df_calc[col] = np.nan
                 df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
 
 
-            # تصفية الصفوف التي تحتوي على NaN في أعمدة الميزات
             df_cleaned = df_calc.dropna(subset=self.feature_columns_for_ml).copy()
             
             if df_cleaned.empty:
@@ -612,99 +604,100 @@ class ScalpingTradingStrategy:
             return None
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        from sklearn.preprocessing import StandardScaler # استيراد هنا لضمان توفره
+        # إضافة تسجيلات مفصلة لأسباب الرفض
+        symbol_log_prefix = f"🔍 [Signal Gen {self.symbol}]"
+
         if df_processed is None or df_processed.empty: 
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: DataFrame المعالج فارغ.")
+            logger.debug(f"{symbol_log_prefix} رفض: DataFrame المعالج فارغ أو لا يحتوي على بيانات كافية.")
             return None
+        
         if self.ml_model is None: 
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: نموذج ML غير محمل.")
+            logger.debug(f"{symbol_log_prefix} رفض: نموذج ML غير محمل لهذا الرمز. يجب تدريب النموذج أولاً.")
             return None
         
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol)
         if current_price is None: 
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: السعر الحالي غير متوفر.")
+            logger.debug(f"{symbol_log_prefix} رفض: السعر الحالي غير متوفر لـ {self.symbol} من بيانات التيكر.")
             return None
         
-        recent_quote_volume = last_row['quote_volume']
+        recent_quote_volume = last_row.get('quote_volume')
         if pd.isna(recent_quote_volume) or recent_quote_volume < MIN_VOLUME_15M_USDT:
-             logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: حجم التداول المطلق ({recent_quote_volume:.2f}) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT}).")
+             logger.debug(f"{symbol_log_prefix} رفض: حجم التداول المطلق ({recent_quote_volume:.2f} USDT) أقل من الحد الأدنى المطلوب ({MIN_VOLUME_15M_USDT} USDT).")
              return None
+        logger.debug(f"{symbol_log_prefix} تجاوز فحص حجم التداول المطلق: {recent_quote_volume:.2f} USDT.")
+
 
         avg_volume = last_row.get('volume_15m_avg')
-        last_candle_volume = last_row.get('quote_volume')
+        last_candle_volume = last_row.get('quote_volume') # استخدام quote_volume هنا للاتساق
 
         if pd.isna(avg_volume) or pd.isna(last_candle_volume):
-             logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: قيم حجم التداول النسبي غير متاحة.")
+             logger.debug(f"{symbol_log_prefix} رفض: قيم حجم التداول النسبي (المتوسط أو الشمعة الأخيرة) غير متاحة.")
              return None
 
         required_volume = avg_volume * RELATIVE_VOLUME_FACTOR
         if last_candle_volume < required_volume:
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: حجم الشمعة الأخيرة ({last_candle_volume:,.0f}) أقل من الحجم النسبي المطلوب ({required_volume:,.0f}).")
+            logger.debug(f"{symbol_log_prefix} رفض: حجم الشمعة الأخيرة ({last_candle_volume:,.0f} USDT) أقل من الحجم النسبي المطلوب ({required_volume:,.0f} USDT). نسبة الحجم: {last_candle_volume/avg_volume:.2f}x.")
             return None
         
-        logger.info(f"✅ [Signal Gen {self.symbol}] نجح فلتر حجم التداول النسبي!")
+        logger.info(f"✅ {symbol_log_prefix} نجح فلتر حجم التداول النسبي! حجم الشمعة: {last_candle_volume:,.0f}، متوسط الحجم: {avg_volume:,.0f}.")
 
         # التأكد من عدم وجود قيم NaN في الميزات قبل التنبؤ
         if last_row[self.feature_columns_for_ml].isnull().any(): 
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: توجد قيم NaN في ميزات التنبؤ.")
+            missing_features = last_row[self.feature_columns_for_ml][last_row[self.feature_columns_for_ml].isnull()].index.tolist()
+            logger.debug(f"{symbol_log_prefix} رفض: توجد قيم NaN في الميزات المطلوبة للتنبؤ بـ ML. الميزات المفقودة: {', '.join(missing_features)}.")
             return None
         
         try:
             features_df = pd.DataFrame([last_row[self.feature_columns_for_ml]], columns=self.feature_columns_for_ml)
             
-            # --- FIX START: تطبيق StandardScaler قبل التنبؤ ---
-            # في سكريبت التدريب، يتم استخدام StandardScaler. يجب أن نستخدم نفس المعاملات هنا.
-            # من الناحية المثالية، يجب أن يتم حفظ StandardScaler مع النموذج أو إعادة تدريبه على بيانات تاريخية كافية.
-            # للتسهيل، سنقوم بتدريب StandardScaler على `df_processed` (البيانات التي تم معالجتها) هنا.
-            # هذا ليس الحل الأمثل لأن StandardScaler يجب أن يكون ثابتاً، ولكن لتصحيح الخطأ الحالي.
-            # الحل الأفضل هو حفظ StandardScaler جنباً إلى جنب مع نموذج ML في قاعدة البيانات.
+            # تدريب StandardScaler على البيانات المعالجة المتاحة (يجب أن يتم حفظه بشكل مثالي مع النموذج)
             if self.scaler is None:
-                # تدريب StandardScaler على البيانات المعالجة المتاحة
-                try:
-                    # التأكد من أن `df_processed` يحتوي على جميع `feature_columns_for_ml`
-                    # وتجنب تدريب StandardScaler على بيانات بها NaN
-                    X_for_scaler_fit = df_processed[self.feature_columns_for_ml].dropna()
-                    if not X_for_scaler_fit.empty:
-                        self.scaler = StandardScaler()
-                        self.scaler.fit(X_for_scaler_fit)
-                    else:
-                        logger.warning(f"⚠️ [Signal Gen {self.symbol}] بيانات غير كافية لتدريب StandardScaler. قد يؤثر على دقة التنبؤ.")
-                        return None # لا يمكن المتابعة بدون scaler
-                except Exception as scaler_err:
-                    logger.error(f"❌ [Signal Gen {self.symbol}] خطأ في تدريب StandardScaler: {scaler_err}")
-                    return None
+                X_for_scaler_fit = df_processed[self.feature_columns_for_ml].dropna()
+                if not X_for_scaler_fit.empty:
+                    self.scaler = StandardScaler()
+                    self.scaler.fit(X_for_scaler_fit)
+                else:
+                    logger.warning(f"⚠️ {symbol_log_prefix} بيانات غير كافية لتدريب StandardScaler. قد يؤثر على دقة التنبؤ.")
+                    return None 
 
             if self.scaler:
                 features_scaled = self.scaler.transform(features_df)
-                if self.ml_model.predict(features_scaled)[0] != 1:
-                    logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: نموذج ML لم يتنبأ بإشارة شراء.")
+                ml_prediction = self.ml_model.predict(features_scaled)[0]
+                if ml_prediction != 1:
+                    logger.debug(f"{symbol_log_prefix} رفض: نموذج ML لم يتنبأ بإشارة شراء (التنبؤ: {ml_prediction}).")
                     return None
+                logger.info(f"✅ {symbol_log_prefix} نجح تنبؤ نموذج ML (التنبؤ: {ml_prediction}).")
             else:
-                logger.error(f"❌ [Signal Gen {self.symbol}] StandardScaler غير متاح. لا يمكن التنبؤ.")
+                logger.error(f"❌ {symbol_log_prefix} StandardScaler غير متاح. لا يمكن التنبؤ.")
                 return None
-            # --- FIX END ---
 
         except Exception as e:
-            logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء تنبؤ نموذج ML: {e}", exc_info=True)
+            logger.error(f"❌ {symbol_log_prefix} خطأ أثناء تنبؤ نموذج ML: {e}", exc_info=True)
             return None
         
         current_atr = last_row.get('atr')
         if pd.isna(current_atr) or current_atr <= 0: 
-            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: قيمة ATR غير صالحة.")
+            logger.debug(f"{symbol_log_prefix} رفض: قيمة ATR غير صالحة ({current_atr}).")
             return None
+        logger.debug(f"{symbol_log_prefix} تجاوز فحص قيمة ATR: {current_atr:.4f}.")
         
-        initial_target = current_price + (PRICE_CHANGE_THRESHOLD_FOR_TARGET * current_price) # استخدام نفس عتبة الهدف مثل التدريب
-        if ((initial_target / current_price) - 1) * 100 < MIN_PROFIT_MARGIN_PCT:
-             logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: هامش الربح المحتمل غير كافٍ.")
+        initial_target = current_price + (PRICE_CHANGE_THRESHOLD_FOR_TARGET * current_price) 
+        profit_potential_pct = ((initial_target / current_price) - 1) * 100
+        if profit_potential_pct < MIN_PROFIT_MARGIN_PCT:
+             logger.debug(f"{symbol_log_prefix} رفض: هامش الربح المحتمل غير كافٍ ({profit_potential_pct:.2f}%)، الحد الأدنى: {MIN_PROFIT_MARGIN_PCT:.2f}%).")
              return None
+        logger.debug(f"{symbol_log_prefix} تجاوز فحص هامش الربح المحتمل: {profit_potential_pct:.2f}%.")
 
         initial_stop_loss = last_row.get('supertrend', current_price - (1.0 * current_atr))
         if initial_stop_loss >= current_price:
+             # إذا كان Supertrend أعلى من السعر، استخدم ATR لحساب وقف الخسارة
              initial_stop_loss = current_price - (1.0 * current_atr)
              if initial_stop_loss >= current_price: 
-                 logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: وقف الخسارة غير صالح.")
+                 logger.debug(f"{symbol_log_prefix} رفض: وقف الخسارة المحسوب ({initial_stop_loss:.8g}) ليس أقل من السعر الحالي ({current_price:.8g}).")
                  return None
+        logger.debug(f"{symbol_log_prefix} تجاوز فحص وقف الخسارة: {max(0.00000001, initial_stop_loss):.8g}.")
+
 
         return {
             'symbol': self.symbol, 'entry_price': current_price, 'initial_target': initial_target,
