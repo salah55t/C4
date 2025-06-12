@@ -61,7 +61,7 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 RSI_PERIOD: int = 9
 RSI_OVERSOLD: int = 30
 RSI_OVERBOUGHT: int = 70
-VOLUME_LOOKBACK_CANDLES: int = 5 # تم التغيير من 1 إلى 5 لمتوسط حجم أطول
+VOLUME_LOOKBACK_CANDLES: int = 5 
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2
 
 ENTRY_ATR_PERIOD: int = 10
@@ -94,6 +94,25 @@ cur: Optional[psycopg2.extensions.cursor] = None
 client: Optional[Client] = None
 ticker_data: Dict[str, float] = {}
 ml_models: Dict[str, Any] = {}
+
+# هذا القاموس الجديد يربط بين سلاسل الفترات الزمنية وثوابت Binance الصحيحة
+BINANCE_KLINE_INTERVAL_MAP = {
+    '1m': Client.KLINE_INTERVAL_1MINUTE,
+    '3m': Client.KLINE_INTERVAL_3MINUTE,
+    '5m': Client.KLINE_INTERVAL_5MINUTE,
+    '15m': Client.KLINE_INTERVAL_15MINUTE,
+    '30m': Client.KLINE_INTERVAL_30MINUTE,
+    '1h': Client.KLINE_INTERVAL_1HOUR,
+    '2h': Client.KLINE_INTERVAL_2HOUR,
+    '4h': Client.KLINE_INTERVAL_4HOUR,
+    '6h': Client.KLINE_INTERVAL_6HOUR,
+    '8h': Client.KLINE_INTERVAL_8HOUR,
+    '12h': Client.KLINE_INTERVAL_12HOUR,
+    '1d': Client.KLINE_INTERVAL_1DAY,
+    '3d': Client.KLINE_INTERVAL_3DAY,
+    '1w': Client.KLINE_INTERVAL_1WEEK,
+    '1M': Client.KLINE_INTERVAL_1MONTH,
+}
 
 # ---------------------- إعداد عميل Binance ----------------------
 try:
@@ -153,12 +172,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
         logger.debug(f"ℹ️ [Data] جلب بيانات {interval} لـ {symbol} من {start_str_overall} فصاعدًا...")
 
-        binance_interval_map = {
-            '15m': Client.KLINE_INTERVAL_15MINUTE, '5m': Client.KLINE_INTERVAL_5MINUTE,
-            '1h': Client.KLINE_INTERVAL_1HOUR, '4h': Client.KLINE_INTERVAL_4HOUR,
-            '1d': Client.KLINE_INTERVAL_1DAY
-        }
-        binance_interval = binance_interval_map.get(interval)
+        # استخدام BINANCE_KLINE_INTERVAL_MAP لتعيين الفترة الزمنية
+        binance_interval = BINANCE_KLINE_INTERVAL_MAP.get(interval)
         if not binance_interval:
             logger.error(f"❌ [Data] فترة غير مدعومة: {interval}")
             return None
@@ -667,7 +682,8 @@ def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME
         logger.error("❌ [Volume] عميل Binance غير مهيأ لجلب الحجم.")
         return 0.0
     try:
-        binance_interval = getattr(Client, f'KLINE_INTERVAL_{interval.upper()}', None)
+        # استخدام BINANCE_KLINE_INTERVAL_MAP لتعيين الفترة الزمنية
+        binance_interval = BINANCE_KLINE_INTERVAL_MAP.get(interval)
         if not binance_interval:
             logger.warning(f"⚠️ [Volume] فترة زمنية غير مدعومة ({interval}) لجلب الحجم لـ {symbol}.")
             return 0.0
