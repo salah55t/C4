@@ -164,11 +164,8 @@
     </div>
 
     <script>
-        // تحقق من API_BASE_URL للتأكد من أنه يشير إلى المكان الصحيح لتطبيقك الخلفي
-        // إذا كنت تستخدم Render، فإن window.location.origin هو عادةً الصحيح.
-        // إذا كنت تختبر محليًا، قد يكون 'http://localhost:10000' أو المنفذ الذي تعمل عليه Flask.
         const API_BASE_URL = window.location.origin; 
-        console.log("Dashboard trying to connect to API_BASE_URL:", API_BASE_URL); // سجل هذا لتصحيح الأخطاء
+        console.log("Dashboard trying to connect to API_BASE_URL:", API_BASE_URL); 
 
         const botStatusElem = document.getElementById('botStatus');
         const totalTradesElem = document.getElementById('totalTrades');
@@ -198,8 +195,8 @@
                     botStatusElem.classList.add('text-red-500');
                 }
             } catch (error) {
-                console.error('Error fetching bot status:', error);
-                botStatusElem.textContent = 'غير متصل ❌';
+                console.error('Error fetching bot status from ' + API_BASE_URL + '/api/status:', error);
+                botStatusElem.textContent = 'غير متصل ❌ (خطأ في الاتصال)'; // رسالة خطأ أوضح
                 botStatusElem.classList.remove('text-yellow-500', 'text-green-500');
                 botStatusElem.classList.add('text-red-500');
             }
@@ -216,9 +213,9 @@
                 totalTradesElem.textContent = data.total_trades || 0;
                 winRateElem.textContent = `${(data.win_rate || 0).toFixed(2)}%`;
             } catch (error) {
-                console.error('Error fetching performance:', error);
-                totalTradesElem.textContent = 'خطأ';
-                winRateElem.textContent = 'خطأ';
+                console.error('Error fetching performance from ' + API_BASE_URL + '/api/performance:', error);
+                totalTradesElem.textContent = 'خطأ في التحميل';
+                winRateElem.textContent = 'خطأ في التحميل';
             }
         }
 
@@ -273,17 +270,15 @@
                     progressPercentage = Math.max(0, Math.min(100, progressPercentage));
 
                     // تحديد لون شريط التقدم (تدرج ألوان)
-                    // للحصول على تدرج أكثر تعقيدًا، يمكنك استخدام دالة لحساب اللون بناءً على النسبة
-                    // هنا، سنستخدم ألوان Tailwind بسيطة بناءً على الشرائح
                     let progressBarColorClass = 'bg-gray-400'; // default for 0%
                     if (progressPercentage > 0 && progressPercentage <= 25) {
-                        progressBarColorClass = 'bg-red-500'; // بداية التقدم (لا يزال في منطقة SL)
+                        progressBarColorClass = 'bg-red-500'; 
                     } else if (progressPercentage > 25 && progressPercentage <= 50) {
-                        progressBarColorClass = 'bg-orange-500'; // يقترب من نقطة الدخول أو يتجاوزها قليلاً
+                        progressBarColorClass = 'bg-orange-500'; 
                     } else if (progressPercentage > 50 && progressPercentage <= 75) {
-                        progressBarColorClass = 'bg-yellow-500'; // تقدم جيد نحو الهدف
+                        progressBarColorClass = 'bg-yellow-500'; 
                     } else if (progressPercentage > 75) {
-                        progressBarColorClass = 'bg-green-500'; // قريب جداً من الهدف أو وصل إليه
+                        progressBarColorClass = 'bg-green-500'; 
                     }
 
                     openSignalsTableBody.innerHTML += `
@@ -292,7 +287,7 @@
                             <td class="px-4 py-2 whitespace-nowrap text-right">${signal.entry_price.toFixed(8)}</td>
                             <td class="px-4 py-2 whitespace-nowrap text-right">${currentPriceDisplay}</td>
                             <td class="px-4 py-2 whitespace-nowrap text-right">${signal.current_target.toFixed(8)}</td>
-                            <td class="px-4 py-2 whitespace-nowrap text-right">${stopLossDisplay}</td> <!-- عرض وقف الخسارة -->
+                            <td class="px-4 py-2 whitespace-nowrap text-right">${stopLossDisplay}</td> 
                             <td class="px-4 py-2 text-right">
                                 <div class="progress-bar-container">
                                     <div class="progress-bar-fill ${progressBarColorClass}" style="width: ${progressPercentage}%;">
@@ -311,7 +306,7 @@
                 });
                 lucide.createIcons();
             } catch (error) {
-                console.error('Error fetching open signals:', error);
+                console.error('Error fetching open signals from ' + API_BASE_URL + '/api/open-signals:', error);
                 openSignalsTableBody.innerHTML = `
                     <tr>
                         <td colspan="8" class="px-4 py-3 text-center text-red-500">فشل تحميل الإشارات المفتوحة. يرجى التحقق من اتصال البوت.</td>
@@ -361,10 +356,10 @@
                     `;
                 });
             } catch (error) {
-                console.error('Error fetching closed signals:', error);
+                console.error('Error fetching closed signals from ' + API_BASE_URL + '/api/closed-signals:', error);
                 closedSignalsTableBody.innerHTML = `
                     <tr>
-                        <td colspan="4" class="px-4 py-3 text-center text-red-500">فشل تحميل الصفقات المغلقة.</td>
+                        <td colspan="4" class="px-4 py-3 text-center text-red-500">فشل تحميل الصفقات المغلقة. يرجى التحقق من اتصال البوت.</td>
                     </tr>
                 `;
             }
@@ -372,17 +367,14 @@
 
         // === دالة إرسال إشارة الإغلاق اليدوي ===
         async function sendExitSignal(signalId) {
-            // استخدام صندوق حوار مخصص بدلاً من alert/confirm (تذكير)
             if (!confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدويًا؟')) {
                 return;
             }
             try {
                 console.log(`Sending manual exit signal for ID: ${signalId}`);
-                // بما أن الإغلاق يتم عبر Telegram webhook، لا يوجد استدعاء مباشر لـ API من هنا.
-                // هذا الجزء في الواجهة الأمامية هو مجرد مؤشر على أن الإغلاق يتم في مكان آخر.
                 setTimeout(() => {
-                    fetchAllData(); // تحديث البيانات بعد الإغلاق
-                }, 2000); // انتظر ثانيتين لمحاكاة وقت معالجة الإغلاق
+                    fetchAllData(); 
+                }, 2000); 
                 alert('تم إرسال طلب إغلاق الصفقة يدوياً. سيتم تحديث لوحة التحكم قريباً.');
             } catch (error) {
                 console.error('Error sending exit signal:', error);
@@ -418,7 +410,7 @@
                             <p><strong>الرمز الأسوأ أداءً:</strong> ${report.worst_performing_symbol ? `<span class="text-red-400">${report.worst_performing_symbol.symbol}</span> (متوسط ربح: ${report.worst_performing_symbol.avg_profit.toFixed(2)}%, عدد الصفقات: ${report.worst_performing_symbol.trade_count})` : 'لا يوجد بيانات'}</p>
                         </div>
                     `;
-                 lucide.createIcons(); // To render any new icons in the modal
+                 lucide.createIcons(); 
             } else {
                  reportContent.innerHTML = '<p class="text-center text-red-500 p-8">فشل تحميل التقرير. يرجى المحاولة مرة أخرى.</p>';
             }
@@ -436,7 +428,7 @@
         document.addEventListener('DOMContentLoaded', () => {
             lucide.createIcons();
             fetchAllData();
-            setInterval(fetchAllData, 15000); // تحديث كل 15 ثانية
+            setInterval(fetchAllData, 15000); 
             
             // Event listeners for the modal
             reportBtn.addEventListener('click', showGeneralReport);
