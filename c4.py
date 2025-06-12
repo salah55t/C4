@@ -58,7 +58,6 @@ RELATIVE_VOLUME_FACTOR: float = 1.5 # يجب أن يكون حجم الشمعة �
 # Indicator Parameters
 RSI_PERIOD: int = 9
 ENTRY_ATR_PERIOD: int = 10
-ENTRY_ATR_MULTIPLIER: float = 1.5
 SUPERTRAND_PERIOD: int = 10
 SUPERTRAND_MULTIPLIER: float = 3.0
 TENKAN_PERIOD: int = 9
@@ -66,6 +65,11 @@ KIJUN_PERIOD: int = 26
 SENKOU_SPAN_B_PERIOD: int = 52
 CHIKOU_LAG: int = 26
 FIB_SR_LOOKBACK_WINDOW: int = 50
+
+# Parameters for ML prediction logic (copied from ml.py)
+VOLUME_LOOKBACK_CANDLES: int = 1 
+RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2
+PRICE_CHANGE_THRESHOLD_FOR_TARGET: float = 0.005 # 0.5% (used for target creation in training)
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
 BINANCE_FEE_RATE: float = 0.001
@@ -103,16 +107,20 @@ except Exception as e:
     logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
     exit(1)
 
-# ---------------------- دوال المؤشرات الإضافية ----------------------
+# ---------------------- دوال المؤشرات الإضافية (محدثة لتطابق ml.py) ----------------------
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
         binance_interval = BINANCE_KLINE_INTERVAL_MAP.get(interval)
-        if not binance_interval: return None
+        if not binance_interval: 
+            logger.error(f"❌ [Data] فترة زمنية غير مدعومة: {interval}")
+            return None
         
         klines = client.get_historical_klines(symbol, binance_interval, start_str)
-        if not klines: return None
+        if not klines: 
+            logger.warning(f"⚠️ [Data] لا توجد بيانات تاريخية لـ {symbol} للفترة المطلوبة.")
+            return None
 
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 
@@ -124,13 +132,31 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        return df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']].dropna()
+        # الاحتفاظ بـ 'quote_volume' لأنه يستخدم لحساب volume_15m_avg
+        df = df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']].dropna()
+        df.sort_index(inplace=True) # التأكد من الترتيب الزمني
+        return df
     except Exception as e:
         logger.error(f"❌ [Data] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
+def calculate_ema(series: pd.Series, span: int) -> pd.Series:
+    """Calculates Exponential Moving Average (EMA)."""
+    if series is None or series.isnull().all() or len(series) < span:
+        return pd.Series(index=series.index if series is not None else None, dtype=float)
+    return series.ewm(span=span, adjust=False).mean()
+
 def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.DataFrame:
     df = df.copy()
+    if 'close' not in df.columns or df['close'].isnull().all():
+        logger.warning("⚠️ [Indicator RSI] عمود 'close' مفقود أو فارغ.")
+        df['rsi'] = np.nan
+        return df
+    if len(df) < period:
+        logger.warning(f"⚠️ [Indicator RSI] بيانات غير كافية ({len(df)} < {period}) لحساب RSI.")
+        df['rsi'] = np.nan
+        return df
+
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -142,6 +168,16 @@ def calculate_rsi_indicator(df: pd.DataFrame, period: int = RSI_PERIOD) -> pd.Da
 
 def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) -> pd.DataFrame:
     df = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator ATR] أعمدة 'high', 'low', 'close' مفقودة أو فارغة.")
+        df['atr'] = np.nan
+        return df
+    if len(df) < period + 1:
+        logger.warning(f"⚠️ [Indicator ATR] بيانات غير كافية ({len(df)} < {period + 1}) لحساب ATR.")
+        df['atr'] = np.nan
+        return df
+
     high_low = df['high'] - df['low']
     high_close_prev = (df['high'] - df['close'].shift(1)).abs()
     low_close_prev = (df['low'] - df['close'].shift(1)).abs()
@@ -151,11 +187,20 @@ def calculate_atr_indicator(df: pd.DataFrame, period: int = ENTRY_ATR_PERIOD) ->
 
 def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, multiplier: float = SUPERTRAND_MULTIPLIER) -> pd.DataFrame:
     df = df.copy()
-    if 'atr' not in df.columns:
-        df = calculate_atr_indicator(df, period=period)
-    if 'atr' not in df.columns or df['atr'].isnull().all().any():
-        df['supertrend'], df['supertrend_direction'] = np.nan, 0
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df.columns for col in required_cols) or df[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Supertrend] أعمدة 'high', 'low', 'close' مفقودة أو فارغة. لا يمكن حساب Supertrend.")
+        df['supertrend'] = np.nan
+        df['supertrend_direction'] = 0 
         return df
+
+    if 'atr' not in df.columns:
+        df = calculate_atr_indicator(df, period=period) 
+        if 'atr' not in df.columns or df['atr'].isnull().all().any():
+            logger.warning("⚠️ [Indicator Supertrend] فشل حساب ATR. لا يمكن حساب Supertrend.")
+            df['supertrend'] = np.nan
+            df['supertrend_direction'] = 0
+            return df
 
     df['basic_upper_band'] = ((df['high'] + df['low']) / 2) + (multiplier * df['atr'])
     df['basic_lower_band'] = ((df['high'] + df['low']) / 2) - (multiplier * df['atr'])
@@ -173,91 +218,185 @@ def calculate_supertrend(df: pd.DataFrame, period: int = SUPERTRAND_PERIOD, mult
         else:
             df.loc[df.index[i], 'final_lower_band'] = df['final_lower_band'].iloc[i-1]
 
-        if df['supertrend_direction'].iloc[i-1] in [0, 1] and df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
-            df.loc[df.index[i], 'supertrend_direction'] = 1
-            df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
-        else:
-            df.loc[df.index[i], 'supertrend_direction'] = -1
-            df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+        if df['supertrend_direction'].iloc[i-1] == 1: 
+            if df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 
+        elif df['supertrend_direction'].iloc[i-1] == -1: 
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1 
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1 
+        else: 
+            if df['close'].iloc[i] > df['final_lower_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_lower_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = 1
+            elif df['close'].iloc[i] < df['final_upper_band'].iloc[i]:
+                df.loc[df.index[i], 'supertrend'] = df['final_upper_band'].iloc[i]
+                df.loc[df.index[i], 'supertrend_direction'] = -1
+            else:
+                df.loc[df.index[i], 'supertrend'] = df['close'].iloc[i] 
+                df.loc[df.index[i], 'supertrend_direction'] = 0
 
-    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True)
+    df.drop(columns=['basic_upper_band', 'basic_lower_band', 'final_upper_band', 'final_lower_band'], inplace=True, errors='ignore')
     return df
 
 def _calculate_btc_trend_feature(df_btc: pd.DataFrame) -> Optional[pd.Series]:
-    if df_btc is None or len(df_btc) < 55: return None
-    ema20 = df_btc['close'].ewm(span=20, adjust=False).mean()
-    ema50 = df_btc['close'].ewm(span=50, adjust=False).mean()
-    trend = pd.Series(0.0, index=df_btc.index)
-    trend[(df_btc['close'] > ema20) & (ema20 > ema50)] = 1.0
-    trend[(df_btc['close'] < ema20) & (ema20 < ema50)] = -1.0
-    return trend
+    if df_btc is None or df_btc.empty or len(df_btc) < 55:
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية ({len(df_btc) if df_btc is not None else 0} < 55) لحساب اتجاه البيتكوين للميزات.")
+        return pd.Series(index=df_btc.index if df_btc is not None else None, data=0.0)
+
+    df_btc_copy = df_btc.copy()
+    df_btc_copy['close'] = pd.to_numeric(df_btc_copy['close'], errors='coerce')
+    df_btc_copy.dropna(subset=['close'], inplace=True)
+
+    if len(df_btc_copy) < 55:
+        logger.warning(f"⚠️ [Indicators] بيانات BTC/USDT غير كافية بعد إزالة NaN لحساب الاتجاه.")
+        return pd.Series(index=df_btc.index, data=0.0)
+
+    ema20 = calculate_ema(df_btc_copy['close'], 20)
+    ema50 = calculate_ema(df_btc_copy['close'], 50)
+    
+    ema_df = pd.DataFrame({'ema20': ema20, 'ema50': ema50, 'close': df_btc_copy['close']})
+    ema_df.dropna(inplace=True)
+
+    if ema_df.empty:
+        logger.warning("⚠️ [Indicators] إطار بيانات EMA فارغ بعد إزالة NaN. لا يمكن حساب اتجاه البيتكوين.")
+        return pd.Series(index=df_btc.index, data=0.0)
+
+    trend_series = pd.Series(index=ema_df.index, data=0.0)
+    trend_series[(ema_df['close'] > ema_df['ema20']) & (ema_df['ema20'] > ema_df['ema50'])] = 1.0
+    trend_series[(ema_df['close'] < ema_df['ema20']) & (ema_df['ema20'] < ema_df['ema50'])] = -1.0
+    
+    final_trend_series = trend_series.reindex(df_btc.index).fillna(0.0)
+    return final_trend_series
 
 def calculate_ichimoku_cloud(df: pd.DataFrame, tenkan_period: int = TENKAN_PERIOD, kijun_period: int = KIJUN_PERIOD, senkou_span_b_period: int = SENKOU_SPAN_B_PERIOD, chikou_lag: int = CHIKOU_LAG) -> pd.DataFrame:
     df_ichimoku = df.copy()
-    df_ichimoku['tenkan_sen'] = (df_ichimoku['high'].rolling(window=tenkan_period).max() + df_ichimoku['low'].rolling(window=tenkan_period).min()) / 2
-    df_ichimoku['kijun_sen'] = (df_ichimoku['high'].rolling(window=kijun_period).max() + df_ichimoku['low'].rolling(window=kijun_period).min()) / 2
-    df_ichimoku['senkou_span_a'] = ((df_ichimoku['tenkan_sen'] + df_ichimoku['kijun_sen']) / 2).shift(kijun_period)
-    df_ichimoku['senkou_span_b'] = ((df_ichimoku['high'].rolling(window=senkou_span_b_period).max() + df_ichimoku['low'].rolling(window=senkou_span_b_period).min()) / 2).shift(kijun_period)
-    
-    cross_up = (df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) & (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen'])
-    cross_down = (df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) & (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen'])
-    df_ichimoku['ichimoku_tenkan_kijun_cross_signal'] = np.select([cross_up, cross_down], [1, -1], 0)
-    
-    price_above_cloud = df_ichimoku['close'] > df_ichimoku[['senkou_span_a', 'senkou_span_b']].max(axis=1)
-    price_below_cloud = df_ichimoku['close'] < df_ichimoku[['senkou_span_a', 'senkou_span_b']].min(axis=1)
-    df_ichimoku['ichimoku_price_cloud_position'] = np.select([price_above_cloud, price_below_cloud], [1, -1], 0)
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_ichimoku.columns for col in required_cols) or df_ichimoku[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Ichimoku] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب Ichimoku.")
+        for col in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b', 'chikou_span',
+                    'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook']:
+            df_ichimoku[col] = np.nan
+        return df_ichimoku
 
-    green_cloud = df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']
-    df_ichimoku['ichimoku_cloud_outlook'] = np.select([green_cloud, ~green_cloud], [1, -1], 0)
+    for col in required_cols:
+        df_ichimoku[col] = pd.to_numeric(df_ichimoku[col], errors='coerce')
+
+    df_ichimoku['tenkan_sen'] = (df_ichimoku['high'].rolling(window=tenkan_period, min_periods=1).max() +
+                                 df_ichimoku['low'].rolling(window=tenkan_period, min_periods=1).min()) / 2
+    df_ichimoku['kijun_sen'] = (df_ichimoku['high'].rolling(window=kijun_period, min_periods=1).max() +
+                                df_ichimoku['low'].rolling(window=kijun_period, min_periods=1).min()) / 2
+    df_ichimoku['senkou_span_a'] = ((df_ichimoku['tenkan_sen'] + df_ichimoku['kijun_sen']) / 2).shift(kijun_period)
+    df_ichimoku['senkou_span_b'] = ((df_ichimoku['high'].rolling(window=senkou_span_b_period, min_periods=1).max() +
+                                     df_ichimoku['low'].rolling(window=senkou_span_b_period, min_periods=1).min()) / 2).shift(kijun_period)
+    df_ichimoku['chikou_span'] = df_ichimoku['close'].shift(-chikou_lag)
+
+    df_ichimoku['ichimoku_tenkan_kijun_cross_signal'] = 0
+    if len(df_ichimoku) > 1:
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) < df_ichimoku['kijun_sen'].shift(1)) &
+                        (df_ichimoku['tenkan_sen'] > df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = 1
+        df_ichimoku.loc[(df_ichimoku['tenkan_sen'].shift(1) > df_ichimoku['kijun_sen'].shift(1)) &
+                        (df_ichimoku['tenkan_sen'] < df_ichimoku['kijun_sen']), 'ichimoku_tenkan_kijun_cross_signal'] = -1
+
+    df_ichimoku['ichimoku_price_cloud_position'] = 0
+    df_ichimoku.loc[(df_ichimoku['close'] > df_ichimoku[['senkou_span_a', 'senkou_span_b']].max(axis=1)), 'ichimoku_price_cloud_position'] = 1
+    df_ichimoku.loc[(df_ichimoku['close'] < df_ichimoku[['senkou_span_a', 'senkou_span_b']].min(axis=1)), 'ichimoku_price_cloud_position'] = -1
+
+    df_ichimoku['ichimoku_cloud_outlook'] = 0
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] > df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = 1
+    df_ichimoku.loc[(df_ichimoku['senkou_span_a'] < df_ichimoku['senkou_span_b']), 'ichimoku_cloud_outlook'] = -1
     
     return df_ichimoku
 
 def calculate_fibonacci_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
     df_fib = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_fib.columns for col in required_cols) or df_fib[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator Fibonacci] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب ميزات فيبوناتشي.")
+        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
+            df_fib[col] = np.nan
+        return df_fib
+    if len(df_fib) < lookback_window:
+        logger.warning(f"⚠️ [Indicator Fibonacci] بيانات غير كافية ({len(df_fib)} < {lookback_window}) لحساب فيبوناتشي.")
+        for col in ['fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50']:
+            df_fib[col] = np.nan
+        return df_fib
 
-    # Calculate rolling high and low
-    rolling_high = df_fib['high'].rolling(window=lookback_window, min_periods=lookback_window).max()
-    rolling_low = df_fib['low'].rolling(window=lookback_window, min_periods=lookback_window).min()
-    price_range = rolling_high - rolling_low
+    for col in required_cols:
+        df_fib[col] = pd.to_numeric(df_fib[col], errors='coerce')
 
-    # Calculate Fibonacci levels for each point in time based on its lookback window
-    fib_236 = rolling_high - (price_range * 0.236)
-    fib_382 = rolling_high - (price_range * 0.382)
-    fib_500 = rolling_high - (price_range * 0.500)
-    fib_618 = rolling_high - (price_range * 0.618)
+    df_fib['fib_236_retrace_dist_norm'] = np.nan
+    df_fib['fib_382_retrace_dist_norm'] = np.nan
+    df_fib['fib_618_retrace_dist_norm'] = np.nan
+    df_fib['is_price_above_fib_50'] = 0
 
-    # Calculate features, handle division by zero using .divide() and replacing inf
-    df_fib['fib_236_retrace_dist_norm'] = (df_fib['close'] - fib_236).divide(price_range).replace([np.inf, -np.inf], 0)
-    df_fib['fib_382_retrace_dist_norm'] = (df_fib['close'] - fib_382).divide(price_range).replace([np.inf, -np.inf], 0)
-    df_fib['fib_618_retrace_dist_norm'] = (df_fib['close'] - fib_618).divide(price_range).replace([np.inf, -np.inf], 0)
-    df_fib['is_price_above_fib_50'] = (df_fib['close'] > fib_500).astype(int)
-    
-    # Where price_range is 0 or rolling values are NaN, the result of division can be NaN. Fill it with 0.
-    df_fib.fillna({
-        'fib_236_retrace_dist_norm': 0, 
-        'fib_382_retrace_dist_norm': 0, 
-        'fib_618_retrace_dist_norm': 0
-    }, inplace=True)
+    for i in range(lookback_window - 1, len(df_fib)):
+        window_df = df_fib.iloc[i - lookback_window + 1 : i + 1]
+        swing_high = window_df['high'].max()
+        swing_low = window_df['low'].min()
+        current_close = df_fib['close'].iloc[i]
+
+        price_range = swing_high - swing_low
+
+        if price_range > 0:
+            fib_0_236 = swing_high - (price_range * 0.236)
+            fib_0_382 = swing_high - (price_range * 0.382)
+            fib_0_500 = swing_high - (price_range * 0.500)
+            fib_0_618 = swing_high - (price_range * 0.618)
+
+            if price_range != 0:
+                df_fib.loc[df_fib.index[i], 'fib_236_retrace_dist_norm'] = (current_close - fib_0_236) / price_range
+                df_fib.loc[df_fib.index[i], 'fib_382_retrace_dist_norm'] = (current_close - fib_0_382) / price_range
+                df_fib.loc[df_fib.index[i], 'fib_618_retrace_dist_norm'] = (current_close - fib_0_618) / price_range
+
+            if current_close > fib_0_500:
+                df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 1
+            else:
+                df_fib.loc[df_fib.index[i], 'is_price_above_fib_50'] = 0
     
     return df_fib
-    
+
 def calculate_support_resistance_features(df: pd.DataFrame, lookback_window: int = FIB_SR_LOOKBACK_WINDOW) -> pd.DataFrame:
     df_sr = df.copy()
+    required_cols = ['high', 'low', 'close']
+    if not all(col in df_sr.columns for col in required_cols) or df_sr[required_cols].isnull().all().any():
+        logger.warning("⚠️ [Indicator S/R] أعمدة OHLC مفقودة أو فارغة. لا يمكن حساب ميزات الدعم والمقاومة.")
+        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
+            df_sr[col] = np.nan
+        return df_sr
+    if len(df_sr) < lookback_window:
+        logger.warning(f"⚠️ [Indicator S/R] بيانات غير كافية ({len(df_sr)} < {lookback_window}) لحساب S/R.")
+        for col in ['price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm']:
+            df_sr[col] = np.nan
+        return df_sr
 
-    # Calculate rolling high and low
-    rolling_high = df_sr['high'].rolling(window=lookback_window, min_periods=lookback_window).max()
-    rolling_low = df_sr['low'].rolling(window=lookback_window, min_periods=lookback_window).min()
-    price_range = rolling_high - rolling_low
+    for col in required_cols:
+        df_sr[col] = pd.to_numeric(df_sr[col], errors='coerce')
 
-    # Calculate features, handle division by zero
-    df_sr['price_distance_to_recent_low_norm'] = (df_sr['close'] - rolling_low).divide(price_range).replace([np.inf, -np.inf], 0)
-    df_sr['price_distance_to_recent_high_norm'] = (rolling_high - df_sr['close']).divide(price_range).replace([np.inf, -np.inf], 0)
+    df_sr['price_distance_to_recent_low_norm'] = np.nan
+    df_sr['price_distance_to_recent_high_norm'] = np.nan
 
-    # Where price_range is 0 or rolling values are NaN, the result of division can be NaN. Fill it with 0.
-    df_sr.fillna({
-        'price_distance_to_recent_low_norm': 0, 
-        'price_distance_to_recent_high_norm': 0
-    }, inplace=True)
+    for i in range(lookback_window - 1, len(df_sr)):
+        window_df = df_sr.iloc[i - lookback_window + 1 : i + 1]
+        recent_high = window_df['high'].max()
+        recent_low = window_df['low'].min()
+        current_close = df_sr['close'].iloc[i]
+
+        price_range = recent_high - recent_low
+
+        if price_range > 0:
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = (current_close - recent_low) / price_range
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = (recent_high - current_close) / price_range
+        else:
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_low_norm'] = 0.0 
+            df_sr.loc[df_sr.index[i], 'price_distance_to_recent_high_norm'] = 0.0 
 
     return df_sr
 
@@ -308,14 +447,18 @@ def check_db_connection() -> bool:
 def load_ml_model_from_db(symbol: str) -> Optional[Any]:
     global ml_models
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if model_name in ml_models: return ml_models[model_name]
+    if model_name in ml_models: 
+        logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من الذاكرة المؤقتة.")
+        return ml_models[model_name]
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            db_cur.execute("SELECT model_data, metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
             result = db_cur.fetchone()
             if result and result['model_data']:
                 model = pickle.loads(result['model_data'])
+                # اختياري: يمكنك التحقق من 'feature_names' في 'metrics' إذا كانت موجودة
+                # والتحقق مما إذا كانت تتطابق مع self.feature_columns_for_ml
                 ml_models[model_name] = model
                 logger.info(f"✅ [ML Model] تم تحميل نموذج ML '{model_name}' من قاعدة البيانات.")
                 return model
@@ -332,6 +475,7 @@ def convert_np_values(obj: Any) -> Any:
     if isinstance(obj, list): return [convert_np_values(i) for i in obj]
     if pd.isna(obj): return None
     return obj
+
 # ---------------------- WebSocket and Helper Functions ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     global ticker_data
@@ -367,30 +511,46 @@ def get_crypto_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except Exception as e:
         logger.error(f"❌ [Data Validation] خطأ أثناء التحقق من الرموز: {e}")
         return []
+
 # ---------------------- Trading Strategy (MODIFIED) -------------------
 class ScalpingTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model = load_ml_model_from_db(symbol)
-        # --- FIX START: Added 'volume_15m_avg' to the feature list ---
+        # --- FIX START: تحديث feature_columns_for_ml لتطابق ml.py بدقة ---
         self.feature_columns_for_ml = [
-            'rsi_momentum_bullish', 'btc_trend_feature', 'supertrend_direction',
-            'ichimoku_tenkan_kijun_cross_signal', 'ichimoku_price_cloud_position', 'ichimoku_cloud_outlook',
-            'fib_236_retrace_dist_norm', 'fib_382_retrace_dist_norm', 'fib_618_retrace_dist_norm', 'is_price_above_fib_50',
-            'price_distance_to_recent_low_norm', 'price_distance_to_recent_high_norm',
-            'volume_15m_avg' # Added the missing feature
+            'volume_15m_avg',
+            'rsi_momentum_bullish',
+            'btc_trend_feature',
+            'supertrend_direction',
+            'ichimoku_tenkan_kijun_cross_signal',
+            'ichimoku_price_cloud_position',
+            'ichimoku_cloud_outlook',
+            'fib_236_retrace_dist_norm',
+            'fib_382_retrace_dist_norm',
+            'fib_618_retrace_dist_norm',
+            'is_price_above_fib_50',
+            'price_distance_to_recent_low_norm',
+            'price_distance_to_recent_high_norm'
         ]
         # --- FIX END ---
+        self.scaler: Optional[StandardScaler] = None # لإضافة StandardScaler
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        # تم تحديث min_len_required ليعكس جميع المؤشرات المستخدمة في ml.py
         min_len_required = max(
-            RSI_PERIOD + 2,
+            VOLUME_LOOKBACK_CANDLES,
+            RSI_PERIOD,
+            RSI_MOMENTUM_LOOKBACK_CANDLES,
+            ENTRY_ATR_PERIOD,
             SUPERTRAND_PERIOD,
+            TENKAN_PERIOD,
+            KIJUN_PERIOD,
             SENKOU_SPAN_B_PERIOD,
+            CHIKOU_LAG,
             FIB_SR_LOOKBACK_WINDOW,
-            RELATIVE_VOLUME_LOOKBACK,
-            55
-        ) + 5 
+            55 # للحصول على بيانات كافية لاتجاه BTC
+        ) + 5 # مخزن إضافي
 
         if len(df) < min_len_required:
             logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame قصير جداً ({len(df)} < {min_len_required}) لحساب المؤشرات.")
@@ -398,12 +558,18 @@ class ScalpingTradingStrategy:
         
         try:
             df_calc = df.copy()
-            # --- FIX START: Renamed 'volume_avg_relative' to 'volume_15m_avg' ---
-            df_calc['volume_15m_avg'] = df_calc['quote_volume'].rolling(window=RELATIVE_VOLUME_LOOKBACK, min_periods=RELATIVE_VOLUME_LOOKBACK).mean()
-            # --- FIX END ---
+
+            # حساب volume_15m_avg (باستخدام quote_volume كما هو الحال في fetch_historical_data)
+            df_calc['volume_15m_avg'] = df_calc['quote_volume'].rolling(window=VOLUME_LOOKBACK_CANDLES, min_periods=1).mean()
             
             df_calc = calculate_rsi_indicator(df_calc, RSI_PERIOD)
-            df_calc['rsi_momentum_bullish'] = ((df_calc['rsi'].diff(1) > 0) & (df_calc['rsi'].diff(2) > 0)).astype(int)
+            # إضافة مؤشر زخم RSI الصعودي
+            df_calc['rsi_momentum_bullish'] = 0
+            if len(df_calc) >= RSI_MOMENTUM_LOOKBACK_CANDLES + 1:
+                for i in range(RSI_MOMENTUM_LOOKBACK_CANDLES, len(df_calc)):
+                    rsi_slice = df_calc['rsi'].iloc[i - RSI_MOMENTUM_LOOKBACK_CANDLES : i + 1]
+                    if not rsi_slice.isnull().any() and np.all(np.diff(rsi_slice) > 0) and rsi_slice.iloc[-1] > 50:
+                        df_calc.loc[df_calc.index[i], 'rsi_momentum_bullish'] = 1
             
             df_calc = calculate_atr_indicator(df_calc, ENTRY_ATR_PERIOD)
             df_calc = calculate_supertrend(df_calc, SUPERTRAND_PERIOD, SUPERTRAND_MULTIPLIER)
@@ -412,8 +578,8 @@ class ScalpingTradingStrategy:
             if btc_df is not None:
                 btc_trend = _calculate_btc_trend_feature(btc_df)
                 if btc_trend is not None:
+                    # يجب أن نضمن أن مؤشر df_calc و btc_trend لهما تداخل زمني للدمج
                     df_calc = df_calc.merge(btc_trend.rename('btc_trend_feature'), left_index=True, right_index=True, how='left')
-                    # --- FIXED FutureWarning ---
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].ffill()
                     df_calc['btc_trend_feature'] = df_calc['btc_trend_feature'].fillna(0.0)
                 else:
@@ -421,36 +587,51 @@ class ScalpingTradingStrategy:
             else:
                 df_calc['btc_trend_feature'] = 0.0
             
-            df_calc = calculate_ichimoku_cloud(df_calc)
-            df_calc = calculate_fibonacci_features(df_calc)
-            df_calc = calculate_support_resistance_features(df_calc)
+            # إضافة مؤشرات Ichimoku, Fibonacci, Support/Resistance
+            df_calc = calculate_ichimoku_cloud(df_calc, TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_SPAN_B_PERIOD, CHIKOU_LAG)
+            df_calc = calculate_fibonacci_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
+            df_calc = calculate_support_resistance_features(df_calc, FIB_SR_LOOKBACK_WINDOW)
 
-            # Drop rows with NaNs in features needed for ML model, then return
+            # التأكد من وجود جميع أعمدة الميزات وتعبئة أي قيم NaN
+            for col in self.feature_columns_for_ml:
+                if col not in df_calc.columns:
+                    df_calc[col] = np.nan
+                df_calc[col] = pd.to_numeric(df_calc[col], errors='coerce')
+
+
+            # تصفية الصفوف التي تحتوي على NaN في أعمدة الميزات
             df_cleaned = df_calc.dropna(subset=self.feature_columns_for_ml).copy()
-            return df_cleaned if not df_cleaned.empty else None
+            
+            if df_cleaned.empty:
+                logger.warning(f"⚠️ [Strategy {self.symbol}] DataFrame فارغ بعد إزالة قيم NaN من الميزات.")
+                return None
+
+            return df_cleaned
         except Exception as e:
-            if isinstance(e, KeyError):
-                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر (KeyError). الأعمدة المطلوبة غير موجودة.", exc_info=True)
-            else:
-                 logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر: {e}", exc_info=True)
+            logger.error(f"❌ [Strategy {self.symbol}] خطأ في حساب المؤشر: {e}", exc_info=True)
             return None
 
     def generate_buy_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if df_processed is None or df_processed.empty: return None
-        if self.ml_model is None: return None
+        from sklearn.preprocessing import StandardScaler # استيراد هنا لضمان توفره
+        if df_processed is None or df_processed.empty: 
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: DataFrame المعالج فارغ.")
+            return None
+        if self.ml_model is None: 
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: نموذج ML غير محمل.")
+            return None
         
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol)
-        if current_price is None: return None
+        if current_price is None: 
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: السعر الحالي غير متوفر.")
+            return None
         
         recent_quote_volume = last_row['quote_volume']
         if pd.isna(recent_quote_volume) or recent_quote_volume < MIN_VOLUME_15M_USDT:
              logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: حجم التداول المطلق ({recent_quote_volume:.2f}) أقل من الحد الأدنى ({MIN_VOLUME_15M_USDT}).")
              return None
 
-        # --- FIX START: Changed get from 'volume_avg_relative' to 'volume_15m_avg' ---
         avg_volume = last_row.get('volume_15m_avg')
-        # --- FIX END ---
         last_candle_volume = last_row.get('quote_volume')
 
         if pd.isna(avg_volume) or pd.isna(last_candle_volume):
@@ -464,20 +645,56 @@ class ScalpingTradingStrategy:
         
         logger.info(f"✅ [Signal Gen {self.symbol}] نجح فلتر حجم التداول النسبي!")
 
-        if last_row[self.feature_columns_for_ml].isnull().any(): return None
+        # التأكد من عدم وجود قيم NaN في الميزات قبل التنبؤ
+        if last_row[self.feature_columns_for_ml].isnull().any(): 
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: توجد قيم NaN في ميزات التنبؤ.")
+            return None
+        
         try:
             features_df = pd.DataFrame([last_row[self.feature_columns_for_ml]], columns=self.feature_columns_for_ml)
-            if self.ml_model.predict(features_df)[0] != 1:
-                logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: نموذج ML لم يتنبأ بإشارة شراء.")
+            
+            # --- FIX START: تطبيق StandardScaler قبل التنبؤ ---
+            # في سكريبت التدريب، يتم استخدام StandardScaler. يجب أن نستخدم نفس المعاملات هنا.
+            # من الناحية المثالية، يجب أن يتم حفظ StandardScaler مع النموذج أو إعادة تدريبه على بيانات تاريخية كافية.
+            # للتسهيل، سنقوم بتدريب StandardScaler على `df_processed` (البيانات التي تم معالجتها) هنا.
+            # هذا ليس الحل الأمثل لأن StandardScaler يجب أن يكون ثابتاً، ولكن لتصحيح الخطأ الحالي.
+            # الحل الأفضل هو حفظ StandardScaler جنباً إلى جنب مع نموذج ML في قاعدة البيانات.
+            if self.scaler is None:
+                # تدريب StandardScaler على البيانات المعالجة المتاحة
+                try:
+                    # التأكد من أن `df_processed` يحتوي على جميع `feature_columns_for_ml`
+                    # وتجنب تدريب StandardScaler على بيانات بها NaN
+                    X_for_scaler_fit = df_processed[self.feature_columns_for_ml].dropna()
+                    if not X_for_scaler_fit.empty:
+                        self.scaler = StandardScaler()
+                        self.scaler.fit(X_for_scaler_fit)
+                    else:
+                        logger.warning(f"⚠️ [Signal Gen {self.symbol}] بيانات غير كافية لتدريب StandardScaler. قد يؤثر على دقة التنبؤ.")
+                        return None # لا يمكن المتابعة بدون scaler
+                except Exception as scaler_err:
+                    logger.error(f"❌ [Signal Gen {self.symbol}] خطأ في تدريب StandardScaler: {scaler_err}")
+                    return None
+
+            if self.scaler:
+                features_scaled = self.scaler.transform(features_df)
+                if self.ml_model.predict(features_scaled)[0] != 1:
+                    logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: نموذج ML لم يتنبأ بإشارة شراء.")
+                    return None
+            else:
+                logger.error(f"❌ [Signal Gen {self.symbol}] StandardScaler غير متاح. لا يمكن التنبؤ.")
                 return None
+            # --- FIX END ---
+
         except Exception as e:
-            logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء تنبؤ نموذج ML: {e}")
+            logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء تنبؤ نموذج ML: {e}", exc_info=True)
             return None
         
         current_atr = last_row.get('atr')
-        if pd.isna(current_atr) or current_atr <= 0: return None
+        if pd.isna(current_atr) or current_atr <= 0: 
+            logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: قيمة ATR غير صالحة.")
+            return None
         
-        initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
+        initial_target = current_price + (PRICE_CHANGE_THRESHOLD_FOR_TARGET * current_price) # استخدام نفس عتبة الهدف مثل التدريب
         if ((initial_target / current_price) - 1) * 100 < MIN_PROFIT_MARGIN_PCT:
              logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: هامش الربح المحتمل غير كافٍ.")
              return None
@@ -485,7 +702,9 @@ class ScalpingTradingStrategy:
         initial_stop_loss = last_row.get('supertrend', current_price - (1.0 * current_atr))
         if initial_stop_loss >= current_price:
              initial_stop_loss = current_price - (1.0 * current_atr)
-             if initial_stop_loss >= current_price: return None
+             if initial_stop_loss >= current_price: 
+                 logger.debug(f"ℹ️ [Signal Gen {self.symbol}] رفض: وقف الخسارة غير صالح.")
+                 return None
 
         return {
             'symbol': self.symbol, 'entry_price': current_price, 'initial_target': initial_target,
@@ -619,7 +838,9 @@ def main_loop():
                 if df_hist is None or df_hist.empty: continue
                 
                 strategy = ScalpingTradingStrategy(symbol)
-                if strategy.ml_model is None: continue
+                if strategy.ml_model is None: 
+                    logger.warning(f"⚠️ [Main] لا يوجد نموذج ML لـ {symbol}. تخطي توليد الإشارة.")
+                    continue
                 
                 df_indicators = strategy.populate_indicators(df_hist)
                 if df_indicators is None: continue
