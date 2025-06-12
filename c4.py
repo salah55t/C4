@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler # استيراد StandardScaler
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # مستوى التسجيل INFO لتقليل الضوضاء
+    level=logging.DEBUG, # *** تم التغيير من INFO إلى DEBUG هنا ***
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_elliott_fib.log', encoding='utf-8'),
