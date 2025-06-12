@@ -80,7 +80,7 @@ CHIKOU_LAG: int = 26
 FIB_SR_LOOKBACK_WINDOW: int = 50
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 0
+MIN_VOLUME_15M_USDT: float = 50000.0
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -124,7 +124,8 @@ def get_fear_greed_index() -> str:
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response.json()["data"][0] 
+        # FIX: Corrected to use .json() method for the response object
+        data = response.json()["data"][0]
         value = int(data["value"])
         classification_en = data["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
