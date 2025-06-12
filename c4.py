@@ -61,7 +61,7 @@ SIGNAL_TRACKING_LOOKBACK_DAYS: int = 1
 RSI_PERIOD: int = 9
 RSI_OVERSOLD: int = 30
 RSI_OVERBOUGHT: int = 70
-VOLUME_LOOKBACK_CANDLES: int = 1
+VOLUME_LOOKBACK_CANDLES: int = 5 # تم التغيير من 1 إلى 5 لمتوسط حجم أطول
 RSI_MOMENTUM_LOOKBACK_CANDLES: int = 2
 
 ENTRY_ATR_PERIOD: int = 10
@@ -80,7 +80,7 @@ CHIKOU_LAG: int = 26
 FIB_SR_LOOKBACK_WINDOW: int = 50
 
 MIN_PROFIT_MARGIN_PCT: float = 1.0
-MIN_VOLUME_15M_USDT: float = 0
+MIN_VOLUME_15M_USDT: float = 50000.0
 
 TARGET_APPROACH_THRESHOLD_PCT: float = 0.005
 
@@ -124,7 +124,7 @@ def get_fear_greed_index() -> str:
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        data = response.json()["data"][0] # Corrected access to data
+        data = response.json()["data"][0] 
         value = int(data["value"])
         classification_en = data["value_classification"]
         classification_ar = classification_translation_ar.get(classification_en, classification_en)
@@ -682,6 +682,10 @@ def fetch_recent_volume(symbol: str, interval: str = SIGNAL_GENERATION_TIMEFRAME
         # العنصر رقم 5 هو حجم العملة الأساسية (Base Volume)
         total_quote_volume = sum(float(k[7]) for k in klines if len(k) > 7 and k[7])
         
+        # إضافة تسجيل تفصيلي إذا كان الحجم صفراً
+        if total_quote_volume == 0.0:
+            logger.debug(f"ℹ️ [Volume Debug] حجم التداول لـ {symbol} في فترة {interval} لآخر {num_candles} شمعة هو 0.0. بيانات الشموع الخام (أول 3 شموع): {klines[:3]}")
+
         logger.debug(f"✅ [Volume] تم جلب حجم تداول {symbol} في {interval} لآخر {num_candles} شمعة: {total_quote_volume:.2f} USDT")
         return total_quote_volume
     except BinanceAPIException as api_err:
@@ -1066,7 +1070,8 @@ def api_open_signals():
     if not check_db_connection() or not conn: return jsonify([]), 500
     try:
         with conn.cursor() as db_cur:
-            db_cur.execute("SELECT id, symbol, entry_price, current_target, sent_at FROM signals WHERE closed_at IS NULL ORDER BY sent_at DESC;")
+            # تم تحديث الاستعلام لجلب stop_loss
+            db_cur.execute("SELECT id, symbol, entry_price, current_target, stop_loss, sent_at FROM signals WHERE closed_at IS NULL ORDER BY sent_at DESC;")
             open_signals = [dict(row) for row in db_cur.fetchall()]
             for signal in open_signals:
                 signal['current_price'] = ticker_data.get(signal['symbol'])
