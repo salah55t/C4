@@ -47,7 +47,7 @@ except Exception as e:
 MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
-MIN_VOLUME_24H_USDT: float = 10_000_000 
+MIN_VOLUME_24H_USDT: float = 10_000_000
 
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V2'
 MODEL_PREDICTION_THRESHOLD = 0.65
@@ -66,7 +66,7 @@ conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 ticker_data: Dict[str, Dict[str, float]] = {}
 ml_models_cache: Dict[str, Any] = {}
-validated_symbols_to_scan: List[str] = [] # <-- List to hold the symbols we will scan
+validated_symbols_to_scan: List[str] = []
 
 # ---------------------- Binance Client & DB Setup ----------------------
 try:
@@ -88,7 +88,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                    target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL, 
+                    target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
                     status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                     profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB);
             """)
@@ -113,7 +113,7 @@ def check_db_connection() -> bool:
         return True
     return False
 
-# ---------------------- Symbol Validation (Copied from ml.py for consistency) ----------------------
+# ---------------------- Symbol Validation ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
     try:
@@ -127,14 +127,14 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.info(f"ℹ️ [Validation] Found {len(active_binance_symbols)} actively trading USDT pairs on Binance.")
 
         validated_symbols = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
-        
+
         ignored_symbols = formatted_symbols - active_binance_symbols
         if ignored_symbols:
             logger.warning(f"⚠️ [Validation] Ignored {len(ignored_symbols)} symbols not found or not active on Binance: {', '.join(ignored_symbols)}")
-        
+
         logger.info(f"✅ [Validation] Bot will scan {len(validated_symbols)} validated symbols.")
         return validated_symbols
-        
+
     except FileNotFoundError:
         logger.error(f"❌ [Validation] Critical error: The file '{filename}' was not found.")
         return []
@@ -142,9 +142,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] An error occurred during symbol validation: {e}")
         return []
 
-# All other functions (fetch_historical_data, indicator calculations, model loading, etc.)
-# remain the same as the previous version.
-
+# --- Data Fetching and Indicator Calculation ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -190,6 +188,7 @@ def calculate_candlestick_features(df: pd.DataFrame) -> pd.DataFrame:
     df['lower_wick'] = df[['open', 'close']].min(axis=1) - df['low']
     return df
 
+# --- Model Loading and WebSocket ---
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -203,9 +202,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
                 model_bundle = pickle.loads(result['model_data'])
                 if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
                     ml_models_cache[model_name] = model_bundle
-                    # logger.info(f"✅ [ML Model] تم تحميل حزمة نموذج '{model_name}' من قاعدة البيانات.")
                     return model_bundle
-            # logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج لـ {symbol} بالاسم '{model_name}'.")
             return None
     except Exception as e:
         logger.error(f"❌ [ML Model] خطأ أثناء تحميل حزمة نموذج ML لـ {symbol}: {e}", exc_info=True)
@@ -218,7 +215,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
         if not isinstance(data, list): data = [data]
         for item in data:
             symbol = item.get('s')
-            if symbol and symbol in validated_symbols_to_scan: # <-- Only process tickers for our validated symbols
+            if symbol and symbol in validated_symbols_to_scan:
                 if symbol not in ticker_data: ticker_data[symbol] = {}
                 ticker_data[symbol]['price'] = float(item.get('c', 0))
                 ticker_data[symbol]['volume_24h_usdt'] = float(item.get('q', 0))
@@ -231,6 +228,7 @@ def run_websocket_manager() -> None:
     twm.start_ticker_socket(callback=handle_ticker_message)
     twm.join()
 
+# --- Trading Strategy and Signal Generation ---
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -269,79 +267,40 @@ class TradingStrategy:
         if stop_loss >= current_price or target_price <= current_price: return None
         return {'symbol': self.symbol, 'entry_price': current_price, 'target_price': target_price, 'stop_loss': stop_loss, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}}
 
-def main_loop():
-    global validated_symbols_to_scan
-    validated_symbols_to_scan = get_validated_symbols() # <-- Load the list at the start
-    if not validated_symbols_to_scan:
-        logger.critical("❌ [Main] No validated symbols to scan. Bot will not proceed.")
-        return
+# --- Telegram and Database Functions ---
+def send_telegram_message(target_chat_id: str, text: str):
+    """ ✅ دالة جديدة لإرسال أي رسالة نصية إلى تليجرام """
+    if not TELEGRAM_TOKEN or not target_chat_id: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
+    try:
+        requests.post(url, json=payload, timeout=20).raise_for_status()
+    except Exception as e:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة العامة: {e}")
 
-    logger.info("✅ [Main] بدء دورة المسح الرئيسية.")
-    time.sleep(10)
-    
-    while True:
-        try:
-            if not check_db_connection() or not conn:
-                time.sleep(60)
-                continue
-            
-            with conn.cursor() as cur_check:
-                cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE status = 'open';")
-                open_count = cur_check.fetchone().get('count', 0)
-
-            if open_count >= MAX_OPEN_TRADES:
-                time.sleep(60)
-                continue
-            
-            slots_available = MAX_OPEN_TRADES - open_count
-            
-            # <-- Iterate through our own validated list
-            for symbol in validated_symbols_to_scan:
-                if slots_available <= 0: break
-                
-                # Filter by liquidity
-                if ticker_data.get(symbol, {}).get('volume_24h_usdt', 0) < MIN_VOLUME_24H_USDT: continue
-
-                with conn.cursor() as symbol_cur:
-                    symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND status = 'open' LIMIT 1;", (symbol,))
-                    if symbol_cur.fetchone(): continue
-
-                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_hist is None or df_hist.empty: continue
-                
-                strategy = TradingStrategy(symbol)
-                if not strategy.ml_model: continue
-
-                df_indicators = strategy.populate_indicators(df_hist)
-                if df_indicators is None: continue
-                
-                potential_signal = strategy.generate_signal(df_indicators)
-                if potential_signal:
-                    logger.info(f"💰 [Main] تم العثور على إشارة صالحة لـ {symbol}. محاولة الحفظ...")
-                    if insert_signal_into_db(potential_signal):
-                        send_telegram_alert(potential_signal)
-                        slots_available -= 1
-            
-            time.sleep(60)
-
-        except (KeyboardInterrupt, SystemExit): break
-        except Exception as main_err:
-            logger.error(f"❌ [Main] خطأ غير متوقع: {main_err}", exc_info=True)
-            time.sleep(120)
-
-# The rest of the functions (send_telegram_alert, insert_signal_into_db, track_signals, run_flask) are unchanged.
-def send_telegram_alert(signal_data: Dict[str, Any]) -> None:
-    symbol, entry, target, sl = signal_data['symbol'].replace('_', '\\_'), signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
+def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
+    """ ✅ تم إصلاح هذه الدالة. تستخدم فقط للإشارات الجديدة """
+    # أولاً، قم بتجهيز اسم الزوج لتجنب الخطأ
+    safe_symbol = signal_data['symbol'].replace('_', '\\_')
+    entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
+    
+    # ثانياً، استخدم المتغير الجاهز في الـ f-string
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n--------------------\n"
-               f"🪙 **الزوج:** `{symbol}`\n" f"📈 **النوع:** شراء\n"
-               f"➡️ **الدخول:** `${entry:,.8g}`\n" f"🎯 **الهدف:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
-               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n" f"🔍 **الثقة:** {signal_data['signal_details']['ML_Probability']}\n--------------------")
+               f"🪙 **الزوج:** `{safe_symbol}`\n"
+               f"📈 **النوع:** شراء\n"
+               f"➡️ **الدخول:** `${entry:,.8g}`\n"
+               f"🎯 **الهدف:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
+               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n"
+               f"🔍 **الثقة:** {signal_data['signal_details']['ML_Probability']}\n--------------------")
+    
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
-    try: requests.post(url, json=payload, timeout=20).raise_for_status()
-    except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+    try:
+        requests.post(url, json=payload, timeout=20).raise_for_status()
+    except Exception as e:
+        logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     if not check_db_connection() or not conn: return False
@@ -352,27 +311,103 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"❌ [DB Insert] خطأ أثناء إدراج الإشارة: {e}"); conn.rollback(); return False
 
+# --- Main Application Loops ---
+def main_loop():
+    global validated_symbols_to_scan
+    validated_symbols_to_scan = get_validated_symbols()
+    if not validated_symbols_to_scan:
+        logger.critical("❌ [Main] No validated symbols to scan. Bot will not proceed.")
+        return
+
+    logger.info("✅ [Main] بدء دورة المسح الرئيسية.")
+    time.sleep(10)
+
+    while True:
+        try:
+            if not check_db_connection() or not conn:
+                time.sleep(60)
+                continue
+
+            with conn.cursor() as cur_check:
+                cur_check.execute("SELECT COUNT(*) AS count FROM signals WHERE status = 'open';")
+                open_count = cur_check.fetchone().get('count', 0)
+
+            if open_count >= MAX_OPEN_TRADES:
+                time.sleep(60)
+                continue
+
+            slots_available = MAX_OPEN_TRADES - open_count
+            for symbol in validated_symbols_to_scan:
+                if slots_available <= 0: break
+
+                if ticker_data.get(symbol, {}).get('volume_24h_usdt', 0) < MIN_VOLUME_24H_USDT: continue
+
+                with conn.cursor() as symbol_cur:
+                    symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND status = 'open' LIMIT 1;", (symbol,))
+                    if symbol_cur.fetchone(): continue
+
+                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
+                if df_hist is None or df_hist.empty: continue
+
+                strategy = TradingStrategy(symbol)
+                if not strategy.ml_model: continue
+
+                df_indicators = strategy.populate_indicators(df_hist)
+                if df_indicators is None: continue
+
+                potential_signal = strategy.generate_signal(df_indicators)
+                if potential_signal:
+                    logger.info(f"💰 [Main] تم العثور على إشارة صالحة لـ {symbol}. محاولة الحفظ...")
+                    if insert_signal_into_db(potential_signal):
+                        send_new_signal_alert(potential_signal) # ✅ استخدام الدالة الصحيحة
+                        slots_available -= 1
+
+            time.sleep(60)
+
+        except (KeyboardInterrupt, SystemExit): break
+        except Exception as main_err:
+            logger.error(f"❌ [Main] خطأ غير متوقع: {main_err}", exc_info=True)
+            time.sleep(120)
+
 def track_signals() -> None:
     logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات...")
     while True:
         try:
             if not check_db_connection() or not conn: time.sleep(15); continue
             with conn.cursor() as track_cur: track_cur.execute("SELECT id, symbol, entry_price, target_price, stop_loss FROM signals WHERE status = 'open';"); open_signals = track_cur.fetchall()
+            
             for signal in open_signals:
-                price_info = ticker_data.get(signal['symbol']);
+                price_info = ticker_data.get(signal['symbol'])
                 if not price_info or 'price' not in price_info: continue
                 price = price_info['price']; status, closing_price = None, None
+                
                 if price >= signal['target_price']: status, closing_price = 'target_hit', signal['target_price']
                 elif price <= signal['stop_loss']: status, closing_price = 'stop_loss_hit', signal['stop_loss']
+                
                 if status:
                     profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
                     with conn.cursor() as update_cur: update_cur.execute("UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;", (status, closing_price, profit_pct, signal['id']))
                     conn.commit()
-                    alert_msg = f"{'✅' if status == 'target_hit' else '🛑'} *{'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'}*\n`{signal['symbol'].replace('_', '\\_')}` | Profit: {profit_pct:+.2f}%"
-                    send_telegram_alert({'symbol': alert_msg, 'entry_price': 0, 'target_price': 0, 'stop_loss': 0, 'signal_details': {'ML_Probability':''}}) # Simplified alert for closure
+
+                    # --- ✅ الإصلاح المنطقي والنهائي هنا ---
+                    # 1. جهز اسم الزوج بشكل آمن
+                    safe_symbol = signal['symbol'].replace('_', '\\_')
+                    
+                    # 2. جهز متغيرات الرسالة
+                    status_icon = '✅' if status == 'target_hit' else '🛑'
+                    status_text = 'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'
+                    
+                    # 3. أنشئ الرسالة النهائية (بدون خطأ الشرطة المائلة)
+                    alert_msg = f"{status_icon} *{status_text}*\n`{safe_symbol}` | Profit: {profit_pct:+.2f}%"
+                    
+                    # 4. أرسل الرسالة باستخدام الدالة العامة الجديدة
+                    send_telegram_message(CHAT_ID, alert_msg)
+            
             time.sleep(3)
         except Exception as e:
-            logger.error(f"❌ [Tracker] خطأ في دورة التتبع: {e}"); conn.rollback(); time.sleep(30)
+            logger.error(f"❌ [Tracker] خطأ في دورة التتبع: {e}"); 
+            if conn: conn.rollback()
+            time.sleep(30)
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
@@ -389,7 +424,7 @@ if __name__ == "__main__":
         init_db()
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=track_signals, daemon=True).start()
-        Thread(target=main_loop, daemon=True).start() # This now handles symbol validation
+        Thread(target=main_loop, daemon=True).start()
         run_flask()
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 [Main] طلب إيقاف...")
