@@ -49,7 +49,8 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
 
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V2'
+# --- ✅ FIX: Match the model name with the training script (ml.py) ---
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V3'
 MODEL_PREDICTION_THRESHOLD = 0.65
 
 # Indicator Parameters
@@ -85,12 +86,21 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             cur = conn.cursor()
+            # This table is for signals, the ML model table is managed by ml.py
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
-                    id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                    target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                    status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                    profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB);
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    entry_price DOUBLE PRECISION NOT NULL,
+                    target_price DOUBLE PRECISION NOT NULL,
+                    stop_loss DOUBLE PRECISION NOT NULL,
+                    status TEXT DEFAULT 'open',
+                    closing_price DOUBLE PRECISION,
+                    closed_at TIMESTAMP,
+                    profit_percentage DOUBLE PRECISION,
+                    strategy_name TEXT,
+                    signal_details JSONB
+                );
             """)
             conn.commit()
             logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
@@ -104,12 +114,19 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
 def check_db_connection() -> bool:
     global conn
     try:
-        if conn is None or conn.closed != 0: init_db()
-        else: conn.cursor().execute("SELECT 1;")
+        if conn is None or conn.closed != 0:
+            logger.warning("[DB] Connection lost. Re-initializing...")
+            init_db()
+        else:
+            # A lightweight query to check if the connection is still alive
+            conn.cursor().execute("SELECT 1;")
         return True
     except (OperationalError, InterfaceError):
-        try: init_db()
-        except Exception: return False
+        try:
+            logger.warning("[DB] Connection check failed. Attempting to re-initialize...")
+            init_db()
+        except Exception:
+            return False
         return True
     return False
 
@@ -192,8 +209,14 @@ def calculate_candlestick_features(df: pd.DataFrame) -> pd.DataFrame:
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if model_name in ml_models_cache: return ml_models_cache[model_name]
-    if not check_db_connection() or not conn: return None
+    if model_name in ml_models_cache:
+        # logger.info(f"✅ [ML Model] Loaded '{model_name}' from cache.")
+        return ml_models_cache[model_name]
+    
+    if not check_db_connection() or not conn:
+        logger.error("[ML Model] Cannot load model, no DB connection.")
+        return None
+        
     try:
         with conn.cursor() as db_cur:
             db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
@@ -202,10 +225,12 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
                 model_bundle = pickle.loads(result['model_data'])
                 if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
                     ml_models_cache[model_name] = model_bundle
+                    logger.info(f"✅ [ML Model] Successfully loaded '{model_name}' from database.")
                     return model_bundle
+            logger.warning(f"⚠️ [ML Model] Model '{model_name}' not found in the database.")
             return None
     except Exception as e:
-        logger.error(f"❌ [ML Model] خطأ أثناء تحميل حزمة نموذج ML لـ {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [ML Model] Error loading ML model bundle for {symbol}: {e}", exc_info=True)
         return None
 
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
@@ -219,10 +244,10 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 if symbol not in ticker_data: ticker_data[symbol] = {}
                 ticker_data[symbol]['price'] = float(item.get('c', 0))
                 ticker_data[symbol]['volume_24h_usdt'] = float(item.get('q', 0))
-    except Exception as e: logger.error(f"❌ [WS] خطأ في معالجة رسالة المؤشر: {e}")
+    except Exception as e: logger.error(f"❌ [WS] Error processing ticker message: {e}")
 
 def run_websocket_manager() -> None:
-    logger.info("ℹ️ [WS] بدء مدير WebSocket...")
+    logger.info("ℹ️ [WS] Starting WebSocket manager...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     twm.start_ticker_socket(callback=handle_ticker_message)
@@ -248,68 +273,89 @@ class TradingStrategy:
         return df_calc
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]): return None
+        if not all([self.ml_model, self.scaler, self.feature_names]):
+            # logger.warning(f"[Signal Gen {self.symbol}] Skipping signal generation, model not loaded.")
+            return None
+            
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol, {}).get('price')
-        if current_price is None: return None
+        if current_price is None:
+            # logger.warning(f"[Signal Gen {self.symbol}] Skipping, no current price available.")
+            return None
 
         try:
+            # Ensure features are in the correct order
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
-            if features_df.isnull().values.any(): return None
+            if features_df.isnull().values.any():
+                # logger.warning(f"[Signal Gen {self.symbol}] Skipping, features contain NaN values.")
+                return None
+                
             features_scaled = self.scaler.transform(features_df)
             prediction_proba = self.ml_model.predict_proba(features_scaled)[0][1]
-            if prediction_proba < MODEL_PREDICTION_THRESHOLD: return None
+
+            if prediction_proba < MODEL_PREDICTION_THRESHOLD:
+                return None
         except Exception as e:
-            logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء التنبؤ: {e}")
+            logger.error(f"❌ [Signal Gen {self.symbol}] Error during prediction: {e}")
             return None
 
         target_price, stop_loss = current_price * 1.015, current_price * 0.99
-        if stop_loss >= current_price or target_price <= current_price: return None
-        return {'symbol': self.symbol, 'entry_price': current_price, 'target_price': target_price, 'stop_loss': stop_loss, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}}
+        if stop_loss >= current_price or target_price <= current_price:
+            return None
+        return {
+            'symbol': self.symbol, 
+            'entry_price': current_price, 
+            'target_price': target_price, 
+            'stop_loss': stop_loss, 
+            'strategy_name': BASE_ML_MODEL_NAME, 
+            'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}
+        }
 
 # --- Telegram and Database Functions ---
 def send_telegram_message(target_chat_id: str, text: str):
-    """ ✅ دالة جديدة لإرسال أي رسالة نصية إلى تليجرام """
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     try:
         requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة العامة: {e}")
+        logger.error(f"❌ [Telegram] Failed to send generic message: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    """ ✅ تم إصلاح هذه الدالة. تستخدم فقط للإشارات الجديدة """
-    # أولاً، قم بتجهيز اسم الزوج لتجنب الخطأ
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
     
-    # ثانياً، استخدم المتغير الجاهز في الـ f-string
-    message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n--------------------\n"
-               f"🪙 **الزوج:** `{safe_symbol}`\n"
-               f"📈 **النوع:** شراء\n"
-               f"➡️ **الدخول:** `${entry:,.8g}`\n"
-               f"🎯 **الهدف:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
-               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n"
-               f"🔍 **الثقة:** {signal_data['signal_details']['ML_Probability']}\n--------------------")
+    message = (f"💡 *New Trading Signal ({BASE_ML_MODEL_NAME})* 💡\n--------------------\n"
+               f"🪙 **Symbol:** `{safe_symbol}`\n"
+               f"📈 **Type:** LONG\n"
+               f"➡️ **Entry:** `${entry:,.8g}`\n"
+               f"🎯 **Target:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
+               f"🛑 **Stop Loss:** `${sl:,.8g}`\n"
+               f"🔍 **Confidence:** {signal_data['signal_details']['ML_Probability']}\n--------------------")
     
-    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
+    reply_markup = {"inline_keyboard": [[{"text": "📊 Open Dashboard", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
     try:
         requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e:
-        logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
+        logger.error(f"❌ [Telegram] Failed to send new signal alert: {e}")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
     if not check_db_connection() or not conn: return False
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) VALUES (%s, %s, %s, %s, %s, %s);", (signal['symbol'], signal['entry_price'], signal['target_price'], signal['stop_loss'], signal.get('strategy_name'), json.dumps(signal.get('signal_details', {}))))
-        conn.commit(); return True
+            cur.execute("""
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) 
+                VALUES (%s, %s, %s, %s, %s, %s);
+            """, (signal['symbol'], signal['entry_price'], signal['target_price'], signal['stop_loss'], signal.get('strategy_name'), json.dumps(signal.get('signal_details', {}))))
+        conn.commit()
+        return True
     except Exception as e:
-        logger.error(f"❌ [DB Insert] خطأ أثناء إدراج الإشارة: {e}"); conn.rollback(); return False
+        logger.error(f"❌ [DB Insert] Error inserting signal: {e}")
+        if conn: conn.rollback()
+        return False
 
 # --- Main Application Loops ---
 def main_loop():
@@ -319,12 +365,13 @@ def main_loop():
         logger.critical("❌ [Main] No validated symbols to scan. Bot will not proceed.")
         return
 
-    logger.info("✅ [Main] بدء دورة المسح الرئيسية.")
-    time.sleep(10)
+    logger.info(f"✅ [Main] Starting main scan loop for {len(validated_symbols_to_scan)} symbols.")
+    time.sleep(10) # Wait for WebSocket to connect and populate initial data
 
     while True:
         try:
             if not check_db_connection() or not conn:
+                logger.warning("[Main] DB connection failed, sleeping for 60s.")
                 time.sleep(60)
                 continue
 
@@ -340,86 +387,106 @@ def main_loop():
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
 
-                if ticker_data.get(symbol, {}).get('volume_24h_usdt', 0) < MIN_VOLUME_24H_USDT: continue
+                if ticker_data.get(symbol, {}).get('volume_24h_usdt', 0) < MIN_VOLUME_24H_USDT:
+                    continue
 
                 with conn.cursor() as symbol_cur:
                     symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND status = 'open' LIMIT 1;", (symbol,))
-                    if symbol_cur.fetchone(): continue
+                    if symbol_cur.fetchone():
+                        continue
 
                 df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_hist is None or df_hist.empty: continue
+                if df_hist is None or df_hist.empty:
+                    continue
 
                 strategy = TradingStrategy(symbol)
-                if not strategy.ml_model: continue
+                if not strategy.ml_model:
+                    # This is expected if the model for a symbol hasn't been trained or failed training
+                    continue
 
                 df_indicators = strategy.populate_indicators(df_hist)
-                if df_indicators is None: continue
+                if df_indicators is None:
+                    continue
 
                 potential_signal = strategy.generate_signal(df_indicators)
                 if potential_signal:
-                    logger.info(f"💰 [Main] تم العثور على إشارة صالحة لـ {symbol}. محاولة الحفظ...")
+                    logger.info(f"💰 [Main] Valid signal found for {symbol}. Attempting to save...")
                     if insert_signal_into_db(potential_signal):
-                        send_new_signal_alert(potential_signal) # ✅ استخدام الدالة الصحيحة
+                        logger.info(f"✅ [Main] Signal for {symbol} saved to DB and alert sent.")
+                        send_new_signal_alert(potential_signal)
                         slots_available -= 1
 
             time.sleep(60)
 
-        except (KeyboardInterrupt, SystemExit): break
+        except (KeyboardInterrupt, SystemExit):
+            break
         except Exception as main_err:
-            logger.error(f"❌ [Main] خطأ غير متوقع: {main_err}", exc_info=True)
+            logger.error(f"❌ [Main] Unexpected error: {main_err}", exc_info=True)
             time.sleep(120)
 
 def track_signals() -> None:
-    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات...")
+    logger.info("ℹ️ [Tracker] Starting signal tracking loop...")
     while True:
         try:
-            if not check_db_connection() or not conn: time.sleep(15); continue
-            with conn.cursor() as track_cur: track_cur.execute("SELECT id, symbol, entry_price, target_price, stop_loss FROM signals WHERE status = 'open';"); open_signals = track_cur.fetchall()
+            if not check_db_connection() or not conn:
+                time.sleep(15)
+                continue
+                
+            with conn.cursor() as track_cur:
+                track_cur.execute("SELECT id, symbol, entry_price, target_price, stop_loss FROM signals WHERE status = 'open';")
+                open_signals = track_cur.fetchall()
             
             for signal in open_signals:
                 price_info = ticker_data.get(signal['symbol'])
-                if not price_info or 'price' not in price_info: continue
-                price = price_info['price']; status, closing_price = None, None
+                if not price_info or 'price' not in price_info:
+                    continue
                 
-                if price >= signal['target_price']: status, closing_price = 'target_hit', signal['target_price']
-                elif price <= signal['stop_loss']: status, closing_price = 'stop_loss_hit', signal['stop_loss']
+                price = price_info['price']
+                status, closing_price = None, None
+                
+                if price >= signal['target_price']:
+                    status, closing_price = 'target_hit', signal['target_price']
+                elif price <= signal['stop_loss']:
+                    status, closing_price = 'stop_loss_hit', signal['stop_loss']
                 
                 if status:
                     profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
-                    with conn.cursor() as update_cur: update_cur.execute("UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;", (status, closing_price, profit_pct, signal['id']))
+                    with conn.cursor() as update_cur:
+                        update_cur.execute(
+                            "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;",
+                            (status, closing_price, profit_pct, signal['id'])
+                        )
                     conn.commit()
 
-                    # --- ✅ الإصلاح المنطقي والنهائي هنا ---
-                    # 1. جهز اسم الزوج بشكل آمن
                     safe_symbol = signal['symbol'].replace('_', '\\_')
-                    
-                    # 2. جهز متغيرات الرسالة
                     status_icon = '✅' if status == 'target_hit' else '🛑'
                     status_text = 'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'
-                    
-                    # 3. أنشئ الرسالة النهائية (بدون خطأ الشرطة المائلة)
                     alert_msg = f"{status_icon} *{status_text}*\n`{safe_symbol}` | Profit: {profit_pct:+.2f}%"
                     
-                    # 4. أرسل الرسالة باستخدام الدالة العامة الجديدة
                     send_telegram_message(CHAT_ID, alert_msg)
             
             time.sleep(3)
         except Exception as e:
-            logger.error(f"❌ [Tracker] خطأ في دورة التتبع: {e}"); 
+            logger.error(f"❌ [Tracker] Error in tracking loop: {e}")
             if conn: conn.rollback()
             time.sleep(30)
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    app = Flask(__name__); CORS(app)
+    app = Flask(__name__)
+    CORS(app)
     @app.route('/')
     def home(): return "Trading Bot is running"
-    logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...")
-    try: from waitress import serve; serve(app, host=host, port=port, threads=8)
-    except ImportError: app.run(host=host, port=port)
+    
+    logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
+    try:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=8)
+    except ImportError:
+        app.run(host=host, port=port)
 
 if __name__ == "__main__":
-    logger.info("🚀 بدء بوت إشارات تداول العملات الرقمية (V2)...")
+    logger.info("🚀 Starting Crypto Trading Signal Bot (V3 Architecture)...")
     try:
         init_db()
         Thread(target=run_websocket_manager, daemon=True).start()
@@ -427,8 +494,10 @@ if __name__ == "__main__":
         Thread(target=main_loop, daemon=True).start()
         run_flask()
     except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 [Main] طلب إيقاف...")
+        logger.info("🛑 [Main] Shutdown requested...")
     finally:
-        if conn: conn.close()
-        logger.info("👋 [Main] تم إيقاف البوت.")
+        if conn:
+            conn.close()
+            logger.info("🔌 [DB] Database connection closed.")
+        logger.info("👋 [Main] Bot has been shut down.")
         os._exit(0)
