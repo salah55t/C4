@@ -162,7 +162,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ... (باقي دوال المعالجة والنمذجة تبقى كما هي)
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
@@ -231,11 +230,11 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 current_prices[symbol] = price
 
             signal_to_process = None
+            status, closing_price = None, None
             with signal_cache_lock:
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
-                    status, closing_price = None, None
-
+                    
                     if price >= signal['target_price']:
                         status, closing_price = 'target_hit', signal['target_price']
                         signal_to_process = signal
@@ -337,7 +336,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     symbol = signal['symbol']
-    # التأكد من أن الإشارة ما زالت مفتوحة قبل محاولة إغلاقها
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']:
             logger.warning(f"⚠️ [إغلاق الإشارة] محاولة إغلاق إشارة {symbol} (ID: {signal['id']}) التي لم تعد في الذاكرة المؤقتة. ربما تم إغلاقها بالفعل.")
@@ -356,7 +354,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
             )
         conn.commit()
 
-        # إزالة الإشارة من الذاكرة المؤقتة فقط بعد نجاح الحفظ في قاعدة البيانات
         with signal_cache_lock:
             del open_signals_cache[symbol]
 
@@ -369,13 +366,16 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         }
         status_icon, status_text = status_map.get(status, ('', status))
 
-        alert_msg = f"{status_icon} *{status_text}*\n`{signal['symbol'].replace('_', '\\_')}` | **الربح:** `{profit_pct:+.2f}%`"
+        # --- الإصلاح ---
+        # نقوم بتهيئة اسم العملة الآمن في متغير منفصل أولاً
+        safe_symbol = signal['symbol'].replace('_', '\\_')
+        # ثم نستخدم هذا المتغير داخل النص المنسق
+        alert_msg = f"{status_icon} *{status_text}*\n`{safe_symbol}` | **الربح:** `{profit_pct:+.2f}%`"
         send_telegram_message(CHAT_ID, alert_msg)
 
     except Exception as e:
         logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}")
         if conn: conn.rollback()
-        # لا نعيد الإشارة إلى الذاكرة هنا لتجنب الحالات غير المتوقعة، سيتم تحميلها في الدورة التالية إذا لزم الأمر
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
@@ -395,7 +395,6 @@ def load_open_signals_to_cache():
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def main_loop():
     global validated_symbols_to_scan
-    # الانتظار قليلاً للتأكد من أن WebSocket قد بدأ
     time.sleep(10)
     
     validated_symbols_to_scan = get_validated_symbols()
@@ -444,7 +443,6 @@ def main_loop():
                         
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
-                            # إضافة الإشارة الجديدة للذاكرة المؤقتة للتتبع الفوري
                             with signal_cache_lock:
                                 open_signals_cache[saved_signal['symbol']] = saved_signal
                             send_new_signal_alert(saved_signal)
@@ -480,7 +478,6 @@ def get_stats():
             cur.execute("SELECT status, profit_percentage FROM signals WHERE status != 'open';")
             closed_signals = cur.fetchall()
         
-        # **تحسين منطق الإحصائيات**
         wins = sum(1 for s in closed_signals if s.get('profit_percentage', 0) > 0)
         losses = sum(1 for s in closed_signals if s.get('profit_percentage', 0) <= 0)
         total_closed = len(closed_signals)
@@ -511,7 +508,6 @@ def get_signals():
         for s in all_signals:
             if s.get('closed_at'):
                 s['closed_at'] = s['closed_at'].isoformat()
-            # إضافة السعر الحالي للإشارات المفتوحة
             if s['status'] == 'open':
                 with prices_lock:
                     s['current_price'] = current_prices.get(s['symbol'])
@@ -534,7 +530,7 @@ def manual_close_signal(signal_id):
     with signal_cache_lock:
         for signal_data in open_signals_cache.values():
             if signal_data['id'] == signal_id:
-                signal_to_close = signal_data.copy() # أخذ نسخة لضمان عدم التعديل المتزامن
+                signal_to_close = signal_data.copy()
                 break
     
     if not signal_to_close:
@@ -547,7 +543,6 @@ def manual_close_signal(signal_id):
     if not closing_price:
         return jsonify({"error": f"تعذر الحصول على السعر الحالي للعملة {symbol_to_close} لإتمام الإغلاق."}), 500
     
-    # استدعاء دالة الإغلاق الموحدة في خيط منفصل
     Thread(target=close_signal, args=(signal_to_close, 'manual_close', closing_price, "manual")).start()
     
     return jsonify({"message": f"جاري إغلاق الإشارة {signal_id} للعملة {symbol_to_close} عند سعر {closing_price}."})
@@ -564,9 +559,8 @@ def run_flask():
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.2 - مع لوحة تحكم)...")
+    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.3 - مصحح)...")
     try:
-        # **الإصلاح الرئيسي: تهيئة كائن Binance هنا**
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
 
