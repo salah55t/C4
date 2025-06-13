@@ -51,10 +51,10 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 3
 
 # --- معلمات فلتر السيولة ---
 # الفلتر الأساسي: الحد الأدنى المطلق لحجم التداول
-MIN_VOLUME_15M_USDT: float = 100.0 
+MIN_VOLUME_15M_USDT: float = 1000.0 
 # الفلتر المتقدم: معلمات حجم التداول النسبي
 RELATIVE_VOLUME_LOOKBACK: int = 30 # عدد الشموع لحساب متوسط الحجم
-RELATIVE_VOLUME_FACTOR: float = 1.1 # يجب أن يكون حجم الشمعة الأخيرة أعلى بـ 50% من المتوسط
+RELATIVE_VOLUME_FACTOR: float = 0.80# يجب أن يكون حجم الشمعة الأخيرة أعلى بـ 50% من المتوسط
 
 # Indicator Parameters
 RSI_PERIOD: int = 9
