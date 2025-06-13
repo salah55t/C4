@@ -302,13 +302,14 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
+    # تم الإصلاح: تم تغيير **bold** إلى *bold* ليتوافق مع تنسيق Markdown القديم
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
-               f"🪙 **العملة:** `{safe_symbol}`\n"
-               f"📈 **النوع:** شراء (LONG)\n\n"
-               f"⬅️ **سعر الدخول:** `${entry:,.8g}`\n"
-               f"🎯 **الهدف:** `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
-               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n\n"
-               f"🔍 **مستوى الثقة:** {signal_data['signal_details']['ML_Probability']}\n"
+               f"🪙 *العملة:* `{safe_symbol}`\n"
+               f"📈 *النوع:* شراء (LONG)\n\n"
+               f"⬅️ *سعر الدخول:* `${entry:,.8g}`\n"
+               f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
+               f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
+               f"🔍 *مستوى الثقة:* {signal_data['signal_details']['ML_Probability']}\n"
                f"--------------------")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -359,18 +360,19 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
         logger.info(f"✅ [إغلاق الإشارة] تم إغلاق الإشارة {signal['id']} للعملة {signal['symbol']} بحالة '{status}'. طريقة الإغلاق: {closed_by}. الربح: {profit_pct:.2f}%")
         
+        # تم الإصلاح: تبسيط الرسالة وتصحيح التنسيق لـ Markdown
         status_map = {
-            'target_hit': ('✅ تحقق الهدف', 'Target Hit'),
-            'stop_loss_hit': ('🛑 ضرب وقف الخسارة', 'Stop Loss Hit'),
-            'manual_close': (' manually_closed', 'أُغلقت يدوياً')
+            'target_hit': '✅ تحقق الهدف',
+            'stop_loss_hit': '🛑 ضرب وقف الخسارة',
+            'manual_close': '🖐️ أُغلقت يدوياً'
         }
-        status_icon, status_text = status_map.get(status, ('', status))
+        # استخدمنا .title() كاحتياط في حال كانت الحالة غير معروفة
+        status_message = status_map.get(status, status.replace('_', ' ').title())
 
-        # --- الإصلاح ---
-        # نقوم بتهيئة اسم العملة الآمن في متغير منفصل أولاً
         safe_symbol = signal['symbol'].replace('_', '\\_')
-        # ثم نستخدم هذا المتغير داخل النص المنسق
-        alert_msg = f"{status_icon} *{status_text}*\n`{safe_symbol}` | **الربح:** `{profit_pct:+.2f}%`"
+        
+        # تم الإصلاح: تم تغيير **bold** إلى *bold* وتعديل هيكل الرسالة ليكون أوضح
+        alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{profit_pct:+.2f}%`"
         send_telegram_message(CHAT_ID, alert_msg)
 
     except Exception as e:
@@ -559,7 +561,7 @@ def run_flask():
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.3 - مصحح)...")
+    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.4 - مصحح)...")
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
