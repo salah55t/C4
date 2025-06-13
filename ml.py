@@ -210,7 +210,7 @@ def train_and_evaluate_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[An
         learning_rate=0.05,
         num_leaves=31,
         n_jobs=-1,
-        is_unbalanced=True, # <-- More direct way to handle imbalance
+        class_weight='balanced', # <-- تم الإصلاح: استبدال is_unbalanced
         colsample_bytree=0.8,
         subsample=0.8
     )
