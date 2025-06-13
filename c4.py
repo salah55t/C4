@@ -49,7 +49,7 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
 
-# --- ✅ FIX: Match the model name with the training script (ml.py) ---
+# --- اسم النموذج يجب أن يتطابق مع ملف التدريب ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V3'
 MODEL_PREDICTION_THRESHOLD = 0.65
 
@@ -210,7 +210,6 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache:
-        # logger.info(f"✅ [ML Model] Loaded '{model_name}' from cache.")
         return ml_models_cache[model_name]
     
     if not check_db_connection() or not conn:
@@ -266,28 +265,33 @@ class TradingStrategy:
         df_calc['rsi'] = calculate_rsi(df_calc, RSI_PERIOD)
         df_calc['macd'], df_calc['macd_signal'] = calculate_macd(df_calc)
         df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-        df_calc['bb_upper'], df_calc['bb_lower'] = calculate_bollinger_bands(df_calc)
-        df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['close']
+
+        # --- ✅ FIX: Calculate all Bollinger Bands features consistently with ml.py ---
+        sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
+        std = df_calc['close'].rolling(window=BBANDS_PERIOD).std().replace(0, np.nan)
+        df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
+        df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
+        df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma.replace(0, np.nan)
+        df_calc['bb_pos'] = (df_calc['close'] - sma) / std # Add the missing feature
+        
         df_calc = calculate_candlestick_features(df_calc)
-        df_calc['relative_volume'] = df_calc['volume'] / df_calc['volume'].rolling(window=30, min_periods=1).mean()
+        # Make relative volume calculation consistent and safe
+        df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
         return df_calc
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
-            # logger.warning(f"[Signal Gen {self.symbol}] Skipping signal generation, model not loaded.")
             return None
             
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol, {}).get('price')
         if current_price is None:
-            # logger.warning(f"[Signal Gen {self.symbol}] Skipping, no current price available.")
             return None
 
         try:
             # Ensure features are in the correct order
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any():
-                # logger.warning(f"[Signal Gen {self.symbol}] Skipping, features contain NaN values.")
                 return None
                 
             features_scaled = self.scaler.transform(features_df)
@@ -401,7 +405,6 @@ def main_loop():
 
                 strategy = TradingStrategy(symbol)
                 if not strategy.ml_model:
-                    # This is expected if the model for a symbol hasn't been trained or failed training
                     continue
 
                 df_indicators = strategy.populate_indicators(df_hist)
