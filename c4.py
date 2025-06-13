@@ -12,7 +12,7 @@ from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify, render_template_string # Added jsonify and render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timedelta
@@ -22,7 +22,7 @@ from sklearn.preprocessing import StandardScaler
 
 # ---------------------- إعداد التسجيل ----------------------
 logging.basicConfig(
-    level=logging.INFO, # تم ضبط المستوى على INFO لإظهار كل الرسائل المطلوبة
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot.log', encoding='utf-8'),
@@ -45,6 +45,7 @@ except Exception as e:
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 MAX_OPEN_TRADES: int = 5
+TRADE_AMOUNT_USDT: float = 10.0 # قيمة الصفقة بالدولار لإحصائيات الربح
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
@@ -68,19 +69,13 @@ ml_models_cache: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {} 
 signal_cache_lock = Lock()
+current_prices: Dict[str, float] = {} # مخزن للأسعار الحالية
+prices_lock = Lock()
 
-# ---------------------- Binance Client & DB Setup ----------------------
-try:
-    logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
-    client = Client(API_KEY, API_SECRET)
-    client.ping()
-    logger.info("✅ [Binance] تم الاتصال بمنصة Binance بنجاح.")
-except Exception as e:
-    logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
-    exit(1)
+# --- (The rest of the Python code remains the same until the Flask section) ---
 
+# ... (Previous functions: init_db, check_db_connection, get_validated_symbols, etc.)
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    # ... (code with existing logging is fine)
     global conn
     logger.info("[DB] بدء تهيئة قاعدة البيانات...")
     for attempt in range(retries):
@@ -105,27 +100,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             else: exit(1)
 
 def check_db_connection() -> bool:
-    # ... (code with existing logging is fine)
     global conn
     try:
-        if conn is None or conn.closed != 0:
-            logger.warning("⚠️ [DB] Connection lost. Re-initializing...")
-            init_db()
-        else:
-            conn.cursor().execute("SELECT 1;")
+        if conn is None or conn.closed != 0: init_db()
+        else: conn.cursor().execute("SELECT 1;")
         return True
     except (OperationalError, InterfaceError):
-        try:
-            logger.warning("⚠️ [DB] Connection failed check. Re-initializing...")
-            init_db()
-        except Exception:
-            return False
+        try: init_db()
+        except Exception: return False
         return True
     return False
 
-# ---------------------- Symbol Validation ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (code with existing logging is fine)
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
     try:
         with open(os.path.join(os.path.dirname(__file__), filename), 'r', encoding='utf-8') as f:
@@ -140,9 +126,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] An error occurred during symbol validation: {e}")
         return []
 
-# --- Data Fetching and Indicator Calculation ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    # ... (code with existing logging is fine)
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -159,7 +143,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (code is purely computational, no logging needed)
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -188,9 +171,7 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
     return df_calc
 
-# --- Model Loading and WebSocket ---
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (code with existing logging is fine)
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
@@ -212,8 +193,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    # ... (code unchanged, logging here would be too verbose)
-    global open_signals_cache
+    global open_signals_cache, current_prices
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
         if not isinstance(data, list): data = [data]
@@ -221,12 +201,16 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
         for item in data:
             symbol = item.get('s')
             if not symbol: continue
+            
+            price = float(item.get('c', 0))
+            if price == 0: continue
+            
+            # تحديث السعر الحالي للوحة التحكم
+            with prices_lock:
+                current_prices[symbol] = price
 
             with signal_cache_lock:
                 if symbol in open_signals_cache:
-                    price = float(item.get('c', 0))
-                    if price == 0: continue
-                    
                     signal = open_signals_cache[symbol]
                     status, closing_price = None, None
 
@@ -236,24 +220,21 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                         status, closing_price = 'stop_loss_hit', signal['stop_loss']
 
                     if status:
-                        # سجل مهم: تم العثور على حدث إغلاق صفقة في الوقت الفعلي
                         logger.info(f"⚡ [Real-time Track] Event '{status}' triggered for {symbol} at price {price:.8f}")
                         del open_signals_cache[symbol]
-                        Thread(target=close_signal_in_db, args=(signal, status, closing_price)).start()
+                        Thread(target=close_signal_in_db, args=(signal, status, closing_price, "auto")).start()
 
     except Exception as e:
         logger.error(f"❌ [WS Tracker] Error processing real-time ticker message: {e}")
 
 def run_websocket_manager() -> None:
-    # ... (code with existing logging is fine)
-    logger.info("ℹ️ [WS] Starting WebSocket manager for real-time tracking...")
+    logger.info("ℹ️ [WS] Starting WebSocket manager...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     twm.start_ticker_socket(callback=handle_ticker_message)
-    logger.info("✅ [WS] WebSocket connected and listening for ticker updates.")
+    logger.info("✅ [WS] WebSocket connected and listening.")
     twm.join()
-    
-# --- Trading Strategy and Signal Generation ---
+
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -265,52 +246,37 @@ class TradingStrategy:
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
-            # سجل مهم: سبب رفض الإشارة
-            logger.info(f"ℹ️ [Signal Reject] {self.symbol}: Signal rejected. Reason: ML model or scaler not loaded.")
+            logger.info(f"ℹ️ [Signal Reject] {self.symbol}: ML model or scaler not loaded.")
             return None
-        
         last_row = df_processed.iloc[-1]
-        
         try:
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any():
-                # سجل مهم: سبب رفض الإشارة
-                logger.info(f"ℹ️ [Signal Reject] {self.symbol}: Signal rejected. Reason: Null values found in feature data.")
+                logger.info(f"ℹ️ [Signal Reject] {self.symbol}: Null values in feature data.")
                 return None
-            
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-            
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0][1]
-            
             if prediction_proba < MODEL_PREDICTION_THRESHOLD:
-                # سجل مهم: سبب رفض الإشارة
-                logger.info(f"ℹ️ [Signal Reject] {self.symbol}: Signal rejected. Reason: Probability {prediction_proba:.2%} is below threshold {MODEL_PREDICTION_THRESHOLD:.2%}.")
+                logger.info(f"ℹ️ [Signal Reject] {self.symbol}: Probability {prediction_proba:.2%} is below threshold {MODEL_PREDICTION_THRESHOLD:.2%}.")
                 return None
-            
-            # سجل مهم: تم العثور على إشارة محتملة
-            logger.info(f"✅ [Signal Found] {self.symbol}: Potential signal found with probability {prediction_proba:.2%}.")
+            logger.info(f"✅ [Signal Found] {self.symbol}: Potential signal with probability {prediction_proba:.2%}.")
             return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}}
-
         except Exception as e:
-            logger.warning(f"⚠️ [Signal Gen] {self.symbol}: Could not generate signal due to an error: {e}")
+            logger.warning(f"⚠️ [Signal Gen] {self.symbol}: Error during generation: {e}")
             return None
 
-# --- Telegram and Database Functions ---
 def send_telegram_message(target_chat_id: str, text: str):
-    # ... (code with existing logging is fine)
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     try:
-        response = requests.post(url, json=payload, timeout=20)
-        response.raise_for_status()
+        requests.post(url, json=payload, timeout=20).raise_for_status()
         logger.info(f"✉️ [Telegram] Successfully sent a message.")
     except Exception as e:
         logger.error(f"❌ [Telegram] Failed to send generic message: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    # ... (code is fine, main logging is in `send_telegram_message`)
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
@@ -324,10 +290,8 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     reply_markup = {"inline_keyboard": [[{"text": "📊 Open Dashboard", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
-    try:
-        requests.post(url, json=payload, timeout=20).raise_for_status()
-    except Exception as e:
-        logger.error(f"❌ [Telegram] Failed to send new signal alert: {e}")
+    try: requests.post(url, json=payload, timeout=20).raise_for_status()
+    except Exception as e: logger.error(f"❌ [Telegram] Failed to send new signal alert: {e}")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -340,19 +304,15 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             new_id = cur.fetchone()['id']
             signal['id'] = new_id
         conn.commit()
-        
-        with signal_cache_lock:
-            open_signals_cache[signal['symbol']] = signal
-        # سجل مهم: تأكيد إضافة الصفقة للتتبع
-        logger.info(f"✅ [DB & Cache] Successfully inserted signal for {signal['symbol']} (ID: {new_id}) and added to real-time tracking cache.")
+        with signal_cache_lock: open_signals_cache[signal['symbol']] = signal
+        logger.info(f"✅ [DB & Cache] Inserted signal for {signal['symbol']} (ID: {new_id}) and added to tracking cache.")
         return signal
-
     except Exception as e:
         logger.error(f"❌ [DB Insert] Error inserting signal for {signal['symbol']}: {e}")
         if conn: conn.rollback()
         return None
 
-def close_signal_in_db(signal: Dict, status: str, closing_price: float):
+def close_signal_in_db(signal: Dict, status: str, closing_price: float, closed_by: str):
     if not check_db_connection() or not conn: return
     try:
         profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
@@ -362,15 +322,14 @@ def close_signal_in_db(signal: Dict, status: str, closing_price: float):
                 (status, closing_price, profit_pct, signal['id'])
             )
         conn.commit()
-        # سجل مهم: تأكيد إغلاق الصفقة
-        logger.info(f"✅ [DB Close] Successfully closed signal {signal['id']} for {signal['symbol']} with status '{status}'. Profit: {profit_pct:.2f}%")
+        logger.info(f"✅ [DB Close] Closed signal {signal['id']} for {signal['symbol']} with status '{status}'. Closed by: {closed_by}. Profit: {profit_pct:.2f}%")
         
         safe_symbol = signal['symbol'].replace('_', '\\_')
         status_icon = '✅' if status == 'target_hit' else '🛑'
         status_text = 'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'
+        if closed_by == "manual": status_text = "Manually Closed"
         alert_msg = f"{status_icon} *{status_text}*\n`{safe_symbol}` | Profit: {profit_pct:+.2f}%"
         send_telegram_message(CHAT_ID, alert_msg)
-
     except Exception as e:
         logger.error(f"❌ [DB Close] Error closing signal {signal['id']} for {signal['symbol']}: {e}")
         if conn: conn.rollback()
@@ -388,95 +347,169 @@ def load_open_signals_to_cache():
             with signal_cache_lock:
                 for signal in open_signals:
                     open_signals_cache[signal['symbol']] = dict(signal)
-            # سجل مهم: تأكيد عدد الصفقات التي يتم تتبعها
             logger.info(f"✅ [Cache Load] Loaded {len(open_signals)} open signals. Now tracking {len(open_signals_cache)} signals in real-time.")
     except Exception as e:
         logger.error(f"❌ [Cache Load] Failed to load open signals: {e}")
 
-# --- Main Application Loops ---
 def main_loop():
     global validated_symbols_to_scan
     validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
         logger.critical("❌ [Main] No validated symbols to scan. Bot will not proceed."); return
-    
     logger.info(f"✅ [Main] Starting main scan loop for {len(validated_symbols_to_scan)} symbols.")
     time.sleep(10)
-
     while True:
         try:
-            with signal_cache_lock:
-                open_count = len(open_signals_cache)
-
+            with signal_cache_lock: open_count = len(open_signals_cache)
             if open_count >= MAX_OPEN_TRADES:
-                # سجل مهم: سبب توقف البحث عن إشارات جديدة
-                logger.info(f"ℹ️ [Main Pause] Reached max open trades limit ({open_count}/{MAX_OPEN_TRADES}). Pausing new signal generation.")
+                logger.info(f"ℹ️ [Main Pause] Reached max open trades ({open_count}/{MAX_OPEN_TRADES}). Pausing new signal generation.")
                 time.sleep(60)
                 continue
-
             slots_available = MAX_OPEN_TRADES - open_count
             logger.info(f"ℹ️ [Main Scan] Starting new scan cycle. Open trades: {open_count}, Slots available: {slots_available}")
-            
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
-                
                 with signal_cache_lock:
                     if symbol in open_signals_cache:
-                        # سجل مهم: سبب رفض الإشارة
-                        logger.info(f"ℹ️ [Signal Reject] {symbol}: Skipped, an open trade already exists for this symbol.")
                         continue
-                
                 try:
                     latest_ticker = client.get_symbol_ticker(symbol=symbol)
                     current_price = float(latest_ticker['price'])
                 except BinanceAPIException as e:
                     logger.warning(f"⚠️ [Price Fetch] {symbol}: Could not get latest price: {e}. Skipping.")
                     continue
-                
                 df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_hist is None or df_hist.empty:
-                    # سجل مهم: سبب رفض الإشارة
-                    logger.info(f"ℹ️ [Signal Reject] {symbol}: Skipped, failed to fetch historical data.")
                     continue
-                
                 strategy = TradingStrategy(symbol)
-                
                 df_features = strategy.get_features(df_hist)
-                if df_features is None:
-                    logger.info(f"ℹ️ [Signal Reject] {symbol}: Skipped, feature calculation resulted in None.")
-                    continue
-
+                if df_features is None: continue
                 potential_signal = strategy.generate_signal(df_features)
                 if potential_signal:
                     potential_signal['entry_price'] = current_price
                     potential_signal['target_price'] = current_price * 1.015
                     potential_signal['stop_loss'] = current_price * 0.99
-                    
                     saved_signal = insert_signal_into_db(potential_signal)
                     if saved_signal:
                         send_new_signal_alert(saved_signal)
                         slots_available -= 1
-            
-            logger.info("ℹ️ [Main Scan] Scan cycle finished. Waiting for next cycle...")
+            logger.info("ℹ️ [Main Scan] Scan cycle finished. Waiting...")
             time.sleep(60)
-        except (KeyboardInterrupt, SystemExit):
-            break
+        except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
             logger.error(f"❌ [Main] Unexpected error in main loop: {main_err}", exc_info=True)
             time.sleep(120)
 
+# ---------------------- Flask API Endpoints for Dashboard ----------------------
+app = Flask(__name__)
+CORS(app) # Enable Cross-Origin Resource Sharing for the dashboard
+
+@app.route('/')
+def home():
+    # هذا سيقرأ ملف index.html من نفس المجلد ويعرضه
+    try:
+        with open('index.html', 'r', encoding='utf-8') as f:
+            return render_template_string(f.read())
+    except FileNotFoundError:
+        return "<h1>Dashboard file (index.html) not found.</h1><p>Please create the dashboard file.</p>", 404
+
+@app.route('/api/stats')
+def get_stats():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, profit_percentage FROM signals WHERE status != 'open';")
+            closed_signals = cur.fetchall()
+        
+        wins = sum(1 for s in closed_signals if s['status'] == 'target_hit')
+        losses = sum(1 for s in closed_signals if s['status'] == 'stop_loss_hit' or s['status'] == 'manual_close')
+        total_closed = len(closed_signals)
+        win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
+        loss_rate = (losses / total_closed * 100) if total_closed > 0 else 0
+
+        total_profit_usdt = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed_signals if s['profit_percentage'] is not None)
+
+        return jsonify({
+            "win_rate": win_rate,
+            "loss_rate": loss_rate,
+            "total_profit_usdt": total_profit_usdt,
+            "wins": wins,
+            "losses": losses
+        })
+    except Exception as e:
+        logger.error(f"❌ [API Stats] Error: {e}")
+        return jsonify({"error": "Could not fetch stats"}), 500
+
+@app.route('/api/signals')
+def get_signals():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "Database connection failed"}), 500
+    try:
+        with conn.cursor() as cur:
+            # جلب الصفقات المفتوحة والمغلقة معاً
+            cur.execute("SELECT * FROM signals ORDER BY closed_at DESC NULLS FIRST, id DESC;")
+            all_signals = cur.fetchall()
+        
+        # تحويل الوقت ليكون قابلاً للقراءة
+        for s in all_signals:
+            if s.get('closed_at'):
+                s['closed_at'] = s['closed_at'].isoformat()
+
+        return jsonify(all_signals)
+    except Exception as e:
+        logger.error(f"❌ [API Signals] Error: {e}")
+        return jsonify({"error": "Could not fetch signals"}), 500
+
+@app.route('/api/prices')
+def get_prices():
+    with prices_lock:
+        return jsonify(current_prices)
+
+@app.route('/api/close/<int:signal_id>', methods=['POST'])
+def manual_close_signal(signal_id):
+    logger.info(f"ℹ️ [API Close] Received manual close request for signal ID: {signal_id}")
+    signal_to_close = None
+    symbol_to_close = None
+    
+    with signal_cache_lock:
+        for symbol, signal_data in open_signals_cache.items():
+            if signal_data['id'] == signal_id:
+                signal_to_close = signal_data
+                symbol_to_close = symbol
+                break
+    
+    if not signal_to_close or not symbol_to_close:
+        return jsonify({"error": "Signal not found in open cache or already closed."}), 404
+
+    with prices_lock:
+        closing_price = current_prices.get(symbol_to_close)
+    
+    if not closing_price:
+        return jsonify({"error": f"Could not get current price for {symbol_to_close} to close."}), 500
+
+    # إزالة الصفقة من الذاكرة المؤقتة أولاً
+    with signal_cache_lock:
+        del open_signals_cache[symbol_to_close]
+    
+    # استدعاء دالة الإغلاق في خيط منفصل
+    Thread(target=close_signal_in_db, args=(signal_to_close, 'manual_close', closing_price, "manual")).start()
+    
+    return jsonify({"message": f"Signal {signal_id} for {symbol_to_close} is being closed at price {closing_price}."})
+
+
 def run_flask():
-    # ... (code with existing logging is fine)
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    app = Flask(__name__); CORS(app)
-    @app.route('/')
-    def home(): return "Trading Bot is running"
-    logger.info(f"ℹ️ [Flask] Starting Flask app on {host}:{port}...")
-    try: from waitress import serve; serve(app, host=host, port=port, threads=8)
-    except ImportError: app.run(host=host, port=port)
+    # We will use the app object defined globally
+    logger.info(f"ℹ️ [Flask] Starting Flask app for dashboard on {host}:{port}...")
+    try:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=8)
+    except ImportError:
+        app.run(host=host, port=port)
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting Crypto Trading Signal Bot (V4.1 - Detailed Logging)...")
+    logger.info("🚀 Starting Crypto Trading Signal Bot (V4.2 - Dashboard Enabled)...")
     try:
         init_db()
         load_open_signals_to_cache()
@@ -484,7 +517,9 @@ if __name__ == "__main__":
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         
+        # The main thread will now run Flask
         run_flask()
+
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 [Main] Shutdown requested...")
     finally:
