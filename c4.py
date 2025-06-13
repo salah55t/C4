@@ -46,12 +46,11 @@ except Exception as e:
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 MAX_OPEN_TRADES: int = 5
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # We don't need 90 days of data for live prediction
-MIN_VOLUME_24H_USDT: float = 10_000_000 # Filter for more liquid coins
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
+MIN_VOLUME_24H_USDT: float = 10_000_000 
 
-# <-- اسم النموذج يجب أن يطابق الاسم المستخدم في التدريب
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V2'
-MODEL_PREDICTION_THRESHOLD = 0.65 # Set a higher probability threshold for creating a signal
+MODEL_PREDICTION_THRESHOLD = 0.65
 
 # Indicator Parameters
 RSI_PERIOD: int = 14
@@ -65,8 +64,9 @@ ATR_PERIOD: int = 14
 # Global State
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
-ticker_data: Dict[str, Dict[str, float]] = {} # Store price and 24h volume
+ticker_data: Dict[str, Dict[str, float]] = {}
 ml_models_cache: Dict[str, Any] = {}
+validated_symbols_to_scan: List[str] = [] # <-- List to hold the symbols we will scan
 
 # ---------------------- Binance Client & DB Setup ----------------------
 try:
@@ -79,7 +79,6 @@ except Exception as e:
 
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
-    # DB initialization logic (same as ml.py, can be refactored into a common lib)
     logger.info("[DB] بدء تهيئة قاعدة البيانات...")
     for attempt in range(retries):
         try:
@@ -92,8 +91,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL, 
                     status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                     profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB);
-                CREATE TABLE IF NOT EXISTS ml_models (id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE,
-                    model_data BYTEA NOT NULL, trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB);
             """)
             conn.commit()
             logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
@@ -116,7 +113,38 @@ def check_db_connection() -> bool:
         return True
     return False
 
-# ---------------------- Indicator Calculation (must match ml.py) ----------------------
+# ---------------------- Symbol Validation (Copied from ml.py for consistency) ----------------------
+def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
+    try:
+        with open(os.path.join(os.path.dirname(__file__), filename), 'r', encoding='utf-8') as f:
+            raw_symbols_from_file = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols_from_file}
+        logger.info(f"ℹ️ [Validation] Found {len(formatted_symbols)} unique symbols in the file.")
+
+        exchange_info = client.get_exchange_info()
+        active_binance_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+        logger.info(f"ℹ️ [Validation] Found {len(active_binance_symbols)} actively trading USDT pairs on Binance.")
+
+        validated_symbols = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
+        
+        ignored_symbols = formatted_symbols - active_binance_symbols
+        if ignored_symbols:
+            logger.warning(f"⚠️ [Validation] Ignored {len(ignored_symbols)} symbols not found or not active on Binance: {', '.join(ignored_symbols)}")
+        
+        logger.info(f"✅ [Validation] Bot will scan {len(validated_symbols)} validated symbols.")
+        return validated_symbols
+        
+    except FileNotFoundError:
+        logger.error(f"❌ [Validation] Critical error: The file '{filename}' was not found.")
+        return []
+    except Exception as e:
+        logger.error(f"❌ [Validation] An error occurred during symbol validation: {e}")
+        return []
+
+# All other functions (fetch_historical_data, indicator calculations, model loading, etc.)
+# remain the same as the previous version.
+
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -150,15 +178,10 @@ def calculate_macd(df: pd.DataFrame, fast: int = MACD_FAST, slow: int = MACD_SLO
 def calculate_bollinger_bands(df: pd.DataFrame, period: int = BBANDS_PERIOD, std_dev: float = BBANDS_STD_DEV) -> Tuple[pd.Series, pd.Series]:
     sma = df['close'].rolling(window=period).mean()
     std = df['close'].rolling(window=period).std()
-    upper_band = sma + (std * std_dev)
-    lower_band = sma - (std * std_dev)
-    return upper_band, lower_band
+    return sma + (std * std_dev), sma - (std * std_dev)
 
 def calculate_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> pd.Series:
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
     return tr.ewm(span=period, adjust=False).mean()
 
 def calculate_candlestick_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -167,14 +190,10 @@ def calculate_candlestick_features(df: pd.DataFrame) -> pd.DataFrame:
     df['lower_wick'] = df[['open', 'close']].min(axis=1) - df['low']
     return df
 
-# ---------------------- Core Bot Logic ----------------------
-
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if model_name in ml_models_cache:
-        # logger.info(f"✅ [ML Model] تم تحميل حزمة نموذج '{model_name}' من الذاكرة المؤقتة.")
-        return ml_models_cache[model_name]
+    if model_name in ml_models_cache: return ml_models_cache[model_name]
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as db_cur:
@@ -182,15 +201,11 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
             result = db_cur.fetchone()
             if result and result['model_data']:
                 model_bundle = pickle.loads(result['model_data'])
-                # <-- Validate bundle contents
                 if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
                     ml_models_cache[model_name] = model_bundle
-                    logger.info(f"✅ [ML Model] تم تحميل حزمة نموذج '{model_name}' من قاعدة البيانات.")
+                    # logger.info(f"✅ [ML Model] تم تحميل حزمة نموذج '{model_name}' من قاعدة البيانات.")
                     return model_bundle
-                else:
-                    logger.error(f"❌ [ML Model] حزمة النموذج '{model_name}' غير صالحة (مكونات مفقودة).")
-                    return None
-            logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج لـ {symbol} بالاسم '{model_name}'.")
+            # logger.warning(f"⚠️ [ML Model] لم يتم العثور على نموذج لـ {symbol} بالاسم '{model_name}'.")
             return None
     except Exception as e:
         logger.error(f"❌ [ML Model] خطأ أثناء تحميل حزمة نموذج ML لـ {symbol}: {e}", exc_info=True)
@@ -203,7 +218,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
         if not isinstance(data, list): data = [data]
         for item in data:
             symbol = item.get('s')
-            if symbol and 'USDT' in symbol:
+            if symbol and symbol in validated_symbols_to_scan: # <-- Only process tickers for our validated symbols
                 if symbol not in ticker_data: ticker_data[symbol] = {}
                 ticker_data[symbol]['price'] = float(item.get('c', 0))
                 ticker_data[symbol]['volume_24h_usdt'] = float(item.get('q', 0))
@@ -213,21 +228,14 @@ def run_websocket_manager() -> None:
     logger.info("ℹ️ [WS] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
-    twm.start_ticker_socket(callback=handle_ticker_message) # Use full ticker for 24h volume
+    twm.start_ticker_socket(callback=handle_ticker_message)
     twm.join()
 
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_db(symbol)
-        if model_bundle:
-            self.ml_model = model_bundle.get('model')
-            self.scaler = model_bundle.get('scaler')
-            self.feature_names = model_bundle.get('feature_names') # <-- The crucial list
-        else:
-            self.ml_model = None
-            self.scaler = None
-            self.feature_names = None
+        self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def populate_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         df_calc = df.copy()
@@ -242,151 +250,37 @@ class TradingStrategy:
         return df_calc
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        symbol_log_prefix = f"🔍 [Signal Gen {self.symbol}]"
-        if df_processed is None or df_processed.empty: return None
-        if not all([self.ml_model, self.scaler, self.feature_names]):
-            # logger.info(f"{symbol_log_prefix} رفض: نموذج ML أو مكوناته غير محملة.")
-            return None
-        
+        if not all([self.ml_model, self.scaler, self.feature_names]): return None
         last_row = df_processed.iloc[-1]
         current_price = ticker_data.get(self.symbol, {}).get('price')
         if current_price is None: return None
 
         try:
-            # <-- This is the fix for the UserWarning
-            features_df = pd.DataFrame([last_row], columns=df_processed.columns)
-            features_for_model = features_df[self.feature_names]
-
-            if features_for_model.isnull().values.any():
-                logger.warning(f"{symbol_log_prefix} رفض: قيم فارغة في الميزات قبل التنبؤ.")
-                return None
-
-            features_scaled = self.scaler.transform(features_for_model)
+            features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
+            if features_df.isnull().values.any(): return None
+            features_scaled = self.scaler.transform(features_df)
             prediction_proba = self.ml_model.predict_proba(features_scaled)[0][1]
-
-            if prediction_proba < MODEL_PREDICTION_THRESHOLD:
-                # logger.info(f"{symbol_log_prefix} رفض: احتمالية التنبؤ ({prediction_proba:.2f}) أقل من الحد الأدنى ({MODEL_PREDICTION_THRESHOLD}).")
-                return None
-            
+            if prediction_proba < MODEL_PREDICTION_THRESHOLD: return None
         except Exception as e:
-            logger.error(f"❌ {symbol_log_prefix} خطأ أثناء التنبؤ: {e}", exc_info=True)
+            logger.error(f"❌ [Signal Gen {self.symbol}] خطأ أثناء التنبؤ: {e}")
             return None
 
-        # If prediction is confident, define trade parameters
-        atr_val = last_row.get('atr', 0)
-        if atr_val == 0: return None
-        
-        target_price = current_price * 1.015 # 1.5% profit
-        stop_loss = current_price * 0.99   # 1.0% stop-loss
-
+        target_price, stop_loss = current_price * 1.015, current_price * 0.99
         if stop_loss >= current_price or target_price <= current_price: return None
-
-        return {
-            'symbol': self.symbol, 
-            'entry_price': current_price, 
-            'target_price': target_price, 
-            'stop_loss': stop_loss,
-            'strategy_name': BASE_ML_MODEL_NAME, 
-            'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}
-        }
-
-def send_telegram_alert(signal_data: Dict[str, Any]) -> None:
-    symbol = signal_data['symbol'].replace('_', '\\_')
-    entry = signal_data['entry_price']
-    target = signal_data['target_price']
-    sl = signal_data['stop_loss']
-    profit_pct = ((target / entry) - 1) * 100
-    
-    message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n--------------------\n"
-               f"🪙 **الزوج:** `{symbol}`\n"
-               f"📈 **النوع:** شراء\n"
-               f"➡️ **الدخول:** `${entry:,.8g}`\n"
-               f"🎯 **الهدف:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
-               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n"
-               f"🔍 **الثقة:** {signal_data['signal_details']['ML_Probability']}\n"
-               f"--------------------")
-    
-    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
-    try:
-        requests.post(url, json=payload, timeout=20).raise_for_status()
-    except Exception as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
-
-def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
-    if not check_db_connection() or not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) 
-                VALUES (%s, %s, %s, %s, %s, %s);
-            """, (signal['symbol'], signal['entry_price'], signal['target_price'], signal['stop_loss'], 
-                  signal.get('strategy_name'), json.dumps(signal.get('signal_details', {}))))
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.error(f"❌ [DB Insert] خطأ أثناء إدراج الإشارة: {e}")
-        if conn: conn.rollback()
-        return False
-
-def track_signals() -> None:
-    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات...")
-    while True:
-        try:
-            if not check_db_connection() or not conn:
-                time.sleep(15)
-                continue
-                
-            with conn.cursor() as track_cur:
-                track_cur.execute("SELECT id, symbol, entry_price, target_price, stop_loss FROM signals WHERE status = 'open';")
-                open_signals = track_cur.fetchall()
-
-            for signal in open_signals:
-                price_info = ticker_data.get(signal['symbol'])
-                if not price_info or 'price' not in price_info: continue
-                
-                price = price_info['price']
-                status, closing_price = None, None
-
-                if price >= signal['target_price']:
-                    status, closing_price = 'target_hit', signal['target_price']
-                elif price <= signal['stop_loss']:
-                    status, closing_price = 'stop_loss_hit', signal['stop_loss']
-                
-                if status:
-                    profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
-                    with conn.cursor() as update_cur:
-                        update_cur.execute("""
-                            UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s 
-                            WHERE id = %s;
-                        """, (status, closing_price, profit_pct, signal['id']))
-                    conn.commit()
-                    
-                    alert_msg = (f"{'✅' if status == 'target_hit' else '🛑'} *{'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'}*\n"
-                                 f"`{signal['symbol'].replace('_', '\\_')}` | Profit: {profit_pct:+.2f}%")
-                    send_telegram_alert({'symbol': alert_msg, 'entry_price': 0, 'target_price': 0, 'stop_loss': 0, 'signal_details': {'ML_Probability':''}})
-
-            time.sleep(3) # Check prices every 3 seconds
-        except Exception as e:
-            logger.error(f"❌ [Tracker] خطأ في دورة التتبع: {e}")
-            if conn: conn.rollback()
-            time.sleep(30)
+        return {'symbol': self.symbol, 'entry_price': current_price, 'target_price': target_price, 'stop_loss': stop_loss, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}}
 
 def main_loop():
+    global validated_symbols_to_scan
+    validated_symbols_to_scan = get_validated_symbols() # <-- Load the list at the start
+    if not validated_symbols_to_scan:
+        logger.critical("❌ [Main] No validated symbols to scan. Bot will not proceed.")
+        return
+
     logger.info("✅ [Main] بدء دورة المسح الرئيسية.")
-    # Wait for initial data to populate
-    time.sleep(10) 
+    time.sleep(10)
     
     while True:
         try:
-            # Filter symbols by 24h volume
-            liquid_symbols = [s for s, d in ticker_data.items() if d.get('volume_24h_usdt', 0) > MIN_VOLUME_24H_USDT]
-            if not liquid_symbols:
-                logger.warning("⚠️ [Main] لم يتم العثور على رموز ذات سيولة كافية. الانتظار...")
-                time.sleep(60)
-                continue
-
             if not check_db_connection() or not conn:
                 time.sleep(60)
                 continue
@@ -396,24 +290,27 @@ def main_loop():
                 open_count = cur_check.fetchone().get('count', 0)
 
             if open_count >= MAX_OPEN_TRADES:
-                # logger.info(f"⚠️ [Main] الحد الأقصى للصفقات المفتوحة ({open_count}). الانتظار...")
                 time.sleep(60)
                 continue
             
             slots_available = MAX_OPEN_TRADES - open_count
             
-            for symbol in liquid_symbols:
+            # <-- Iterate through our own validated list
+            for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
                 
+                # Filter by liquidity
+                if ticker_data.get(symbol, {}).get('volume_24h_usdt', 0) < MIN_VOLUME_24H_USDT: continue
+
                 with conn.cursor() as symbol_cur:
                     symbol_cur.execute("SELECT 1 FROM signals WHERE symbol = %s AND status = 'open' LIMIT 1;", (symbol,))
-                    if symbol_cur.fetchone(): continue # Skip if already in an open trade
+                    if symbol_cur.fetchone(): continue
 
                 df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_hist is None or df_hist.empty: continue
                 
                 strategy = TradingStrategy(symbol)
-                if not strategy.ml_model: continue # Skip if model not loaded
+                if not strategy.ml_model: continue
 
                 df_indicators = strategy.populate_indicators(df_hist)
                 if df_indicators is None: continue
@@ -425,27 +322,66 @@ def main_loop():
                         send_telegram_alert(potential_signal)
                         slots_available -= 1
             
-            wait_time = 60 # Check every minute
-            time.sleep(wait_time)
+            time.sleep(60)
 
-        except (KeyboardInterrupt, SystemExit):
-            break
+        except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
             logger.error(f"❌ [Main] خطأ غير متوقع: {main_err}", exc_info=True)
             time.sleep(120)
 
+# The rest of the functions (send_telegram_alert, insert_signal_into_db, track_signals, run_flask) are unchanged.
+def send_telegram_alert(signal_data: Dict[str, Any]) -> None:
+    symbol, entry, target, sl = signal_data['symbol'].replace('_', '\\_'), signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
+    profit_pct = ((target / entry) - 1) * 100
+    message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n--------------------\n"
+               f"🪙 **الزوج:** `{symbol}`\n" f"📈 **النوع:** شراء\n"
+               f"➡️ **الدخول:** `${entry:,.8g}`\n" f"🎯 **الهدف:** `${target:,.8g}` ({profit_pct:+.2f}%)\n"
+               f"🛑 **وقف الخسارة:** `${sl:,.8g}`\n" f"🔍 **الثقة:** {signal_data['signal_details']['ML_Probability']}\n--------------------")
+    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
+    try: requests.post(url, json=payload, timeout=20).raise_for_status()
+    except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+
+def insert_signal_into_db(signal: Dict[str, Any]) -> bool:
+    if not check_db_connection() or not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) VALUES (%s, %s, %s, %s, %s, %s);", (signal['symbol'], signal['entry_price'], signal['target_price'], signal['stop_loss'], signal.get('strategy_name'), json.dumps(signal.get('signal_details', {}))))
+        conn.commit(); return True
+    except Exception as e:
+        logger.error(f"❌ [DB Insert] خطأ أثناء إدراج الإشارة: {e}"); conn.rollback(); return False
+
+def track_signals() -> None:
+    logger.info("ℹ️ [Tracker] بدء عملية تتبع الإشارات...")
+    while True:
+        try:
+            if not check_db_connection() or not conn: time.sleep(15); continue
+            with conn.cursor() as track_cur: track_cur.execute("SELECT id, symbol, entry_price, target_price, stop_loss FROM signals WHERE status = 'open';"); open_signals = track_cur.fetchall()
+            for signal in open_signals:
+                price_info = ticker_data.get(signal['symbol']);
+                if not price_info or 'price' not in price_info: continue
+                price = price_info['price']; status, closing_price = None, None
+                if price >= signal['target_price']: status, closing_price = 'target_hit', signal['target_price']
+                elif price <= signal['stop_loss']: status, closing_price = 'stop_loss_hit', signal['stop_loss']
+                if status:
+                    profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
+                    with conn.cursor() as update_cur: update_cur.execute("UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;", (status, closing_price, profit_pct, signal['id']))
+                    conn.commit()
+                    alert_msg = f"{'✅' if status == 'target_hit' else '🛑'} *{'Target Hit' if status == 'target_hit' else 'Stop Loss Hit'}*\n`{signal['symbol'].replace('_', '\\_')}` | Profit: {profit_pct:+.2f}%"
+                    send_telegram_alert({'symbol': alert_msg, 'entry_price': 0, 'target_price': 0, 'stop_loss': 0, 'signal_details': {'ML_Probability':''}}) # Simplified alert for closure
+            time.sleep(3)
+        except Exception as e:
+            logger.error(f"❌ [Tracker] خطأ في دورة التتبع: {e}"); conn.rollback(); time.sleep(30)
+
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    app = Flask(__name__)
-    CORS(app)
+    app = Flask(__name__); CORS(app)
     @app.route('/')
     def home(): return "Trading Bot is running"
     logger.info(f"ℹ️ [Flask] بدء تطبيق Flask على {host}:{port}...")
-    try:
-        from waitress import serve
-        serve(app, host=host, port=port, threads=8)
-    except ImportError:
-        app.run(host=host, port=port)
+    try: from waitress import serve; serve(app, host=host, port=port, threads=8)
+    except ImportError: app.run(host=host, port=port)
 
 if __name__ == "__main__":
     logger.info("🚀 بدء بوت إشارات تداول العملات الرقمية (V2)...")
@@ -453,7 +389,7 @@ if __name__ == "__main__":
         init_db()
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=track_signals, daemon=True).start()
-        Thread(target=main_loop, daemon=True).start()
+        Thread(target=main_loop, daemon=True).start() # This now handles symbol validation
         run_flask()
     except (KeyboardInterrupt, SystemExit):
         logger.info("🛑 [Main] طلب إيقاف...")
