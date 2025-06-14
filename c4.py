@@ -302,7 +302,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
-    # تم الإصلاح: تم تغيير **bold** إلى *bold* ليتوافق مع تنسيق Markdown القديم
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
@@ -360,18 +359,15 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
         logger.info(f"✅ [إغلاق الإشارة] تم إغلاق الإشارة {signal['id']} للعملة {signal['symbol']} بحالة '{status}'. طريقة الإغلاق: {closed_by}. الربح: {profit_pct:.2f}%")
         
-        # تم الإصلاح: تبسيط الرسالة وتصحيح التنسيق لـ Markdown
         status_map = {
             'target_hit': '✅ تحقق الهدف',
             'stop_loss_hit': '🛑 ضرب وقف الخسارة',
             'manual_close': '🖐️ أُغلقت يدوياً'
         }
-        # استخدمنا .title() كاحتياط في حال كانت الحالة غير معروفة
         status_message = status_map.get(status, status.replace('_', ' ').title())
 
         safe_symbol = signal['symbol'].replace('_', '\\_')
         
-        # تم الإصلاح: تم تغيير **bold** إلى *bold* وتعديل هيكل الرسالة ليكون أوضح
         alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{profit_pct:+.2f}%`"
         send_telegram_message(CHAT_ID, alert_msg)
 
@@ -485,10 +481,15 @@ def get_stats():
         total_closed = len(closed_signals)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
         
+        # --- تم الإصلاح: إضافة حساب نسبة الخسارة ---
+        loss_rate = (losses / total_closed * 100) if total_closed > 0 else 0
+        
         total_profit_usdt = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed_signals if s.get('profit_percentage') is not None)
 
+        # --- تم الإصلاح: إضافة نسبة الخسارة إلى الاستجابة ---
         return jsonify({
             "win_rate": win_rate,
+            "loss_rate": loss_rate,
             "wins": wins,
             "losses": losses,
             "total_profit_usdt": total_profit_usdt,
@@ -561,7 +562,7 @@ def run_flask():
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.4 - مصحح)...")
+    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V4.5 - مصحح)...")
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")

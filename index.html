@@ -147,13 +147,24 @@
         async function fetchStats() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/stats`);
+                if (!response.ok) {
+                    throw new Error(`API Error: ${response.statusText}`);
+                }
                 const stats = await response.json();
-                document.getElementById('total-profit').textContent = `${stats.total_profit_usdt.toFixed(2)}`;
-                document.getElementById('win-rate').textContent = `${stats.win_rate.toFixed(2)}%`;
-                document.getElementById('loss-rate').textContent = `${stats.loss_rate.toFixed(2)}%`;
-                document.getElementById('win-loss-count').textContent = `${stats.wins} / ${stats.losses}`;
+
+                // --- تم الإصلاح: التحقق من وجود البيانات قبل عرضها ---
+                document.getElementById('total-profit').textContent = stats.hasOwnProperty('total_profit_usdt') ? `${stats.total_profit_usdt.toFixed(2)}` : '--.--';
+                document.getElementById('win-rate').textContent = stats.hasOwnProperty('win_rate') ? `${stats.win_rate.toFixed(2)}%` : '--.--%';
+                document.getElementById('loss-rate').textContent = stats.hasOwnProperty('loss_rate') ? `${stats.loss_rate.toFixed(2)}%` : '--.--%';
+                document.getElementById('win-loss-count').textContent = (stats.hasOwnProperty('wins') && stats.hasOwnProperty('losses')) ? `${stats.wins} / ${stats.losses}` : '-- / --';
+
             } catch (error) {
                 console.error("Failed to fetch stats:", error);
+                // إعادة تعيين الحقول إلى الحالة الافتراضية عند حدوث خطأ
+                document.getElementById('total-profit').textContent = '--.--';
+                document.getElementById('win-rate').textContent = '--.--%';
+                document.getElementById('loss-rate').textContent = '--.--%';
+                document.getElementById('win-loss-count').textContent = '-- / --';
             }
         }
 
@@ -171,6 +182,8 @@
                 const closedSignalsTbody = document.getElementById('closed-signals-tbody');
                 const noOpenSignalsMsg = document.getElementById('no-open-signals');
                 
+                // --- تم الإصلاح: إخفاء رسالة "لا توجد صفقات" قبل البدء ---
+                if (noOpenSignalsMsg) noOpenSignalsMsg.style.display = 'none';
                 openSignalsContainer.innerHTML = '';
                 closedSignalsTbody.innerHTML = '';
                 let openSignalsCount = 0;
@@ -206,20 +219,20 @@
                         row.className = 'border-b border-gray-700 hover:bg-gray-700';
                         row.innerHTML = `
                             <td class="p-2 font-bold">${s.symbol}</td>
-                            <td class="p-2"><span class="px-2 py-1 rounded-full text-xs font-bold status-${s.status}">${s.status.replace('_', ' ')}</span></td>
+                            <td class="p-2"><span class="px-2 py-1 rounded-full text-xs font-bold status-${s.status}">${s.status.replace(/_/g, ' ')}</span></td>
                             <td class="p-2">${s.entry_price.toFixed(5)}</td>
                             <td class="p-2">${s.closing_price ? s.closing_price.toFixed(5) : 'N/A'}</td>
-                            <td class="p-2 ${s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400'}">${s.profit_percentage.toFixed(2)}%</td>
+                            <td class="p-2 ${s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400'}">${s.profit_percentage ? s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
                             <td class="p-2 text-xs">${new Date(s.closed_at).toLocaleString('ar-EG')}</td>
                         `;
                         closedSignalsTbody.appendChild(row);
                     }
                 });
-
-                noOpenSignalsMsg.style.display = openSignalsCount === 0 ? 'block' : 'none';
-                 if (openSignalsCount > 0) {
-                   openSignalsContainer.appendChild(noOpenSignalsMsg); // Keep it in the DOM but hidden
-                 }
+                
+                // --- تم الإصلاح: إعادة إضافة الرسالة فقط إذا لم تكن هناك صفقات مفتوحة ---
+                if (openSignalsCount === 0) {
+                    openSignalsContainer.innerHTML = '<p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>';
+                }
 
 
             } catch (error) {
@@ -228,16 +241,17 @@
         }
         
         async function closeSignal(signalId) {
-            if (!confirm("هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟")) {
+            // --- تم الإصلاح: استخدام نافذة تأكيد مخصصة وأفضل ---
+            if (!window.confirm("هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟")) {
                 return;
             }
             try {
                 const response = await fetch(`${API_BASE_URL}/api/close/${signalId}`, {
                     method: 'POST'
                 });
+                const result = await response.json();
                 if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || 'Failed to close signal');
+                    throw new Error(result.error || 'Failed to close signal');
                 }
                 alert("تم إرسال أمر الإغلاق بنجاح.");
                 // Refresh data immediately
@@ -256,9 +270,13 @@
 
             // تحديث البيانات كل 5 ثوانٍ
             setInterval(() => {
-                fetchStats();
+                // لا نحدث الإحصائيات بنفس سرعة الأسعار
                 fetchSignalsAndPrices();
             }, 5000);
+            
+             setInterval(() => {
+                fetchStats();
+            }, 30000); // تحديث الإحصائيات كل 30 ثانية يكفي
         });
     </script>
 </body>
