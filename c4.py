@@ -263,20 +263,36 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
                     
-                    stop_price = signal.get('trailing_stop_price', signal['stop_loss'])
+                    # --- الإصلاح: التحقق من وجود القيم قبل استخدامها ---
+                    target_price = signal.get('target_price')
+                    stop_loss = signal.get('stop_loss')
+                    trailing_stop_price = signal.get('trailing_stop_price')
 
-                    if price >= signal['target_price']:
-                        status, closing_price = 'target_hit', signal['target_price']
+                    # استخدم الوقف المتحرك إذا كان موجوداً وصالحاً، وإلا استخدم وقف الخسارة الأساسي
+                    current_stop_price = trailing_stop_price if trailing_stop_price is not None else stop_loss
+
+                    # تحقق من أن جميع القيم الضرورية هي أرقام
+                    if not all(isinstance(p, (int, float)) for p in [price, target_price, current_stop_price]):
+                        logger.warning(f"⚠️ [WebSocket] تخطي التحقق للعملة {symbol} بسبب بيانات غير صالحة (فارغة). "
+                                     f"Target: {target_price}, Stop: {current_stop_price}")
+                        continue # تخطي هذه الدورة إذا كانت البيانات غير صالحة
+
+                    if price >= target_price:
+                        status, closing_price = 'target_hit', target_price
                         signal_to_process = signal
-                    elif price <= stop_price:
-                        status, closing_price = 'stop_loss_hit', stop_price
+                    elif price <= current_stop_price:
+                        status, closing_price = 'stop_loss_hit', current_stop_price
                         signal_to_process = signal
                     
+                    # --- منطق الوقف المتحرك (بدون تغيير) ---
                     if USE_TRAILING_STOP and status is None:
-                        activation_price = signal['entry_price'] * (1 + (TRAILING_STOP_ACTIVATE_PERCENT / 100))
+                        entry_price = signal.get('entry_price')
+                        if entry_price is None: continue
+
+                        activation_price = entry_price * (1 + (TRAILING_STOP_ACTIVATE_PERCENT / 100))
                         if price > activation_price:
                             new_trailing_stop = price * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
-                            if new_trailing_stop > stop_price:
+                            if new_trailing_stop > current_stop_price:
                                 open_signals_cache[symbol]['trailing_stop_price'] = new_trailing_stop
                                 Thread(target=update_trailing_stop_in_db, args=(signal['id'], new_trailing_stop)).start()
 
@@ -286,7 +302,9 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
 
     except Exception as e:
-        logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}")
+        # وضعنا الفحص داخل الحلقة، لكن نترك هذا للسلامة العامة
+        logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
+
 
 def update_trailing_stop_in_db(signal_id: int, new_price: float) -> None:
     if not check_db_connection() or not conn: return
