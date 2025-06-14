@@ -17,10 +17,11 @@
             border-radius: 0.75rem;
             padding: 1.5rem;
             border: 1px solid #374151;
-            transition: transform 0.2s;
+            transition: transform 0.2s, box-shadow 0.2s;
         }
         .stat-card:hover {
             transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
         .signal-card {
             background-color: #1f2937;
@@ -46,17 +47,21 @@
         .btn-close:hover {
             background-color: #dc2626;
         }
-        .status-open {
-             background-color: #3b82f6; /* Blue */
-             color: white;
+        .status-open { background-color: #3b82f6; color: white; }
+        .status-target_hit { background-color: #22c55e; color: white; }
+        .status-stop_loss_hit, .status-manual_close { background-color: #ef4444; color: white; }
+
+        /* --- New styles for market status --- */
+        .gauge-bar {
+            background-color: #374151;
+            border-radius: 0.5rem;
+            overflow: hidden;
+            height: 20px;
         }
-        .status-target_hit {
-            background-color: #22c55e; /* Green */
-            color: white;
-        }
-        .status-stop_loss_hit, .status-manual_close {
-            background-color: #ef4444; /* Red */
-            color: white;
+        .gauge-fill {
+            height: 100%;
+            border-radius: 0.5rem;
+            transition: width 0.5s ease-in-out, background-color 0.5s ease-in-out;
         }
     </style>
 </head>
@@ -67,6 +72,32 @@
             <h1 class="text-4xl font-bold text-white">لوحة تحكم بوت التداول</h1>
             <p class="text-gray-400 mt-2">مراقبة الأداء والصفقات في الوقت الفعلي</p>
         </header>
+
+        <!-- قسم حالة السوق (جديد) -->
+        <section id="market-status-section" class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <!-- بطاقة الاتجاه العام للسوق -->
+            <div class="stat-card">
+                <h3 class="text-lg font-bold text-gray-400">الاتجاه العام للسوق (BTC)</h3>
+                <div id="market-trend-content" class="flex items-center justify-center mt-4 text-2xl font-bold">
+                    <span class="text-gray-500">جاري التحميل...</span>
+                </div>
+                 <p id="market-trend-details" class="text-center text-sm text-gray-500 mt-2 h-5"></p>
+            </div>
+            <!-- بطاقة مؤشر الخوف والطمع -->
+            <div class="stat-card">
+                 <h3 class="text-lg font-bold text-gray-400">مؤشر الخوف والطمع</h3>
+                 <div id="fear-greed-content" class="mt-4">
+                     <div class="flex justify-between items-center mb-2">
+                         <span id="fear-greed-text" class="text-xl font-bold">...</span>
+                         <span id="fear-greed-value" class="text-2xl font-bold">--</span>
+                     </div>
+                     <div class="gauge-bar">
+                         <div id="fear-greed-gauge" class="gauge-fill" style="width: 0%;"></div>
+                     </div>
+                 </div>
+            </div>
+        </section>
+
 
         <!-- قسم الإحصائيات -->
         <section id="stats-section" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -92,8 +123,7 @@
         <section>
             <h2 class="text-2xl font-bold mb-4 text-white">التوصيات المفتوحة</h2>
             <div id="open-signals-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <!-- سيتم ملء البطاقات هنا بواسطة JavaScript -->
-                 <p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>
+                <p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>
             </div>
         </section>
         
@@ -112,9 +142,7 @@
                             <th class="p-2">وقت الإغلاق</th>
                         </tr>
                     </thead>
-                    <tbody id="closed-signals-tbody">
-                        <!-- سيتم ملء الصفوف هنا -->
-                    </tbody>
+                    <tbody id="closed-signals-tbody"></tbody>
                 </table>
             </div>
         </section>
@@ -143,16 +171,69 @@
                 </svg>
             `;
         }
+        
+        // --- دالة جديدة ---
+        async function fetchMarketStatus() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/market_status`);
+                if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+                const data = await response.json();
+
+                // Update Market Trend
+                const trendContent = document.getElementById('market-trend-content');
+                const trendDetails = document.getElementById('market-trend-details');
+                if (data.btc_trend) {
+                    const trend = data.btc_trend;
+                    if (trend.status === "Uptrend") {
+                        trendContent.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                            </svg>
+                            <span>صاعد</span>
+                        `;
+                        trendContent.className = 'flex items-center justify-center mt-4 text-2xl font-bold text-green-500';
+                    } else if (trend.status === "Downtrend") {
+                         trendContent.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-red-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 17l5-5m0 0l-5-5m5 5H6" />
+                            </svg>
+                            <span>هابط</span>
+                        `;
+                        trendContent.className = 'flex items-center justify-center mt-4 text-2xl font-bold text-red-500';
+                    }
+                    trendDetails.textContent = trend.message || '';
+                }
+
+                // Update Fear & Greed Index
+                const greed = data.fear_and_greed;
+                if (greed && greed.value !== -1) {
+                    const value = greed.value;
+                    document.getElementById('fear-greed-value').textContent = value;
+                    document.getElementById('fear-greed-text').textContent = greed.classification;
+                    const gauge = document.getElementById('fear-greed-gauge');
+                    gauge.style.width = `${value}%`;
+
+                    // Dynamic color for gauge
+                    if (value <= 20) gauge.style.backgroundColor = '#ef4444'; // Red
+                    else if (value <= 40) gauge.style.backgroundColor = '#f97316'; // Orange
+                    else if (value <= 60) gauge.style.backgroundColor = '#eab308'; // Yellow
+                    else if (value <= 80) gauge.style.backgroundColor = '#84cc16'; // Lime
+                    else gauge.style.backgroundColor = '#22c55e'; // Green
+
+                }
+
+            } catch (error) {
+                console.error("Failed to fetch market status:", error);
+            }
+        }
+
 
         async function fetchStats() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/stats`);
-                if (!response.ok) {
-                    throw new Error(`API Error: ${response.statusText}`);
-                }
+                if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
                 const stats = await response.json();
-
-                // --- تم الإصلاح: التحقق من وجود البيانات قبل عرضها ---
+                
                 document.getElementById('total-profit').textContent = stats.hasOwnProperty('total_profit_usdt') ? `${stats.total_profit_usdt.toFixed(2)}` : '--.--';
                 document.getElementById('win-rate').textContent = stats.hasOwnProperty('win_rate') ? `${stats.win_rate.toFixed(2)}%` : '--.--%';
                 document.getElementById('loss-rate').textContent = stats.hasOwnProperty('loss_rate') ? `${stats.loss_rate.toFixed(2)}%` : '--.--%';
@@ -160,7 +241,6 @@
 
             } catch (error) {
                 console.error("Failed to fetch stats:", error);
-                // إعادة تعيين الحقول إلى الحالة الافتراضية عند حدوث خطأ
                 document.getElementById('total-profit').textContent = '--.--';
                 document.getElementById('win-rate').textContent = '--.--%';
                 document.getElementById('loss-rate').textContent = '--.--%';
@@ -170,20 +250,15 @@
 
         async function fetchSignalsAndPrices() {
             try {
-                const [signalsResponse, pricesResponse] = await Promise.all([
+                const [signalsResponse] = await Promise.all([
                     fetch(`${API_BASE_URL}/api/signals`),
-                    fetch(`${API_BASE_URL}/api/prices`)
                 ]);
 
                 const signals = await signalsResponse.json();
-                const prices = await pricesResponse.json();
-
+                
                 const openSignalsContainer = document.getElementById('open-signals-container');
                 const closedSignalsTbody = document.getElementById('closed-signals-tbody');
-                const noOpenSignalsMsg = document.getElementById('no-open-signals');
                 
-                // --- تم الإصلاح: إخفاء رسالة "لا توجد صفقات" قبل البدء ---
-                if (noOpenSignalsMsg) noOpenSignalsMsg.style.display = 'none';
                 openSignalsContainer.innerHTML = '';
                 closedSignalsTbody.innerHTML = '';
                 let openSignalsCount = 0;
@@ -191,10 +266,10 @@
                 signals.forEach(s => {
                     if (s.status === 'open') {
                         openSignalsCount++;
-                        const currentPrice = prices[s.symbol] || s.entry_price;
+                        const currentPrice = s.current_price || s.entry_price;
                         
                         let progress_percentage = 0;
-                        if (currentPrice > s.entry_price) {
+                        if (currentPrice > s.entry_price && s.target_price > s.entry_price) {
                             progress_percentage = ((currentPrice - s.entry_price) / (s.target_price - s.entry_price)) * 100;
                         }
                         progress_percentage = Math.max(0, Math.min(100, progress_percentage));
@@ -217,23 +292,23 @@
                     } else {
                         const row = document.createElement('tr');
                         row.className = 'border-b border-gray-700 hover:bg-gray-700';
+                        const profitClass = s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400';
+                        const profitSign = s.profit_percentage >= 0 ? '+' : '';
                         row.innerHTML = `
                             <td class="p-2 font-bold">${s.symbol}</td>
                             <td class="p-2"><span class="px-2 py-1 rounded-full text-xs font-bold status-${s.status}">${s.status.replace(/_/g, ' ')}</span></td>
                             <td class="p-2">${s.entry_price.toFixed(5)}</td>
                             <td class="p-2">${s.closing_price ? s.closing_price.toFixed(5) : 'N/A'}</td>
-                            <td class="p-2 ${s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400'}">${s.profit_percentage ? s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
+                            <td class="p-2 ${profitClass}">${s.profit_percentage ? profitSign + s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
                             <td class="p-2 text-xs">${new Date(s.closed_at).toLocaleString('ar-EG')}</td>
                         `;
                         closedSignalsTbody.appendChild(row);
                     }
                 });
                 
-                // --- تم الإصلاح: إعادة إضافة الرسالة فقط إذا لم تكن هناك صفقات مفتوحة ---
                 if (openSignalsCount === 0) {
                     openSignalsContainer.innerHTML = '<p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>';
                 }
-
 
             } catch (error) {
                 console.error("Failed to fetch signals or prices:", error);
@@ -241,7 +316,6 @@
         }
         
         async function closeSignal(signalId) {
-            // --- تم الإصلاح: استخدام نافذة تأكيد مخصصة وأفضل ---
             if (!window.confirm("هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟")) {
                 return;
             }
@@ -254,7 +328,6 @@
                     throw new Error(result.error || 'Failed to close signal');
                 }
                 alert("تم إرسال أمر الإغلاق بنجاح.");
-                // Refresh data immediately
                 fetchStats();
                 fetchSignalsAndPrices();
             } catch (error) {
@@ -263,20 +336,14 @@
             }
         }
 
-        // أول تحميل للبيانات عند فتح الصفحة
         document.addEventListener('DOMContentLoaded', () => {
+            fetchMarketStatus();
             fetchStats();
             fetchSignalsAndPrices();
 
-            // تحديث البيانات كل 5 ثوانٍ
-            setInterval(() => {
-                // لا نحدث الإحصائيات بنفس سرعة الأسعار
-                fetchSignalsAndPrices();
-            }, 5000);
-            
-             setInterval(() => {
-                fetchStats();
-            }, 30000); // تحديث الإحصائيات كل 30 ثانية يكفي
+            setInterval(fetchSignalsAndPrices, 5000); // تحديث الصفقات كل 5 ثوانٍ
+            setInterval(fetchStats, 30000); // تحديث الإحصائيات كل 30 ثانية
+            setInterval(fetchMarketStatus, 60000 * 5); // تحديث حالة السوق كل 5 دقائق
         });
     </script>
 </body>
