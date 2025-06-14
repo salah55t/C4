@@ -5,157 +5,89 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>لوحة تحكم بوت التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="style.css">
     <style>
-        /* تخصيص إضافي للأزرار */
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: #111827; /* Dark gray background */
+            color: #e5e7eb; /* Light gray text */
+        }
+        .stat-card {
+            background-color: #1f2937;
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            border: 1px solid #374151;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .signal-card {
+            background-color: #1f2937;
+            border-radius: 0.75rem;
+            border: 1px solid #374151;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .progress-ring {
+            transition: stroke-dashoffset 0.5s;
+            transform: rotate(-90deg);
+            transform-origin: 50% 50%;
+        }
         .btn-close {
-            background: linear-gradient(135deg, #ef4444, #dc2626);
+            background-color: #ef4444;
             color: white;
-            padding: 0.75rem 1.5rem;
-            border-radius: 15px;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
             border: none;
             cursor: pointer;
-            font-weight: 600;
-            font-size: 0.95rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            position: relative;
-            overflow: hidden;
-            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            box-shadow: 0 8px 25px rgba(239, 68, 68, 0.3);
+            transition: background-color 0.2s;
         }
-
-        .btn-close::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-            transition: left 0.6s ease;
-        }
-
-        .btn-close:hover::before {
-            left: 100%;
-        }
-
         .btn-close:hover {
-            transform: translateY(-3px) scale(1.05);
-            box-shadow: 0 15px 35px rgba(239, 68, 68, 0.4);
-            background: linear-gradient(135deg, #dc2626, #b91c1c);
+            background-color: #dc2626;
         }
+        .status-open { background-color: #3b82f6; color: white; }
+        .status-target_hit { background-color: #22c55e; color: white; }
+        .status-stop_loss_hit, .status-manual_close { background-color: #ef4444; color: white; }
 
-        .btn-close:active {
-            transform: translateY(-1px) scale(1.02);
-            box-shadow: 0 8px 20px rgba(239, 68, 68, 0.5);
-        }
-
-        /* تحسين أزرار التنقل إذا وجدت */
-        .btn-primary {
-            background: linear-gradient(135deg, var(--accent-gold), var(--accent-blue));
-            color: #1a1a2e;
-            padding: 0.75rem 2rem;
-            border-radius: 15px;
-            border: none;
-            cursor: pointer;
-            font-weight: 700;
-            font-size: 1rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            position: relative;
+        /* --- New styles for market status --- */
+        .gauge-bar {
+            background-color: #374151;
+            border-radius: 0.5rem;
             overflow: hidden;
-            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            box-shadow: var(--glow-gold);
+            height: 20px;
         }
-
-        .btn-primary::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
+        .gauge-fill {
             height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-            transition: left 0.6s ease;
-        }
-
-        .btn-primary:hover::before {
-            left: 100%;
-        }
-
-        .btn-primary:hover {
-            transform: translateY(-3px) scale(1.05);
-            box-shadow: var(--glow-blue);
-            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
-            color: white;
-        }
-
-        .btn-primary:active {
-            transform: translateY(-1px) scale(1.02);
-        }
-
-        /* تحسين عناصر الإدخال */
-        input, select, textarea {
-            background: rgba(255, 255, 255, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            border-radius: 12px;
-            padding: 0.75rem 1rem;
-            color: var(--text-primary);
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            backdrop-filter: blur(10px);
-        }
-
-        input:focus, select:focus, textarea:focus {
-            outline: none;
-            border-color: var(--accent-blue);
-            box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.2);
-            background: rgba(255, 255, 255, 0.15);
-        }
-
-        /* تحسين النصوص */
-        .text-gradient {
-            background: linear-gradient(135deg, var(--accent-gold), var(--accent-blue));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
-
-        /* تحسين الأيقونات */
-        .icon-glow {
-            filter: drop-shadow(0 0 8px currentColor);
-            transition: filter 0.3s ease;
-        }
-
-        .icon-glow:hover {
-            filter: drop-shadow(0 0 12px currentColor);
+            border-radius: 0.5rem;
+            transition: width 0.5s ease-in-out, background-color 0.5s ease-in-out;
         }
     </style>
 </head>
 <body class="p-4 md:p-8">
 
     <div class="max-w-7xl mx-auto">
-        <header class="text-center mb-12">
-            <h1 class="text-4xl font-bold">لوحة تحكم بوت التداول</h1>
-            <p class="mt-4">مراقبة الأداء والصفقات في الوقت الفعلي</p>
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold text-white">لوحة تحكم بوت التداول</h1>
+            <p class="text-gray-400 mt-2">مراقبة الأداء والصفقات في الوقت الفعلي</p>
         </header>
 
         <!-- قسم حالة السوق (جديد) -->
-        <section id="market-status-section" class="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
+        <section id="market-status-section" class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
             <!-- بطاقة الاتجاه العام للسوق -->
             <div class="stat-card">
-                <h3 class="text-lg font-bold">الاتجاه العام للسوق (BTC)</h3>
-                <div id="market-trend-content" class="flex items-center justify-center mt-6 text-2xl font-bold">
-                    <span class="text-gray-500 animate-pulse">جاري التحميل...</span>
+                <h3 class="text-lg font-bold text-gray-400">الاتجاه العام للسوق (BTC)</h3>
+                <div id="market-trend-content" class="flex items-center justify-center mt-4 text-2xl font-bold">
+                    <span class="text-gray-500">جاري التحميل...</span>
                 </div>
-                 <p id="market-trend-details" class="text-center text-sm mt-4 h-5"></p>
+                 <p id="market-trend-details" class="text-center text-sm text-gray-500 mt-2 h-5"></p>
             </div>
             <!-- بطاقة مؤشر الخوف والطمع -->
             <div class="stat-card">
-                 <h3 class="text-lg font-bold">مؤشر الخوف والطمع</h3>
-                 <div id="fear-greed-content" class="mt-6">
-                     <div class="flex justify-between items-center mb-4">
+                 <h3 class="text-lg font-bold text-gray-400">مؤشر الخوف والطمع</h3>
+                 <div id="fear-greed-content" class="mt-4">
+                     <div class="flex justify-between items-center mb-2">
                          <span id="fear-greed-text" class="text-xl font-bold">...</span>
                          <span id="fear-greed-value" class="text-2xl font-bold">--</span>
                      </div>
@@ -168,46 +100,46 @@
 
 
         <!-- قسم الإحصائيات -->
-        <section id="stats-section" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mb-12">
+        <section id="stats-section" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <div class="stat-card">
-                <h3 class="text-lg font-bold">إجمالي الربح (USDT)</h3>
-                <p id="total-profit" class="text-3xl font-bold mt-4">--.--</p>
+                <h3 class="text-lg font-bold text-gray-400">إجمالي الربح (USDT)</h3>
+                <p id="total-profit" class="text-3xl font-bold mt-2">--.--</p>
             </div>
             <div class="stat-card">
-                <h3 class="text-lg font-bold">نسبة الربح</h3>
-                <p id="win-rate" class="text-3xl font-bold mt-4">--.--%</p>
+                <h3 class="text-lg font-bold text-gray-400">نسبة الربح</h3>
+                <p id="win-rate" class="text-3xl font-bold mt-2">--.--%</p>
             </div>
             <div class="stat-card">
-                <h3 class="text-lg font-bold">نسبة الخسارة</h3>
-                <p id="loss-rate" class="text-3xl font-bold mt-4">--.--%</p>
+                <h3 class="text-lg font-bold text-gray-400">نسبة الخسارة</h3>
+                <p id="loss-rate" class="text-3xl font-bold mt-2">--.--%</p>
             </div>
             <div class="stat-card">
-                <h3 class="text-lg font-bold">الصفقات الرابحة / الخاسرة</h3>
-                <p id="win-loss-count" class="text-3xl font-bold mt-4">-- / --</p>
+                <h3 class="text-lg font-bold text-gray-400">الصفقات الرابحة / الخاسرة</h3>
+                <p id="win-loss-count" class="text-3xl font-bold mt-2">-- / --</p>
             </div>
         </section>
 
         <!-- قسم الصفقات المفتوحة -->
-        <section class="mb-12">
-            <h2 class="text-3xl font-bold mb-8 text-gradient">التوصيات المفتوحة</h2>
-            <div id="open-signals-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                <p id="no-open-signals" class="text-gray-400 col-span-full text-center py-8">لا توجد صفقات مفتوحة حالياً...</p>
+        <section>
+            <h2 class="text-2xl font-bold mb-4 text-white">التوصيات المفتوحة</h2>
+            <div id="open-signals-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>
             </div>
         </section>
         
         <!-- قسم سجل الصفقات -->
-        <section class="mt-16">
-            <h2 class="text-3xl font-bold mb-8 text-gradient">سجل التوصيات</h2>
-            <div class="table-container">
+        <section class="mt-12">
+            <h2 class="text-2xl font-bold mb-4 text-white">سجل التوصيات</h2>
+            <div class="overflow-x-auto bg-[#1f2937] rounded-lg p-4">
                 <table class="w-full text-right">
-                    <thead>
+                    <thead class="border-b-2 border-gray-500">
                         <tr>
-                            <th class="p-4">العملة</th>
-                            <th class="p-4">الحالة</th>
-                            <th class="p-4">سعر الدخول</th>
-                            <th class="p-4">سعر الإغلاق</th>
-                            <th class="p-4">الربح (%)</th>
-                            <th class="p-4">وقت الإغلاق</th>
+                            <th class="p-2">العملة</th>
+                            <th class="p-2">الحالة</th>
+                            <th class="p-2">سعر الدخول</th>
+                            <th class="p-2">سعر الإغلاق</th>
+                            <th class="p-2">الربح (%)</th>
+                            <th class="p-2">وقت الإغلاق</th>
                         </tr>
                     </thead>
                     <tbody id="closed-signals-tbody"></tbody>
@@ -237,10 +169,10 @@
             const offset = circumference - (percentage / 100 * circumference);
             // --- CHANGE: Added style="direction: ltr;" to SVG text for correct number display ---
             return `
-                <svg class="w-28 h-28">
-                    <circle class="text-gray-600" stroke-width="6" stroke="currentColor" fill="transparent" r="${radius}" cx="50%" cy="50%"/>
-                    <circle class="progress-ring text-blue-400"
-                        stroke-width="6"
+                <svg class="w-24 h-24">
+                    <circle class="text-gray-600" stroke-width="8" stroke="currentColor" fill="transparent" r="${radius}" cx="50%" cy="50%"/>
+                    <circle class="progress-ring text-blue-500"
+                        stroke-width="8"
                         stroke-dasharray="${circumference} ${circumference}"
                         style="stroke-dashoffset: ${offset}"
                         stroke="currentColor"
@@ -266,20 +198,20 @@
                     const trend = data.btc_trend;
                     if (trend.status === "Uptrend") {
                         trendContent.innerHTML = `
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-green-400 mr-3 icon-glow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-green-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
                             </svg>
-                            <span class="text-gradient">صاعد</span>
+                            <span>صاعد</span>
                         `;
-                        trendContent.className = 'flex items-center justify-center mt-6 text-2xl font-bold';
+                        trendContent.className = 'flex items-center justify-center mt-4 text-2xl font-bold text-green-500';
                     } else if (trend.status === "Downtrend") {
                          trendContent.innerHTML = `
-                            <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 text-red-400 mr-3 icon-glow" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-red-500 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 17l5-5m0 0l-5-5m5 5H6" />
                             </svg>
-                            <span class="text-gradient">هابط</span>
+                            <span>هابط</span>
                         `;
-                        trendContent.className = 'flex items-center justify-center mt-6 text-2xl font-bold';
+                        trendContent.className = 'flex items-center justify-center mt-4 text-2xl font-bold text-red-500';
                     }
                     trendDetails.textContent = trend.message || '';
                 }
@@ -289,17 +221,17 @@
                 if (greed && greed.value !== -1) {
                     const value = greed.value;
                     // --- CHANGE: Added span with dir="ltr" for correct number display ---
-                    document.getElementById('fear-greed-value').innerHTML = `<span dir="ltr" class="text-gradient">${value}</span>`;
+                    document.getElementById('fear-greed-value').innerHTML = `<span dir="ltr">${value}</span>`;
                     document.getElementById('fear-greed-text').textContent = greed.classification; // This is now pre-translated
                     const gauge = document.getElementById('fear-greed-gauge');
                     gauge.style.width = `${value}%`;
 
                     // Dynamic color for gauge
-                    if (value <= 20) gauge.style.background = 'linear-gradient(135deg, #ef4444, #dc2626)'; // Red
-                    else if (value <= 40) gauge.style.background = 'linear-gradient(135deg, #f97316, #ea580c)'; // Orange
-                    else if (value <= 60) gauge.style.background = 'linear-gradient(135deg, #eab308, #ca8a04)'; // Yellow
-                    else if (value <= 80) gauge.style.background = 'linear-gradient(135deg, #84cc16, #65a30d)'; // Lime
-                    else gauge.style.background = 'linear-gradient(135deg, #22c55e, #16a34a)'; // Green
+                    if (value <= 20) gauge.style.backgroundColor = '#ef4444'; // Red
+                    else if (value <= 40) gauge.style.backgroundColor = '#f97316'; // Orange
+                    else if (value <= 60) gauge.style.backgroundColor = '#eab308'; // Yellow
+                    else if (value <= 80) gauge.style.backgroundColor = '#84cc16'; // Lime
+                    else gauge.style.backgroundColor = '#22c55e'; // Green
                 }
 
             } catch (error) {
@@ -360,15 +292,15 @@
                         card.id = `signal-${s.id}`;
                         // --- CHANGE: Added dir="ltr" to strong tags for correct number display ---
                         card.innerHTML = `
-                            <h4 class="text-xl font-bold mb-4">${s.symbol}</h4>
-                            <div class="my-6">${createProgressRing(progress_percentage)}</div>
-                            <div class="w-full text-sm space-y-3">
-                                <div class="flex justify-between py-2 border-b border-gray-600"><span>السعر الحالي:</span> <strong id="price-${s.symbol}" dir="ltr" class="text-gradient">${currentPrice.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-2 border-b border-gray-600"><span>سعر الدخول:</span> <strong dir="ltr" class="text-blue-400">${s.entry_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-2 text-green-400"><span>الهدف:</span> <strong dir="ltr">${s.target_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-2 text-red-400"><span>وقف الخسارة:</span> <strong dir="ltr">${s.stop_loss.toFixed(5)}</strong></div>
+                            <h4 class="text-xl font-bold mb-2">${s.symbol}</h4>
+                            <div class="my-4">${createProgressRing(progress_percentage)}</div>
+                            <div class="w-full text-sm">
+                                <div class="flex justify-between py-1 border-b border-gray-700"><span>السعر الحالي:</span> <strong id="price-${s.symbol}" dir="ltr">${currentPrice.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 border-b border-gray-700"><span>سعر الدخول:</span> <strong dir="ltr">${s.entry_price.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 text-green-400"><span>الهدف:</span> <strong dir="ltr">${s.target_price.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 text-red-400"><span>وقف الخسارة:</span> <strong dir="ltr">${s.stop_loss.toFixed(5)}</strong></div>
                             </div>
-                            <button onclick="closeSignal(${s.id})" class="btn-close mt-6 w-full">خروج فوري</button>
+                            <button onclick="closeSignal(${s.id})" class="btn-close mt-4 w-full">خروج فوري</button>
                         `;
                         openSignalsContainer.appendChild(card);
                     } else {
@@ -376,76 +308,58 @@
                         row.className = 'border-b border-gray-700 hover:bg-gray-700';
                         const profitClass = s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400';
                         const profitSign = s.profit_percentage >= 0 ? '+' : '';
-                        // --- CHANGE: Added dir="ltr" to spans for correct number display ---
+                        // --- CHANGE: Added dir="ltr" to cells and used English date format ---
                         row.innerHTML = `
-                            <td class="p-4 font-bold text-blue-400">${s.symbol}</td>
-                            <td class="p-4"><span class="status-${s.status}">${getStatusText(s.status)}</span></td>
-                            <td class="p-4"><span dir="ltr">${s.entry_price.toFixed(5)}</span></td>
-                            <td class="p-4"><span dir="ltr">${s.close_price ? s.close_price.toFixed(5) : 'N/A'}</span></td>
-                            <td class="p-4 ${profitClass} font-bold"><span dir="ltr">${profitSign}${s.profit_percentage.toFixed(2)}%</span></td>
-                            <td class="p-4"><span dir="ltr">${formatEnglishDate(s.close_time)}</span></td>
+                            <td class="p-2 font-bold">${s.symbol}</td>
+                            <td class="p-2"><span class="px-2 py-1 rounded-full text-xs font-bold status-${s.status}">${s.status.replace(/_/g, ' ')}</span></td>
+                            <td class="p-2" dir="ltr">${s.entry_price.toFixed(5)}</td>
+                            <td class="p-2" dir="ltr">${s.closing_price ? s.closing_price.toFixed(5) : 'N/A'}</td>
+                            <td class="p-2 ${profitClass}" dir="ltr">${s.profit_percentage ? profitSign + s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
+                            <td class="p-2 text-xs" dir="ltr">${formatEnglishDate(s.closed_at)}</td>
                         `;
                         closedSignalsTbody.appendChild(row);
                     }
                 });
-
-                if (openSignalsCount === 0) {
-                    document.getElementById('no-open-signals').style.display = 'block';
-                } else {
-                    document.getElementById('no-open-signals').style.display = 'none';
-                }
-
-            } catch (error) {
-                console.error("Failed to fetch signals:", error);
-            }
-        }
-
-        function getStatusText(status) {
-            const statusMap = {
-                'target_hit': 'تم الوصول للهدف',
-                'stop_loss_hit': 'تم ضرب وقف الخسارة',
-                'manual_close': 'إغلاق يدوي',
-                'open': 'مفتوح'
-            };
-            return statusMap[status] || status;
-        }
-
-        async function closeSignal(signalId) {
-            if (!confirm('هل أنت متأكد من إغلاق هذه الصفقة؟')) return;
-            
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/close_signal`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ signal_id: signalId })
-                });
                 
-                if (response.ok) {
-                    await fetchSignalsAndPrices();
-                    await fetchStats();
-                } else {
-                    alert('فشل في إغلاق الصفقة');
+                if (openSignalsCount === 0) {
+                    openSignalsContainer.innerHTML = '<p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>';
                 }
+
             } catch (error) {
-                console.error("Failed to close signal:", error);
-                alert('حدث خطأ أثناء إغلاق الصفقة');
+                console.error("Failed to fetch signals or prices:", error);
+            }
+        }
+        
+        async function closeSignal(signalId) {
+            if (!window.confirm("هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟")) {
+                return;
+            }
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/close/${signalId}`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || 'Failed to close signal');
+                }
+                alert("تم إرسال أمر الإغلاق بنجاح.");
+                fetchStats();
+                fetchSignalsAndPrices();
+            } catch (error) {
+                console.error("Error closing signal:", error);
+                alert(`فشل إغلاق الصفقة: ${error.message}`);
             }
         }
 
-        // تحديث البيانات كل 30 ثانية
-        setInterval(() => {
-            fetchMarketStatus();
-            fetchStats();
-            fetchSignalsAndPrices();
-        }, 30000);
-
-        // تحميل البيانات عند بدء التشغيل
         document.addEventListener('DOMContentLoaded', () => {
             fetchMarketStatus();
             fetchStats();
             fetchSignalsAndPrices();
+
+            setInterval(fetchSignalsAndPrices, 5000); // تحديث الصفقات كل 5 ثوانٍ
+            setInterval(fetchStats, 30000); // تحديث الإحصائيات كل 30 ثانية
+            setInterval(fetchMarketStatus, 60000 * 5); // تحديث حالة السوق كل 5 دقائق
         });
     </script>
 </body>
 </html>
-
