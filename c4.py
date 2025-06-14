@@ -263,19 +263,16 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
                     
-                    # --- الإصلاح: التحقق من وجود القيم قبل استخدامها ---
                     target_price = signal.get('target_price')
                     stop_loss = signal.get('stop_loss')
                     trailing_stop_price = signal.get('trailing_stop_price')
 
-                    # استخدم الوقف المتحرك إذا كان موجوداً وصالحاً، وإلا استخدم وقف الخسارة الأساسي
                     current_stop_price = trailing_stop_price if trailing_stop_price is not None else stop_loss
 
-                    # تحقق من أن جميع القيم الضرورية هي أرقام
                     if not all(isinstance(p, (int, float)) for p in [price, target_price, current_stop_price]):
                         logger.warning(f"⚠️ [WebSocket] تخطي التحقق للعملة {symbol} بسبب بيانات غير صالحة (فارغة). "
                                      f"Target: {target_price}, Stop: {current_stop_price}")
-                        continue # تخطي هذه الدورة إذا كانت البيانات غير صالحة
+                        continue
 
                     if price >= target_price:
                         status, closing_price = 'target_hit', target_price
@@ -284,7 +281,6 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                         status, closing_price = 'stop_loss_hit', current_stop_price
                         signal_to_process = signal
                     
-                    # --- منطق الوقف المتحرك (بدون تغيير) ---
                     if USE_TRAILING_STOP and status is None:
                         entry_price = signal.get('entry_price')
                         if entry_price is None: continue
@@ -302,7 +298,6 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
 
     except Exception as e:
-        # وضعنا الفحص داخل الحلقة، لكن نترك هذا للسلامة العامة
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
 
 
@@ -388,12 +383,18 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
+        # --- FIX: Convert numpy types to standard Python floats before insertion ---
+        entry_price = float(signal['entry_price'])
+        target_price = float(signal['target_price'])
+        stop_loss = float(signal['stop_loss'])
+        trailing_stop_price = float(signal.get('trailing_stop_price', stop_loss)) # Use stop_loss as fallback
+
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, trailing_stop_price) 
                    VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
-                (signal['symbol'], signal['entry_price'], signal['target_price'], signal['stop_loss'], 
-                 signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), signal['trailing_stop_price'])
+                (signal['symbol'], entry_price, target_price, stop_loss, 
+                 signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), trailing_stop_price)
             )
             new_id = cur.fetchone()['id']
             signal['id'] = new_id
@@ -401,7 +402,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.info(f"✅ [قاعدة البيانات] تم إدراج الإشارة لـ {signal['symbol']} (ID: {new_id}).")
         return signal
     except Exception as e:
-        logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}")
+        logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
 
@@ -567,7 +568,6 @@ app = Flask(__name__)
 CORS(app)
 
 def get_fear_and_greed_index() -> Dict[str, Any]:
-    # --- CHANGE: Added translation for Fear & Greed classification ---
     classification_translation = {
         "Extreme Fear": "خوف شديد",
         "Fear": "خوف",
@@ -581,7 +581,6 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
         response.raise_for_status()
         data = response.json()['data'][0]
         
-        # Translate the classification before sending it to the frontend
         original_classification = data['value_classification']
         translated_classification = classification_translation.get(original_classification, original_classification)
 
@@ -597,7 +596,6 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
 @app.route('/')
 def home():
     try:
-        # Construct path relative to the script file
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, 'index.html')
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -700,23 +698,18 @@ def initialize_bot_services():
     global client, validated_symbols_to_scan
     
     try:
-        # 1. تهيئة عميل Binance
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
 
-        # 2. تهيئة قاعدة البيانات
         init_db()
         
-        # 3. تحميل الذاكرة المؤقتة
         load_open_signals_to_cache()
         
-        # 4. الحصول على الرموز المعتمدة
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ [خدمات البوت] لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
             return
 
-        # 5. بدء خيوط العمل (Workers)
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         
@@ -731,13 +724,10 @@ def initialize_bot_services():
 if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل تطبيق بوت التداول...")
 
-    # ابدأ كل المهام الثقيلة (اتصال DB، اتصالات API، الحلقات) في خيط خلفية.
-    # هذا يسمح لخادم الويب بالبدء فوراً والاستجابة لفحوصات السلامة (health checks).
     initialization_thread = Thread(target=initialize_bot_services)
     initialization_thread.daemon = True
     initialization_thread.start()
 
-    # يعمل تطبيق Flask في الخيط الرئيسي، ويرتبط بالمنفذ بسرعة.
     run_flask()
 
     logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
