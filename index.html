@@ -152,9 +152,22 @@
     <script>
         const API_BASE_URL = window.location.origin;
 
+        // --- CHANGE: Helper function to format date in YYYY-MM-DD HH:MM format ---
+        function formatEnglishDate(dateString) {
+            if (!dateString) return 'N/A';
+            const date = new Date(dateString);
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            const hours = String(date.getHours()).padStart(2, '0');
+            const minutes = String(date.getMinutes()).padStart(2, '0');
+            return `${year}-${month}-${day} ${hours}:${minutes}`;
+        }
+
         function createProgressRing(percentage, radius = 40) {
             const circumference = 2 * Math.PI * radius;
             const offset = circumference - (percentage / 100 * circumference);
+            // --- CHANGE: Added style="direction: ltr;" to SVG text for correct number display ---
             return `
                 <svg class="w-24 h-24">
                     <circle class="text-gray-600" stroke-width="8" stroke="currentColor" fill="transparent" r="${radius}" cx="50%" cy="50%"/>
@@ -167,12 +180,11 @@
                         r="${radius}"
                         cx="50%"
                         cy="50%"/>
-                    <text x="50%" y="50%" text-anchor="middle" dy=".3em" class="text-lg font-bold fill-current text-white">${percentage.toFixed(1)}%</text>
+                    <text x="50%" y="50%" text-anchor="middle" dy=".3em" class="text-lg font-bold fill-current text-white" style="direction: ltr;">${percentage.toFixed(1)}%</text>
                 </svg>
             `;
         }
         
-        // --- دالة جديدة ---
         async function fetchMarketStatus() {
             try {
                 const response = await fetch(`${API_BASE_URL}/api/market_status`);
@@ -208,8 +220,9 @@
                 const greed = data.fear_and_greed;
                 if (greed && greed.value !== -1) {
                     const value = greed.value;
-                    document.getElementById('fear-greed-value').textContent = value;
-                    document.getElementById('fear-greed-text').textContent = greed.classification;
+                    // --- CHANGE: Added span with dir="ltr" for correct number display ---
+                    document.getElementById('fear-greed-value').innerHTML = `<span dir="ltr">${value}</span>`;
+                    document.getElementById('fear-greed-text').textContent = greed.classification; // This is now pre-translated
                     const gauge = document.getElementById('fear-greed-gauge');
                     gauge.style.width = `${value}%`;
 
@@ -219,7 +232,6 @@
                     else if (value <= 60) gauge.style.backgroundColor = '#eab308'; // Yellow
                     else if (value <= 80) gauge.style.backgroundColor = '#84cc16'; // Lime
                     else gauge.style.backgroundColor = '#22c55e'; // Green
-
                 }
 
             } catch (error) {
@@ -234,10 +246,11 @@
                 if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
                 const stats = await response.json();
                 
-                document.getElementById('total-profit').textContent = stats.hasOwnProperty('total_profit_usdt') ? `${stats.total_profit_usdt.toFixed(2)}` : '--.--';
-                document.getElementById('win-rate').textContent = stats.hasOwnProperty('win_rate') ? `${stats.win_rate.toFixed(2)}%` : '--.--%';
-                document.getElementById('loss-rate').textContent = stats.hasOwnProperty('loss_rate') ? `${stats.loss_rate.toFixed(2)}%` : '--.--%';
-                document.getElementById('win-loss-count').textContent = (stats.hasOwnProperty('wins') && stats.hasOwnProperty('losses')) ? `${stats.wins} / ${stats.losses}` : '-- / --';
+                // --- CHANGE: Added spans with dir="ltr" for correct number display ---
+                document.getElementById('total-profit').innerHTML = stats.hasOwnProperty('total_profit_usdt') ? `<span dir="ltr">${stats.total_profit_usdt.toFixed(2)}</span>` : '--.--';
+                document.getElementById('win-rate').innerHTML = stats.hasOwnProperty('win_rate') ? `<span dir="ltr">${stats.win_rate.toFixed(2)}%</span>` : '--.--%';
+                document.getElementById('loss-rate').innerHTML = stats.hasOwnProperty('loss_rate') ? `<span dir="ltr">${stats.loss_rate.toFixed(2)}%</span>` : '--.--%';
+                document.getElementById('win-loss-count').innerHTML = (stats.hasOwnProperty('wins') && stats.hasOwnProperty('losses')) ? `<span dir="ltr">${stats.wins} / ${stats.losses}</span>` : '-- / --';
 
             } catch (error) {
                 console.error("Failed to fetch stats:", error);
@@ -277,14 +290,15 @@
                         const card = document.createElement('div');
                         card.className = 'signal-card flex flex-col items-center';
                         card.id = `signal-${s.id}`;
+                        // --- CHANGE: Added dir="ltr" to strong tags for correct number display ---
                         card.innerHTML = `
                             <h4 class="text-xl font-bold mb-2">${s.symbol}</h4>
                             <div class="my-4">${createProgressRing(progress_percentage)}</div>
                             <div class="w-full text-sm">
-                                <div class="flex justify-between py-1 border-b border-gray-700"><span>السعر الحالي:</span> <strong id="price-${s.symbol}">${currentPrice.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-1 border-b border-gray-700"><span>سعر الدخول:</span> <strong>${s.entry_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-1 text-green-400"><span>الهدف:</span> <strong>${s.target_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between py-1 text-red-400"><span>وقف الخسارة:</span> <strong>${s.stop_loss.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 border-b border-gray-700"><span>السعر الحالي:</span> <strong id="price-${s.symbol}" dir="ltr">${currentPrice.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 border-b border-gray-700"><span>سعر الدخول:</span> <strong dir="ltr">${s.entry_price.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 text-green-400"><span>الهدف:</span> <strong dir="ltr">${s.target_price.toFixed(5)}</strong></div>
+                                <div class="flex justify-between py-1 text-red-400"><span>وقف الخسارة:</span> <strong dir="ltr">${s.stop_loss.toFixed(5)}</strong></div>
                             </div>
                             <button onclick="closeSignal(${s.id})" class="btn-close mt-4 w-full">خروج فوري</button>
                         `;
@@ -294,13 +308,14 @@
                         row.className = 'border-b border-gray-700 hover:bg-gray-700';
                         const profitClass = s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400';
                         const profitSign = s.profit_percentage >= 0 ? '+' : '';
+                        // --- CHANGE: Added dir="ltr" to cells and used English date format ---
                         row.innerHTML = `
                             <td class="p-2 font-bold">${s.symbol}</td>
                             <td class="p-2"><span class="px-2 py-1 rounded-full text-xs font-bold status-${s.status}">${s.status.replace(/_/g, ' ')}</span></td>
-                            <td class="p-2">${s.entry_price.toFixed(5)}</td>
-                            <td class="p-2">${s.closing_price ? s.closing_price.toFixed(5) : 'N/A'}</td>
-                            <td class="p-2 ${profitClass}">${s.profit_percentage ? profitSign + s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
-                            <td class="p-2 text-xs">${new Date(s.closed_at).toLocaleString('ar-EG')}</td>
+                            <td class="p-2" dir="ltr">${s.entry_price.toFixed(5)}</td>
+                            <td class="p-2" dir="ltr">${s.closing_price ? s.closing_price.toFixed(5) : 'N/A'}</td>
+                            <td class="p-2 ${profitClass}" dir="ltr">${s.profit_percentage ? profitSign + s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
+                            <td class="p-2 text-xs" dir="ltr">${formatEnglishDate(s.closed_at)}</td>
                         `;
                         closedSignalsTbody.appendChild(row);
                     }

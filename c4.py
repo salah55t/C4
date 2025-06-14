@@ -567,17 +567,31 @@ app = Flask(__name__)
 CORS(app)
 
 def get_fear_and_greed_index() -> Dict[str, Any]:
+    # --- CHANGE: Added translation for Fear & Greed classification ---
+    classification_translation = {
+        "Extreme Fear": "خوف شديد",
+        "Fear": "خوف",
+        "Neutral": "محايد",
+        "Greed": "طمع",
+        "Extreme Greed": "طمع شديد",
+        "Error": "خطأ"
+    }
     try:
         response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]
-        return {"value": int(data['value']), "classification": data['value_classification']}
+        
+        # Translate the classification before sending it to the frontend
+        original_classification = data['value_classification']
+        translated_classification = classification_translation.get(original_classification, original_classification)
+
+        return {"value": int(data['value']), "classification": translated_classification}
     except requests.RequestException as e:
         logger.error(f"❌ [مؤشر الخوف والطمع] فشل الاتصال بالـ API: {e}")
-        return {"value": -1, "classification": "Error"}
+        return {"value": -1, "classification": classification_translation["Error"]}
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         logger.error(f"❌ [مؤشر الخوف والطمع] فشل في تحليل استجابة الـ API: {e}")
-        return {"value": -1, "classification": "Error"}
+        return {"value": -1, "classification": classification_translation["Error"]}
 
 
 @app.route('/')
@@ -728,4 +742,3 @@ if __name__ == "__main__":
 
     logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
     os._exit(0)
-
