@@ -134,8 +134,10 @@ def check_db_connection() -> bool:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
         init_db()
     try:
-        conn.cursor().execute("SELECT 1;")
-        return True
+        if conn: # Check if conn is not None after trying to init
+            conn.cursor().execute("SELECT 1;")
+            return True
+        return False
     except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال: {e}. محاولة إعادة الاتصال...")
         try:
@@ -153,7 +155,11 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error("❌ [التحقق] كائن Binance client غير مهيأ. لا يمكن المتابعة.")
         return []
     try:
-        with open(os.path.join(os.path.dirname(__file__), filename), 'r', encoding='utf-8') as f:
+        # Construct path relative to the script file
+        script_dir = os.path.dirname(__file__)
+        file_path = os.path.join(script_dir, filename)
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols_from_file = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         
         formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols_from_file}
@@ -312,19 +318,19 @@ class TradingStrategy:
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
-            logger.info(f"ℹ️ [رفض إشارة] {self.symbol}: نموذج تعلم الآلة أو المُعاير غير محمل.")
+            logger.debug(f"ℹ️ [رفض إشارة] {self.symbol}: نموذج تعلم الآلة أو المُعاير غير محمل.")
             return None
         last_row = df_processed.iloc[-1]
         try:
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any():
-                logger.info(f"ℹ️ [رفض إشارة] {self.symbol}: توجد قيم فارغة في بيانات الخصائص.")
+                logger.debug(f"ℹ️ [رفض إشارة] {self.symbol}: توجد قيم فارغة في بيانات الخصائص.")
                 return None
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0][1]
             if prediction_proba < MODEL_PREDICTION_THRESHOLD:
-                logger.info(f"ℹ️ [رفض إشارة] {self.symbol}: الاحتمالية {prediction_proba:.2%} أقل من الحد الأدنى {MODEL_PREDICTION_THRESHOLD:.2%}.")
+                logger.debug(f"ℹ️ [رفض إشارة] {self.symbol}: الاحتمالية {prediction_proba:.2%} أقل من الحد الأدنى {MODEL_PREDICTION_THRESHOLD:.2%}.")
                 return None
             logger.info(f"✅ [العثور على إشارة] {self.symbol}: إشارة محتملة باحتمالية {prediction_proba:.2%}.")
             return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability': f"{prediction_proba:.2%}"}}
@@ -439,11 +445,8 @@ def load_open_signals_to_cache():
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_trend() -> Dict[str, Any]:
-    """
-    يحدد اتجاه البيتكوين ويعيد قاموسًا يحتوي على الحالة والتفاصيل.
-    """
     if not client: 
-        return {"status": "error", "message": "Binance client not initialized"}
+        return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -453,12 +456,10 @@ def get_btc_trend() -> Dict[str, Any]:
         current_price = df['close'].iloc[-1]
         
         if current_price > ema:
-            status = "Uptrend"
-            message = f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
+            status, message = "Uptrend", f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
             logger.info(f"📈 [فلتر BTC] الاتجاه صاعد (السعر: {current_price} > EMA({BTC_TREND_EMA_PERIOD}): {ema:.2f})")
         else:
-            status = "Downtrend"
-            message = f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
+            status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
             logger.info(f"📉 [فلتر BTC] الاتجاه هابط (السعر: {current_price} < EMA({BTC_TREND_EMA_PERIOD}): {ema:.2f})")
             
         return {"status": status, "message": message, "is_uptrend": (status == "Uptrend")}
@@ -468,10 +469,9 @@ def get_btc_trend() -> Dict[str, Any]:
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
 def main_loop():
-    global validated_symbols_to_scan
-    time.sleep(10)
+    logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
+    time.sleep(15) # Give some time for initial connections to establish
     
-    validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
         logger.critical("❌ [الحلقة الرئيسية] لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل."); return
     
@@ -548,19 +548,12 @@ def main_loop():
 app = Flask(__name__)
 CORS(app)
 
-# --- دالة جديدة ---
 def get_fear_and_greed_index() -> Dict[str, Any]:
-    """
-    يجلب مؤشر الخوف والطمع من واجهة برمجة تطبيقات alternative.me.
-    """
     try:
         response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]
-        return {
-            "value": int(data['value']),
-            "classification": data['value_classification']
-        }
+        return {"value": int(data['value']), "classification": data['value_classification']}
     except requests.RequestException as e:
         logger.error(f"❌ [مؤشر الخوف والطمع] فشل الاتصال بالـ API: {e}")
         return {"value": -1, "classification": "Error"}
@@ -572,24 +565,19 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
 @app.route('/')
 def home():
     try:
-        with open('index.html', 'r', encoding='utf-8') as f:
+        # Construct path relative to the script file
+        script_dir = os.path.dirname(__file__)
+        file_path = os.path.join(script_dir, 'index.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
             return render_template_string(f.read())
     except FileNotFoundError:
         return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1><p>يرجى التأكد من وجود الملف.</p>", 404
 
-# --- نقطة نهاية جديدة ---
 @app.route('/api/market_status')
 def get_market_status():
-    """
-    نقطة نهاية جديدة لتوفير حالة السوق العامة.
-    """
     btc_trend = get_btc_trend()
     fear_and_greed = get_fear_and_greed_index()
-    
-    return jsonify({
-        "btc_trend": btc_trend,
-        "fear_and_greed": fear_and_greed
-    })
+    return jsonify({"btc_trend": btc_trend, "fear_and_greed": fear_and_greed})
 
 @app.route('/api/stats')
 def get_stats():
@@ -608,12 +596,8 @@ def get_stats():
         total_profit_usdt = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed_signals if s.get('profit_percentage') is not None)
 
         return jsonify({
-            "win_rate": win_rate,
-            "loss_rate": loss_rate,
-            "wins": wins,
-            "losses": losses,
-            "total_profit_usdt": total_profit_usdt,
-            "total_closed_trades": total_closed
+            "win_rate": win_rate, "loss_rate": loss_rate, "wins": wins, "losses": losses,
+            "total_profit_usdt": total_profit_usdt, "total_closed_trades": total_closed
         })
     except Exception as e:
         logger.error(f"❌ [API إحصائيات] خطأ: {e}")
@@ -675,30 +659,55 @@ def run_flask():
         logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير الخاص بـ Flask (غير مناسب للإنتاج).")
         app.run(host=host, port=port)
 
-# ---------------------- نقطة انطلاق البرنامج ----------------------
-if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل بوت إشارات التداول (V5.1 - مع مؤشرات السوق)...")
+# ---------------------- نقطة انطلاق البرنامج (مُعاد هيكلتها) ----------------------
+def initialize_bot_services():
+    """
+    تقوم هذه الدالة بتهيئة جميع خدمات البوت طويلة الأمد في الخلفية.
+    """
+    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
+    global client, validated_symbols_to_scan
+    
     try:
+        # 1. تهيئة عميل Binance
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
 
+        # 2. تهيئة قاعدة البيانات
         init_db()
+        
+        # 3. تحميل الذاكرة المؤقتة
         load_open_signals_to_cache()
         
+        # 4. الحصول على الرموز المعتمدة
+        validated_symbols_to_scan = get_validated_symbols()
+        if not validated_symbols_to_scan:
+            logger.critical("❌ [خدمات البوت] لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
+            return
+
+        # 5. بدء خيوط العمل (Workers)
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         
-        run_flask()
+        logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
 
     except BinanceAPIException as e:
         logger.critical(f"❌ [Binance] خطأ فادح في الاتصال بـ Binance: {e}. تأكد من صحة مفاتيح API.")
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 [إيقاف] تم طلب إيقاف تشغيل البوت...")
     except Exception as e:
-        logger.critical(f"❌ [فشل البدء] حدث خطأ حاسم أثناء بدء التشغيل: {e}", exc_info=True)
-    finally:
-        if conn:
-            conn.close()
-            logger.info("🔌 [قاعدة البيانات] تم إغلاق الاتصال بقاعدة البيانات.")
-        logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
-        os._exit(0)
+        logger.critical(f"❌ [خدمات البوت] حدث خطأ حاسم أثناء تهيئة خدمات البوت: {e}", exc_info=True)
+
+
+if __name__ == "__main__":
+    logger.info("🚀 بدء تشغيل تطبيق بوت التداول...")
+
+    # ابدأ كل المهام الثقيلة (اتصال DB، اتصالات API، الحلقات) في خيط خلفية.
+    # هذا يسمح لخادم الويب بالبدء فوراً والاستجابة لفحوصات السلامة (health checks).
+    initialization_thread = Thread(target=initialize_bot_services)
+    initialization_thread.daemon = True
+    initialization_thread.start()
+
+    # يعمل تطبيق Flask في الخيط الرئيسي، ويرتبط بالمنفذ بسرعة.
+    run_flask()
+
+    logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
+    os._exit(0)
+
