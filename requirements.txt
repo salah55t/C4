@@ -13,3 +13,4 @@ pandas_ta
 ta
 lightgbm
 Flask-Cors
+tqdm
