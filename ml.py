@@ -46,7 +46,7 @@ except Exception as e:
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V3' # <-- تم تحديث إصدار النموذج
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4' # <-- تم تحديث إصدار النموذج ليشمل الميزات الجديدة
 
 # Indicator Parameters
 RSI_PERIOD: int = 14
@@ -71,7 +71,7 @@ except Exception as e:
     logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
     exit(1)
 
-# --- Database and Symbol Validation Functions (Unchanged) ---
+# --- Database and Symbol Validation Functions ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn; logger.info("[DB] بدء تهيئة قاعدة البيانات...")
     for attempt in range(retries):
@@ -115,7 +115,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # --- Indicator and Feature Calculation ---
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates all technical indicators and features."""
+    """Calculates all technical indicators and new requested features."""
     df_calc = df.copy()
     
     # ATR
@@ -138,6 +138,18 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd'] = ema_fast - ema_slow
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    
+    # --- NEW: MACD Crossover Feature ---
+    # 1 for bullish crossover (MACD crosses above Signal)
+    # -1 for bearish crossover (MACD crosses below Signal)
+    # 0 for no crossover
+    macd_above = df_calc['macd'] > df_calc['macd_signal']
+    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    df_calc['macd_cross'] = 0
+    # Bullish cross: was below in the previous candle, is now above
+    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
+    # Bearish cross: was above in the previous candle, is now below
+    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
 
     # Bollinger Bands
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
@@ -145,8 +157,13 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
     df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
-    # New Feature: Price position within the bands
     df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
+    
+    # --- NEW: Time-based Features ---
+    # Day of the week (Monday=0, Sunday=6)
+    df_calc['day_of_week'] = df_calc.index.dayofweek
+    # Hour of the day (0-23)
+    df_calc['hour_of_day'] = df_calc.index.hour
 
     # Candlestick features
     df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
@@ -161,26 +178,31 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
 # --- Model Training Logic ---
 
 def prepare_data_for_ml(df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing data for ML model for {symbol}...")
+    logger.info(f"ℹ️ [ML Prep] Preparing data for ML model for {symbol} with new features...")
     df_featured = calculate_features(df)
 
-    # --- New, simplified Target Definition ---
+    # --- Target Definition (Unchanged) ---
+    # We still want to predict a price rise, but now with more context about bearish conditions.
     profit_target_pct = 0.015  # 1.5% profit
     look_forward_period = 12 # How many 15-min candles to look into the future (3 hours)
     
     future_high = df_featured['high'].rolling(window=look_forward_period).max().shift(-look_forward_period)
     df_featured['target'] = ((future_high / df_featured['close']) - 1 > profit_target_pct).astype(int)
     
+    # --- UPDATED: Feature Columns ---
     feature_columns = [
         'volume', 'relative_volume', 'rsi', 'macd_hist', 'bb_width', 'bb_pos', 'atr',
-        'candle_body_size', 'upper_wick', 'lower_wick'
+        'candle_body_size', 'upper_wick', 'lower_wick',
+        # --- NEW FEATURES ADDED FOR TRAINING ---
+        'macd_cross',
+        'day_of_week',
+        'hour_of_day'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     
-    # --- Crucial Diagnostic Logging ---
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
-        logger.warning(f"⚠️ [ML Prep] DataFrame for {symbol} is empty or has only one class. Skipping.")
+        logger.warning(f"⚠️ [ML Prep] DataFrame for {symbol} is empty or has only one class after feature calculation. Skipping.")
         return None
         
     logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
@@ -199,7 +221,6 @@ def train_and_evaluate_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[An
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
     scaler = StandardScaler().fit(X_train)
-    # --- Fix for UserWarning: Convert scaled arrays back to DataFrames with columns ---
     X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns)
     X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
     
@@ -210,7 +231,7 @@ def train_and_evaluate_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[An
         learning_rate=0.05,
         num_leaves=31,
         n_jobs=-1,
-        class_weight='balanced', # <-- تم الإصلاح: استبدال is_unbalanced
+        class_weight='balanced',
         colsample_bytree=0.8,
         subsample=0.8
     )
@@ -228,7 +249,6 @@ def train_and_evaluate_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[An
         'f1_score': f1_score(y_test, y_pred, zero_division=0),
         'num_samples_trained': len(X_train),
     }
-    # Use a more readable format for the metrics log
     metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in metrics.items() if isinstance(v, float)])
     logger.info(f"📊 [ML Train] LightGBM performance: {metrics_log_str}")
     
@@ -288,7 +308,6 @@ if __name__ == "__main__":
                 X, y, feature_names = prepared_data
                 trained_model, trained_scaler, model_metrics = train_and_evaluate_model(X, y)
                 
-                # Check if model is useful before saving
                 if trained_model and trained_scaler and model_metrics.get('precision', 0) > 0.1:
                     model_bundle = {'model': trained_model, 'scaler': trained_scaler, 'feature_names': feature_names}
                     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
