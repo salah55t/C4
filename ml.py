@@ -46,7 +46,7 @@ except Exception as e:
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4' # <-- تم تحديث إصدار النموذج ليشمل الميزات الجديدة
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V3' # <-- تم تحديث إصدار النموذج ليشمل الميزات الجديدة
 
 # Indicator Parameters
 RSI_PERIOD: int = 14
