@@ -50,7 +50,9 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
 
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V3'
+# --- !!! تم التحديث هنا !!! ---
+# تم تغيير اسم النموذج إلى V4 ليتطابق مع سكريبت التدريب
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 MODEL_PREDICTION_THRESHOLD = 0.70
 
 USE_DYNAMIC_SL_TP = True
@@ -191,32 +193,57 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+    
+    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
+    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
+
+    # MACD
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     df_calc['macd'] = ema_fast - ema_slow
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    
+    # MACD Crossover (as used in V4 training)
+    macd_above = df_calc['macd'] > df_calc['macd_signal']
+    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    df_calc['macd_cross'] = 0
+    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
+    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
+    
+    # Bollinger Bands
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
     df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
     df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
+    
+    # Time-based Features (as used in V4 training)
+    df_calc['day_of_week'] = df_calc.index.dayofweek
+    df_calc['hour_of_day'] = df_calc.index.hour
+    
+    # Candlestick features
     df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
     df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
     df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
+
+    # Relative volume
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
+    
     return df_calc.dropna()
+
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
@@ -335,6 +362,7 @@ class TradingStrategy:
             return None
         last_row = df_processed.iloc[-1]
         try:
+            # IMPORTANT: Ensure the columns for prediction match the training feature names exactly
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any():
                 logger.debug(f"ℹ️ [رفض إشارة] {self.symbol}: توجد قيم فارغة في بيانات الخصائص.")
