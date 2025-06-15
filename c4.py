@@ -64,7 +64,7 @@ TRAILING_STOP_DISTANCE_PERCENT = 1.0
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 6
+BTC_TREND_EMA_PERIOD = 50
 
 RSI_PERIOD: int = 14
 MACD_FAST: int = 12
@@ -305,7 +305,7 @@ def update_trailing_stop_in_db(signal_id: int, new_price: float) -> None:
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE signals SET trailing_stop_price = %s WHERE id = %s;", (new_price, signal_id))
+            cur.execute("UPDATE signals SET trailing_stop_price = %s WHERE id = %s;", (float(new_price), signal_id))
         conn.commit()
         logger.info(f"📈 [الوقف المتحرك] تم تحديث وقف الخسارة للإشارة ID {signal_id} إلى {new_price:.8f}")
     except Exception as e:
@@ -383,11 +383,10 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
-        # --- FIX: Convert numpy types to standard Python floats before insertion ---
         entry_price = float(signal['entry_price'])
         target_price = float(signal['target_price'])
         stop_loss = float(signal['stop_loss'])
-        trailing_stop_price = float(signal.get('trailing_stop_price', stop_loss)) # Use stop_loss as fallback
+        trailing_stop_price = float(signal.get('trailing_stop_price', stop_loss))
 
         with conn.cursor() as cur:
             cur.execute(
@@ -418,18 +417,21 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         return
 
     try:
-        profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
+        # --- FIX: Convert numpy/other types to standard Python float before DB operation ---
+        db_closing_price = float(closing_price)
+        db_profit_pct = float(((db_closing_price / signal['entry_price']) - 1) * 100)
+        
         with conn.cursor() as update_cur:
             update_cur.execute(
                 "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;",
-                (status, closing_price, profit_pct, signal['id'])
+                (status, db_closing_price, db_profit_pct, signal['id'])
             )
         conn.commit()
 
         with signal_cache_lock:
             del open_signals_cache[symbol]
 
-        logger.info(f"✅ [إغلاق الإشارة] تم إغلاق الإشارة {signal['id']} للعملة {signal['symbol']} بحالة '{status}'. طريقة الإغلاق: {closed_by}. الربح: {profit_pct:.2f}%")
+        logger.info(f"✅ [إغلاق الإشارة] تم إغلاق الإشارة {signal['id']} للعملة {signal['symbol']} بحالة '{status}'. طريقة الإغلاق: {closed_by}. الربح: {db_profit_pct:.2f}%")
         
         status_map = {
             'target_hit': '✅ تحقق الهدف',
@@ -440,12 +442,13 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
         safe_symbol = signal['symbol'].replace('_', '\\_')
         
-        alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{profit_pct:+.2f}%`"
+        alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{db_profit_pct:+.2f}%`"
         send_telegram_message(CHAT_ID, alert_msg)
 
     except Exception as e:
-        logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}")
+        logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
+
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
