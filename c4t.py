@@ -158,10 +158,15 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
     df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
 
-    # Bollinger Bands
+    # --- START OF FIX ---
+    # Bollinger Bands (Corrected and complete version)
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
+    df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
+    df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
+    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
     df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
+    # --- END OF FIX ---
 
     # Time-based Features
     df_calc['day_of_week'] = df_calc.index.dayofweek
