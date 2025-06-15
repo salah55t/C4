@@ -233,13 +233,26 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     
     df_featured = calculate_features(data)
     
-    for col in feature_names:
-        if col not in df_featured.columns:
-            logger.error(f"Missing feature '{col}' in data for {symbol}. Skipping backtest for this symbol.")
-            return []
+    # التأكد من أن جميع الأعمدة المطلوبة موجودة
+    if not all(col in df_featured.columns for col in feature_names):
+        missing = [col for col in feature_names if col not in df_featured.columns]
+        logger.error(f"Missing features {missing} for {symbol}. Skipping.")
+        return []
 
-    features_scaled = scaler.transform(df_featured[feature_names])
-    predictions = model.predict_proba(features_scaled)[:, 1]
+    # --- START OF FIX for Scikit-learn UserWarning ---
+    # 1. حدد الميزات بالترتيب الصحيح كما يتوقعه النموذج
+    features_df = df_featured[feature_names]
+    
+    # 2. قم بمعايرة الميزات. هذا يُرجع مصفوفة NumPy، التي لا تحتوي على أسماء أعمدة.
+    features_scaled_np = scaler.transform(features_df)
+    
+    # 3. قم بتحويل مصفوفة NumPy مرة أخرى إلى DataFrame، مع تعيين أسماء الميزات الصحيحة.
+    #    هذه هي الخطوة الحاسمة لمنع التحذير.
+    features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
+
+    # 4. قم بإجراء التنبؤ باستخدام الـ DataFrame الذي يحتوي الآن على أسماء الميزات الصحيحة.
+    predictions = model.predict_proba(features_scaled_df)[:, 1]
+    # --- END OF FIX ---
     
     df_featured['prediction'] = predictions
     
@@ -347,8 +360,11 @@ Gross Loss: ${gross_loss:,.2f} ({len(losing_trades)} trades)
     logger.info(report_str)
     
     try:
-        report_filename = f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        df_trades.to_csv(report_filename)
+        # تأكد من أننا لا نحاول الحفظ في مجلد غير موجود
+        if not os.path.exists('reports'):
+            os.makedirs('reports')
+        report_filename = os.path.join('reports', f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        df_trades.to_csv(report_filename, index=False)
         logger.info(f"\n================================================================================\n✅ Full trade log saved to: {report_filename}\n================================================================================\n")
     except Exception as e:
         logger.error(f"Could not save report to CSV: {e}")
