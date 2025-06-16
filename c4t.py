@@ -19,16 +19,16 @@ from flask import Flask
 # --------------------------- إعدادات الاختبار الخلفي ----------------------------
 # ==============================================================================
 # الفترة الزمنية للاختبار بالايام
-BACKTEST_PERIOD_DAYS: int = 30
+BACKTEST_PERIOD_DAYS: int = 180
 # الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
 # اسم النموذج الأساسي الذي سيتم اختباره
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.70
+MODEL_PREDICTION_THRESHOLD: float = 0.75
 ATR_SL_MULTIPLIER: float = 2.0
-ATR_TP_MULTIPLIER: float = 3.0
+ATR_TP_MULTIPLIER: float = 4.0
 USE_TRAILING_STOP: bool = True
 TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75  # Activate TSL when 75% to TP
 TRAILING_STOP_DISTANCE_PERCENT: float = 1.0 # Trail 1.0% behind price
