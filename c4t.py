@@ -30,8 +30,14 @@ MODEL_PREDICTION_THRESHOLD: float = 0.70
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 3.0
 USE_TRAILING_STOP: bool = True
-TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75
-TRAILING_STOP_DISTANCE_PERCENT: float = 1.0
+TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75  # Activate TSL when 75% to TP
+TRAILING_STOP_DISTANCE_PERCENT: float = 1.0 # Trail 1.0% behind price
+
+# --- !!! جديد: معلمات محاكاة التكاليف الواقعية !!! ---
+# العمولة لكل صفقة (شراء أو بيع). 0.1% هو المعدل القياسي في Binance
+COMMISSION_PERCENT: float = 0.1
+# الانزلاق السعري المتوقع. 0.05% هو تقدير معقول للصفقات السوقية
+SLIPPAGE_PERCENT: float = 0.05
 
 # مبلغ افتراضي لكل صفقة بالدولار لمحاكاة الربح
 INITIAL_TRADE_AMOUNT_USDT: float = 10.0
@@ -51,18 +57,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger('Backtester')
 
-# --- START: تعديل للعمل على Render.io ---
-# إعداد خادم الويب
+# إعداد خادم الويب (للتوافق مع منصات مثل Render)
 app = Flask(__name__)
-
 @app.route('/')
 def health_check():
-    """
-    هذه نقطة النهاية (endpoint) لكي تتحقق منصة Render من أن التطبيق يعمل.
-    """
     return "Backtester service is running and alive."
-# --- END: تعديل للعمل على Render.io ---
-
 
 # تحميل متغيرات البيئة
 try:
@@ -104,7 +103,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error("Binance client not initialized.")
         return []
     try:
-        # تأكد من أن المسار صحيح حتى لو تم تشغيل السكريبت من مجلد آخر
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
         
@@ -224,6 +222,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     تقوم بتنفيذ محاكاة التداول على البيانات التاريخية لعملة واحدة.
+    الأسعار المسجلة هنا هي أسعار "مثالية" قبل تطبيق الانزلاق والعمولة.
     """
     trades = []
     
@@ -233,26 +232,15 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     
     df_featured = calculate_features(data)
     
-    # التأكد من أن جميع الأعمدة المطلوبة موجودة
     if not all(col in df_featured.columns for col in feature_names):
         missing = [col for col in feature_names if col not in df_featured.columns]
         logger.error(f"Missing features {missing} for {symbol}. Skipping.")
         return []
 
-    # --- START OF FIX for Scikit-learn UserWarning ---
-    # 1. حدد الميزات بالترتيب الصحيح كما يتوقعه النموذج
     features_df = df_featured[feature_names]
-    
-    # 2. قم بمعايرة الميزات. هذا يُرجع مصفوفة NumPy، التي لا تحتوي على أسماء أعمدة.
     features_scaled_np = scaler.transform(features_df)
-    
-    # 3. قم بتحويل مصفوفة NumPy مرة أخرى إلى DataFrame، مع تعيين أسماء الميزات الصحيحة.
-    #    هذه هي الخطوة الحاسمة لمنع التحذير.
     features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
-
-    # 4. قم بإجراء التنبؤ باستخدام الـ DataFrame الذي يحتوي الآن على أسماء الميزات الصحيحة.
     predictions = model.predict_proba(features_scaled_df)[:, 1]
-    # --- END OF FIX ---
     
     df_featured['prediction'] = predictions
     
@@ -262,24 +250,37 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     for i in range(len(df_featured)):
         current_candle = df_featured.iloc[i]
         
+        # --- Logic to manage an active trade ---
         if in_trade:
+            # Check for TP hit: if the candle's high touches the take profit
             if current_candle['high'] >= trade_details['tp']:
                 trade_details['exit_price'] = trade_details['tp']
                 trade_details['exit_reason'] = 'TP Hit'
+            # Check for SL hit: if the candle's low touches the stop loss
             elif current_candle['low'] <= trade_details['sl']:
                 trade_details['exit_price'] = trade_details['sl']
                 trade_details['exit_reason'] = 'SL Hit'
             
+            # Trailing Stop Loss Logic
             elif USE_TRAILING_STOP:
-                activation_price = trade_details['entry_price'] * (1 + (TRAILING_STOP_ACTIVATE_PERCENT / 100))
+                # Calculate activation price based on progress towards TP
+                activation_price = trade_details['entry_price'] + \
+                                   (trade_details['tp'] - trade_details['entry_price']) * TRAILING_STOP_ACTIVATE_PERCENT
+                
+                # Activate TSL if not already active and price crosses activation level
                 if not trade_details.get('tsl_active') and current_candle['high'] >= activation_price:
                     trade_details['tsl_active'] = True
-                
+                    logger.debug(f"TSL activated for {symbol} at price {current_candle['high']:.4f}")
+
+                # If TSL is active, trail the price
                 if trade_details.get('tsl_active'):
+                    # Calculate new potential TSL based on the current close
                     new_tsl = current_candle['close'] * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
+                    # Only update the stop loss if the new TSL is higher than the current one
                     if new_tsl > trade_details['sl']:
                         trade_details['sl'] = new_tsl
             
+            # If an exit condition was met, finalize the trade
             if trade_details.get('exit_price'):
                 trade_details['exit_time'] = current_candle.name
                 trade_details['duration_candles'] = i - trade_details['entry_index']
@@ -288,6 +289,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
                 trade_details = {}
             continue
 
+        # --- Logic to enter a new trade ---
         if not in_trade and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
             entry_price = current_candle['close']
@@ -299,7 +301,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             trade_details = {
                 'symbol': symbol,
                 'entry_time': current_candle.name,
-                'entry_price': entry_price,
+                'entry_price': entry_price, # Ideal price before slippage
                 'entry_index': i,
                 'tp': take_profit,
                 'sl': stop_loss,
@@ -310,7 +312,8 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
 
 def generate_report(all_trades: List[Dict[str, Any]]):
     """
-    تنشئ وتعرض تقريرًا مفصلاً بنتائج الاختبار الخلفي.
+    تنشئ وتعرض تقريرًا مفصلاً بنتائج الاختبار الخلفي،
+    مع تطبيق الانزلاق السعري والعمولة للحصول على نتائج واقعية.
     """
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
@@ -318,49 +321,68 @@ def generate_report(all_trades: List[Dict[str, Any]]):
 
     df_trades = pd.DataFrame(all_trades)
     
-    df_trades['pnl_pct'] = ((df_trades['exit_price'] / df_trades['entry_price']) - 1) * 100
-    df_trades['pnl_usdt'] = df_trades['pnl_pct'] / 100 * INITIAL_TRADE_AMOUNT_USDT
+    # --- تطبيق الانزلاق السعري والعمولة ---
+    # تعديل سعر الدخول (شراء بسعر أعلى قليلاً)
+    df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
+    # تعديل سعر الخروج (بيع بسعر أقل قليلاً)
+    df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
+    
+    # حساب نسبة الربح/الخسارة بناءً على الأسعار المعدلة (قبل العمولة)
+    df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
+    
+    # حساب الربح/الخسارة بالدولار مع خصم العمولات
+    entry_cost = INITIAL_TRADE_AMOUNT_USDT
+    exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
+    
+    commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
+    commission_exit = exit_value * (COMMISSION_PERCENT / 100)
+    
+    df_trades['commission_total'] = commission_entry + commission_exit
+    df_trades['pnl_usdt_net'] = (exit_value - entry_cost) - df_trades['commission_total']
+    df_trades['pnl_pct_net'] = (df_trades['pnl_usdt_net'] / INITIAL_TRADE_AMOUNT_USDT) * 100
 
+    # --- إعداد التقرير ---
     total_trades = len(df_trades)
-    winning_trades = df_trades[df_trades['pnl_usdt'] > 0]
-    losing_trades = df_trades[df_trades['pnl_usdt'] <= 0]
+    winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]
+    losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
     
     win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
-    total_pnl = df_trades['pnl_usdt'].sum()
+    total_net_pnl = df_trades['pnl_usdt_net'].sum()
     
-    gross_profit = winning_trades['pnl_usdt'].sum()
-    gross_loss = abs(losing_trades['pnl_usdt'].sum())
+    gross_profit = winning_trades['pnl_usdt_net'].sum()
+    gross_loss = abs(losing_trades['pnl_usdt_net'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
     
-    avg_win = winning_trades['pnl_usdt'].mean() if len(winning_trades) > 0 else 0
-    avg_loss = losing_trades['pnl_usdt'].mean() if len(losing_trades) > 0 else 0
-    risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
+    avg_win = winning_trades['pnl_usdt_net'].mean() if len(winning_trades) > 0 else 0
+    avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
+    risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
     report_str = f"""
 ================================================================================
 📈 BACKTESTING REPORT: {BASE_ML_MODEL_NAME}
-Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME} timeframe)
+Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME})
+Costs: {COMMISSION_PERCENT}% commission/trade, {SLIPPAGE_PERCENT}% slippage
 ================================================================================
 
---- General Performance ---
+--- Net Performance (After Costs) ---
+Total Net PnL: ${total_net_pnl:,.2f}
 Total Trades: {total_trades}
 Win Rate: {win_rate:.2f}%
-Total Net PnL: ${total_pnl:,.2f}
 Profit Factor: {profit_factor:.2f}
 
---- Averages ---
+--- Averages (Net) ---
 Average Winning Trade: ${avg_win:,.2f}
-Average Losing Trade: ${avg_loss:,.2f}
+Average Losing Trade: -${avg_loss:,.2f}
 Average Risk/Reward Ratio: {risk_reward_ratio:.2f}:1
 
---- Totals ---
+--- Totals (Net) ---
 Gross Profit: ${gross_profit:,.2f} ({len(winning_trades)} trades)
-Gross Loss: ${gross_loss:,.2f} ({len(losing_trades)} trades)
+Gross Loss: -${gross_loss:,.2f} ({len(losing_trades)} trades)
+Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 """
     logger.info(report_str)
     
     try:
-        # تأكد من أننا لا نحاول الحفظ في مجلد غير موجود
         if not os.path.exists('reports'):
             os.makedirs('reports')
         report_filename = os.path.join('reports', f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
@@ -376,11 +398,9 @@ Gross Loss: ${gross_loss:,.2f} ({len(losing_trades)} trades)
 def start_backtesting_job():
     """
     هذه هي الوظيفة التي تقوم بتشغيل عملية الاختبار الخلفي بأكملها.
-    سيتم تشغيلها في thread منفصل حتى لا توقف خادم الويب.
     """
-    logger.info("🚀 Starting backtesting job in a background thread...")
-    # انتظر قليلاً للتأكد من أن جميع الاتصالات الأولية قد تمت
-    time.sleep(5) 
+    logger.info("🚀 Starting backtesting job...")
+    time.sleep(2) 
     
     symbols_to_test = get_validated_symbols()
     
@@ -390,20 +410,27 @@ def start_backtesting_job():
         
     all_trades = []
     
+    # We add 10 days to the history to ensure indicators are well-calculated for the first few days of the actual backtest period
+    data_fetch_days = BACKTEST_PERIOD_DAYS + 10
+    
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         model_bundle = load_ml_model_bundle_from_db(symbol)
         if not model_bundle:
             continue
             
-        df_hist = fetch_historical_data(symbol, TIMEFRAME, BACKTEST_PERIOD_DAYS + 30)
+        df_hist = fetch_historical_data(symbol, TIMEFRAME, data_fetch_days)
         if df_hist is None or df_hist.empty:
             continue
             
-        trades = run_backtest_for_symbol(symbol, df_hist, model_bundle)
+        # We only backtest on the requested period, the extra data was just for indicator warmup
+        backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
+        df_to_test = df_hist[df_hist.index >= backtest_start_date]
+
+        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle)
         if trades:
             all_trades.extend(trades)
         
-        time.sleep(1) 
+        time.sleep(0.5) # Small delay to avoid hitting API rate limits if any other calls were made
 
     generate_report(all_trades)
     
@@ -418,14 +445,10 @@ def start_backtesting_job():
 # ==============================================================================
 
 if __name__ == "__main__":
-    # 1. ابدأ وظيفة الاختبار الخلفي في thread جديد
     backtest_thread = Thread(target=start_backtesting_job)
-    backtest_thread.daemon = True # سيتم إغلاق الـ thread عند إغلاق البرنامج الرئيسي
+    backtest_thread.daemon = True
     backtest_thread.start()
 
-    # 2. قم بتشغيل خادم الويب ليبقي التطبيق يعمل على Render
-    # Render ستوفر متغير البيئة PORT تلقائياً
-    port = int(os.environ.get("PORT", 10000))
-    # استخدم '0.0.0.0' ليكون الخادم متاحاً خارجياً
+    port = int(os.environ.get("PORT", 10002)) # Using a different port just in case
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
