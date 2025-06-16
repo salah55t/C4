@@ -99,6 +99,37 @@ def get_binance_client():
     except Exception as e:
         logger.critical(f"❌ [Binance] فشل تهيئة عميل Binance: {e}"); exit(1)
 
+# --- !!! الدالة المضافة لحل المشكلة !!! ---
+def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    تقرأ الرموز من ملف، تتحقق من صلاحيتها وقابليتها للتداول على Binance.
+    """
+    if not client:
+        logger.error("❌ [Validation] عميل Binance لم يتم تهيئته.")
+        return []
+    try:
+        # تأكد من أن المسار صحيح ويعمل في بيئات مختلفة
+        script_dir = os.path.dirname(__file__)
+        file_path = os.path.join(script_dir, filename)
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            symbols = {s.strip().upper() for s in f if s.strip() and not s.startswith('#')}
+        
+        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in symbols}
+        
+        info = client.get_exchange_info()
+        active = {s['symbol'] for s in info['symbols'] if s['status'] == 'TRADING' and s['quoteAsset'] == 'USDT'}
+        
+        validated = sorted(list(formatted.intersection(active)))
+        
+        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من القائمة.")
+        return validated
+    except FileNotFoundError:
+        logger.error(f"❌ [Validation] ملف قائمة العملات '{filename}' غير موجود في المسار: {file_path}")
+        return []
+    except Exception as e:
+        logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
+
 # --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
@@ -277,6 +308,10 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         final_model = model
         final_scaler = scaler
     
+    if final_model is None or final_scaler is None:
+        logger.error("❌ [ML Train] Training failed, no model was created.")
+        return None, None, None
+
     # Aggregate metrics from all folds
     avg_metrics = {
         'accuracy': np.mean([accuracy_score(y.iloc[test_index], final_model.predict(scaler.transform(X.iloc[test_index]))) for _, test_index in tscv.split(X)]),
@@ -356,7 +391,11 @@ if __name__ == "__main__":
             X, y, feature_names = prepared_data
             
             # 5. Train and validate using Walk-Forward
-            final_model, final_scaler, model_metrics = train_with_walk_forward_validation(X, y)
+            training_result = train_with_walk_forward_validation(X, y)
+            if training_result is None:
+                 failed_models += 1
+                 continue
+            final_model, final_scaler, model_metrics = training_result
             
             # 6. Save the model if it's useful
             # We check if the precision for predicting a "win" (class 1) is acceptable
