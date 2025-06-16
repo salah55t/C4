@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
 from sklearn.preprocessing import StandardScaler
+from collections import deque
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
@@ -49,33 +50,22 @@ TRADE_AMOUNT_USDT: float = 10.0
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
-
-# --- !!! تم التحديث هنا !!! ---
-# تم تغيير اسم النموذج إلى V4 ليتطابق مع سكريبت التدريب
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 MODEL_PREDICTION_THRESHOLD = 0.70
-
 USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 3.0
-
 USE_TRAILING_STOP = True
 TRAILING_STOP_ACTIVATE_PERCENT = 0.75
 TRAILING_STOP_DISTANCE_PERCENT = 1.0
-
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
-
-RSI_PERIOD: int = 14
-MACD_FAST: int = 12
-MACD_SLOW: int = 26
-MACD_SIGNAL: int = 9
-BBANDS_PERIOD: int = 20
+RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 9, 20, 14
 BBANDS_STD_DEV: float = 2.0
-ATR_PERIOD: int = 14
 
+# --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 ml_models_cache: Dict[str, Any] = {}
@@ -84,6 +74,9 @@ open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
 current_prices: Dict[str, float] = {}
 prices_lock = Lock()
+# --- !!! جديد: ذاكرة مؤقتة للتنبيهات !!! ---
+notifications_cache = deque(maxlen=50)
+notifications_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -94,6 +87,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # جدول الصفقات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -110,25 +104,24 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         trailing_stop_price DOUBLE PRECISION
                     );
                 """)
+                # --- !!! جديد: جدول التنبيهات !!! ---
                 cur.execute("""
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='signals' AND column_name='trailing_stop_price') THEN
-                            ALTER TABLE signals ADD COLUMN trailing_stop_price DOUBLE PRECISION;
-                        END IF;
-                    END$$;
+                    CREATE TABLE IF NOT EXISTS notifications (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        type TEXT NOT NULL, -- 'NEW_SIGNAL', 'CLOSE_SIGNAL', 'TSL_UPDATE', 'SYSTEM'
+                        message TEXT NOT NULL,
+                        is_read BOOLEAN DEFAULT FALSE
+                    );
                 """)
             conn.commit()
-            logger.info("✅ [قاعدة البيانات] تم تهيئة قاعدة البيانات بنجاح.")
+            logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
             return
         except Exception as e:
             logger.error(f"❌ [قاعدة البيانات] خطأ في الاتصال (المحاولة {attempt + 1}): {e}")
             if conn: conn.rollback()
-            if attempt < retries - 1:
-                time.sleep(delay)
-            else:
-                logger.critical("❌ [قاعدة البيانات] فشل الاتصال بعد عدة محاولات. سيتم إيقاف البوت.")
-                exit(1)
+            if attempt < retries - 1: time.sleep(delay)
+            else: logger.critical("❌ [قاعدة البيانات] فشل الاتصال بعد عدة محاولات."); exit(1)
 
 def check_db_connection() -> bool:
     global conn
@@ -136,22 +129,48 @@ def check_db_connection() -> bool:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
         init_db()
     try:
-        if conn: # Check if conn is not None after trying to init
-            conn.cursor().execute("SELECT 1;")
-            return True
+        if conn: conn.cursor().execute("SELECT 1;"); return True
         return False
     except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال: {e}. محاولة إعادة الاتصال...")
-        try:
-            init_db()
-            return conn is not None and conn.closed == 0
-        except Exception as retry_e:
-            logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
-            return False
+        try: init_db(); return conn is not None and conn.closed == 0
+        except Exception as retry_e: logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}"); return False
     return False
+
+# --- !!! جديد: دالة مركزية للتنبيهات !!! ---
+def log_and_notify(level: str, message: str, notification_type: str):
+    """Logs to console, DB, and cache."""
+    log_methods = {
+        'info': logger.info,
+        'warning': logger.warning,
+        'error': logger.error,
+        'critical': logger.critical,
+    }
+    log_methods.get(level.lower(), logger.info)(message)
+
+    if not check_db_connection() or not conn: return
+    try:
+        new_notification = {
+            "timestamp": datetime.now().isoformat(),
+            "type": notification_type,
+            "message": message
+        }
+        with notifications_lock:
+            notifications_cache.appendleft(new_notification)
+        
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO notifications (type, message) VALUES (%s, %s);",
+                (notification_type, message)
+            )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}")
+        if conn: conn.rollback()
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    # ... (الكود لم يتغير) ...
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client:
         logger.error("❌ [التحقق] كائن Binance client غير مهيأ. لا يمكن المتابعة.")
@@ -176,6 +195,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    # ... (الكود لم يتغير) ...
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -192,6 +212,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+    # ... (الكود لم يتغير) ...
     df_calc = df.copy()
     
     # ATR
@@ -244,8 +265,8 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_calc.dropna()
 
-
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+    # ... (الكود لم يتغير) ...
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
@@ -268,6 +289,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
+    # ... (الكود لم يتغير) ...
     global open_signals_cache, current_prices
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
@@ -317,7 +339,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                             new_trailing_stop = price * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
                             if new_trailing_stop > current_stop_price:
                                 open_signals_cache[symbol]['trailing_stop_price'] = new_trailing_stop
-                                Thread(target=update_trailing_stop_in_db, args=(signal['id'], new_trailing_stop)).start()
+                                Thread(target=update_trailing_stop_in_db, args=(signal['id'], signal['symbol'], new_trailing_stop)).start()
 
 
             if signal_to_process and status:
@@ -327,19 +349,24 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
     except Exception as e:
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
 
-
-def update_trailing_stop_in_db(signal_id: int, new_price: float) -> None:
+# --- !!! تعديل: دالة تحديث وقف الخسارة المتحرك ترسل تنبيهًا الآن !!! ---
+def update_trailing_stop_in_db(signal_id: int, symbol: str, new_price: float) -> None:
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
             cur.execute("UPDATE signals SET trailing_stop_price = %s WHERE id = %s;", (float(new_price), signal_id))
         conn.commit()
-        logger.info(f"📈 [الوقف المتحرك] تم تحديث وقف الخسارة للإشارة ID {signal_id} إلى {new_price:.8f}")
+        
+        # إرسال تنبيه
+        message = f"📈 [تحديث وقف الخسارة] {symbol}: تم رفع وقف الخسارة إلى ${new_price:,.8g}"
+        log_and_notify('info', message, 'TSL_UPDATE')
+        
     except Exception as e:
         logger.error(f"❌ [قاعدة البيانات] فشل تحديث الوقف المتحرك للإشارة ID {signal_id}: {e}")
         if conn: conn.rollback()
 
 def run_websocket_manager() -> None:
+    # ... (الكود لم يتغير) ...
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
@@ -348,6 +375,7 @@ def run_websocket_manager() -> None:
     twm.join()
 
 class TradingStrategy:
+    # ... (الكود لم يتغير) ...
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_db(symbol)
@@ -384,12 +412,10 @@ def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
-    try:
-        requests.post(url, json=payload, timeout=20).raise_for_status()
-        logger.info(f"✉️ [Telegram] تم إرسال رسالة بنجاح.")
-    except Exception as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+    try: requests.post(url, json=payload, timeout=20).raise_for_status()
+    except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
+# --- !!! تعديل: دالة إرسال تنبيه الإشارة الجديدة تسجل تنبيهًا الآن !!! ---
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
@@ -400,15 +426,20 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"⬅️ *سعر الدخول:* `${entry:,.8g}`\n"
                f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
-               f"🔍 *مستوى الثقة:* {signal_data['signal_details']['ML_Probability']}\n"
-               f"--------------------")
+               f"🔍 *مستوى الثقة:* {signal_data['signal_details']['ML_Probability']}")
+    
+    # إرسال إلى تيليجرام
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
 
+    # تسجيل التنبيه في النظام
+    log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
+
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # ... (الكود لم يتغير) ...
     if not check_db_connection() or not conn: return None
     try:
         entry_price = float(signal['entry_price'])
@@ -433,11 +464,12 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if conn: conn.rollback()
         return None
 
+# --- !!! تعديل: دالة إغلاق الصفقة تسجل تنبيهًا الآن !!! ---
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     symbol = signal['symbol']
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']:
-            logger.warning(f"⚠️ [إغلاق الإشارة] محاولة إغلاق إشارة {symbol} (ID: {signal['id']}) التي لم تعد في الذاكرة المؤقتة. ربما تم إغلاقها بالفعل.")
+            logger.warning(f"⚠️ [إغلاق الإشارة] محاولة إغلاق إشارة {symbol} (ID: {signal['id']}) التي لم تعد في الذاكرة المؤقتة.")
             return
 
     if not check_db_connection() or not conn:
@@ -445,7 +477,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         return
 
     try:
-        # --- FIX: Convert numpy/other types to standard Python float before DB operation ---
         db_closing_price = float(closing_price)
         db_profit_pct = float(((db_closing_price / signal['entry_price']) - 1) * 100)
         
@@ -458,27 +489,25 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
         with signal_cache_lock:
             del open_signals_cache[symbol]
-
-        logger.info(f"✅ [إغلاق الإشارة] تم إغلاق الإشارة {signal['id']} للعملة {signal['symbol']} بحالة '{status}'. طريقة الإغلاق: {closed_by}. الربح: {db_profit_pct:.2f}%")
         
-        status_map = {
-            'target_hit': '✅ تحقق الهدف',
-            'stop_loss_hit': '🛑 ضرب وقف الخسارة',
-            'manual_close': '🖐️ أُغلقت يدوياً'
-        }
+        status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
-
         safe_symbol = signal['symbol'].replace('_', '\\_')
         
-        alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{db_profit_pct:+.2f}%`"
-        send_telegram_message(CHAT_ID, alert_msg)
+        # إرسال إلى تيليجرام
+        alert_msg_tg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{db_profit_pct:+.2f}%`"
+        send_telegram_message(CHAT_ID, alert_msg_tg)
+
+        # تسجيل التنبيه في النظام
+        alert_msg_db = f"{status_message}: {signal['symbol']} | الربح: {db_profit_pct:+.2f}%"
+        log_and_notify('info', alert_msg_db, 'CLOSE_SIGNAL')
 
     except Exception as e:
         logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
 
-
 def load_open_signals_to_cache():
+    # ... (الكود لم يتغير) ...
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً إلى ذاكرة التتبع...")
     try:
@@ -493,8 +522,26 @@ def load_open_signals_to_cache():
     except Exception as e:
         logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
+def load_notifications_to_cache():
+    """Loads the last 50 notifications from DB to cache on startup."""
+    if not check_db_connection() or not conn: return
+    logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل آخر التنبيهات...")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 50;")
+            recent_notifications = cur.fetchall()
+            with notifications_lock:
+                notifications_cache.clear()
+                for n in reversed(recent_notifications): # aprependleft will reverse it again
+                    n['timestamp'] = n['timestamp'].isoformat()
+                    notifications_cache.appendleft(dict(n))
+            logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
+    except Exception as e:
+        logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
+
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_trend() -> Dict[str, Any]:
+    # ... (الكود لم يتغير) ...
     if not client: 
         return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
@@ -507,10 +554,8 @@ def get_btc_trend() -> Dict[str, Any]:
         
         if current_price > ema:
             status, message = "Uptrend", f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
-            logger.info(f"📈 [فلتر BTC] الاتجاه صاعد (السعر: {current_price} > EMA({BTC_TREND_EMA_PERIOD}): {ema:.2f})")
         else:
             status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
-            logger.info(f"📉 [فلتر BTC] الاتجاه هابط (السعر: {current_price} < EMA({BTC_TREND_EMA_PERIOD}): {ema:.2f})")
             
         return {"status": status, "message": message, "is_uptrend": (status == "Uptrend")}
             
@@ -519,13 +564,15 @@ def get_btc_trend() -> Dict[str, Any]:
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
 def main_loop():
+    # ... (الكود لم يتغير) ...
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
-    time.sleep(15) # Give some time for initial connections to establish
+    time.sleep(15) 
     
     if not validated_symbols_to_scan:
-        logger.critical("❌ [الحلقة الرئيسية] لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل."); return
+        log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
+        return
     
-    logger.info(f"✅ [الحلقة الرئيسية] بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.")
+    log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
     
     while True:
         try:
@@ -591,7 +638,7 @@ def main_loop():
             time.sleep(60)
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
-            logger.error(f"❌ [الحلقة الرئيسية] خطأ غير متوقع في الحلقة الرئيسية: {main_err}", exc_info=True)
+            log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM")
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
@@ -599,30 +646,20 @@ app = Flask(__name__)
 CORS(app)
 
 def get_fear_and_greed_index() -> Dict[str, Any]:
+    # ... (الكود لم يتغير) ...
     classification_translation = {
-        "Extreme Fear": "خوف شديد",
-        "Fear": "خوف",
-        "Neutral": "محايد",
-        "Greed": "طمع",
-        "Extreme Greed": "طمع شديد",
-        "Error": "خطأ"
+        "Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد",
+        "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"
     }
     try:
         response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]
-        
         original_classification = data['value_classification']
-        translated_classification = classification_translation.get(original_classification, original_classification)
-
-        return {"value": int(data['value']), "classification": translated_classification}
-    except requests.RequestException as e:
+        return {"value": int(data['value']), "classification": classification_translation.get(original_classification, original_classification)}
+    except Exception as e:
         logger.error(f"❌ [مؤشر الخوف والطمع] فشل الاتصال بالـ API: {e}")
         return {"value": -1, "classification": classification_translation["Error"]}
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
-        logger.error(f"❌ [مؤشر الخوف والطمع] فشل في تحليل استجابة الـ API: {e}")
-        return {"value": -1, "classification": classification_translation["Error"]}
-
 
 @app.route('/')
 def home():
@@ -632,7 +669,7 @@ def home():
         with open(file_path, 'r', encoding='utf-8') as f:
             return render_template_string(f.read())
     except FileNotFoundError:
-        return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1><p>يرجى التأكد من وجود الملف.</p>", 404
+        return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
 
 @app.route('/api/market_status')
 def get_market_status():
@@ -642,6 +679,7 @@ def get_market_status():
 
 @app.route('/api/stats')
 def get_stats():
+    # ... (الكود لم يتغير) ...
     if not check_db_connection() or not conn:
         return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
@@ -664,8 +702,10 @@ def get_stats():
         logger.error(f"❌ [API إحصائيات] خطأ: {e}")
         return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
 
+
 @app.route('/api/signals')
 def get_signals():
+    # ... (الكود لم يتغير) ...
     if not check_db_connection() or not conn:
         return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
@@ -682,13 +722,9 @@ def get_signals():
         logger.error(f"❌ [API إشارات] خطأ: {e}")
         return jsonify({"error": "تعذر جلب الإشارات"}), 500
 
-@app.route('/api/prices')
-def get_prices():
-    with prices_lock:
-        return jsonify(current_prices)
-
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
+    # ... (الكود لم يتغير) ...
     logger.info(f"ℹ️ [API إغلاق] تم استلام طلب إغلاق يدوي للإشارة ID: {signal_id}")
     signal_to_close = None
     
@@ -710,56 +746,46 @@ def manual_close_signal(signal_id):
     Thread(target=close_signal, args=(signal_to_close, 'manual_close', closing_price, "manual")).start()
     return jsonify({"message": f"جاري إغلاق الإشارة {signal_id} للعملة {symbol_to_close} عند سعر {closing_price}."})
 
+# --- !!! جديد: نقطة نهاية API لجلب التنبيهات !!! ---
+@app.route('/api/notifications')
+def get_notifications():
+    with notifications_lock:
+        return jsonify(list(notifications_cache))
+
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    logger.info(f"ℹ️ [Flask] بدء تشغيل لوحة التحكم على {host}:{port}...")
+    log_and_notify("info", f"بدء تشغيل لوحة التحكم على {host}:{port}", "SYSTEM")
     try:
         from waitress import serve
         serve(app, host=host, port=port, threads=8)
     except ImportError:
-        logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير الخاص بـ Flask (غير مناسب للإنتاج).")
+        logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير (غير مناسب للإنتاج).")
         app.run(host=host, port=port)
 
-# ---------------------- نقطة انطلاق البرنامج (مُعاد هيكلتها) ----------------------
+# ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
-    """
-    تقوم هذه الدالة بتهيئة جميع خدمات البوت طويلة الأمد في الخلفية.
-    """
-    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
     global client, validated_symbols_to_scan
-    
+    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
-
         init_db()
-        
         load_open_signals_to_cache()
-        
+        load_notifications_to_cache() # تحميل التنبيهات القديمة
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            logger.critical("❌ [خدمات البوت] لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
+            logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
             return
-
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
-        
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
-
-    except BinanceAPIException as e:
-        logger.critical(f"❌ [Binance] خطأ فادح في الاتصال بـ Binance: {e}. تأكد من صحة مفاتيح API.")
     except Exception as e:
-        logger.critical(f"❌ [خدمات البوت] حدث خطأ حاسم أثناء تهيئة خدمات البوت: {e}", exc_info=True)
-
+        logger.critical(f"❌ [خدمات البوت] حدث خطأ حاسم أثناء التهيئة: {e}", exc_info=True)
 
 if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل تطبيق بوت التداول...")
-
-    initialization_thread = Thread(target=initialize_bot_services)
-    initialization_thread.daemon = True
+    initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
-
     run_flask()
-
     logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
     os._exit(0)
