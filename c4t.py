@@ -26,7 +26,7 @@ TIMEFRAME: str = '15m'
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.75
+MODEL_PREDICTION_THRESHOLD: float = 0.80
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 4.0
 USE_TRAILING_STOP: bool = True
