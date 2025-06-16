@@ -334,4 +334,5 @@ if __name__ == "__main__":
     finally:
         if conn: conn.close()
         logger.info("👋 [Main] ML training script finished.")
-        flask_thread.join()
+        # Do not join the flask_thread to allow the script to exit
+        # This is suitable for a script that runs, trains, and then exits.
