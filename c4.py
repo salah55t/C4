@@ -70,7 +70,7 @@ notifications_cache = deque(maxlen=100)
 notifications_lock = Lock()
 
 # =================================================================================
-# --- !!! قسم التنبيهات وقاعدة البيانات (مُحسَّن) !!! ---
+# --- قسم التنبيهات وقاعدة البيانات ---
 # =================================================================================
 def init_db():
     global db_pool
@@ -117,28 +117,21 @@ def execute_db_query(query, params=None, fetch=None):
         if conn: db_pool.putconn(conn)
 
 def send_telegram_message(text: str):
-    """وظيفة لإرسال الرسائل إلى تلغرام"""
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        # استخدام Markdown للتنسيق
         response = requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def log_and_notify(level: str, message: str, notification_type: str, send_tg: bool = False):
-    """تسجيل الحدث، تخزينه، وإرساله إلى تلغرام إذا لزم الأمر"""
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
     log_methods.get(level.lower(), logger.info)(message)
-    
     with notifications_lock:
         notifications_cache.appendleft({"timestamp": datetime.now().isoformat(), "type": notification_type, "message": message})
-    
-    # لا تسجل كل شيء في قاعدة البيانات لتجنب الامتلاء
     if notification_type in ["NEW_TRADE", "TRADE_CLOSE", "SYSTEM_ERROR", "SYSTEM_INFO"]:
         execute_db_query("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
-    
     if send_tg:
         send_telegram_message(message)
 
@@ -327,7 +320,7 @@ def load_open_signals_to_cache():
         logger.info(f"✅ [Cache] تم تحميل {len(open_signals)} صفقة مفتوحة.")
 
 # =================================================================================
-# --- حلقة العمل الرئيسية ---
+# --- حلقة العمل الرئيسية (تم الإصلاح) ---
 # =================================================================================
 def main_loop():
     logger.info("[Main Loop] انتظار اكتمال التهيئة الأولية...")
@@ -358,11 +351,15 @@ def main_loop():
                     df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty: continue
                     
-                    strategy = TradingStrategy(symbol)
-                    df_features = strategy.get_features(df_hist, current_btc_data)
+                    # --- !!! هذا هو السطر الذي تم إصلاحه !!! ---
+                    # 1. حساب المؤشرات الفنية أولاً باستخدام الدالة المستقلة
+                    df_features = calculate_features(df_hist, current_btc_data)
                     if df_features is None or df_features.empty: continue
                     
+                    # 2. الآن، إنشاء كائن الاستراتيجية وتوليد الإشارة
+                    strategy = TradingStrategy(symbol)
                     potential_signal = strategy.generate_signal(df_features)
+                    
                     if potential_signal:
                         with prices_lock: current_price = current_prices.get(symbol)
                         if not current_price: continue
@@ -384,7 +381,7 @@ def main_loop():
             log_and_notify("error", f"خطأ في الحلقة الرئيسية: {main_err}", "SYSTEM_ERROR", send_tg=True); time.sleep(120)
 
 # =================================================================================
-# --- !!! قسم واجهة API للوحة التحكم (مُحدَّث) !!! ---
+# --- قسم واجهة API للوحة التحكم ---
 # =================================================================================
 app = Flask(__name__)
 CORS(app)
@@ -394,24 +391,19 @@ def home(): return "Crypto Trading Bot V5 API is running.", 200
 
 @app.route('/api/signals')
 def get_signals():
-    """جلب جميع الصفقات (المفتوحة والمغلقة)"""
     all_signals = execute_db_query("SELECT * FROM signals ORDER BY created_at DESC LIMIT 100;", fetch='all')
     if all_signals is None: return jsonify([])
-    
     with prices_lock: current_prices_copy = dict(current_prices)
-    
     processed_signals = []
     for s in all_signals:
         signal_dict = dict(s)
         if signal_dict['status'] == 'open':
             signal_dict['current_price'] = current_prices_copy.get(signal_dict['symbol'])
         processed_signals.append(signal_dict)
-        
     return jsonify(processed_signals)
 
 @app.route('/api/stats')
 def get_stats():
-    """جلب إحصائيات الأداء"""
     stats_query = """
         SELECT
             COUNT(*) as total_trades,
@@ -422,42 +414,35 @@ def get_stats():
         FROM signals WHERE status != 'open';
     """
     stats = execute_db_query(stats_query, fetch='one')
-    if not stats or stats['closed_trades'] == 0:
+    if not stats or stats.get('closed_trades', 0) == 0:
         return jsonify({'wins': 0, 'losses': 0, 'win_rate': 0, 'loss_rate': 0, 'total_profit_usdt': 0})
 
     win_rate = (stats['wins'] / stats['closed_trades']) * 100 if stats['closed_trades'] > 0 else 0
     loss_rate = (stats['losses'] / stats['closed_trades']) * 100 if stats['closed_trades'] > 0 else 0
     
-    # الربح بالدولار غير ممكن حسابه بدقة بدون حجم الصفقة، سنستخدم النسبة المئوية كمؤشر
     return jsonify({
-        'wins': stats['wins'],
-        'losses': stats['losses'],
+        'wins': stats.get('wins', 0),
+        'losses': stats.get('losses', 0),
         'win_rate': win_rate,
         'loss_rate': loss_rate,
-        'total_profit_usdt': stats['total_profit_percentage'] # Note: This is sum of percentages, not USDT
+        'total_profit_usdt': stats.get('total_profit_percentage', 0)
     })
     
 @app.route('/api/notifications')
 def get_notifications():
-    """جلب آخر التنبيهات"""
     with notifications_lock: notifs = list(notifications_cache)
     return jsonify(notifs)
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
-    """إغلاق صفقة يدوياً"""
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
-
     if not signal_to_close:
         return jsonify({'error': 'الصفقة غير موجودة أو مغلقة بالفعل'}), 404
-
     with prices_lock:
         price = current_prices.get(signal_to_close['symbol'])
-
     if not price:
         return jsonify({'error': 'لا يمكن الحصول على السعر الحالي للعملة'}), 500
-    
     close_signal(signal_to_close, 'closed_manual', price, 'Manual')
     return jsonify({'message': f'تم إرسال طلب إغلاق للصفقة {signal_to_close["symbol"]}'})
 
@@ -471,15 +456,12 @@ def initialize_bot_services():
         init_db()
         client = Client(API_KEY, API_SECRET)
         load_open_signals_to_cache()
-        
         Thread(target=btc_cache_updater_loop, daemon=True).start()
         logger.info("... انتظار أول جلب لبيانات البيتكوين ...")
         time.sleep(10)
-
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             log_and_notify("critical", "❌ لا توجد رموز معتمدة للمسح.", "SYSTEM_ERROR", send_tg=True); return
-
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         logger.info("✅ [Init] تم بدء جميع خدمات الخلفية بنجاح.")
@@ -490,7 +472,6 @@ if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل تطبيق بوت التداول V5...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
-    
     host = "0.0.0.0"
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🌍 بدء تشغيل خادم الويب على {host}:{port}")
