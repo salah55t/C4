@@ -30,10 +30,15 @@ MODEL_PREDICTION_THRESHOLD: float = 0.70
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 3.0
 USE_TRAILING_STOP: bool = False
-#TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75  # Activate TSL when 75% to TP
-#TRAILING_STOP_DISTANCE_PERCENT: float = 1.0 # Trail 1.0% behind price
+#TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75
+#TRAILING_STOP_DISTANCE_PERCENT: float = 1.0
 
-# --- !!! جديد: معلمات محاكاة التكاليف الواقعية !!! ---
+# --- !!! جديد: إضافة فلتر RSI لمطابقة البوت الرئيسي !!! ---
+USE_RSI_FILTER: bool = True
+RSI_OVERBOUGHT_THRESHOLD: float = 70.0
+
+
+# --- معلمات محاكاة التكاليف الواقعية ---
 # العمولة لكل صفقة (شراء أو بيع). 0.1% هو المعدل القياسي في Binance
 COMMISSION_PERCENT: float = 0.1
 # الانزلاق السعري المتوقع. 0.05% هو تقدير معقول للصفقات السوقية
@@ -261,26 +266,16 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
                 trade_details['exit_price'] = trade_details['sl']
                 trade_details['exit_reason'] = 'SL Hit'
             
-            # Trailing Stop Loss Logic
+            # Trailing Stop Loss Logic (currently disabled in settings)
             elif USE_TRAILING_STOP:
-                # Calculate activation price based on progress towards TP
-                activation_price = trade_details['entry_price'] + \
-                                   (trade_details['tp'] - trade_details['entry_price']) * TRAILING_STOP_ACTIVATE_PERCENT
-                
-                # Activate TSL if not already active and price crosses activation level
+                activation_price = trade_details['entry_price'] + (trade_details['tp'] - trade_details['entry_price']) * 0.75
                 if not trade_details.get('tsl_active') and current_candle['high'] >= activation_price:
                     trade_details['tsl_active'] = True
-                    logger.debug(f"TSL activated for {symbol} at price {current_candle['high']:.4f}")
-
-                # If TSL is active, trail the price
                 if trade_details.get('tsl_active'):
-                    # Calculate new potential TSL based on the current close
-                    new_tsl = current_candle['close'] * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
-                    # Only update the stop loss if the new TSL is higher than the current one
+                    new_tsl = current_candle['close'] * (1 - (1.0 / 100))
                     if new_tsl > trade_details['sl']:
                         trade_details['sl'] = new_tsl
             
-            # If an exit condition was met, finalize the trade
             if trade_details.get('exit_price'):
                 trade_details['exit_time'] = current_candle.name
                 trade_details['duration_candles'] = i - trade_details['entry_index']
@@ -290,7 +285,15 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             continue
 
         # --- Logic to enter a new trade ---
-        if not in_trade and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
+        # --- !!! جديد: تطبيق فلتر RSI قبل الدخول !!! ---
+        passes_rsi_filter = True # الافتراضي هو أن الشرط متحقق إذا كان الفلتر معطلاً
+        if USE_RSI_FILTER:
+            # إذا كان الفلتر مفعّلاً، تحقق من أن RSI فوق الحد المطلوب
+            if current_candle.get('rsi', 0) < RSI_OVERBOUGHT_THRESHOLD:
+                passes_rsi_filter = False
+
+        # تحقق من فلتر RSI ومن توقع النموذج قبل الدخول في صفقة
+        if not in_trade and passes_rsi_filter and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
             entry_price = current_candle['close']
             atr_value = current_candle['atr']
@@ -322,15 +325,10 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     df_trades = pd.DataFrame(all_trades)
     
     # --- تطبيق الانزلاق السعري والعمولة ---
-    # تعديل سعر الدخول (شراء بسعر أعلى قليلاً)
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
-    # تعديل سعر الخروج (بيع بسعر أقل قليلاً)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
-    
-    # حساب نسبة الربح/الخسارة بناءً على الأسعار المعدلة (قبل العمولة)
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
     
-    # حساب الربح/الخسارة بالدولار مع خصم العمولات
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
     
@@ -357,9 +355,14 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
+    # بناء نص التقرير
+    report_header = f"BACKTESTING REPORT: {BASE_ML_MODEL_NAME}"
+    if USE_RSI_FILTER:
+        report_header += f" (with RSI Filter > {RSI_OVERBOUGHT_THRESHOLD})"
+        
     report_str = f"""
 ================================================================================
-📈 BACKTESTING REPORT: {BASE_ML_MODEL_NAME}
+📈 {report_header}
 Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME})
 Costs: {COMMISSION_PERCENT}% commission/trade, {SLIPPAGE_PERCENT}% slippage
 ================================================================================
@@ -410,7 +413,6 @@ def start_backtesting_job():
         
     all_trades = []
     
-    # We add 10 days to the history to ensure indicators are well-calculated for the first few days of the actual backtest period
     data_fetch_days = BACKTEST_PERIOD_DAYS + 10
     
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
@@ -422,7 +424,6 @@ def start_backtesting_job():
         if df_hist is None or df_hist.empty:
             continue
             
-        # We only backtest on the requested period, the extra data was just for indicator warmup
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
         df_to_test = df_hist[df_hist.index >= backtest_start_date]
 
@@ -430,7 +431,7 @@ def start_backtesting_job():
         if trades:
             all_trades.extend(trades)
         
-        time.sleep(0.5) # Small delay to avoid hitting API rate limits if any other calls were made
+        time.sleep(0.5)
 
     generate_report(all_trades)
     
@@ -449,6 +450,6 @@ if __name__ == "__main__":
     backtest_thread.daemon = True
     backtest_thread.start()
 
-    port = int(os.environ.get("PORT", 10002)) # Using a different port just in case
+    port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
