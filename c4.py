@@ -65,9 +65,11 @@ BTC_TREND_EMA_PERIOD = 10
 RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 9, 20, 14
 BBANDS_STD_DEV: float = 2.0
 
-# --- !!! جديد: فلاتر إضافية !!! ---
+# --- !!! تعديل: تم تغيير فلتر RSI إلى نطاق !!! ---
 USE_RSI_FILTER = True  # تفعيل أو إلغاء فلتر RSI
-RSI_OVERBOUGHT_THRESHOLD = 70  # حد التشبع الشرائي للدخول
+RSI_LOWER_THRESHOLD = 40  # الحد الأدنى لفلتر RSI
+RSI_UPPER_THRESHOLD = 69  # الحد الأعلى لفلتر RSI
+
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -301,7 +303,7 @@ class TradingStrategy:
     def get_features(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return calculate_features(df)
 
-    # --- !!! تعديل: تم إضافة فلتر RSI هنا !!! ---
+    # --- !!! تعديل: تم تحديث منطق فلتر RSI هنا !!! ---
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
@@ -309,14 +311,14 @@ class TradingStrategy:
         last_row = df_processed.iloc[-1]
         
         try:
-            # --- الفلتر الأول: التحقق من مؤشر القوة النسبية (RSI) ---
+            # --- الفلتر الأول: التحقق من مؤشر القوة النسبية (RSI) ضمن النطاق المطلوب ---
             if USE_RSI_FILTER:
                 current_rsi = last_row.get('rsi')
-                if current_rsi is None or current_rsi < RSI_OVERBOUGHT_THRESHOLD:
+                if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
                     # هذه الرسالة يمكن تفعيلها لفهم سبب تجاهل الإشارات
-                    # logger.info(f"[{self.symbol}] تم تجاهل الإشارة. RSI الحالي ({current_rsi:.2f}) أقل من الحد المطلوب ({RSI_OVERBOUGHT_THRESHOLD}).")
+                    # logger.info(f"[{self.symbol}] تم تجاهل الإشارة. RSI الحالي ({current_rsi:.2f}) خارج النطاق المطلوب ({RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD}).")
                     return None
-                logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f}")
+                logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
 
             # --- الفلتر الثاني: التحقق من نموذج تعلم الآلة (ML) ---
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]

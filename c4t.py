@@ -33,9 +33,10 @@ USE_TRAILING_STOP: bool = False
 #TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75
 #TRAILING_STOP_DISTANCE_PERCENT: float = 1.0
 
-# --- !!! جديد: إضافة فلتر RSI لمطابقة البوت الرئيسي !!! ---
+# --- !!! تعديل: تم تغيير فلتر RSI إلى نطاق !!! ---
 USE_RSI_FILTER: bool = True
-RSI_OVERBOUGHT_THRESHOLD: float = 70.0
+RSI_LOWER_THRESHOLD: float = 40.0 # الحد الأدنى لفلتر RSI
+RSI_UPPER_THRESHOLD: float = 69.0 # الحد الأعلى لفلتر RSI
 
 
 # --- معلمات محاكاة التكاليف الواقعية ---
@@ -285,11 +286,12 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             continue
 
         # --- Logic to enter a new trade ---
-        # --- !!! جديد: تطبيق فلتر RSI قبل الدخول !!! ---
+        # --- !!! تعديل: تطبيق فلتر RSI ضمن النطاق المطلوب !!! ---
         passes_rsi_filter = True # الافتراضي هو أن الشرط متحقق إذا كان الفلتر معطلاً
         if USE_RSI_FILTER:
-            # إذا كان الفلتر مفعّلاً، تحقق من أن RSI فوق الحد المطلوب
-            if current_candle.get('rsi', 0) < RSI_OVERBOUGHT_THRESHOLD:
+            # إذا كان الفلتر مفعّلاً، تحقق من أن RSI ضمن النطاق المطلوب
+            current_rsi_value = current_candle.get('rsi', 0)
+            if not (RSI_LOWER_THRESHOLD <= current_rsi_value <= RSI_UPPER_THRESHOLD):
                 passes_rsi_filter = False
 
         # تحقق من فلتر RSI ومن توقع النموذج قبل الدخول في صفقة
@@ -358,7 +360,7 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     # بناء نص التقرير
     report_header = f"BACKTESTING REPORT: {BASE_ML_MODEL_NAME}"
     if USE_RSI_FILTER:
-        report_header += f" (with RSI Filter > {RSI_OVERBOUGHT_THRESHOLD})"
+        report_header += f" (with RSI Filter between {RSI_LOWER_THRESHOLD} and {RSI_UPPER_THRESHOLD})"
         
     report_str = f"""
 ================================================================================
