@@ -3,98 +3,53 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول - إصدار مطور</title>
+    <title>لوحة تحكم بوت التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
         :root {
-            --color-bg: #111827;
-            --color-card: #1f2937;
-            --color-border: #374151;
-            --color-text: #e5e7eb;
-            --color-text-dim: #9ca3af;
-            --color-green: #22c55e;
-            --color-red: #ef4444;
-            --color-blue: #3b82f6;
-            --color-yellow: #eab308;
-            --color-orange: #f97316;
+            --color-bg: #111827; --color-card: #1f2937; --color-border: #374151;
+            --color-text: #e5e7eb; --color-text-dim: #9ca3af; --color-green: #22c55e;
+            --color-red: #ef4444; --color-blue: #3b82f6; --color-yellow: #eab308;
         }
-        body {
-            font-family: 'Cairo', sans-serif;
-            background-color: var(--color-bg);
-            color: var(--color-text);
-        }
-        .stat-card {
-            background-color: var(--color-card);
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            border: 1px solid var(--color-border);
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
-        }
-        .signal-card {
-            background-color: var(--color-card);
-            border-radius: 0.75rem;
-            border: 1px solid var(--color-border);
-            padding: 1rem;
-            margin-bottom: 1rem;
-            display: flex;
-            flex-direction: column;
-        }
-        .progress-ring-track { stroke: var(--color-border); }
-        .progress-ring {
-            transition: stroke-dashoffset 0.5s, stroke 0.5s;
-            transform: rotate(-90deg);
-            transform-origin: 50% 50%;
-        }
-        /* --- جديد: شريط مؤشر الخطر --- */
-        .danger-bar-track { background-color: #374151; }
-        .danger-bar-fill { transition: width 0.5s, background-color 0.5s; }
-
-        /* --- جديد: قسم التنبيهات --- */
-        .notifications-container {
-            max-height: 400px;
-            overflow-y: auto;
-            background-color: var(--color-card);
-            padding: 1rem;
-            border-radius: 0.75rem;
-            border: 1px solid var(--color-border);
-        }
-        .notification-item {
-            padding: 0.75rem;
-            border-bottom: 1px solid var(--color-border);
-            font-size: 0.875rem;
-        }
+        body { font-family: 'Cairo', sans-serif; background-color: var(--color-bg); color: var(--color-text); }
+        .stat-card { background-color: var(--color-card); border-radius: 0.75rem; padding: 1.5rem; border: 1px solid var(--color-border); transition: transform 0.2s; }
+        .stat-card:hover { transform: translateY(-5px); }
+        .signal-card { background-color: var(--color-card); border-radius: 0.75rem; border: 1px solid var(--color-border); padding: 1rem; margin-bottom: 1rem; display: flex; flex-direction: column; }
+        .progress-ring { transition: stroke-dashoffset 0.5s; transform: rotate(-90deg); transform-origin: 50% 50%; }
+        .danger-bar-fill { transition: width 0.5s; }
+        .notifications-container { max-height: 400px; overflow-y: auto; background-color: var(--color-card); padding: 1rem; border-radius: 0.75rem; border: 1px solid var(--color-border); }
+        .notification-item { padding: 0.75rem; border-bottom: 1px solid var(--color-border); font-size: 0.875rem; }
         .notification-item:last-child { border-bottom: none; }
-        .notification-type-NEW_SIGNAL { border-right: 4px solid var(--color-blue); }
-        .notification-type-CLOSE_SIGNAL { border-right: 4px solid var(--color-green); }
-        .notification-type-TSL_UPDATE { border-right: 4px solid var(--color-yellow); }
-        .notification-type-SYSTEM { border-right: 4px solid var(--color-text-dim); }
+        .notification-type-NEW_TRADE { border-right: 4px solid var(--color-blue); }
+        .notification-type-TRADE_CLOSE { border-right: 4px solid var(--color-green); }
         .notification-item[data-status="loss"] { border-right-color: var(--color-red); }
-
-        /* --- جديد: استبدال الـ confirm بـ modal --- */
-        .modal-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(0, 0, 0, 0.7);
-            display: flex; align-items: center; justify-content: center;
-            z-index: 50; visibility: hidden; opacity: 0; transition: opacity 0.3s;
-        }
+        .notification-type-SYSTEM_ERROR { border-right: 4px solid var(--color-red); }
+        .notification-type-SYSTEM_INFO { border-right: 4px solid var(--color-yellow); }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.7); display: flex; align-items: center; justify-content: center; z-index: 50; visibility: hidden; opacity: 0; transition: opacity 0.3s; }
         .modal-overlay.visible { visibility: visible; opacity: 1; }
-        .modal-box {
-            background-color: var(--color-card); padding: 2rem;
-            border-radius: 0.75rem; text-align: center;
-            transform: scale(0.95); transition: transform 0.3s;
-        }
+        .modal-box { background-color: var(--color-card); padding: 2rem; border-radius: 0.75rem; text-align: center; transform: scale(0.95); transition: transform 0.3s; }
         .modal-overlay.visible .modal-box { transform: scale(1); }
-        .modal-btn { padding: 0.5rem 1.5rem; border-radius: 0.5rem; border: none; cursor: pointer; font-weight: bold; }
-        .btn-confirm { background-color: var(--color-red); color: white; }
-        .btn-cancel { background-color: var(--color-border); color: white; }
+        /* !!! جديد: حالة الخادم */
+        #server-status {
+            position: fixed; top: 1rem; left: 1rem; background-color: var(--color-card);
+            padding: 0.5rem 1rem; border-radius: 0.5rem; border: 1px solid var(--color-border);
+            font-size: 0.875rem; z-index: 100; display: flex; align-items: center; gap: 0.5rem;
+        }
+        .status-dot { width: 10px; height: 10px; border-radius: 50%; }
+        .status-connecting { background-color: var(--color-yellow); animation: pulse 1.5s infinite; }
+        .status-ok { background-color: var(--color-green); }
+        .status-error { background-color: var(--color-red); }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
     </style>
 </head>
 <body class="p-4 md:p-8">
+
+    <!-- !!! جديد: مؤشر حالة الخادم -->
+    <div id="server-status">
+        <div id="status-dot" class="status-dot status-connecting"></div>
+        <span id="status-text">جاري الاتصال بالخادم...</span>
+    </div>
 
     <div class="max-w-7xl mx-auto">
         <header class="text-center mb-8">
@@ -102,41 +57,39 @@
             <p class="text-gray-400 mt-2">مراقبة الأداء والصفقات والأحداث في الوقت الفعلي</p>
         </header>
 
-        <!-- قسم الإحصائيات (لم يتغير) -->
         <section id="stats-section" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-             <div class="stat-card"><h3 class="text-lg font-bold text-gray-400">إجمالي الربح (USDT)</h3><p id="total-profit" class="text-3xl font-bold mt-2">--.--</p></div>
+            <!-- (بطاقات الإحصائيات كما هي) -->
+             <div class="stat-card"><h3 class="text-lg font-bold text-gray-400">إجمالي الربح (%)</h3><p id="total-profit" class="text-3xl font-bold mt-2">--.--</p></div>
              <div class="stat-card"><h3 class="text-lg font-bold text-gray-400">نسبة الربح</h3><p id="win-rate" class="text-3xl font-bold mt-2">--.--%</p></div>
              <div class="stat-card"><h3 class="text-lg font-bold text-gray-400">نسبة الخسارة</h3><p id="loss-rate" class="text-3xl font-bold mt-2">--.--%</p></div>
              <div class="stat-card"><h3 class="text-lg font-bold text-gray-400">الرابحة / الخاسرة</h3><p id="win-loss-count" class="text-3xl font-bold mt-2">-- / --</p></div>
         </section>
 
         <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <!-- العمود الأيسر: الصفقات المفتوحة والمغلقة -->
             <div class="lg:col-span-2">
                 <section>
                     <h2 class="text-2xl font-bold mb-4 text-white">الصفقات المفتوحة</h2>
                     <div id="open-signals-container" class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <p id="no-open-signals" class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>
+                        <!-- المحتوى الديناميكي -->
                     </div>
                 </section>
                 
-                <!-- !!! جديد: قسم الصفقات المقسم -->
                 <section class="mt-12">
                      <div class="grid grid-cols-1 xl:grid-cols-2 gap-8">
                         <div>
                             <h2 class="text-2xl font-bold mb-4 text-green-400">الصفقات الرابحة</h2>
-                            <div class="bg-[#1f2937] rounded-lg p-2 max-h-96 overflow-y-auto">
+                            <div class="bg-gray-800 rounded-lg p-2 max-h-96 overflow-y-auto">
                                 <table class="w-full text-right text-sm">
-                                    <thead class="sticky top-0 bg-[#1f2937]"><tr class="border-b border-gray-500"><th class="p-2">العملة</th><th class="p-2">الربح (%)</th><th class="p-2">وقت الإغلاق</th></tr></thead>
+                                    <thead class="sticky top-0 bg-gray-800"><tr class="border-b border-gray-600"><th class="p-2">العملة</th><th class="p-2">الربح (%)</th><th class="p-2">وقت الإغلاق</th></tr></thead>
                                     <tbody id="winning-trades-tbody"></tbody>
                                 </table>
                             </div>
                         </div>
                         <div>
                             <h2 class="text-2xl font-bold mb-4 text-red-400">الصفقات الخاسرة</h2>
-                             <div class="bg-[#1f2937] rounded-lg p-2 max-h-96 overflow-y-auto">
+                             <div class="bg-gray-800 rounded-lg p-2 max-h-96 overflow-y-auto">
                                 <table class="w-full text-right text-sm">
-                                    <thead class="sticky top-0 bg-[#1f2937]"><tr class="border-b border-gray-500"><th class="p-2">العملة</th><th class="p-2">الخسارة (%)</th><th class="p-2">وقت الإغلاق</th></tr></thead>
+                                    <thead class="sticky top-0 bg-gray-800"><tr class="border-b border-gray-600"><th class="p-2">العملة</th><th class="p-2">الخسارة (%)</th><th class="p-2">وقت الإغلاق</th></tr></thead>
                                     <tbody id="losing-trades-tbody"></tbody>
                                 </table>
                             </div>
@@ -144,26 +97,25 @@
                      </div>
                 </section>
             </div>
-            <!-- العمود الأيمن: التنبيهات -->
             <div class="lg:col-span-1">
                  <section>
                     <h2 class="text-2xl font-bold mb-4 text-white">آخر التنبيهات والأحداث</h2>
                     <div id="notifications-container" class="notifications-container">
-                        <p id="no-notifications" class="text-gray-400">لا توجد تنبيهات لعرضها...</p>
+                       <!-- المحتوى الديناميكي -->
                     </div>
                  </section>
             </div>
         </main>
     </div>
 
-    <!-- !!! جديد: Modal للتأكيد بدلاً من window.confirm -->
     <div id="confirm-modal" class="modal-overlay">
+        <!-- (Modal كما هو) -->
         <div class="modal-box">
             <h3 id="modal-title" class="text-xl font-bold mb-4">هل أنت متأكد؟</h3>
             <p id="modal-body" class="text-gray-400 mb-6">سيتم إغلاق الصفقة فوراً بالسعر الحالي.</p>
             <div class="flex justify-center gap-4">
-                <button id="modal-cancel-btn" class="modal-btn btn-cancel">إلغاء</button>
-                <button id="modal-confirm-btn" class="modal-btn btn-confirm">تأكيد الإغلاق</button>
+                <button id="modal-cancel-btn" class="modal-btn bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg">إلغاء</button>
+                <button id="modal-confirm-btn" class="modal-btn bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">تأكيد الإغلاق</button>
             </div>
         </div>
     </div>
@@ -171,53 +123,25 @@
 
     <script>
         const API_BASE_URL = window.location.origin;
+        let serverIsHealthy = false;
 
-        // دالة عرض التاريخ بصيغة مقروءة
         function formatRelativeTime(dateString) {
+            // ... (الدالة كما هي)
             if (!dateString) return 'N/A';
             const date = new Date(dateString);
             const now = new Date();
             const seconds = Math.round((now - date) / 1000);
+            if (seconds < 60) return `قبل ${seconds} ثانية`;
             const minutes = Math.round(seconds / 60);
+            if (minutes < 60) return `قبل ${minutes} دقيقة`;
             const hours = Math.round(minutes / 60);
+            if (hours < 24) return `قبل ${hours} ساعة`;
             const days = Math.round(hours / 24);
-
-            if (seconds < 60) return `منذ ${seconds} ثوان`;
-            if (minutes < 60) return `منذ ${minutes} دقائق`;
-            if (hours < 24) return `منذ ${hours} ساعات`;
-            return `منذ ${days} أيام`;
+            return `قبل ${days} يوم`;
         }
 
-        // --- جديد: دوال Modal للتأكيد ---
-        const confirmModal = document.getElementById('confirm-modal');
-        function showConfirmModal(title, body, onConfirm) {
-            document.getElementById('modal-title').textContent = title;
-            document.getElementById('modal-body').textContent = body;
-            confirmModal.classList.add('visible');
-
-            const confirmBtn = document.getElementById('modal-confirm-btn');
-            const cancelBtn = document.getElementById('modal-cancel-btn');
-
-            const confirmHandler = () => {
-                onConfirm();
-                hideConfirmModal();
-            };
-            const cancelHandler = () => hideConfirmModal();
-            
-            // إزالة المستمعين القدامى لضمان عدم تكرار التنفيذ
-            confirmBtn.replaceWith(confirmBtn.cloneNode(true));
-            cancelBtn.replaceWith(cancelBtn.cloneNode(true));
-            
-            document.getElementById('modal-confirm-btn').addEventListener('click', confirmHandler);
-            document.getElementById('modal-cancel-btn').addEventListener('click', cancelHandler);
-        }
-        function hideConfirmModal() {
-            confirmModal.classList.remove('visible');
-        }
-
-
-        // --- محدّث: دالة رسم دائرة التقدم ---
         function createProgressRing(percentage, radius = 35) {
+            // ... (الدالة كما هي)
             const circumference = 2 * Math.PI * radius;
             const offset = circumference - (percentage / 100 * circumference);
             let colorClass = 'text-blue-500';
@@ -225,7 +149,7 @@
             
             return `
                 <svg class="w-20 h-20">
-                    <circle class="progress-ring-track" stroke-width="7" stroke="currentColor" fill="transparent" r="${radius}" cx="50%" cy="50%"/>
+                    <circle class="text-gray-700" stroke-width="7" stroke="currentColor" fill="transparent" r="${radius}" cx="50%" cy="50%"/>
                     <circle class="progress-ring ${colorClass}"
                         stroke-width="7" stroke-dasharray="${circumference} ${circumference}"
                         style="stroke-dashoffset: ${offset}" stroke-linecap="round"
@@ -234,167 +158,177 @@
                 </svg>
             `;
         }
+        
+        async function fetchWithHandling(url, options = {}) {
+            if (!serverIsHealthy) {
+                console.warn("Server is not healthy, skipping fetch for:", url);
+                return null; // لا تحاول الجلب إذا كان الخادم غير متصل
+            }
+            try {
+                const response = await fetch(url, options);
+                if (!response.ok) {
+                    throw new Error(`API Error ${response.status}: ${response.statusText}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error(`Failed to fetch from ${url}:`, error);
+                return null; // إرجاع null عند الفشل
+            }
+        }
 
-        // دالة جلب الإحصائيات (لم تتغير)
         async function fetchStats() {
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/stats`);
-                if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
-                const stats = await response.json();
-                document.getElementById('total-profit').textContent = stats.hasOwnProperty('total_profit_usdt') ? stats.total_profit_usdt.toFixed(2) : '--.--';
-                document.getElementById('win-rate').textContent = stats.hasOwnProperty('win_rate') ? `${stats.win_rate.toFixed(2)}%` : '--.--%';
-                document.getElementById('loss-rate').textContent = stats.hasOwnProperty('loss_rate') ? `${stats.loss_rate.toFixed(2)}%` : '--.--%';
-                document.getElementById('win-loss-count').textContent = (stats.hasOwnProperty('wins') && stats.hasOwnProperty('losses')) ? `${stats.wins} / ${stats.losses}` : '-- / --';
-            } catch (error) { console.error("Failed to fetch stats:", error); }
+            const stats = await fetchWithHandling(`${API_BASE_URL}/api/stats`);
+            if (!stats) return;
+            document.getElementById('total-profit').textContent = stats.hasOwnProperty('total_profit_usdt') ? stats.total_profit_usdt.toFixed(2) : '--.--';
+            document.getElementById('win-rate').textContent = stats.hasOwnProperty('win_rate') ? `${stats.win_rate.toFixed(2)}%` : '--.--%';
+            document.getElementById('loss-rate').textContent = stats.hasOwnProperty('loss_rate') ? `${stats.loss_rate.toFixed(2)}%` : '--.--%';
+            document.getElementById('win-loss-count').textContent = (stats.hasOwnProperty('wins') && stats.hasOwnProperty('losses')) ? `${stats.wins} / ${stats.losses}` : '-- / --';
         }
         
-        // --- محدّث: دالة جلب الصفقات (الآن تفصل بين الصفقات وتُظهر مؤشر الخطر) ---
         async function fetchSignals() {
-            try {
-                const response = await fetch(`${API_BASE_URL}/api/signals`);
-                const signals = await response.json();
-                
-                const openContainer = document.getElementById('open-signals-container');
-                const winningTbody = document.getElementById('winning-trades-tbody');
-                const losingTbody = document.getElementById('losing-trades-tbody');
-                
-                openContainer.innerHTML = '';
-                winningTbody.innerHTML = '';
-                losingTbody.innerHTML = '';
-                let openSignalsCount = 0;
+            const signals = await fetchWithHandling(`${API_BASE_URL}/api/signals`);
+            if (!signals) return;
+            
+            const openContainer = document.getElementById('open-signals-container');
+            const winningTbody = document.getElementById('winning-trades-tbody');
+            const losingTbody = document.getElementById('losing-trades-tbody');
+            
+            openContainer.innerHTML = ''; winningTbody.innerHTML = ''; losingTbody.innerHTML = '';
+            let openSignalsCount = 0;
 
-                signals.forEach(s => {
-                    if (s.status === 'open') {
-                        openSignalsCount++;
-                        const currentPrice = s.current_price || s.entry_price;
-                        
-                        // حساب نسبة التقدم نحو الهدف
-                        let progress_percentage = 0;
-                        if (currentPrice > s.entry_price && s.target_price > s.entry_price) {
-                            progress_percentage = ((currentPrice - s.entry_price) / (s.target_price - s.entry_price)) * 100;
-                        }
-                        progress_percentage = Math.max(0, Math.min(100, progress_percentage));
-
-                        // --- جديد: حساب نسبة الخطر (القرب من وقف الخسارة) ---
-                        let danger_percentage = 0;
-                        const currentStopLoss = s.trailing_stop_price || s.stop_loss;
-                        if (currentPrice < s.entry_price && s.entry_price > currentStopLoss) {
-                            danger_percentage = ((s.entry_price - currentPrice) / (s.entry_price - currentStopLoss)) * 100;
-                        }
-                        danger_percentage = Math.max(0, Math.min(100, danger_percentage));
-                        let dangerColor = 'bg-yellow-500';
-                        if(danger_percentage > 75) dangerColor = 'bg-red-500';
-                        else if (danger_percentage > 50) dangerColor = 'bg-orange-500';
-
-                        const card = document.createElement('div');
-                        card.className = 'signal-card';
-                        card.innerHTML = `
-                            <div class="flex justify-between items-center mb-2">
-                                <h4 class="text-xl font-bold">${s.symbol}</h4>
-                                <div class="text-xs text-gray-400" dir="ltr">${s.signal_details.ML_Probability || ''}</div>
-                            </div>
-                            <div class="mx-auto my-2">${createProgressRing(progress_percentage)}</div>
-                            <div class="w-full text-sm space-y-2">
-                                <div class="flex justify-between"><span>سعر الدخول:</span> <strong dir="ltr">${s.entry_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between text-green-400"><span>الهدف:</span> <strong dir="ltr">${s.target_price.toFixed(5)}</strong></div>
-                                <div class="flex justify-between text-red-400"><span>وقف الخسارة:</span> <strong dir="ltr">${currentStopLoss.toFixed(5)}</strong></div>
-                            </div>
-                             <!-- جديد: شريط مؤشر الخطر -->
-                            <div class="mt-4 space-y-1">
-                                <div class="text-xs text-center text-gray-400">مؤشر الخطر (القرب من SL)</div>
-                                <div class="w-full h-2 rounded-full danger-bar-track">
-                                    <div class="h-full rounded-full danger-bar-fill ${dangerColor}" style="width: ${danger_percentage}%;"></div>
-                                </div>
-                            </div>
-                            <button onclick="requestCloseSignal(${s.id}, '${s.symbol}')" class="mt-4 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">إغلاق يدوي</button>
-                        `;
-                        openContainer.appendChild(card);
-                    } else { // الصفقات المغلقة
-                        const row = document.createElement('tr');
-                        row.className = 'border-b border-gray-700 hover:bg-gray-800';
-                        const profitClass = s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400';
-                        row.innerHTML = `
-                            <td class="p-2 font-bold">${s.symbol}</td>
-                            <td class="p-2 ${profitClass}" dir="ltr">${s.profit_percentage ? s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
-                            <td class="p-2 text-gray-400 text-xs" dir="ltr">${formatRelativeTime(s.closed_at)}</td>
-                        `;
-                        if (s.profit_percentage >= 0) winningTbody.appendChild(row);
-                        else losingTbody.appendChild(row);
+            signals.forEach(s => {
+                if (s.status === 'open') {
+                    openSignalsCount++;
+                    const currentPrice = s.current_price || s.entry_price;
+                    let progress_percentage = 0;
+                    if (currentPrice > s.entry_price && s.target_price > s.entry_price) {
+                        progress_percentage = ((currentPrice - s.entry_price) / (s.target_price - s.entry_price)) * 100;
                     }
-                });
-                
-                if (openSignalsCount === 0) {
-                    openContainer.innerHTML = '<p class="text-gray-400 col-span-full">لا توجد صفقات مفتوحة حالياً...</p>';
+                    progress_percentage = Math.max(0, Math.min(100, progress_percentage));
+
+                    const card = document.createElement('div');
+                    card.className = 'signal-card';
+                    card.innerHTML = `
+                        <div class="flex justify-between items-center mb-2">
+                            <h4 class="text-xl font-bold">${s.symbol}</h4>
+                            <div class="text-xs text-gray-400" dir="ltr">${s.signal_details.ML_Confidence || ''}</div>
+                        </div>
+                        <div class="mx-auto my-2">${createProgressRing(progress_percentage)}</div>
+                        <div class="w-full text-sm space-y-2">
+                            <div class="flex justify-between"><span>سعر الدخول:</span> <strong dir="ltr">${s.entry_price.toFixed(5)}</strong></div>
+                            <div class="flex justify-between text-green-400"><span>الهدف:</span> <strong dir="ltr">${s.target_price.toFixed(5)}</strong></div>
+                            <div class="flex justify-between text-red-400"><span>وقف الخسارة:</span> <strong dir="ltr">${(s.trailing_stop_price || s.stop_loss).toFixed(5)}</strong></div>
+                        </div>
+                        <button onclick="requestCloseSignal(${s.id}, '${s.symbol}')" class="mt-4 w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg">إغلاق يدوي</button>
+                    `;
+                    openContainer.appendChild(card);
+                } else {
+                    const row = document.createElement('tr');
+                    row.className = 'border-b border-gray-700 hover:bg-gray-800';
+                    const profitClass = s.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400';
+                    row.innerHTML = `
+                        <td class="p-2 font-bold">${s.symbol}</td>
+                        <td class="p-2 ${profitClass}" dir="ltr">${s.profit_percentage ? s.profit_percentage.toFixed(2) + '%' : 'N/A'}</td>
+                        <td class="p-2 text-gray-400 text-xs">${formatRelativeTime(s.closed_at)}</td>
+                    `;
+                    if (s.profit_percentage >= 0) winningTbody.appendChild(row);
+                    else losingTbody.appendChild(row);
                 }
-            } catch (error) { console.error("Failed to fetch signals:", error); }
+            });
+            
+            if (openSignalsCount === 0) {
+                openContainer.innerHTML = '<p class="text-gray-400 col-span-full p-8 text-center">لا توجد صفقات مفتوحة حالياً...</p>';
+            }
         }
         
-        // --- جديد: دالة جلب التنبيهات ---
         async function fetchNotifications() {
-             try {
-                const response = await fetch(`${API_BASE_URL}/api/notifications`);
-                const notifications = await response.json();
-                const container = document.getElementById('notifications-container');
-                container.innerHTML = '';
-                
-                if (notifications.length === 0) {
-                     container.innerHTML = '<p id="no-notifications" class="text-gray-400">لا توجد تنبيهات لعرضها...</p>';
-                     return;
+            const notifications = await fetchWithHandling(`${API_BASE_URL}/api/notifications`);
+            if (!notifications) return;
+            const container = document.getElementById('notifications-container');
+            container.innerHTML = '';
+            
+            if (notifications.length === 0) {
+                 container.innerHTML = '<p class="text-gray-400 p-8 text-center">لا توجد تنبيهات لعرضها...</p>';
+                 return;
+            }
+
+            notifications.forEach(n => {
+                const item = document.createElement('div');
+                let statusAttr = '';
+                if(n.type === 'TRADE_CLOSE' && n.message.includes('-')) {
+                    statusAttr = 'data-status="loss"';
                 }
-
-                notifications.forEach(n => {
-                    const item = document.createElement('div');
-                    let statusAttr = '';
-                    if(n.type === 'CLOSE_SIGNAL' && n.message.includes('الربح: -')) {
-                        statusAttr = 'data-status="loss"';
-                    }
-                    item.className = `notification-item notification-type-${n.type}`;
-                    item.setAttribute(statusAttr, '');
-                    
-                    item.innerHTML = `
-                        <p class="font-bold">${n.message}</p>
-                        <p class="text-xs text-gray-500 text-left" dir="ltr">${formatRelativeTime(n.timestamp)}</p>
-                    `;
-                    container.appendChild(item);
-                });
-             } catch (error) {
-                console.error("Failed to fetch notifications:", error);
-             }
+                item.className = `notification-item notification-type-${n.type}`;
+                item.setAttribute(statusAttr, '');
+                item.innerHTML = `
+                    <p class="font-bold">${n.message}</p>
+                    <p class="text-xs text-gray-500 text-left">${formatRelativeTime(n.timestamp)}</p>`;
+                container.appendChild(item);
+            });
         }
-
-        // --- محدّث: دالة إغلاق الصفقة تستخدم Modal الآن ---
+        
+        // ... (دوال Modal والإغلاق اليدوي كما هي)
+        const confirmModal = document.getElementById('confirm-modal');
+        function showConfirmModal(title, body, onConfirm) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-body').textContent = body;
+            confirmModal.classList.add('visible');
+            const confirmBtn = document.getElementById('modal-confirm-btn');
+            const cancelBtn = document.getElementById('modal-cancel-btn');
+            const confirmHandler = () => { onConfirm(); hideConfirmModal(); };
+            const cancelHandler = () => hideConfirmModal();
+            confirmBtn.replaceWith(confirmBtn.cloneNode(true));
+            cancelBtn.replaceWith(cancelBtn.cloneNode(true));
+            document.getElementById('modal-confirm-btn').addEventListener('click', confirmHandler);
+            document.getElementById('modal-cancel-btn').addEventListener('click', cancelHandler);
+        }
+        function hideConfirmModal() { confirmModal.classList.remove('visible'); }
         function requestCloseSignal(signalId, symbol) {
             showConfirmModal(
-                `إغلاق صفقة ${symbol}`,
-                `هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟ سيتم استخدام السعر الحالي.`,
-                () => { // This is the onConfirm callback
-                    fetch(`${API_BASE_URL}/api/close/${signalId}`, { method: 'POST' })
-                    .then(response => {
-                        if(!response.ok) return response.json().then(err => { throw new Error(err.error) });
-                        return response.json();
-                    })
-                    .then(result => {
-                        console.log("Close signal initiated:", result.message);
-                        // The UI will update on the next poll, which is fine.
-                    })
-                    .catch(error => {
-                        console.error("Error closing signal:", error);
-                        alert(`فشل إغلاق الصفقة: ${error.message}`); // Fallback alert
-                    });
+                `إغلاق صفقة ${symbol}`, `هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟`,
+                async () => {
+                    const result = await fetchWithHandling(`${API_BASE_URL}/api/close/${signalId}`, { method: 'POST' });
+                    if (result) { console.log("Close signal initiated:", result.message); }
                 }
             );
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            // استدعاء أولي
+        // !!! جديد: فحص حالة الخادم بشكل دوري
+        async function checkServerStatus() {
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/health`);
+                if (response.ok) {
+                    if (!serverIsHealthy) {
+                        // إذا كان هذا أول اتصال ناجح، قم بتشغيل جلب البيانات فوراً
+                        serverIsHealthy = true;
+                        statusText.textContent = 'الخادم متصل';
+                        statusDot.className = 'status-dot status-ok';
+                        fetchAllData();
+                    }
+                } else {
+                    throw new Error('Server not healthy');
+                }
+            } catch (error) {
+                serverIsHealthy = false;
+                statusText.textContent = 'الخادم غير متصل أو قيد التشغيل...';
+                statusDot.className = 'status-dot status-error';
+            }
+        }
+        
+        function fetchAllData() {
             fetchStats();
             fetchSignals();
             fetchNotifications();
+        }
 
-            // تحديث دوري
-            setInterval(fetchSignals, 5000); // تحديث الصفقات كل 5 ثوانٍ
-            setInterval(fetchStats, 30000); // تحديث الإحصائيات كل 30 ثانية
-            setInterval(fetchNotifications, 7000); // تحديث التنبيهات كل 7 ثوانٍ
+        document.addEventListener('DOMContentLoaded', () => {
+            checkServerStatus();
+            // فحص حالة الخادم كل 5 ثوانٍ
+            setInterval(checkServerStatus, 5000);
+            // جلب البيانات كل 7 ثوانٍ (فقط إذا كان الخادم متصلاً)
+            setInterval(fetchAllData, 7000);
         });
     </script>
 </body>
