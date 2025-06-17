@@ -51,24 +51,20 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
-MODEL_PREDICTION_THRESHOLD = 0.80
+MODEL_PREDICTION_THRESHOLD = 0.70
 USE_DYNAMIC_SL_TP = True
-ATR_SL_MULTIPLIER = 1.5
-ATR_TP_MULTIPLIER = 3.5
+ATR_SL_MULTIPLIER = 2.0
+ATR_TP_MULTIPLIER = 3.0
 USE_TRAILING_STOP = False
-#TRAILING_STOP_ACTIVATE_PERCENT = 0.75
-#TRAILING_STOP_DISTANCE_PERCENT = 1.0
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
 RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 9, 20, 14
 BBANDS_STD_DEV: float = 2.0
-
-# --- !!! تعديل: تم تغيير فلتر RSI إلى نطاق !!! ---
-USE_RSI_FILTER = True  # تفعيل أو إلغاء فلتر RSI
-RSI_LOWER_THRESHOLD = 40  # الحد الأدنى لفلتر RSI
-RSI_UPPER_THRESHOLD = 69  # الحد الأعلى لفلتر RSI
+USE_RSI_FILTER = True
+RSI_LOWER_THRESHOLD = 40
+RSI_UPPER_THRESHOLD = 69
 
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -83,6 +79,11 @@ prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
 
+# --- !!! جديد: متغيرات حالة البوت !!! ---
+bot_status_info = {"status": "INITIALIZING", "message": "البوت قيد التشغيل والتهيئة..."}
+bot_status_lock = Lock()
+
+
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
@@ -92,7 +93,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # جدول الصفقات مع عمود وقف الخسارة المتحرك
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -303,45 +303,25 @@ class TradingStrategy:
     def get_features(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return calculate_features(df)
 
-    # --- !!! تعديل: تم تحديث منطق فلتر RSI هنا !!! ---
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
-            
         last_row = df_processed.iloc[-1]
-        
         try:
-            # --- الفلتر الأول: التحقق من مؤشر القوة النسبية (RSI) ضمن النطاق المطلوب ---
             if USE_RSI_FILTER:
                 current_rsi = last_row.get('rsi')
                 if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
-                    # هذه الرسالة يمكن تفعيلها لفهم سبب تجاهل الإشارات
-                    # logger.info(f"[{self.symbol}] تم تجاهل الإشارة. RSI الحالي ({current_rsi:.2f}) خارج النطاق المطلوب ({RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD}).")
                     return None
                 logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
-
-            # --- الفلتر الثاني: التحقق من نموذج تعلم الآلة (ML) ---
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
-            if features_df.isnull().values.any():
-                return None
-                
+            if features_df.isnull().values.any(): return None
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0][1]
-
-            if prediction_proba < MODEL_PREDICTION_THRESHOLD:
-                return None
-
+            if prediction_proba < MODEL_PREDICTION_THRESHOLD: return None
             logger.info(f"✅ [العثور على إشارة] {self.symbol}: إشارة محتملة باحتمالية {prediction_proba:.2%}.")
-            
-            # تجميع تفاصيل الإشارة لإرسالها
-            signal_details = {
-                'ML_Probability': f"{prediction_proba:.2%}",
-                'RSI_Value': f"{last_row.get('rsi'):.2f}"
-            }
-
+            signal_details = {'ML_Probability': f"{prediction_proba:.2%}", 'RSI_Value': f"{last_row.get('rsi'):.2f}"}
             return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': signal_details}
-        
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}")
             return None
@@ -354,15 +334,12 @@ def send_telegram_message(target_chat_id: str, text: str):
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- !!! تعديل: تحديث رسالة الإشارة لتشمل RSI !!! ---
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
-    
     rsi_value = signal_data['signal_details'].get('RSI_Value', 'N/A')
     ml_prob = signal_data['signal_details'].get('ML_Probability', 'N/A')
-
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
@@ -371,13 +348,11 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
                f"🔍 *مستوى الثقة (ML):* {ml_prob}\n"
                f"📊 *مؤشر القوة النسبية (RSI):* `{rsi_value}`")
-    
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
-
     log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -404,8 +379,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     symbol = signal['symbol']
     with signal_cache_lock:
-        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']:
-            return
+        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']: return
     if not check_db_connection() or not conn: return
     try:
         db_closing_price = float(closing_price)
@@ -416,8 +390,7 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
                 (status, db_closing_price, db_profit_pct, signal['id'])
             )
         conn.commit()
-        with signal_cache_lock:
-            del open_signals_cache[symbol]
+        with signal_cache_lock: del open_signals_cache[symbol]
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
         safe_symbol = signal['symbol'].replace('_', '\\_')
@@ -479,28 +452,43 @@ def get_btc_trend() -> Dict[str, Any]:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
+def set_bot_status(status: str, message: str):
+    global bot_status_info
+    with bot_status_lock:
+        bot_status_info = {"status": status, "message": message}
+    logger.info(f"[حالة البوت] {status}: {message}")
+
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
     time.sleep(15) 
     if not validated_symbols_to_scan:
-        log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
+        message = "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل."
+        log_and_notify("critical", message, "SYSTEM")
+        set_bot_status("ERROR", message)
         return
+    
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
+    
     while True:
         try:
             if USE_BTC_TREND_FILTER:
                 trend_data = get_btc_trend()
                 if not trend_data.get("is_uptrend"):
-                    logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
+                    message = f"تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين."
+                    set_bot_status("PAUSED_BTC_TREND", message)
                     time.sleep(300)
                     continue
+
             with signal_cache_lock: open_count = len(open_signals_cache)
             if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات المفتوحة ({open_count}/{MAX_OPEN_TRADES}).")
+                message = f"تم الوصول للحد الأقصى للصفقات المفتوحة ({open_count}/{MAX_OPEN_TRADES})."
+                set_bot_status("PAUSED_MAX_TRADES", message)
                 time.sleep(60)
                 continue
+
             slots_available = MAX_OPEN_TRADES - open_count
-            logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
+            set_bot_status("SCANNING", f"جاري البحث عن إشارات... المراكز المفتوحة: {open_count}/{MAX_OPEN_TRADES}")
+            
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
                 with signal_cache_lock:
@@ -531,13 +519,17 @@ def main_loop():
                             with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                             send_new_signal_alert(saved_signal)
                             slots_available -= 1
+                            open_count += 1
+                            set_bot_status("SCANNING", f"إشارة جديدة! المراكز المفتوحة: {open_count}/{MAX_OPEN_TRADES}")
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
-            logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار الدورة التالية...")
+            
             time.sleep(60)
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
-            log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM")
+            message = f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}"
+            log_and_notify("error", message, "SYSTEM")
+            set_bot_status("ERROR", message)
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
@@ -565,6 +557,12 @@ def home():
             return render_template_string(f.read())
     except FileNotFoundError:
         return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
+
+# --- !!! جديد: API لحالة البوت !!! ---
+@app.route('/api/bot_status')
+def get_bot_status():
+    with bot_status_lock:
+        return jsonify(bot_status_info)
 
 @app.route('/api/market_status')
 def get_market_status():
@@ -644,7 +642,7 @@ def run_flask():
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
     global client, validated_symbols_to_scan
-    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
+    set_bot_status("INITIALIZING", "بدء تهيئة خدمات البوت...")
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
@@ -653,13 +651,17 @@ def initialize_bot_services():
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
+            message = "لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ."
+            logger.critical(f"❌ {message}")
+            set_bot_status("ERROR", message)
             return
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
     except Exception as e:
-        log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
+        message = f"حدث خطأ حاسم أثناء التهيئة: {e}"
+        log_and_notify("critical", message, "SYSTEM")
+        set_bot_status("ERROR", message)
         pass
 
 if __name__ == "__main__":
