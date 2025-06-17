@@ -252,21 +252,50 @@ class TradingStrategy:
         return calculate_features(df, btc_df)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]): return None
+        """
+        --- !!! تم التعديل هنا لحل مشكلة أسماء الميزات !!! ---
+        """
+        if not all([self.ml_model, self.scaler, self.feature_names]):
+            return None
+            
         last_row = df_processed.iloc[-1:]
+        
         try:
+            # 1. التأكد من وجود الميزات المطلوبة
             features_df = last_row[self.feature_names]
-            if features_df.isnull().values.any(): return None
-            features_scaled = self.scaler.transform(features_df)
-            prediction = self.ml_model.predict(features_scaled)[0]
-            if prediction != 1: return None
-            prediction_proba = self.ml_model.predict_proba(features_scaled)[0]
+            if features_df.isnull().values.any():
+                return None
+
+            # 2. تحويل البيانات باستخدام الـ Scaler (ينتج عنه مصفوفة NumPy)
+            features_scaled_np = self.scaler.transform(features_df)
+            
+            # 3. *** الحل: إعادة تحويل مصفوفة NumPy إلى DataFrame مع أسماء الميزات ***
+            features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names, index=features_df.index)
+
+            # 4. استخدام الـ DataFrame الجديد للتنبؤ
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            if prediction != 1:  # نحن نهتم فقط بإشارات الشراء (1)
+                return None
+
+            # 5. الحصول على احتمالية التنبؤ
+            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
             confidence_for_class_1 = prediction_proba[np.where(self.ml_model.classes_ == 1)[0][0]]
-            if confidence_for_class_1 < MODEL_CONFIDENCE_THRESHOLD: return None
+
+            # 6. التحقق من عتبة الثقة
+            if confidence_for_class_1 < MODEL_CONFIDENCE_THRESHOLD:
+                return None
+
             logger.info(f"✅ [Signal Found] {self.symbol}: إشارة شراء محتملة بثقة {confidence_for_class_1:.2%}.")
-            return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Confidence': f"{confidence_for_class_1:.2%}"}}
+            return {
+                'symbol': self.symbol,
+                'strategy_name': BASE_ML_MODEL_NAME,
+                'signal_details': {'ML_Confidence': f"{confidence_for_class_1:.2%}"}
+            }
+            
         except Exception as e:
-            logger.warning(f"⚠️ [Signal Gen] {self.symbol}: خطأ: {e}"); return None
+            logger.warning(f"⚠️ [Signal Gen] {self.symbol}: خطأ أثناء توليد الإشارة: {e}", exc_info=False)
+            return None
+
 
 def close_signal(signal, status, closing_price, closed_by):
     entry_price = signal['entry_price']
