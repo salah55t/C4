@@ -22,7 +22,7 @@ from flask_cors import CORS
 BACKTEST_PERIOD_DAYS: int = 180
 TIMEFRAME: str = '15m'
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
-MODEL_PREDICTION_THRESHOLD: float = 0.70
+MODEL_PREDICTION_THRESHOLD: float = 0.80
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: float = 3.5
 USE_RSI_FILTER: bool = True
