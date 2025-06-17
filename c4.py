@@ -46,9 +46,9 @@ except Exception as e:
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 # --- V5 Model Constants ---
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5' # !!! تحديث: اسم النموذج الجديد
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # تم تقليلها لتسريع الجلب، النموذج يحتاج لفترة أقل
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
 
 # --- Indicator & Feature Parameters (Matching ml.py) ---
 RSI_PERIOD: int = 14
@@ -59,14 +59,15 @@ EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 
 # --- Trading Logic Constants ---
+MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
 TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
-ATR_SL_MULTIPLIER = 1.5 # تم تعديله ليتوافق مع استراتيجية V5
-ATR_TP_MULTIPLIER = 2.0 # تم تعديله ليتوافق مع استراتيجية V5
-USE_TRAILING_STOP = True
-TRAILING_STOP_ACTIVATE_PERCENT = 0.5
-TRAILING_STOP_DISTANCE_PERCENT = 0.8
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
+USE_TRAILING_STOP = False # !!! تحديث: تم تعطيل وقف الخسارة المتحرك
+# TRAILING_STOP_ACTIVATE_PERCENT = 0.5 # لم يعد مستخدماً
+# TRAILING_STOP_DISTANCE_PERCENT = 0.8 # لم يعد مستخدماً
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
@@ -93,20 +94,27 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # !!! تحديث: تم حذف عمود وقف الخسارة المتحرك من الجدول
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        trailing_stop_price DOUBLE PRECISION );
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL,
+                        stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT,
+                        signal_details JSONB
+                    );
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
                         message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
-                # جدول نماذج تعلم الآلة (للقراءة فقط بواسطة البوت)
                 cur.execute("""
                      CREATE TABLE IF NOT EXISTS ml_models (
                         id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
@@ -186,47 +194,29 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# !!! تحديث: دالة حساب المؤشرات الجديدة بالكامل لتتوافق مع نموذج V5 !!!
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-
-    # MACD Histogram
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = macd_line - signal_line
-
-    # Price vs EMAs (New Feature)
+    df_calc['macd_hist'] = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=MACD_SIGNAL, adjust=False).mean()
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-
-    # BTC Correlation (New Feature)
     df_calc['returns'] = df_calc['close'].pct_change()
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-
-    # Relative Volume
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
-    
-    # Hour of Day
     df_calc['hour_of_day'] = df_calc.index.hour
-    
     return df_calc.dropna()
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
@@ -270,21 +260,15 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
                     target_price = signal.get('target_price')
-                    current_stop_price = signal.get('trailing_stop_price') or signal.get('stop_loss')
-                    if not all(isinstance(p, (int, float)) for p in [price, target_price, current_stop_price]): continue
+                    # !!! تحديث: استخدام وقف الخسارة الثابت فقط
+                    stop_loss_price = signal.get('stop_loss')
+
+                    if not all(isinstance(p, (int, float)) for p in [price, target_price, stop_loss_price]): continue
 
                     if price >= target_price: status, closing_price, signal_to_process = 'target_hit', target_price, signal
-                    elif price <= current_stop_price: status, closing_price, signal_to_process = 'stop_loss_hit', current_stop_price, signal
+                    elif price <= stop_loss_price: status, closing_price, signal_to_process = 'stop_loss_hit', stop_loss_price, signal
                     
-                    if USE_TRAILING_STOP and status is None:
-                        entry_price = signal.get('entry_price')
-                        if entry_price is None: continue
-                        activation_price = entry_price + (target_price - entry_price) * TRAILING_STOP_ACTIVATE_PERCENT
-                        if price > activation_price:
-                            new_trailing_stop = price * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
-                            if new_trailing_stop > current_stop_price:
-                                open_signals_cache[symbol]['trailing_stop_price'] = new_trailing_stop
-                                Thread(target=update_trailing_stop_in_db, args=(signal['id'], signal['symbol'], new_trailing_stop)).start()
+                    # !!! تحديث: تم حذف منطق وقف الخسارة المتحرك بالكامل
             
             if signal_to_process and status:
                 logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status}' للعملة {symbol} عند سعر {price:.8f}")
@@ -292,18 +276,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
     except Exception as e:
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
 
-def update_trailing_stop_in_db(signal_id: int, symbol: str, new_price: float) -> None:
-    if not check_db_connection() or not conn: return
-    try:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE signals SET trailing_stop_price = %s WHERE id = %s;", (float(new_price), signal_id))
-        conn.commit()
-        message = f"📈 [تحديث وقف الخسارة] {symbol}: تم رفع وقف الخسارة إلى ${new_price:,.8g}"
-        log_and_notify('info', message, 'TSL_UPDATE')
-        send_telegram_message(CHAT_ID, message)
-    except Exception as e:
-        logger.error(f"❌ [قاعدة البيانات] فشل تحديث الوقف المتحرك للإشارة ID {signal_id}: {e}")
-        if conn: conn.rollback()
+# !!! تحديث: تم حذف الدالة update_trailing_stop_in_db لأنها لم تعد مستخدمة
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
@@ -319,11 +292,9 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_db(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    # !!! تحديث: الدالة تتطلب الآن بيانات البيتكوين !!!
     def get_features(self, df: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         return calculate_features(df, btc_df)
 
-    # !!! تحديث: منطق توليد الإشارة لنموذج V5 !!!
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
@@ -336,32 +307,27 @@ class TradingStrategy:
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
             
-            # التنبؤ بالفئة (1 للشراء، -1 للبيع، 0 للانتظار)
             prediction = self.ml_model.predict(features_scaled_df)[0]
-            
-            # نريد فقط إشارات الشراء
-            if prediction != 1:
-                return None
-            
-            # الحصول على الاحتماليات لمزيد من التفاصيل (اختياري)
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
-            # ابحث عن احتمالية الفئة '1'
+            
             prob_for_class_1 = 0
             try:
-                #جد فئة 1 في مصفوفة الكلاسات في حال لم تكن مرتبة
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except ValueError:
-                # في حال لم يتم تدريب النموذج على الفئة '1'
-                logger.warning(f"⚠️ {self.symbol}: النموذج لا يحتوي على الفئة '1'.")
+                return None
 
-            logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج بالإشارة 'شراء' (1) باحتمالية {prob_for_class_1:.2%}.")
-            
-            return {
-                'symbol': self.symbol,
-                'strategy_name': BASE_ML_MODEL_NAME,
-                'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}
-            }
+            if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
+                logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}, وهي أعلى من الحد المطلوب ({MODEL_CONFIDENCE_THRESHOLD:.0%}).")
+                
+                return {
+                    'symbol': self.symbol,
+                    'strategy_name': BASE_ML_MODEL_NAME,
+                    'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}
+                }
+            else:
+                return None
+
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
@@ -396,15 +362,14 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
-        tsl = float(signal.get('trailing_stop_price', sl))
         with conn.cursor() as cur:
+            # !!! تحديث: تم حذف عمود وقف الخسارة المتحرك من جملة الإضافة
             cur.execute(
-                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, trailing_stop_price) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
-                (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), tsl)
+                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) 
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;""",
+                (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})))
             )
             signal['id'] = cur.fetchone()['id']
-            signal['trailing_stop_price'] = tsl
         conn.commit()
         logger.info(f"✅ [قاعدة البيانات] تم إدراج الإشارة لـ {signal['symbol']} (ID: {signal['id']}).")
         return signal
@@ -480,7 +445,6 @@ def get_btc_trend() -> Dict[str, Any]:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
-# !!! إضافة: دالة لجلب بيانات البيتكوين لحساب المؤشرات !!!
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين لحساب المؤشرات...")
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
@@ -514,7 +478,6 @@ def main_loop():
             slots_available = MAX_OPEN_TRADES - open_count
             logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
             
-            # !!! تحديث: جلب بيانات البيتكوين قبل حلقة المسح !!!
             btc_data = get_btc_data_for_bot()
             if btc_data is None:
                 logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
@@ -530,7 +493,6 @@ def main_loop():
                     if df_hist is None or df_hist.empty: continue
                     
                     strategy = TradingStrategy(symbol)
-                    # !!! تحديث: تمرير بيانات البيتكوين لحساب المؤشرات !!!
                     df_features = strategy.get_features(df_hist, btc_data)
                     if df_features is None or df_features.empty: continue
                     
@@ -545,9 +507,8 @@ def main_loop():
                             atr_value = df_features['atr'].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
-                        else: # Fallback
+                        else:
                             potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
-                        potential_signal['trailing_stop_price'] = potential_signal['stop_loss']
                         
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
