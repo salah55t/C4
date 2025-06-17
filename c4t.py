@@ -16,34 +16,31 @@ from tqdm import tqdm
 from flask import Flask
 
 # ==============================================================================
-# --------------------------- إعدادات الاختبار الخلفي (محدثة لـ V5) ----------------------------
+# --------------------------- إعدادات الاختبار الخلفي ----------------------------
 # ==============================================================================
 # الفترة الزمنية للاختبار بالايام
-BACKTEST_PERIOD_DAYS: int = 30
+BACKTEST_PERIOD_DAYS: int = 180
 # الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
-# اسم النموذج الأساسي الذي سيتم اختباره (تم التحديث إلى V5)
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
+# اسم النموذج الأساسي الذي سيتم اختباره
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
-# --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
+# --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
 MODEL_PREDICTION_THRESHOLD: float = 0.70
-ATR_SL_MULTIPLIER: float = 1.5 # تم التحديث
-ATR_TP_MULTIPLIER: float = 2.0 # تم التحديث
-USE_TRAILING_STOP: bool = False # !!! تحديث: تم تعطيل وقف الخسارة المتحرك
+ATR_SL_MULTIPLIER: float = 2.0
+ATR_TP_MULTIPLIER: float = 3.0
+USE_TRAILING_STOP: bool = False
+#TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75  # Activate TSL when 75% to TP
+#TRAILING_STOP_DISTANCE_PERCENT: float = 1.0 # Trail 1.0% behind price
 
-# --- محاكاة التكاليف الواقعية ---
+# --- !!! جديد: معلمات محاكاة التكاليف الواقعية !!! ---
+# العمولة لكل صفقة (شراء أو بيع). 0.1% هو المعدل القياسي في Binance
 COMMISSION_PERCENT: float = 0.1
+# الانزلاق السعري المتوقع. 0.05% هو تقدير معقول للصفقات السوقية
 SLIPPAGE_PERCENT: float = 0.05
-INITIAL_TRADE_AMOUNT_USDT: float = 10.0
 
-# --- معلمات المؤشرات (من c4.py) ---
-RSI_PERIOD: int = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
-ATR_PERIOD: int = 14
-EMA_SLOW_PERIOD: int = 200
-EMA_FAST_PERIOD: int = 50
-BTC_CORR_PERIOD: int = 30
-BTC_SYMBOL = 'BTCUSDT'
+# مبلغ افتراضي لكل صفقة بالدولار لمحاكاة الربح
+INITIAL_TRADE_AMOUNT_USDT: float = 10.0
 
 # ==============================================================================
 # ---------------------------- إعدادات النظام والاتصال -------------------------
@@ -54,17 +51,17 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtester_v5.log', encoding='utf-8'),
+        logging.FileHandler('backtester.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('BacktesterV5')
+logger = logging.getLogger('Backtester')
 
-# إعداد خادم الويب
+# إعداد خادم الويب (للتوافق مع منصات مثل Render)
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Backtester service for V5 is running."
+    return "Backtester service is running and alive."
 
 # تحميل متغيرات البيئة
 try:
@@ -118,7 +115,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         
         exchange_info = client.get_exchange_info()
-        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING' and s['quoteAsset'] == 'USDT'}
+        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING'}
         
         validated = sorted(list(formatted.intersection(active_symbols)))
         logger.info(f"✅ [Validation] Found {len(validated)} symbols to backtest.")
@@ -150,33 +147,52 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}")
         return None
 
-# !!! تحديث: تم استبدال دالة حساب المؤشرات بالكامل لتطابق c4.py
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    تحسب جميع المؤشرات والميزات المطلوبة لنموذج V5.
+    تحسب جميع المؤشرات والميزات المطلوبة للنموذج (نسخة مطابقة لما في ملف التدريب والاستراتيجية).
     """
     df_calc = df.copy()
+    RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 9, 20, 14
+    BBANDS_STD_DEV = 2.0
+    
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    rs = gain / loss.replace(0, np.nan)
+    df_calc['rsi'] = 100 - (100 / (1 + rs))
+
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd_hist'] = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=MACD_SIGNAL, adjust=False).mean()
-    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-    df_calc['returns'] = df_calc['close'].pct_change()
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
+    df_calc['macd'] = ema_fast - ema_slow
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    macd_above = df_calc['macd'] > df_calc['macd_signal']
+    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    df_calc['macd_cross'] = 0
+    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
+    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
+
+    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
+    std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
+    df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
+    df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
+    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma.replace(0, np.nan)
+    df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
+
+    df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
+    
+    df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
+    df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
+    df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
+
     return df_calc.dropna()
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
@@ -187,7 +203,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     if not conn: return None
     try:
         with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s LIMIT 1;", (model_name,))
             result = db_cur.fetchone()
             if result and result.get('model_data'):
                 model_bundle = pickle.loads(result['model_data'])
@@ -203,10 +219,10 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 # ----------------------------- محرك الاختبار الخلفي ----------------------------
 # ==============================================================================
 
-# !!! تحديث: تم تعديل الدالة لتستقبل بيانات البيتكوين
-def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     تقوم بتنفيذ محاكاة التداول على البيانات التاريخية لعملة واحدة.
+    الأسعار المسجلة هنا هي أسعار "مثالية" قبل تطبيق الانزلاق والعمولة.
     """
     trades = []
     
@@ -214,8 +230,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     scaler = model_bundle['scaler']
     feature_names = model_bundle['feature_names']
     
-    # !!! تحديث: تمرير بيانات البيتكوين لحساب المؤشرات
-    df_featured = calculate_features(data, btc_data)
+    df_featured = calculate_features(data)
     
     if not all(col in df_featured.columns for col in feature_names):
         missing = [col for col in feature_names if col not in df_featured.columns]
@@ -225,14 +240,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     features_df = df_featured[feature_names]
     features_scaled_np = scaler.transform(features_df)
     features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
-    
-    # الحصول على احتمالية الفئة 1 (شراء)
-    try:
-        class_1_index = list(model.classes_).index(1)
-        predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
-    except (ValueError, IndexError):
-        logger.error(f"Could not find class '1' in model for {symbol}. Skipping.")
-        return []
+    predictions = model.predict_proba(features_scaled_df)[:, 1]
     
     df_featured['prediction'] = predictions
     
@@ -242,20 +250,37 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     for i in range(len(df_featured)):
         current_candle = df_featured.iloc[i]
         
-        # --- منطق إدارة الصفقة المفتوحة ---
+        # --- Logic to manage an active trade ---
         if in_trade:
-            # التحقق من جني الأرباح: إذا وصل أعلى سعر في الشمعة إلى الهدف
+            # Check for TP hit: if the candle's high touches the take profit
             if current_candle['high'] >= trade_details['tp']:
                 trade_details['exit_price'] = trade_details['tp']
                 trade_details['exit_reason'] = 'TP Hit'
-            # التحقق من وقف الخسارة: إذا وصل أدنى سعر في الشمعة إلى الوقف
+            # Check for SL hit: if the candle's low touches the stop loss
             elif current_candle['low'] <= trade_details['sl']:
                 trade_details['exit_price'] = trade_details['sl']
                 trade_details['exit_reason'] = 'SL Hit'
             
-            # !!! تحديث: تم حذف منطق وقف الخسارة المتحرك بالكامل
+            # Trailing Stop Loss Logic
+            elif USE_TRAILING_STOP:
+                # Calculate activation price based on progress towards TP
+                activation_price = trade_details['entry_price'] + \
+                                   (trade_details['tp'] - trade_details['entry_price']) * TRAILING_STOP_ACTIVATE_PERCENT
+                
+                # Activate TSL if not already active and price crosses activation level
+                if not trade_details.get('tsl_active') and current_candle['high'] >= activation_price:
+                    trade_details['tsl_active'] = True
+                    logger.debug(f"TSL activated for {symbol} at price {current_candle['high']:.4f}")
 
-            # إذا تحقق شرط الخروج، قم بإنهاء الصفقة
+                # If TSL is active, trail the price
+                if trade_details.get('tsl_active'):
+                    # Calculate new potential TSL based on the current close
+                    new_tsl = current_candle['close'] * (1 - (TRAILING_STOP_DISTANCE_PERCENT / 100))
+                    # Only update the stop loss if the new TSL is higher than the current one
+                    if new_tsl > trade_details['sl']:
+                        trade_details['sl'] = new_tsl
+            
+            # If an exit condition was met, finalize the trade
             if trade_details.get('exit_price'):
                 trade_details['exit_time'] = current_candle.name
                 trade_details['duration_candles'] = i - trade_details['entry_index']
@@ -264,7 +289,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
                 trade_details = {}
             continue
 
-        # --- منطق الدخول في صفقة جديدة ---
+        # --- Logic to enter a new trade ---
         if not in_trade and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
             entry_price = current_candle['close']
@@ -276,10 +301,11 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
             trade_details = {
                 'symbol': symbol,
                 'entry_time': current_candle.name,
-                'entry_price': entry_price,
+                'entry_price': entry_price, # Ideal price before slippage
                 'entry_index': i,
                 'tp': take_profit,
                 'sl': stop_loss,
+                'initial_sl': stop_loss,
             }
 
     return trades
@@ -295,28 +321,38 @@ def generate_report(all_trades: List[Dict[str, Any]]):
 
     df_trades = pd.DataFrame(all_trades)
     
-    # تطبيق الانزلاق السعري والعمولة
+    # --- تطبيق الانزلاق السعري والعمولة ---
+    # تعديل سعر الدخول (شراء بسعر أعلى قليلاً)
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
+    # تعديل سعر الخروج (بيع بسعر أقل قليلاً)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
+    
+    # حساب نسبة الربح/الخسارة بناءً على الأسعار المعدلة (قبل العمولة)
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
     
+    # حساب الربح/الخسارة بالدولار مع خصم العمولات
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
+    
     commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
     commission_exit = exit_value * (COMMISSION_PERCENT / 100)
+    
     df_trades['commission_total'] = commission_entry + commission_exit
     df_trades['pnl_usdt_net'] = (exit_value - entry_cost) - df_trades['commission_total']
     df_trades['pnl_pct_net'] = (df_trades['pnl_usdt_net'] / INITIAL_TRADE_AMOUNT_USDT) * 100
 
-    # إعداد التقرير
+    # --- إعداد التقرير ---
     total_trades = len(df_trades)
     winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]
     losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
+    
     win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
     total_net_pnl = df_trades['pnl_usdt_net'].sum()
+    
     gross_profit = winning_trades['pnl_usdt_net'].sum()
     gross_loss = abs(losing_trades['pnl_usdt_net'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+    
     avg_win = winning_trades['pnl_usdt_net'].mean() if len(winning_trades) > 0 else 0
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
@@ -363,7 +399,7 @@ def start_backtesting_job():
     """
     هذه هي الوظيفة التي تقوم بتشغيل عملية الاختبار الخلفي بأكملها.
     """
-    logger.info("🚀 Starting backtesting job for V5 Strategy...")
+    logger.info("🚀 Starting backtesting job...")
     time.sleep(2) 
     
     symbols_to_test = get_validated_symbols()
@@ -374,23 +410,10 @@ def start_backtesting_job():
         
     all_trades = []
     
-    # إضافة أيام إضافية لضمان حساب المؤشرات بشكل صحيح في بداية فترة الاختبار
-    data_fetch_days = BACKTEST_PERIOD_DAYS + 30
+    # We add 10 days to the history to ensure indicators are well-calculated for the first few days of the actual backtest period
+    data_fetch_days = BACKTEST_PERIOD_DAYS + 10
     
-    # !!! تحديث: جلب بيانات البيتكوين مرة واحدة قبل البدء
-    logger.info(f"ℹ️ [BTC Data] Fetching historical data for {BTC_SYMBOL}...")
-    btc_data = fetch_historical_data(BTC_SYMBOL, TIMEFRAME, data_fetch_days)
-    if btc_data is None:
-        logger.critical("❌ Failed to fetch BTC data. Cannot proceed with backtest.")
-        return
-    btc_data['btc_returns'] = btc_data['close'].pct_change()
-    logger.info("✅ [BTC Data] Successfully fetched and processed BTC data.")
-
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
-        # لا نختبر البيتكوين مقابل نفسه
-        if symbol == BTC_SYMBOL:
-            continue
-            
         model_bundle = load_ml_model_bundle_from_db(symbol)
         if not model_bundle:
             continue
@@ -399,17 +422,15 @@ def start_backtesting_job():
         if df_hist is None or df_hist.empty:
             continue
             
-        # نختبر فقط على الفترة المطلوبة، البيانات الإضافية كانت لتسخين المؤشرات
+        # We only backtest on the requested period, the extra data was just for indicator warmup
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
         df_to_test = df_hist[df_hist.index >= backtest_start_date]
-        btc_to_test = btc_data[btc_data.index >= backtest_start_date]
 
-        # !!! تحديث: تمرير بيانات البيتكوين إلى دالة الاختبار
-        trades = run_backtest_for_symbol(symbol, df_to_test, btc_to_test, model_bundle)
+        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle)
         if trades:
             all_trades.extend(trades)
         
-        time.sleep(0.5)
+        time.sleep(0.5) # Small delay to avoid hitting API rate limits if any other calls were made
 
     generate_report(all_trades)
     
@@ -428,6 +449,6 @@ if __name__ == "__main__":
     backtest_thread.daemon = True
     backtest_thread.start()
 
-    port = int(os.environ.get("PORT", 10002))
+    port = int(os.environ.get("PORT", 10002)) # Using a different port just in case
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
