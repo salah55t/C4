@@ -68,11 +68,9 @@ RSI_UPPER_THRESHOLD = 69
 
 # --- إعدادات فلتر MACD الجديدة ---
 USE_MACD_FILTER: bool = True
-# هذه المعلمات مطابقة لـ MACD_FAST و MACD_SLOW و MACD_SIGNAL المحددة أعلاه،
-# ولكنها وُضعت هنا لتعزيز الوضوح بشأن الغرض من الفلتر.
 MACD_SHORT_PERIOD: int = 12
 MACD_LONG_PERIOD: int = 26
-MACD_SIGNAL_PERIOD: int = 9 # هذه هي مدة MA التي طلبتها لـ DEA
+MACD_SIGNAL_PERIOD: int = 9
 MACD_DIF_CROSSOVER_ONLY: bool = True # فلتر لتقاطع DIF صعوديا فوق DEA
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -510,7 +508,8 @@ def get_btc_trend() -> Dict[str, Any]:
         if current_price > ema:
             status, message = "Uptrend", f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
         else:
-            status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAMe})"
+            # تم تصحيح الخطأ الإملائي هنا
+            status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
         return {"status": status, "message": message, "is_uptrend": (status == "Uptrend")}
     except Exception as e:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
