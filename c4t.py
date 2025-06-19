@@ -26,29 +26,28 @@ TIMEFRAME: str = '15m'
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.85 # تم تحديثه ليطابق البوت
+MODEL_PREDICTION_THRESHOLD: float = 0.85
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 3.0
-USE_TRAILING_STOP: bool = False # البوت لا يستخدمه حالياً
 
 # --- !!! جديد: فلاتر الاستراتيجية المحدثة لتطابق البوت c4.py !!! ---
 # تم تحديث جميع المعلمات والفلاتر لتعكس بدقة منطق البوت الرئيسي
+USE_BTC_TREND_FILTER: bool = True # *** تفعيل فلتر اتجاه البيتكوين ***
+BTC_SYMBOL: str = 'BTCUSDT'
+BTC_TREND_TIMEFRAME: str = '4h'
+BTC_TREND_EMA_PERIOD: int = 10
+
 USE_RSI_FILTER: bool = True
 RSI_LOWER_THRESHOLD: float = 45.0
 RSI_UPPER_THRESHOLD: float = 65.0
 
-USE_MACD_CROSS_FILTER: bool = True  # فلتر لتقاطع MACD الصعودي فقط
+USE_MACD_CROSS_FILTER: bool = True
 
 USE_STOCH_RSI_FILTER: bool = True
 STOCH_RSI_LOWER_THRESHOLD: float = 25.0
 STOCH_RSI_UPPER_THRESHOLD: float = 75.0
 
-MIN_RELATIVE_VOLUME: float = 2.0  # فلتر جديد لحجم التداول النسبي
-
-# ملاحظة: فلتر اتجاه البيتكوين (USE_BTC_TREND_FILTER) الموجود في البوت الرئيسي
-# لم يتم تضمينه هنا لأنه يتطلب تحميل بيانات عملتين في نفس الوقت،
-# مما يعقد عملية الاختبار الخلفي المبسطة. نتائج الاختبار قد تكون أكثر تفاؤلاً
-# من أداء البوت الفعلي الذي يتوقف أثناء اتجاه البيتكوين الهابط.
+MIN_RELATIVE_VOLUME: float = 2.0
 
 # --- معلمات محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
@@ -103,6 +102,7 @@ except Exception as e:
 # ==============================================================================
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    # ... (code remains the same)
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
     if not client: return []
     try:
@@ -121,7 +121,9 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] Error: {e}", exc_info=True)
         return []
 
+
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    # ... (code remains the same)
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -138,38 +140,25 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    *** محدّثة بالكامل ***
-    هذه الدالة الآن نسخة طبق الأصل من دالة حساب الميزات في البوت الرئيسي c4.py
-    لضمان أن الاختبار الخلفي يستخدم نفس البيانات تمامًا.
-    """
+    # ... (code remains the same as previous update)
     df_calc = df.copy()
-    # معلمات المؤشرات مطابقة للبوت الرئيسي
     RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
     STOCH_RSI_PERIOD, STOCH_RSI_SMA_PERIOD, STOCH_RSI_K_PERIOD, STOCH_RSI_D_PERIOD = 14, 14, 3, 3
     BBANDS_STD_DEV: float = 2.0
-
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     df_calc["rsi"] = 100 - (100 / (1 + rs))
-
-    # Stochastic RSI
     stoch_rsi = 100 * ((df_calc['rsi'] - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()) / \
                        (df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).max() - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()).replace(0, np.nan))
     df_calc['stoch_rsi_k'] = stoch_rsi.rolling(window=STOCH_RSI_K_PERIOD).mean()
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_RSI_D_PERIOD).mean()
-
-    # MACD and Cross
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     df_calc['macd'] = ema_fast - ema_slow
@@ -178,28 +167,24 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     macd_above = df_calc['macd'] > df_calc['macd_signal']
     macd_below = df_calc['macd'] < df_calc['macd_signal']
     df_calc['macd_cross'] = 0
-    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1  # تقاطع صعودي
-    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1 # تقاطع هبوطي
-
-    # Bollinger Bands
+    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
+    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
     df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
     df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
-
-    # Other Features
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
     df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
     df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
-    
     return df_calc.dropna()
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+    # ... (code remains the same)
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn: return None
     try:
@@ -216,23 +201,53 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [Model] Error loading model for {symbol}: {e}", exc_info=True)
         return None
 
+def prepare_btc_trend_filter_data(days: int) -> Optional[pd.Series]:
+    """
+    *** دالة جديدة ***
+    تجلب بيانات البيتكوين وتحسب حالة الاتجاه (صاعد/هابط) لكل شمعة.
+    """
+    logger.info(f"ℹ️ [BTC Filter] Preparing BTC trend filter data for the last {days} days...")
+    df_btc = fetch_historical_data(BTC_SYMBOL, BTC_TREND_TIMEFRAME, days)
+    if df_btc is None or df_btc.empty:
+        logger.error("❌ [BTC Filter] Could not fetch BTC data. The filter will be disabled.")
+        return None
+
+    df_btc['ema'] = df_btc['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
+    df_btc['is_uptrend'] = df_btc['close'] > df_btc['ema']
+
+    logger.info("✅ [BTC Filter] BTC trend filter data prepared successfully.")
+    return df_btc['is_uptrend']
+
 # ==============================================================================
 # ----------------------------- محرك الاختبار الخلفي ----------------------------
 # ==============================================================================
 
-def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any], btc_trend_data: Optional[pd.Series]) -> List[Dict[str, Any]]:
     """
     *** محدّثة بالكامل ***
-    تنفيذ محاكاة التداول مع تطبيق جميع الفلاتر الجديدة من البوت الرئيسي.
+    تنفيذ محاكاة التداول مع دمج وتطبيق فلتر اتجاه البيتكوين.
     """
     trades = []
     model, scaler, feature_names = model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
     
     df_featured = calculate_features(data)
     
+    # --- !! جديد: دمج بيانات اتجاه البيتكوين !! ---
+    if USE_BTC_TREND_FILTER and btc_trend_data is not None:
+        df_featured = pd.merge_asof(
+            df_featured.sort_index(),
+            btc_trend_data.rename('btc_is_uptrend').sort_index(),
+            left_index=True,
+            right_index=True,
+            direction='backward'
+        )
+        df_featured['btc_is_uptrend'].fillna(False, inplace=True) 
+    else:
+        df_featured['btc_is_uptrend'] = True
+
     missing_features = [col for col in feature_names if col not in df_featured.columns]
     if missing_features:
-        logger.error(f"[{symbol}] Missing features required by model: {missing_features}. Skipping symbol.")
+        logger.error(f"[{symbol}] Missing features: {missing_features}. Skipping.")
         return []
 
     features_df = df_featured[feature_names]
@@ -253,15 +268,15 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
                 trade_details.update({'exit_price': trade_details['sl'], 'exit_reason': 'SL Hit'})
             
             if 'exit_price' in trade_details:
-                trade_details.update({
-                    'exit_time': current_candle.name,
-                    'duration_candles': i - trade_details['entry_index']
-                })
+                trade_details.update({'exit_time': current_candle.name, 'duration_candles': i - trade_details['entry_index']})
                 trades.append(trade_details)
                 in_trade, trade_details = False, {}
             continue
 
-        # --- !!! جديد: منطق الدخول المحدث بالكامل ليطابق البوت c4.py !!! ---
+        # --- !!! جديد: تطبيق جميع الفلاتر بما فيها فلتر البيتكوين !!! ---
+        # 0. فلتر اتجاه البيتكوين (أول وأهم فلتر)
+        if not current_candle['btc_is_uptrend']: continue
+        
         # 1. فلتر توقع النموذج
         if current_candle['prediction'] < MODEL_PREDICTION_THRESHOLD: continue
         
@@ -276,15 +291,12 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
         # 4. فلتر Stochastic RSI
         if USE_STOCH_RSI_FILTER:
             k, d = current_candle.get('stoch_rsi_k'), current_candle.get('stoch_rsi_d')
-            if k is None or d is None or not \
-               (STOCH_RSI_LOWER_THRESHOLD <= k <= STOCH_RSI_UPPER_THRESHOLD and 
-                STOCH_RSI_LOWER_THRESHOLD <= d <= STOCH_RSI_UPPER_THRESHOLD): continue
+            if k is None or d is None or not (STOCH_RSI_LOWER_THRESHOLD <= k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= d <= STOCH_RSI_UPPER_THRESHOLD): continue
 
         # 5. فلتر حجم التداول النسبي
         rel_vol = current_candle.get('relative_volume')
         if rel_vol is None or rel_vol < MIN_RELATIVE_VOLUME: continue
 
-        # إذا مرت جميع الفلاتر، يمكن الدخول في صفقة
         if not in_trade:
             in_trade = True
             entry_price = current_candle['close']
@@ -292,28 +304,18 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
             take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
             
-            trade_details = {
-                'symbol': symbol, 'entry_time': current_candle.name, 'entry_price': entry_price,
-                'entry_index': i, 'tp': take_profit, 'sl': stop_loss,
-            }
-            # إضافة تفاصيل الفلاتر عند الدخول للصفقة للتحليل
-            trade_details['debug_info'] = {
-                'prediction': round(current_candle['prediction'], 4),
-                'rsi': round(current_candle.get('rsi', -1), 2),
-                'stoch_k': round(current_candle.get('stoch_rsi_k', -1), 2),
-                'rel_volume': round(current_candle.get('relative_volume', -1), 2)
-            }
+            trade_details = {'symbol': symbol, 'entry_time': current_candle.name, 'entry_price': entry_price, 'entry_index': i, 'tp': take_profit, 'sl': stop_loss}
 
     return trades
 
 def generate_report(all_trades: List[Dict[str, Any]]):
+    # ... (code remains mostly the same, just report header is updated)
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
         return
 
     df_trades = pd.DataFrame(all_trades)
     
-    # تطبيق الانزلاق السعري والعمولة
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
@@ -328,7 +330,6 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     df_trades['pnl_usdt_net'] = (exit_value - entry_cost) - df_trades['commission_total']
     df_trades['pnl_pct_net'] = (df_trades['pnl_usdt_net'] / INITIAL_TRADE_AMOUNT_USDT) * 100
 
-    # إعداد التقرير
     total_trades = len(df_trades)
     winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]
     losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
@@ -344,16 +345,16 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
-    # --- !!! جديد: بناء عنوان التقرير بشكل ديناميكي بناءً على الفلاتر المستخدمة !!! ---
+    # --- !!! جديد: تحديث عنوان التقرير ليشمل فلتر البيتكوين !!! ---
     report_header = f"BACKTESTING REPORT: {BASE_ML_MODEL_NAME}"
     active_filters = []
+    if USE_BTC_TREND_FILTER: active_filters.append("BTC Trend")
     if USE_RSI_FILTER: active_filters.append(f"RSI ({RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
     if USE_MACD_CROSS_FILTER: active_filters.append("MACD Cross")
     if USE_STOCH_RSI_FILTER: active_filters.append(f"StochRSI ({STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
     if MIN_RELATIVE_VOLUME > 0: active_filters.append(f"RelVol (>{MIN_RELATIVE_VOLUME})")
     
-    if active_filters:
-        report_header += " | Filters: " + ", ".join(active_filters)
+    if active_filters: report_header += " | Filters: " + ", ".join(active_filters)
         
     report_str = f"""
 ================================================================================
@@ -383,12 +384,7 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
     try:
         if not os.path.exists('reports'): os.makedirs('reports')
         report_filename = os.path.join('reports', f"backtest_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        
-        # فك تفاصيل التصحيح إلى أعمدة منفصلة
-        debug_df = pd.json_normalize(df_trades['debug_info']).fillna(-1)
-        report_df = pd.concat([df_trades.drop(columns=['debug_info']), debug_df], axis=1)
-
-        report_df.to_csv(report_filename, index=False, encoding='utf-8-sig')
+        df_trades.to_csv(report_filename, index=False, encoding='utf-8-sig')
         logger.info(f"\n================================================================================\n✅ Full trade log saved to: {report_filename}\n================================================================================\n")
     except Exception as e:
         logger.error(f"Could not save report to CSV: {e}")
@@ -398,16 +394,27 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 # ==============================================================================
 
 def start_backtesting_job():
-    logger.info("🚀 Starting synchronized backtesting job...")
+    logger.info("🚀 Starting synchronized backtesting job with BTC Trend Filter...")
     time.sleep(2) 
-    
+
+    # --- !! جديد: إعداد فلتر البيتكوين قبل البدء !! ---
+    btc_trend_series = None
+    if USE_BTC_TREND_FILTER:
+        # نحتاج أيامًا إضافية لحساب المؤشرات بشكل صحيح
+        btc_trend_series = prepare_btc_trend_filter_data(BACKTEST_PERIOD_DAYS + 30)
+        if btc_trend_series is None:
+            # في حال فشل جلب بيانات البيتكوين، يتم تعطيل الفلتر تلقائياً
+            global USE_BTC_TREND_FILTER
+            USE_BTC_TREND_FILTER = False
+            logger.warning("Disabling BTC Trend Filter for this run due to data fetch failure.")
+
     symbols_to_test = get_validated_symbols()
     if not symbols_to_test:
         logger.critical("❌ No valid symbols. Backtesting job will not run.")
         return
         
     all_trades = []
-    data_fetch_days = BACKTEST_PERIOD_DAYS + 15 # أيام إضافية لحساب المؤشرات
+    data_fetch_days = BACKTEST_PERIOD_DAYS + 30
     
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         model_bundle = load_ml_model_bundle_from_db(symbol)
@@ -420,18 +427,19 @@ def start_backtesting_job():
         df_to_test = df_hist[df_hist.index >= backtest_start_date.strftime('%Y-%m-%d')]
 
         if df_to_test.empty:
-            logger.warning(f"[{symbol}] No data available for the backtest period. Skipping.")
+            logger.warning(f"[{symbol}] No data for the backtest period. Skipping.")
             continue
-
-        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle)
+        
+        # تمرير بيانات اتجاه البيتكوين إلى دالة الاختبار
+        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle, btc_trend_series)
         if trades: all_trades.extend(trades)
         
-        time.sleep(0.2) # إيقاف مؤقت طفيف لتجنب استهلاك الموارد
+        time.sleep(0.1)
 
     generate_report(all_trades)
     
     if conn: conn.close(); logger.info("✅ Database connection closed.")
-    logger.info("👋 Backtesting job finished. The web service will remain active.")
+    logger.info("👋 Backtesting job finished.")
 
 # ==============================================================================
 # --------------------------------- التنفيذ -----------------------------------
