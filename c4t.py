@@ -221,7 +221,8 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             right_index=True,
             direction='backward'
         )
-        df_featured['btc_is_uptrend'].fillna(False, inplace=True) 
+        # *** الإصلاح الأول: تجنب التحذير "FutureWarning" ***
+        df_featured['btc_is_uptrend'] = df_featured['btc_is_uptrend'].fillna(False)
     else:
         df_featured['btc_is_uptrend'] = True
 
@@ -231,8 +232,15 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
         return []
 
     features_df = df_featured[feature_names]
-    features_scaled = scaler.transform(features_df)
-    predictions = model.predict_proba(features_scaled)[:, 1]
+    
+    # *** الإصلاح الثاني: تجنب التحذير "UserWarning" ***
+    # 1. قم بتحويل البيانات باستخدام المعاير (scaler)
+    features_scaled_np = scaler.transform(features_df)
+    # 2. قم بإعادة تحويلها إلى DataFrame مع أسماء الميزات الصحيحة
+    features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
+    # 3. مرر الـ DataFrame إلى النموذج للتنبؤ
+    predictions = model.predict_proba(features_scaled_df)[:, 1]
+    
     df_featured['prediction'] = predictions
     
     in_trade = False
@@ -366,7 +374,6 @@ def start_backtesting_job():
     logger.info("🚀 Starting synchronized backtesting job with BTC Trend Filter...")
     time.sleep(2) 
 
-    # *** تم الإصلاح: استخدام متغير محلي لتتبع حالة الفلتر ***
     btc_filter_active_for_run = USE_BTC_TREND_FILTER
     btc_trend_series = None
     if btc_filter_active_for_run:
