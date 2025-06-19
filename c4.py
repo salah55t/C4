@@ -60,18 +60,15 @@ USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
-RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 9, 20, 14
+
+# --- !!! جديد: تحديث معلمات المؤشرات وإضافة فلتر MACD !!! ---
+RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
 BBANDS_STD_DEV: float = 2.0
 USE_RSI_FILTER = True
 RSI_LOWER_THRESHOLD = 40
 RSI_UPPER_THRESHOLD = 69
+USE_MACD_CROSS_FILTER = True # *** إضافة جديدة: تفعيل فلتر تقاطع MACD ***
 
-# --- إعدادات فلتر MACD الجديدة ---
-USE_MACD_FILTER: bool = True
-MACD_SHORT_PERIOD: int = 12
-MACD_LONG_PERIOD: int = 26
-MACD_SIGNAL_PERIOD: int = 9
-MACD_DIF_CROSSOVER_ONLY: bool = True # فلتر لتقاطع DIF صعوديا فوق DEA
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -84,8 +81,6 @@ current_prices: Dict[str, float] = {}
 prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
-
-# --- !!! جديد: متغيرات حالة البوت !!! ---
 bot_status_info = {"status": "INITIALIZING", "message": "البوت قيد التشغيل والتهيئة..."}
 bot_status_lock = Lock()
 
@@ -215,19 +210,16 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
-
-    # --- حسابات MACD: DIF و DEA (MACD Signal) و MACD Hist ---
-    ema_fast = df_calc['close'].ewm(span=MACD_SHORT_PERIOD, adjust=False).mean() # DIF (MACD Line)
-    ema_slow = df_calc['close'].ewm(span=MACD_LONG_PERIOD, adjust=False).mean()  # Slow EMA
-    df_calc['macd_line'] = ema_fast - ema_slow # هذا هو DIF
-    df_calc['macd_signal_line'] = df_calc['macd_line'].ewm(span=MACD_SIGNAL_PERIOD, adjust=False).mean() # هذا هو DEA
-    df_calc['macd_hist'] = df_calc['macd_line'] - df_calc['macd_signal_line'] # هذا هو MACD Hist
-
-    # تحديد تقاطع MACD
-    # DIF يخترق صعودياً DEA
-    df_calc['macd_crossover_up'] = (df_calc['macd_line'] > df_calc['macd_signal_line']) & \
-                                   (df_calc['macd_line'].shift(1) <= df_calc['macd_signal_line'].shift(1))
-
+    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
+    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+    df_calc['macd'] = ema_fast - ema_slow
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean() # *** سيستخدم MACD_SIGNAL=10 الآن ***
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    macd_above = df_calc['macd'] > df_calc['macd_signal']
+    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    df_calc['macd_cross'] = 0
+    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1  # تقاطع صعودي
+    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1 # تقاطع هبوطي
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
@@ -317,69 +309,36 @@ class TradingStrategy:
             return None
         last_row = df_processed.iloc[-1]
         try:
+            # *** تعديل: تطبيق فلتر تقاطع MACD ***
+            if USE_MACD_CROSS_FILTER:
+                if last_row.get('macd_cross') != 1:
+                    return None # إلغاء الإشارة إذا لم يكن هناك تقاطع صعودي
+                logger.info(f"✅ [{self.symbol}] نجح فلتر تقاطع MACD. (تقاطع صعودي)")
+
             if USE_RSI_FILTER:
                 current_rsi = last_row.get('rsi')
                 if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
-                    logger.info(f"ℹ️ [{self.symbol}] فشل فلتر RSI. RSI الحالي: {current_rsi:.2f}")
                     return None
                 logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
-
-            # --- فلتر MACD الجديد ---
-            if USE_MACD_FILTER:
-                # تحقق من وجود بيانات كافية لـ MACD
-                if len(df_processed) < max(MACD_SHORT_PERIOD, MACD_LONG_PERIOD, MACD_SIGNAL_PERIOD) + 1:
-                    logger.info(f"ℹ️ [{self.symbol}] بيانات غير كافية لفلتر MACD.")
-                    return None
-                
-                # تحقق من تقاطع DIF صعوديا فوق DEA في الشمعة الأخيرة
-                # macd_line هي DIF، macd_signal_line هي DEA
-                current_macd_line = last_row.get('macd_line')
-                current_macd_signal_line = last_row.get('macd_signal_line')
-                prev_macd_line = df_processed.iloc[-2].get('macd_line')
-                prev_macd_signal_line = df_processed.iloc[-2].get('macd_signal_line')
-
-                if current_macd_line is None or current_macd_signal_line is None or \
-                   prev_macd_line is None or prev_macd_signal_line is None:
-                    logger.info(f"ℹ️ [{self.symbol}] قيم MACD غير متوفرة لفلتر MACD.")
-                    return None
-
-                macd_crossover_up_triggered = (current_macd_line > current_macd_signal_line) and \
-                                              (prev_macd_line <= prev_macd_signal_line)
-                
-                if MACD_DIF_CROSSOVER_ONLY and not macd_crossover_up_triggered:
-                    logger.info(f"ℹ️ [{self.symbol}] فشل فلتر MACD. لم يحدث تقاطع DIF صعوديا فوق DEA.")
-                    return None
-                elif not MACD_DIF_CROSSOVER_ONLY and not (current_macd_line > current_macd_signal_line):
-                    # إذا لم نكن نركز فقط على التقاطع، فنتأكد من أن MACD Line (DIF) فوق Signal Line (DEA)
-                    logger.info(f"ℹ️ [{self.symbol}] فشل فلتر MACD. MACD Line ليست فوق Signal Line.")
-                    return None
-                
-                logger.info(f"✅ [{self.symbol}] نجح فلتر MACD. DIF: {current_macd_line:.4f}, DEA: {current_macd_signal_line:.4f}")
-                
+            
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
-            if features_df.isnull().values.any():
-                logger.warning(f"⚠️ [{self.symbol}] يوجد قيم NaN في الميزات. سيتم التخطي.")
-                return None
+            if features_df.isnull().values.any(): return None
             
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0][1]
             
-            if prediction_proba < MODEL_PREDICTION_THRESHOLD:
-                logger.info(f"ℹ️ [{self.symbol}] احتمالية ML منخفضة: {prediction_proba:.2%}. سيتم التخطي.")
-                return None
+            if prediction_proba < MODEL_PREDICTION_THRESHOLD: return None
             
             logger.info(f"✅ [العثور على إشارة] {self.symbol}: إشارة محتملة باحتمالية {prediction_proba:.2%}.")
-            
             signal_details = {
-                'ML_Probability': f"{prediction_proba:.2%}",
+                'ML_Probability': f"{prediction_proba:.2%}", 
                 'RSI_Value': f"{last_row.get('rsi'):.2f}",
-                'MACD_Line': f"{last_row.get('macd_line'):.4f}",
-                'MACD_Signal_Line': f"{last_row.get('macd_signal_line'):.4f}"
+                'MACD_Cross': last_row.get('macd_cross') # إضافة للشفافية
             }
             return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': signal_details}
         except Exception as e:
-            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
+            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}")
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
@@ -396,9 +355,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     profit_pct = ((target / entry) - 1) * 100
     rsi_value = signal_data['signal_details'].get('RSI_Value', 'N/A')
     ml_prob = signal_data['signal_details'].get('ML_Probability', 'N/A')
-    macd_line = signal_data['signal_details'].get('MACD_Line', 'N/A')
-    macd_signal_line = signal_data['signal_details'].get('MACD_Signal_Line', 'N/A')
-
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
@@ -407,9 +363,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
                f"🔍 *مستوى الثقة (ML):* {ml_prob}\n"
                f"📊 *مؤشر القوة النسبية (RSI):* `{rsi_value}`\n"
-               f"📊 *مؤشر MACD (DIF):* `{macd_line}`\n"
-               f"📊 *مؤشر MACD (DEA):* `{macd_signal_line}`")
-
+               f"🔀 *فلتر MACD:* تقاطع صعودي مؤكد")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
@@ -508,7 +462,6 @@ def get_btc_trend() -> Dict[str, Any]:
         if current_price > ema:
             status, message = "Uptrend", f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
         else:
-            # تم تصحيح الخطأ الإملائي هنا
             status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
         return {"status": status, "message": message, "is_uptrend": (status == "Uptrend")}
     except Exception as e:
@@ -621,7 +574,6 @@ def home():
     except FileNotFoundError:
         return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
 
-# --- !!! جديد: API لحالة البوت !!! ---
 @app.route('/api/bot_status')
 def get_bot_status():
     with bot_status_lock:
