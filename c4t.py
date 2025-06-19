@@ -23,12 +23,12 @@ TIMEFRAME: str = '15m'
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.85
+MODEL_PREDICTION_THRESHOLD: float = 0.70
 ATR_SL_MULTIPLIER: float = 2.0
-ATR_TP_MULTIPLIER: float = 3.0
+ATR_TP_MULTIPLIER: float = 3.5
 
 # --- فلاتر الاستراتيجية المحدثة لتطابق البوت c4.py ---
-USE_BTC_TREND_FILTER: bool = True
+USE_BTC_TREND_FILTER: bool = False
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 10
