@@ -51,7 +51,7 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
 MIN_VOLUME_24H_USDT: float = 10_000_000
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
-MODEL_PREDICTION_THRESHOLD = 0.70
+MODEL_PREDICTION_THRESHOLD = 0.85 # زيادة العتبة لزيادة الربحية وتقليل الإشارات الخاطئة
 USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 3.0
@@ -63,11 +63,17 @@ BTC_TREND_EMA_PERIOD = 10
 
 # --- !!! جديد: تحديث معلمات المؤشرات وإضافة فلتر MACD !!! ---
 RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
+STOCH_RSI_PERIOD, STOCH_RSI_SMA_PERIOD, STOCH_RSI_K_PERIOD, STOCH_RSI_D_PERIOD = 14, 14, 3, 3
+USE_STOCH_RSI_FILTER = True
+STOCH_RSI_LOWER_THRESHOLD = 25
+STOCH_RSI_UPPER_THRESHOLD = 75
 BBANDS_STD_DEV: float = 2.0
 USE_RSI_FILTER = True
-RSI_LOWER_THRESHOLD = 40
-RSI_UPPER_THRESHOLD = 69
+RSI_LOWER_THRESHOLD = 45
+RSI_UPPER_THRESHOLD = 65
 USE_MACD_CROSS_FILTER = True # *** إضافة جديدة: تفعيل فلتر تقاطع MACD ***
+MIN_RELATIVE_VOLUME = 2.0 # *** إضافة جديدة: فلتر حجم التداول النسبي ***
+
 
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -209,7 +215,12 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
-    df_calc['rsi'] = 100 - (100 / (1 + rs))
+    df_calc["rsi"] = 100 - (100 / (1 + rs))
+    # Stochastic RSI
+    stoch_rsi = 100 * ((df_calc['rsi'] - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()) / \
+                       (df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).max() - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()).replace(0, np.nan))
+    df_calc['stoch_rsi_k'] = stoch_rsi.rolling(window=STOCH_RSI_K_PERIOD).mean()
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_RSI_D_PERIOD).mean()
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     df_calc['macd'] = ema_fast - ema_slow
@@ -316,11 +327,24 @@ class TradingStrategy:
                 logger.info(f"✅ [{self.symbol}] نجح فلتر تقاطع MACD. (تقاطع صعودي)")
 
             if USE_RSI_FILTER:
-                current_rsi = last_row.get('rsi')
+                current_rsi = last_row.get(\'rsi\')
                 if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
                     return None
                 logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
-            
+
+            if USE_STOCH_RSI_FILTER:
+                current_stoch_rsi_k = last_row.get(\'stoch_rsi_k\')
+                current_stoch_rsi_d = last_row.get(\'stoch_rsi_d\')
+                if current_stoch_rsi_k is None or current_stoch_rsi_d is None or not (STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_d <= STOCH_RSI_UPPER_THRESHOLD):
+                    return None
+                logger.info(f"✅ [{self.symbol}] نجح فلتر Stochastic RSI. K: {current_stoch_rsi_k:.2f}, D: {current_stoch_rsi_d:.2f} (ضمن النطاق {STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
+
+            # *** إضافة جديدة: فلتر حجم التداول النسبي ***
+            current_relative_volume = last_row.get(\'relative_volume\')
+            if current_relative_volume is None or current_relative_volume < MIN_RELATIVE_VOLUME:
+                logger.info(f"❌ [{self.symbol}] فشل فلتر حجم التداول النسبي. الحجم الحالي: {current_relative_volume:.2f} (المطلوب: >= {MIN_RELATIVE_VOLUME})")
+                return None
+            logger.info(f"✅ [{self.symbol}] نجح فلتر حجم التداول النسبي. الحجم الحالي: {current_relative_volume:.2f}")           
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any(): return None
             
