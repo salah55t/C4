@@ -327,20 +327,20 @@ class TradingStrategy:
                 logger.info(f"✅ [{self.symbol}] نجح فلتر تقاطع MACD. (تقاطع صعودي)")
 
             if USE_RSI_FILTER:
-                current_rsi = last_row.get(\'rsi\')
+                current_rsi = last_row.get('rsi')
                 if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
                     return None
                 logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
 
             if USE_STOCH_RSI_FILTER:
-                current_stoch_rsi_k = last_row.get(\'stoch_rsi_k\')
-                current_stoch_rsi_d = last_row.get(\'stoch_rsi_d\')
+                current_stoch_rsi_k = last_row.get('stoch_rsi_k')
+                current_stoch_rsi_d = last_row.get('stoch_rsi_d')
                 if current_stoch_rsi_k is None or current_stoch_rsi_d is None or not (STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_d <= STOCH_RSI_UPPER_THRESHOLD):
                     return None
                 logger.info(f"✅ [{self.symbol}] نجح فلتر Stochastic RSI. K: {current_stoch_rsi_k:.2f}, D: {current_stoch_rsi_d:.2f} (ضمن النطاق {STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
 
             # *** إضافة جديدة: فلتر حجم التداول النسبي ***
-            current_relative_volume = last_row.get(\'relative_volume\')
+            current_relative_volume = last_row.get('relative_volume')
             if current_relative_volume is None or current_relative_volume < MIN_RELATIVE_VOLUME:
                 logger.info(f"❌ [{self.symbol}] فشل فلتر حجم التداول النسبي. الحجم الحالي: {current_relative_volume:.2f} (المطلوب: >= {MIN_RELATIVE_VOLUME})")
                 return None
