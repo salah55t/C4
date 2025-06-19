@@ -26,17 +26,17 @@ TIMEFRAME: str = '15m'
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.70
+MODEL_PREDICTION_THRESHOLD: float = 0.80
 ATR_SL_MULTIPLIER: float = 2.0
-ATR_TP_MULTIPLIER: float = 3.0
+ATR_TP_MULTIPLIER: float = 4
 USE_TRAILING_STOP: bool = False
 #TRAILING_STOP_ACTIVATE_PERCENT: float = 0.75
 #TRAILING_STOP_DISTANCE_PERCENT: float = 1.0
 
 # --- !!! تعديل: تم تغيير فلتر RSI إلى نطاق !!! ---
 USE_RSI_FILTER: bool = True
-RSI_LOWER_THRESHOLD: float = 40.0 # الحد الأدنى لفلتر RSI
-RSI_UPPER_THRESHOLD: float = 69.0 # الحد الأعلى لفلتر RSI
+RSI_LOWER_THRESHOLD: float = 45.0 # الحد الأدنى لفلتر RSI
+RSI_UPPER_THRESHOLD: float = 65.0 # الحد الأعلى لفلتر RSI
 
 # --- إعدادات فلتر MACD الجديدة ---
 USE_MACD_FILTER: bool = True
