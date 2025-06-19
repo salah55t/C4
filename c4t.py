@@ -16,59 +16,63 @@ from tqdm import tqdm
 from flask import Flask
 
 # ==============================================================================
-# --------------------------- إعدادات الاختبار الخلفي ----------------------------
+# --------------------------- إعدادات الاختبار الخلفي (محدثة لـ V5) ----------------------------
 # ==============================================================================
+# الفترة الزمنية للاختبار بالايام
 BACKTEST_PERIOD_DAYS: int = 180
+# الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
+# اسم النموذج الأساسي الذي سيتم اختباره (تم التحديث إلى V5)
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 
-# --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
+# --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
 MODEL_PREDICTION_THRESHOLD: float = 0.70
-ATR_SL_MULTIPLIER: float = 2.0
-ATR_TP_MULTIPLIER: float = 3.5
+ATR_SL_MULTIPLIER: float = 1.5
+ATR_TP_MULTIPLIER: float = 2.0
+USE_TRAILING_STOP: bool = False
 
-# --- فلاتر الاستراتيجية المحدثة لتطابق البوت c4.py ---
-USE_BTC_TREND_FILTER: bool = False
-BTC_SYMBOL: str = 'BTCUSDT'
-BTC_TREND_TIMEFRAME: str = '4h'
-BTC_TREND_EMA_PERIOD: int = 10
-
-USE_RSI_FILTER: bool = True
-RSI_LOWER_THRESHOLD: float = 45.0
-RSI_UPPER_THRESHOLD: float = 65.0
-
-USE_MACD_CROSS_FILTER: bool = True
-
-USE_STOCH_RSI_FILTER: bool = True
-STOCH_RSI_LOWER_THRESHOLD: float = 25.0
-STOCH_RSI_UPPER_THRESHOLD: float = 75.0
-
-MIN_RELATIVE_VOLUME: float = 2.0
-
-# --- معلمات محاكاة التكاليف الواقعية ---
+# --- محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
 SLIPPAGE_PERCENT: float = 0.05
 INITIAL_TRADE_AMOUNT_USDT: float = 10.0
+
+# --- معلمات المؤشرات (من c4.py) ---
+RSI_PERIOD: int = 14
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+ATR_PERIOD: int = 14
+EMA_SLOW_PERIOD: int = 200
+EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+BTC_SYMBOL = 'BTCUSDT'
+# --- تمت إضافة معلمات المؤشرات الجديدة ---
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
+
 
 # ==============================================================================
 # ---------------------------- إعدادات النظام والاتصال -------------------------
 # ==============================================================================
 
+# إعداد التسجيل (Logging)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtester.log', encoding='utf-8'),
+        logging.FileHandler('backtester_v5.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('Backtester')
+logger = logging.getLogger('BacktesterV5')
 
+# إعداد خادم الويب
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Backtester service is running and alive."
+    return "Backtester service for V5 is running."
 
+# تحميل متغيرات البيئة
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
@@ -77,6 +81,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
+# إعداد عميل Binance
 client: Optional[Client] = None
 try:
     client = Client(API_KEY, API_SECRET)
@@ -85,6 +90,7 @@ except Exception as e:
     logger.critical(f"❌ [Binance] فشل الاتصال: {e}")
     exit(1)
 
+# إعداد الاتصال بقاعدة البيانات
 conn: Optional[psycopg2.extensions.connection] = None
 try:
     conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
@@ -98,17 +104,28 @@ except Exception as e:
 # ==============================================================================
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    تقرأ قائمة العملات وتتحقق من وجودها وصلاحيتها للتداول على Binance.
+    """
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
-    if not client: return []
+    if not client:
+        logger.error("Binance client not initialized.")
+        return []
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
-        if not os.path.exists(file_path): logger.error(f"File not found: {file_path}"); return []
+        
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return []
+
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {s.strip().upper() for s in f if s.strip() and not s.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        
         exchange_info = client.get_exchange_info()
-        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING'}
+        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s['status'] == 'TRADING' and s['quoteAsset'] == 'USDT'}
+        
         validated = sorted(list(formatted.intersection(active_symbols)))
         logger.info(f"✅ [Validation] Found {len(validated)} symbols to backtest.")
         return validated
@@ -117,14 +134,21 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    """
+    تجلب البيانات التاريخية من Binance.
+    """
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
-        if not klines: logger.warning(f"⚠️ No historical data for {symbol}"); return None
+        if not klines:
+            logger.warning(f"⚠️ No historical data found for {symbol} for the given period.")
+            return None
+            
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df[['open', 'high', 'low', 'close', 'volume']].dropna()
@@ -132,114 +156,116 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}")
         return None
 
-def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    تحسب جميع المؤشرات والميزات المطلوبة لنموذج V5.
+    """
     df_calc = df.copy()
-    RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
-    STOCH_RSI_PERIOD, STOCH_RSI_SMA_PERIOD, STOCH_RSI_K_PERIOD, STOCH_RSI_D_PERIOD = 14, 14, 3, 3
-    BBANDS_STD_DEV: float = 2.0
+
+    # ATR (موجود بالفعل)
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
+    # RSI (الفلتر الأول - موجود)
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df_calc["rsi"] = 100 - (100 / (1 + rs))
-    stoch_rsi = 100 * ((df_calc['rsi'] - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()) / \
-                       (df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).max() - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()).replace(0, np.nan))
-    df_calc['stoch_rsi_k'] = stoch_rsi.rolling(window=STOCH_RSI_K_PERIOD).mean()
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_RSI_D_PERIOD).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # MACD and MACD Cross (الفلتر الثاني - محدث)
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd'] = ema_fast - ema_slow
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-    macd_above = df_calc['macd'] > df_calc['macd_signal']
-    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    # اكتشاف التقاطع
     df_calc['macd_cross'] = 0
-    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
-    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
-    df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
-    df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
-    df_calc['day_of_week'] = df_calc.index.dayofweek
+    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
+
+    # Stochastic RSI (الفلتر الثالث - جديد)
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
+    # Relative Volume (الفلتر الرابع - موجود)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
+    # الميزات الأخرى الموجودة
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
-    df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
-    df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
-    df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
+    
     return df_calc.dropna()
 
+
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    تحمل حزمة النموذج (النموذج + المعاير + أسماء الميزات) من قاعدة البيانات.
+    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn: return None
     try:
         with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s LIMIT 1;", (model_name,))
+            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
             result = db_cur.fetchone()
             if result and result.get('model_data'):
                 model_bundle = pickle.loads(result['model_data'])
-                logger.info(f"✅ [Model] Loaded model '{model_name}' for {symbol}.")
+                logger.info(f"✅ [Model] Successfully loaded model '{model_name}' for {symbol}.")
                 return model_bundle
-            logger.warning(f"⚠️ [Model] Model '{model_name}' not found for {symbol}.")
+            logger.warning(f"⚠️ [Model] Model '{model_name}' not found in DB for {symbol}.")
             return None
     except Exception as e:
         logger.error(f"❌ [Model] Error loading model for {symbol}: {e}", exc_info=True)
         return None
 
-def prepare_btc_trend_filter_data(days: int) -> Optional[pd.Series]:
-    logger.info(f"ℹ️ [BTC Filter] Preparing BTC trend filter data for the last {days} days...")
-    df_btc = fetch_historical_data(BTC_SYMBOL, BTC_TREND_TIMEFRAME, days)
-    if df_btc is None or df_btc.empty:
-        logger.error("❌ [BTC Filter] Could not fetch BTC data. The filter will be disabled.")
-        return None
-    df_btc['ema'] = df_btc['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
-    df_btc['is_uptrend'] = df_btc['close'] > df_btc['ema']
-    logger.info("✅ [BTC Filter] BTC trend filter data prepared successfully.")
-    return df_btc['is_uptrend']
-
 # ==============================================================================
 # ----------------------------- محرك الاختبار الخلفي ----------------------------
 # ==============================================================================
 
-def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any], btc_trend_data: Optional[pd.Series]) -> List[Dict[str, Any]]:
+def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    تقوم بتنفيذ محاكاة التداول على البيانات التاريخية لعملة واحدة.
+    """
     trades = []
-    model, scaler, feature_names = model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
     
-    df_featured = calculate_features(data)
+    model = model_bundle['model']
+    scaler = model_bundle['scaler']
+    feature_names = model_bundle['feature_names']
     
-    if btc_trend_data is not None:
-        df_featured = pd.merge_asof(
-            df_featured.sort_index(),
-            btc_trend_data.rename('btc_is_uptrend').sort_index(),
-            left_index=True,
-            right_index=True,
-            direction='backward'
-        )
-        # *** الإصلاح الأول: تجنب التحذير "FutureWarning" ***
-        df_featured['btc_is_uptrend'] = df_featured['btc_is_uptrend'].fillna(False)
-    else:
-        df_featured['btc_is_uptrend'] = True
-
-    missing_features = [col for col in feature_names if col not in df_featured.columns]
-    if missing_features:
-        logger.error(f"[{symbol}] Missing features: {missing_features}. Skipping.")
+    df_featured = calculate_features(data, btc_data)
+    
+    # التأكد من أن جميع الأعمدة المطلوبة موجودة
+    missing = [col for col in feature_names if col not in df_featured.columns]
+    if missing:
+        logger.error(f"Missing features {missing} for {symbol}. Skipping.")
         return []
 
     features_df = df_featured[feature_names]
-    
-    # *** الإصلاح الثاني: تجنب التحذير "UserWarning" ***
-    # 1. قم بتحويل البيانات باستخدام المعاير (scaler)
     features_scaled_np = scaler.transform(features_df)
-    # 2. قم بإعادة تحويلها إلى DataFrame مع أسماء الميزات الصحيحة
     features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
-    # 3. مرر الـ DataFrame إلى النموذج للتنبؤ
-    predictions = model.predict_proba(features_scaled_df)[:, 1]
+    
+    try:
+        class_1_index = list(model.classes_).index(1)
+        predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
+    except (ValueError, IndexError):
+        logger.error(f"Could not find class '1' in model for {symbol}. Skipping.")
+        return []
     
     df_featured['prediction'] = predictions
     
@@ -251,43 +277,44 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
         
         if in_trade:
             if current_candle['high'] >= trade_details['tp']:
-                trade_details.update({'exit_price': trade_details['tp'], 'exit_reason': 'TP Hit'})
+                trade_details['exit_price'] = trade_details['tp']
+                trade_details['exit_reason'] = 'TP Hit'
             elif current_candle['low'] <= trade_details['sl']:
-                trade_details.update({'exit_price': trade_details['sl'], 'exit_reason': 'SL Hit'})
+                trade_details['exit_price'] = trade_details['sl']
+                trade_details['exit_reason'] = 'SL Hit'
             
-            if 'exit_price' in trade_details:
-                trade_details.update({'exit_time': current_candle.name, 'duration_candles': i - trade_details['entry_index']})
+            if trade_details.get('exit_price'):
+                trade_details['exit_time'] = current_candle.name
+                trade_details['duration_candles'] = i - trade_details['entry_index']
                 trades.append(trade_details)
-                in_trade, trade_details = False, {}
+                in_trade = False
+                trade_details = {}
             continue
 
-        if not current_candle['btc_is_uptrend']: continue
-        if current_candle['prediction'] < MODEL_PREDICTION_THRESHOLD: continue
-        if USE_MACD_CROSS_FILTER and current_candle.get('macd_cross') != 1: continue
-        
-        if USE_RSI_FILTER:
-            current_rsi = current_candle.get('rsi')
-            if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD): continue
-            
-        if USE_STOCH_RSI_FILTER:
-            k, d = current_candle.get('stoch_rsi_k'), current_candle.get('stoch_rsi_d')
-            if k is None or d is None or not (STOCH_RSI_LOWER_THRESHOLD <= k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= d <= STOCH_RSI_UPPER_THRESHOLD): continue
-
-        rel_vol = current_candle.get('relative_volume')
-        if rel_vol is None or rel_vol < MIN_RELATIVE_VOLUME: continue
-
-        if not in_trade:
+        if not in_trade and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
             entry_price = current_candle['close']
             atr_value = current_candle['atr']
+            
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
             take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
             
-            trade_details = {'symbol': symbol, 'entry_time': current_candle.name, 'entry_price': entry_price, 'entry_index': i, 'tp': take_profit, 'sl': stop_loss}
+            trade_details = {
+                'symbol': symbol,
+                'entry_time': current_candle.name,
+                'entry_price': entry_price,
+                'entry_index': i,
+                'tp': take_profit,
+                'sl': stop_loss,
+            }
 
     return trades
 
-def generate_report(all_trades: List[Dict[str, Any]], btc_filter_was_active: bool):
+def generate_report(all_trades: List[Dict[str, Any]]):
+    """
+    تنشئ وتعرض تقريرًا مفصلاً بنتائج الاختبار الخلفي،
+    مع تطبيق الانزلاق السعري والعمولة للحصول على نتائج واقعية.
+    """
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
         return
@@ -300,10 +327,8 @@ def generate_report(all_trades: List[Dict[str, Any]], btc_filter_was_active: boo
     
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
-    
     commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
     commission_exit = exit_value * (COMMISSION_PERCENT / 100)
-    
     df_trades['commission_total'] = commission_entry + commission_exit
     df_trades['pnl_usdt_net'] = (exit_value - entry_cost) - df_trades['commission_total']
     df_trades['pnl_pct_net'] = (df_trades['pnl_usdt_net'] / INITIAL_TRADE_AMOUNT_USDT) * 100
@@ -311,32 +336,19 @@ def generate_report(all_trades: List[Dict[str, Any]], btc_filter_was_active: boo
     total_trades = len(df_trades)
     winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]
     losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
-    
     win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
     total_net_pnl = df_trades['pnl_usdt_net'].sum()
-    
     gross_profit = winning_trades['pnl_usdt_net'].sum()
     gross_loss = abs(losing_trades['pnl_usdt_net'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-    
     avg_win = winning_trades['pnl_usdt_net'].mean() if len(winning_trades) > 0 else 0
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
-    report_header = f"BACKTESTING REPORT: {BASE_ML_MODEL_NAME}"
-    active_filters = []
-    if btc_filter_was_active: active_filters.append("BTC Trend")
-    if USE_RSI_FILTER: active_filters.append(f"RSI ({RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
-    if USE_MACD_CROSS_FILTER: active_filters.append("MACD Cross")
-    if USE_STOCH_RSI_FILTER: active_filters.append(f"StochRSI ({STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
-    if MIN_RELATIVE_VOLUME > 0: active_filters.append(f"RelVol (>{MIN_RELATIVE_VOLUME})")
-    
-    if active_filters: report_header += " | Filters: " + ", ".join(active_filters)
-        
     report_str = f"""
 ================================================================================
-📈 {report_header}
-Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME}) | Model Threshold: {MODEL_PREDICTION_THRESHOLD}
+📈 BACKTESTING REPORT: {BASE_ML_MODEL_NAME}
+Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME})
 Costs: {COMMISSION_PERCENT}% commission/trade, {SLIPPAGE_PERCENT}% slippage
 ================================================================================
 
@@ -359,9 +371,10 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
     logger.info(report_str)
     
     try:
-        if not os.path.exists('reports'): os.makedirs('reports')
-        report_filename = os.path.join('reports', f"backtest_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        df_trades.to_csv(report_filename, index=False, encoding='utf-8-sig')
+        if not os.path.exists('reports'):
+            os.makedirs('reports')
+        report_filename = os.path.join('reports', f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        df_trades.to_csv(report_filename, index=False)
         logger.info(f"\n================================================================================\n✅ Full trade log saved to: {report_filename}\n================================================================================\n")
     except Exception as e:
         logger.error(f"Could not save report to CSV: {e}")
@@ -371,48 +384,61 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 # ==============================================================================
 
 def start_backtesting_job():
-    logger.info("🚀 Starting synchronized backtesting job with BTC Trend Filter...")
+    """
+    هذه هي الوظيفة التي تقوم بتشغيل عملية الاختبار الخلفي بأكملها.
+    """
+    logger.info("🚀 Starting backtesting job for V5 Strategy...")
     time.sleep(2) 
-
-    btc_filter_active_for_run = USE_BTC_TREND_FILTER
-    btc_trend_series = None
-    if btc_filter_active_for_run:
-        btc_trend_series = prepare_btc_trend_filter_data(BACKTEST_PERIOD_DAYS + 30)
-        if btc_trend_series is None:
-            btc_filter_active_for_run = False
-            logger.warning("Disabling BTC Trend Filter for this run due to data fetch failure.")
-
+    
     symbols_to_test = get_validated_symbols()
+    
     if not symbols_to_test:
-        logger.critical("❌ No valid symbols. Backtesting job will not run.")
+        logger.critical("❌ No valid symbols to test. Backtesting job will not run.")
         return
         
     all_trades = []
+    
     data_fetch_days = BACKTEST_PERIOD_DAYS + 30
     
+    logger.info(f"ℹ️ [BTC Data] Fetching historical data for {BTC_SYMBOL}...")
+    btc_data = fetch_historical_data(BTC_SYMBOL, TIMEFRAME, data_fetch_days)
+    if btc_data is None:
+        logger.critical("❌ Failed to fetch BTC data. Cannot proceed with backtest.")
+        return
+    btc_data['btc_returns'] = btc_data['close'].pct_change()
+    logger.info("✅ [BTC Data] Successfully fetched and processed BTC data.")
+
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
+        if symbol == BTC_SYMBOL:
+            continue
+            
         model_bundle = load_ml_model_bundle_from_db(symbol)
-        if not model_bundle: continue
+        if not model_bundle:
+            continue
             
         df_hist = fetch_historical_data(symbol, TIMEFRAME, data_fetch_days)
-        if df_hist is None or df_hist.empty: continue
+        if df_hist is None or df_hist.empty:
+            continue
             
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
-        df_to_test = df_hist[df_hist.index >= backtest_start_date.strftime('%Y-%m-%d')]
+        df_to_test = df_hist[df_hist.index >= backtest_start_date]
+        # التأكد من أن بيانات البيتكوين متوفرة لنفس الفترة
+        btc_to_test = btc_data[btc_data.index.isin(df_to_test.index)]
 
-        if df_to_test.empty:
-            logger.warning(f"[{symbol}] No data for the backtest period. Skipping.")
-            continue
-        
-        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle, btc_trend_series)
-        if trades: all_trades.extend(trades)
-        
-        time.sleep(0.1)
 
-    generate_report(all_trades, btc_filter_active_for_run)
+        trades = run_backtest_for_symbol(symbol, df_to_test, btc_to_test, model_bundle)
+        if trades:
+            all_trades.extend(trades)
+        
+        time.sleep(0.5)
+
+    generate_report(all_trades)
     
-    if conn: conn.close(); logger.info("✅ Database connection closed.")
-    logger.info("👋 Backtesting job finished.")
+    if conn:
+        conn.close()
+        logger.info("✅ Database connection closed.")
+        
+    logger.info("👋 Backtesting job finished. The web service will remain active.")
 
 # ==============================================================================
 # --------------------------------- التنفيذ -----------------------------------
@@ -425,10 +451,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
-    
-    try:
-        from waitress import serve
-        serve(app, host='0.0.0.0', port=port, threads=4)
-    except ImportError:
-        logger.warning("Waitress not found, using Flask's development server.")
-        app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port)

@@ -8,29 +8,29 @@ import pandas as pd
 import psycopg2
 import pickle
 import lightgbm as lgb
-from psycopg2 import sql, OperationalError, InterfaceError
+from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
 from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
-from flask import Flask, request, Response
-from threading import Thread
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
+from flask import Flask
+from threading import Thread
 
-# ---------------------- إعداد التسجيل ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v5.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer')
+logger = logging.getLogger('MLTrainer_V5')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -44,63 +44,76 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4' # <-- تم تحديث إصدار النموذج ليشمل الميزات الجديدة
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
+BTC_SYMBOL = 'BTCUSDT'
 
-# Indicator Parameters
+# Indicator & Feature Parameters
 RSI_PERIOD: int = 14
-MACD_FAST: int = 12
-MACD_SLOW: int = 26
-MACD_SIGNAL: int = 9
-BBANDS_PERIOD: int = 20
-BBANDS_STD_DEV: float = 2.0
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
+EMA_SLOW_PERIOD: int = 200
+EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+
+# Triple-Barrier Method Parameters
+TP_ATR_MULTIPLIER: float = 2.0
+SL_ATR_MULTIPLIER: float = 1.5
+MAX_HOLD_PERIOD: int = 24
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
-training_status: str = "Idle"
+btc_data_cache: Optional[pd.DataFrame] = None
 
-# ---------------------- Binance Client & DB Setup ----------------------
-try:
-    logger.info("ℹ️ [Binance] تهيئة عميل Binance...")
-    client = Client(API_KEY, API_SECRET)
-    client.ping()
-except Exception as e:
-    logger.critical(f"❌ [Binance] فشل غير متوقع في تهيئة عميل Binance: {e}")
-    exit(1)
+# --- دوال الاتصال والتحقق ---
+def init_db():
+    global conn
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ml_models (
+                    id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE,
+                    model_data BYTEA NOT NULL, trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
+            """)
+        conn.commit()
+        logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+    except Exception as e:
+        logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
 
-# --- Database and Symbol Validation Functions ---
-def init_db(retries: int = 5, delay: int = 5) -> None:
-    global conn; logger.info("[DB] بدء تهيئة قاعدة البيانات...")
-    for attempt in range(retries):
-        try:
-            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor); conn.autocommit = False; cur = conn.cursor()
-            cur.execute("CREATE TABLE IF NOT EXISTS ml_models (id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL, trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB);")
-            conn.commit(); logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح."); return
-        except Exception as e:
-            logger.error(f"❌ [DB] خطأ في الاتصال (المحاولة {attempt + 1}): {e}");
-            if conn: conn.rollback()
-            if attempt < retries - 1: time.sleep(delay)
-            else: exit(1)
+def get_binance_client():
+    global client
+    try:
+        client = Client(API_KEY, API_SECRET)
+        client.ping()
+        logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
+    except Exception as e:
+        logger.critical(f"❌ [Binance] فشل تهيئة عميل Binance: {e}"); exit(1)
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
+    if not client:
+        logger.error("❌ [Validation] عميل Binance لم يتم تهيئته.")
+        return []
     try:
-        with open(os.path.join(os.path.dirname(__file__), filename), 'r', encoding='utf-8') as f:
-            formatted_symbols = {f"{s.strip().upper()}USDT" if not s.strip().upper().endswith('USDT') else s.strip().upper() for s in f if s.strip() and not s.startswith('#')}
-        logger.info(f"ℹ️ [Validation] Found {len(formatted_symbols)} unique symbols in the file.")
-        exchange_info = client.get_exchange_info()
-        active_binance_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
-        logger.info(f"ℹ️ [Validation] Found {len(active_binance_symbols)} actively trading USDT pairs on Binance.")
-        validated_symbols = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
-        ignored_symbols = formatted_symbols - active_binance_symbols
-        if ignored_symbols: logger.warning(f"⚠️ [Validation] Ignored {len(ignored_symbols)} symbols: {', '.join(ignored_symbols)}")
-        logger.info(f"✅ [Validation] Proceeding with {len(validated_symbols)} validated symbols.")
-        return validated_symbols
-    except Exception as e: logger.error(f"❌ [Validation] An error occurred: {e}"); return []
+        script_dir = os.path.dirname(__file__)
+        file_path = os.path.join(script_dir, filename)
+        with open(file_path, 'r', encoding='utf-8') as f:
+            symbols = {s.strip().upper() for s in f if s.strip() and not s.startswith('#')}
+        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in symbols}
+        info = client.get_exchange_info()
+        active = {s['symbol'] for s in info['symbols'] if s['status'] == 'TRADING' and s['quoteAsset'] == 'USDT'}
+        validated = sorted(list(formatted.intersection(active)))
+        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول.")
+        return validated
+    except FileNotFoundError:
+        logger.error(f"❌ [Validation] ملف قائمة العملات '{filename}' غير موجود.")
+        return []
+    except Exception as e:
+        logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
 
+# --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -109,230 +122,223 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms'); df.set_index('timestamp', inplace=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
         return df[numeric_cols].dropna()
-    except Exception as e: logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol}: {e}"); return None
+    except Exception as e:
+        logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol}: {e}"); return None
 
-# --- Indicator and Feature Calculation ---
-def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates all technical indicators and new requested features."""
+def fetch_and_cache_btc_data():
+    global btc_data_cache
+    logger.info("ℹ️ [BTC Data] جاري جلب بيانات البيتكوين وتخزينها...")
+    btc_data_cache = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
+    if btc_data_cache is None:
+        logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
+    btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
+
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df_calc['rsi'] = 100 - (100 / (1 + rs))
-
-    # MACD
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd'] = ema_fast - ema_slow
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-    
-    # --- NEW: MACD Crossover Feature ---
-    # 1 for bullish crossover (MACD crosses above Signal)
-    # -1 for bearish crossover (MACD crosses below Signal)
-    # 0 for no crossover
-    macd_above = df_calc['macd'] > df_calc['macd_signal']
-    macd_below = df_calc['macd'] < df_calc['macd_signal']
-    df_calc['macd_cross'] = 0
-    # Bullish cross: was below in the previous candle, is now above
-    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1
-    # Bearish cross: was above in the previous candle, is now below
-    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1
-
-    # Bollinger Bands
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
-    df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
-    df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
-    
-    # --- NEW: Time-based Features ---
-    # Day of the week (Monday=0, Sunday=6)
-    df_calc['day_of_week'] = df_calc.index.dayofweek
-    # Hour of the day (0-23)
-    df_calc['hour_of_day'] = df_calc.index.hour
-
-    # Candlestick features
-    df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
-    df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
-    df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
-
-    # Relative volume
+    df_calc['macd_hist'] = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=MACD_SIGNAL, adjust=False).mean()
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
-
+    df_calc['hour_of_day'] = df_calc.index.hour
     return df_calc
 
-# --- Model Training Logic ---
+def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
+    labels = pd.Series(0, index=prices.index)
+    for i in tqdm(range(len(prices) - MAX_HOLD_PERIOD), desc="Labeling", leave=False):
+        entry_price = prices.iloc[i]
+        current_atr = atr.iloc[i]
+        if pd.isna(current_atr) or current_atr == 0: continue
+        upper_barrier = entry_price + (current_atr * TP_ATR_MULTIPLIER)
+        lower_barrier = entry_price - (current_atr * SL_ATR_MULTIPLIER)
+        for j in range(1, MAX_HOLD_PERIOD + 1):
+            if prices.iloc[i + j] >= upper_barrier:
+                labels.iloc[i] = 1; break
+            if prices.iloc[i + j] <= lower_barrier:
+                labels.iloc[i] = -1; break
+    return labels
 
-def prepare_data_for_ml(df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing data for ML model for {symbol} with new features...")
-    df_featured = calculate_features(df)
-
-    # --- Target Definition (Unchanged) ---
-    # We still want to predict a price rise, but now with more context about bearish conditions.
-    profit_target_pct = 0.015  # 1.5% profit
-    look_forward_period = 12 # How many 15-min candles to look into the future (3 hours)
-    
-    future_high = df_featured['high'].rolling(window=look_forward_period).max().shift(-look_forward_period)
-    df_featured['target'] = ((future_high / df_featured['close']) - 1 > profit_target_pct).astype(int)
-    
-    # --- UPDATED: Feature Columns ---
+def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
+    df_featured = calculate_features(df, btc_df)
+    df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     feature_columns = [
-        'volume', 'relative_volume', 'rsi', 'macd_hist', 'bb_width', 'bb_pos', 'atr',
-        'candle_body_size', 'upper_wick', 'lower_wick',
-        # --- NEW FEATURES ADDED FOR TRAINING ---
-        'macd_cross',
-        'day_of_week',
-        'hour_of_day'
+        'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
+        'price_vs_ema50', 'price_vs_ema200', 'btc_correlation'
     ]
-    
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
-    
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
-        logger.warning(f"⚠️ [ML Prep] DataFrame for {symbol} is empty or has only one class after feature calculation. Skipping.")
+        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes. Skipping.")
         return None
-        
     logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
-    
-    if df_cleaned['target'].value_counts(normalize=True).get(1, 0) < 0.01:
-        logger.warning(f"⚠️ [ML Prep] Target class '1' is less than 1% of data for {symbol}. Model may struggle.")
-
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
-    
     return X, y, feature_columns
 
-def train_and_evaluate_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
-    logger.info("ℹ️ [ML Train] Starting model training and evaluation with LightGBM...")
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-    
-    scaler = StandardScaler().fit(X_train)
-    X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns)
-    X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns)
-    
-    model = lgb.LGBMClassifier(
-        objective='binary',
-        random_state=42,
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=31,
-        n_jobs=-1,
-        class_weight='balanced',
-        colsample_bytree=0.8,
-        subsample=0.8
-    )
-    
-    model.fit(X_train_scaled, y_train,
-              eval_set=[(X_test_scaled, y_test)],
-              eval_metric='logloss',
-              callbacks=[lgb.early_stopping(25, verbose=False)])
-    
-    y_pred = model.predict(X_test_scaled)
-    metrics = {
-        'accuracy': accuracy_score(y_test, y_pred),
-        'precision': precision_score(y_test, y_pred, zero_division=0),
-        'recall': recall_score(y_test, y_pred, zero_division=0),
-        'f1_score': f1_score(y_test, y_pred, zero_division=0),
-        'num_samples_trained': len(X_train),
-    }
-    metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in metrics.items() if isinstance(v, float)])
-    logger.info(f"📊 [ML Train] LightGBM performance: {metrics_log_str}")
-    
-    return model, scaler, metrics
+# --- !!! تعديل: دالة التدريب لحل مشكلة أسماء الميزات !!! ---
+def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
+    logger.info("ℹ️ [ML Train] Starting training with Walk-Forward Validation...")
+    tscv = TimeSeriesSplit(n_splits=5)
+    final_model, final_scaler = None, None
 
-def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]) -> bool:
-    logger.info(f"ℹ️ [DB Save] Attempting to save ML model bundle '{model_name}'...")
-    if not conn: return False
+    for i, (train_index, test_index) in enumerate(tscv.split(X)):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        
+        scaler = StandardScaler().fit(X_train)
+        
+        # --- الحل: إعادة إنشاء DataFrame مع أسماء الميزات ---
+        X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
+        
+        model = lgb.LGBMClassifier(
+            objective='multiclass', num_class=3, random_state=42, n_estimators=300,
+            learning_rate=0.05, class_weight='balanced', n_jobs=-1 )
+        
+        model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)],
+                  eval_metric='multi_logloss', callbacks=[lgb.early_stopping(30, verbose=False)])
+        
+        y_pred = model.predict(X_test_scaled)
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
+                    f"P(1): {report.get('1', {}).get('precision', 0):.4f}, "
+                    f"P(-1): {report.get('-1', {}).get('precision', 0):.4f}")
+        
+        final_model, final_scaler = model, scaler
+
+    if not final_model or not final_scaler:
+        logger.error("❌ [ML Train] Training failed, no model was created.")
+        return None, None, None
+
+    # --- الحل: التأكد من استخدام DataFrame مع أسماء الميزات لحساب المقاييس النهائية ---
+    all_preds = []
+    all_true = []
+    for _, test_index in tscv.split(X):
+        X_test_final = X.iloc[test_index]
+        y_test_final = y.iloc[test_index]
+        X_test_final_scaled = pd.DataFrame(final_scaler.transform(X_test_final), columns=X.columns, index=X_test_final.index)
+        all_preds.extend(final_model.predict(X_test_final_scaled))
+        all_true.extend(y_test_final)
+
+    final_report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
+    avg_metrics = {
+        'accuracy': accuracy_score(all_true, all_preds),
+        'precision_class_1': final_report.get('1', {}).get('precision', 0),
+        'recall_class_1': final_report.get('1', {}).get('recall', 0),
+        'num_samples_trained': len(X),
+    }
+
+    metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in avg_metrics.items()])
+    logger.info(f"📊 [ML Train] Average Walk-Forward Performance: {metrics_log_str}")
+    return final_model, final_scaler, avg_metrics
+
+def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
+    logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
     try:
         model_binary = pickle.dumps(model_bundle)
         metrics_json = json.dumps(metrics)
         with conn.cursor() as db_cur:
-            db_cur.execute("INSERT INTO ml_models (model_name, model_data, trained_at, metrics) VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET model_data = EXCLUDED.model_data, trained_at = NOW(), metrics = EXCLUDED.metrics;", (model_name, model_binary, metrics_json))
+            db_cur.execute("""
+                INSERT INTO ml_models (model_name, model_data, trained_at, metrics) 
+                VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET 
+                model_data = EXCLUDED.model_data, trained_at = NOW(), metrics = EXCLUDED.metrics;
+            """, (model_name, model_binary, metrics_json))
         conn.commit()
         logger.info(f"✅ [DB Save] Model bundle '{model_name}' saved successfully.")
-        return True
     except Exception as e:
-        logger.error(f"❌ [DB Save] Unexpected error while saving ML model bundle: {e}", exc_info=True)
-        if conn: conn.rollback()
-        return False
+        logger.error(f"❌ [DB Save] Error saving model bundle: {e}"); conn.rollback()
 
-# --- Main Execution ---
-def send_telegram_message(target_chat_id: str, text: str):
-    if not TELEGRAM_TOKEN or not target_chat_id: return
+def send_telegram_message(text: str):
+    if not TELEGRAM_TOKEN or not CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
+    try: requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
+# --- !!! تعديل: دالة التدريب الرئيسية للعمل في خيط منفصل !!! ---
+def run_training_job():
+    logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
+    init_db()
+    get_binance_client()
+    fetch_and_cache_btc_data()
+    symbols_to_train = get_validated_symbols(filename='crypto_list.txt')
+    if not symbols_to_train:
+        logger.critical("❌ [Main] No valid symbols found. Exiting.")
+        return
+        
+    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} symbols.")
+    
+    successful_models, failed_models = 0, 0
+    for symbol in symbols_to_train:
+        logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
+        try:
+            df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
+            if df_hist is None or df_hist.empty:
+                logger.warning(f"⚠️ [Main] No data for {symbol}, skipping."); failed_models += 1; continue
+            
+            prepared_data = prepare_data_for_ml(df_hist, btc_data_cache, symbol)
+            if prepared_data is None:
+                failed_models += 1; continue
+            X, y, feature_names = prepared_data
+            
+            training_result = train_with_walk_forward_validation(X, y)
+            if not all(training_result):
+                 failed_models += 1; continue
+            final_model, final_scaler, model_metrics = training_result
+            
+            if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
+                model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
+                model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+                save_ml_model_to_db(model_bundle, model_name, model_metrics)
+                successful_models += 1
+            else:
+                logger.warning(f"⚠️ [Main] Model for {symbol} is not useful. Discarding."); failed_models += 1
+        except Exception as e:
+            logger.critical(f"❌ [Main] A fatal error occurred for {symbol}: {e}", exc_info=True); failed_models += 1
+        time.sleep(1)
+
+    completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
+                        f"- Successfully trained: {successful_models} models\n"
+                        f"- Failed/Discarded: {failed_models} models\n"
+                        f"- Total symbols: {len(symbols_to_train)}")
+    send_telegram_message(completion_message)
+    logger.info(completion_message)
+
+    if conn: conn.close()
+    logger.info("👋 [Main] ML training job finished.")
+
+# --- !!! تعديل: إضافة خادم Flask للعمل على Render !!! ---
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    """Endpoint for Render health checks."""
+    return "ML Trainer service is running and healthy.", 200
+
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting ML model training script ({BASE_ML_MODEL_NAME})...")
-    app = Flask(__name__)
-    @app.route('/')
-    def home(): return Response(f"ML Trainer Service: {training_status}", status=200)
-    flask_thread = Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': int(os.environ.get('PORT', 10001))}, daemon=True)
-    flask_thread.start()
-
-    try:
-        init_db()
-        symbols_to_train = get_validated_symbols()
-        if not symbols_to_train:
-            logger.critical("❌ [Main] No valid symbols to train after validation. Exiting.")
-            exit(1)
-        
-        training_status = "In Progress"
-        send_telegram_message(CHAT_ID, f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} symbols.")
-        
-        successful_models, failed_models = 0, 0
-        for symbol in symbols_to_train:
-            logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
-            try:
-                df_hist = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=DATA_LOOKBACK_DAYS_FOR_TRAINING)
-                if df_hist is None or df_hist.empty: continue
-                
-                prepared_data = prepare_data_for_ml(df_hist, symbol)
-                if prepared_data is None: failed_models += 1; continue
-                
-                X, y, feature_names = prepared_data
-                trained_model, trained_scaler, model_metrics = train_and_evaluate_model(X, y)
-                
-                if trained_model and trained_scaler and model_metrics.get('precision', 0) > 0.1:
-                    model_bundle = {'model': trained_model, 'scaler': trained_scaler, 'feature_names': feature_names}
-                    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-                    if save_ml_model_to_db(model_bundle, model_name, model_metrics):
-                        successful_models += 1
-                    else:
-                        failed_models += 1
-                else:
-                    logger.warning(f"⚠️ [Main] Model for {symbol} is not useful (precision <= 0.1). Discarding.")
-                    failed_models += 1
-
-            except Exception as e:
-                logger.critical(f"❌ [Main] A fatal error occurred for {symbol}: {e}", exc_info=True)
-                failed_models += 1
-            time.sleep(1)
-
-        training_status = f"Completed. {successful_models} successful, {failed_models} failed/discarded."
-        send_telegram_message(CHAT_ID, f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\nSuccessfully trained {successful_models}/{len(symbols_to_train)} useful models.")
-        
-    except Exception as e:
-        logger.critical(f"❌ [Main] A fatal error occurred in main script: {e}", exc_info=True)
-        training_status = f"Failed: {e}"
-        send_telegram_message(CHAT_ID, f"🚨 *Fatal Error in ML Training Script*\n`{e}`")
-    finally:
-        if conn: conn.close()
-        logger.info("👋 [Main] ML training script finished.")
-        # Do not join the flask_thread to allow the script to exit
-        # This is suitable for a script that runs, trains, and then exits.
+    # بدء عملية التدريب في خيط منفصل حتى لا تمنع الخادم من العمل
+    training_thread = Thread(target=run_training_job)
+    training_thread.daemon = True
+    training_thread.start()
+    
+    # تشغيل خادم الويب
+    port = int(os.environ.get("PORT", 10000))
+    logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
+    app.run(host='0.0.0.0', port=port)

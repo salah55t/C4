@@ -26,11 +26,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v5.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBot')
+logger = logging.getLogger('CryptoBotV5')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -45,36 +45,37 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+# --- V5 Model Constants ---
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m'
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
+
+# --- Indicator & Feature Parameters (Matching ml.py) ---
+RSI_PERIOD: int = 14
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+ATR_PERIOD: int = 14
+EMA_SLOW_PERIOD: int = 200
+EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+# --- تمت إضافة معلمات المؤشرات الجديدة ---
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
+
+
+# --- Trading Logic Constants ---
+MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
 TRADE_AMOUNT_USDT: float = 10.0
-SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7
-MIN_VOLUME_24H_USDT: float = 10_000_000
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
-MODEL_PREDICTION_THRESHOLD = 0.70 # زيادة العتبة لزيادة الربحية وتقليل الإشارات الخاطئة
 USE_DYNAMIC_SL_TP = True
-ATR_SL_MULTIPLIER = 2.0
-ATR_TP_MULTIPLIER = 3.5
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
 USE_TRAILING_STOP = False
-USE_BTC_TREND_FILTER = False
+USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 10
-
-# --- !!! جديد: تحديث معلمات المؤشرات وإضافة فلتر MACD !!! ---
-RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
-STOCH_RSI_PERIOD, STOCH_RSI_SMA_PERIOD, STOCH_RSI_K_PERIOD, STOCH_RSI_D_PERIOD = 14, 14, 3, 3
-USE_STOCH_RSI_FILTER = True
-STOCH_RSI_LOWER_THRESHOLD = 25
-STOCH_RSI_UPPER_THRESHOLD = 75
-BBANDS_STD_DEV: float = 2.0
-USE_RSI_FILTER = True
-RSI_LOWER_THRESHOLD = 45
-RSI_UPPER_THRESHOLD = 65
-USE_MACD_CROSS_FILTER = True # *** إضافة جديدة: تفعيل فلتر تقاطع MACD ***
-MIN_RELATIVE_VOLUME = 2.0 # *** إضافة جديدة: فلتر حجم التداول النسبي ***
-
-
+BTC_TREND_EMA_PERIOD = 50
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -87,9 +88,6 @@ current_prices: Dict[str, float] = {}
 prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
-bot_status_info = {"status": "INITIALIZING", "message": "البوت قيد التشغيل والتهيئة..."}
-bot_status_lock = Lock()
-
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -112,18 +110,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION,
                         strategy_name TEXT,
-                        signal_details JSONB,
-                        trailing_stop_price DOUBLE PRECISION
+                        signal_details JSONB
                     );
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        type TEXT NOT NULL,
-                        message TEXT NOT NULL,
-                        is_read BOOLEAN DEFAULT FALSE
-                    );
+                        id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
+                        message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
+                """)
+                cur.execute("""
+                     CREATE TABLE IF NOT EXISTS ml_models (
+                        id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
+                        trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
                 """)
             conn.commit()
             logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
@@ -149,44 +147,36 @@ def check_db_connection() -> bool:
     return False
 
 def log_and_notify(level: str, message: str, notification_type: str):
-    log_methods = {
-        'info': logger.info, 'warning': logger.warning,
-        'error': logger.error, 'critical': logger.critical,
-    }
+    log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
     log_methods.get(level.lower(), logger.info)(message)
-
     if not check_db_connection() or not conn: return
     try:
         new_notification = {"timestamp": datetime.now().isoformat(), "type": notification_type, "message": message}
-        with notifications_lock:
-            notifications_cache.appendleft(new_notification)
+        with notifications_lock: notifications_cache.appendleft(new_notification)
         with conn.cursor() as cur:
             cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}")
+        logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}");
         if conn: conn.rollback()
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
-    if not client:
-        logger.error("❌ [التحقق] كائن Binance client غير مهيأ. لا يمكن المتابعة.")
-        return []
+    if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
     try:
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, filename)
         with open(file_path, 'r', encoding='utf-8') as f:
-            raw_symbols_from_file = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
-        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols_from_file}
+            raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         exchange_info = client.get_exchange_info()
-        active_binance_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
-        validated_symbols = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
-        logger.info(f"✅ [التحقق] سيقوم البوت بمراقبة {len(validated_symbols)} عملة رقمية معتمدة.")
-        return validated_symbols
+        active = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+        validated = sorted(list(formatted.intersection(active)))
+        logger.info(f"✅ [التحقق] سيقوم البوت بمراقبة {len(validated)} عملة معتمدة.")
+        return validated
     except Exception as e:
-        logger.error(f"❌ [التحقق] حدث خطأ أثناء التحقق من الرموز: {e}", exc_info=True)
-        return []
+        logger.error(f"❌ [التحقق] حدث خطأ أثناء التحقق من الرموز: {e}", exc_info=True); return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
@@ -200,50 +190,67 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df[numeric_cols].dropna()
+    except BinanceAPIException as e:
+        logger.warning(f"⚠️ [API Binance] خطأ في جلب بيانات {symbol}: {e}")
+        return None
     except Exception as e:
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
+# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+
+    # ATR (موجود بالفعل)
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
+    # RSI (الفلتر الأول - موجود)
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df_calc["rsi"] = 100 - (100 / (1 + rs))
-    # Stochastic RSI
-    stoch_rsi = 100 * ((df_calc['rsi'] - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()) / \
-                       (df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).max() - df_calc['rsi'].rolling(window=STOCH_RSI_PERIOD).min()).replace(0, np.nan))
-    df_calc['stoch_rsi_k'] = stoch_rsi.rolling(window=STOCH_RSI_K_PERIOD).mean()
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_RSI_D_PERIOD).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # MACD and MACD Cross (الفلتر الثاني - محدث)
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd'] = ema_fast - ema_slow
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=MACD_SIGNAL, adjust=False).mean() # *** سيستخدم MACD_SIGNAL=10 الآن ***
-    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-    macd_above = df_calc['macd'] > df_calc['macd_signal']
-    macd_below = df_calc['macd'] < df_calc['macd_signal']
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    # اكتشاف التقاطع
     df_calc['macd_cross'] = 0
-    df_calc.loc[macd_above & macd_below.shift(1), 'macd_cross'] = 1  # تقاطع صعودي
-    df_calc.loc[macd_below & macd_above.shift(1), 'macd_cross'] = -1 # تقاطع هبوطي
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    df_calc['bb_upper'] = sma + (std * BBANDS_STD_DEV)
-    df_calc['bb_lower'] = sma - (std * BBANDS_STD_DEV)
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / sma
-    df_calc['bb_pos'] = (df_calc['close'] - sma) / std.replace(0, np.nan)
-    df_calc['day_of_week'] = df_calc.index.dayofweek
+    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
+
+    # Stochastic RSI (الفلتر الثالث - جديد)
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
+    # Relative Volume (الفلتر الرابع - موجود)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
+    # الميزات الأخرى الموجودة
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
-    df_calc['candle_body_size'] = (df_calc['close'] - df_calc['open']).abs()
-    df_calc['upper_wick'] = df_calc['high'] - df_calc[['open', 'close']].max(axis=1)
-    df_calc['lower_wick'] = df_calc[['open', 'close']].min(axis=1) - df_calc['low']
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
+    
     return df_calc.dropna()
+
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
@@ -272,26 +279,27 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
         if not isinstance(data, list): data = [data]
+        
         for item in data:
             symbol = item.get('s')
             if not symbol: continue
             price = float(item.get('c', 0))
             if price == 0: continue
-            with prices_lock:
-                current_prices[symbol] = price
+            
+            with prices_lock: current_prices[symbol] = price
             signal_to_process, status, closing_price = None, None, None
+            
             with signal_cache_lock:
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
                     target_price = signal.get('target_price')
-                    current_stop_price = signal.get('trailing_stop_price') or signal.get('stop_loss')
-                    if not all(isinstance(p, (int, float)) for p in [price, target_price, current_stop_price]): continue
-                    if price >= target_price:
-                        status, closing_price = 'target_hit', target_price
-                        signal_to_process = signal
-                    elif price <= current_stop_price:
-                        status, closing_price = 'stop_loss_hit', current_stop_price
-                        signal_to_process = signal
+                    stop_loss_price = signal.get('stop_loss')
+
+                    if not all(isinstance(p, (int, float)) for p in [price, target_price, stop_loss_price]): continue
+
+                    if price >= target_price: status, closing_price, signal_to_process = 'target_hit', target_price, signal
+                    elif price <= stop_loss_price: status, closing_price, signal_to_process = 'stop_loss_hit', stop_loss_price, signal
+            
             if signal_to_process and status:
                 logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status}' للعملة {symbol} عند سعر {price:.8f}")
                 Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
@@ -312,57 +320,50 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_db(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    def get_features(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        return calculate_features(df)
+    def get_features(self, df: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        return calculate_features(df, btc_df)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
+        
         last_row = df_processed.iloc[-1]
         try:
-            # *** تعديل: تطبيق فلتر تقاطع MACD ***
-            if USE_MACD_CROSS_FILTER:
-                if last_row.get('macd_cross') != 1:
-                    return None # إلغاء الإشارة إذا لم يكن هناك تقاطع صعودي
-                logger.info(f"✅ [{self.symbol}] نجح فلتر تقاطع MACD. (تقاطع صعودي)")
-
-            if USE_RSI_FILTER:
-                current_rsi = last_row.get('rsi')
-                if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD):
-                    return None
-                logger.info(f"✅ [{self.symbol}] نجح فلتر RSI. RSI الحالي: {current_rsi:.2f} (ضمن النطاق {RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
-
-            if USE_STOCH_RSI_FILTER:
-                current_stoch_rsi_k = last_row.get('stoch_rsi_k')
-                current_stoch_rsi_d = last_row.get('stoch_rsi_d')
-                if current_stoch_rsi_k is None or current_stoch_rsi_d is None or not (STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= current_stoch_rsi_d <= STOCH_RSI_UPPER_THRESHOLD):
-                    return None
-                logger.info(f"✅ [{self.symbol}] نجح فلتر Stochastic RSI. K: {current_stoch_rsi_k:.2f}, D: {current_stoch_rsi_d:.2f} (ضمن النطاق {STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
-
-            # *** إضافة جديدة: فلتر حجم التداول النسبي ***
-            current_relative_volume = last_row.get('relative_volume')
-            if current_relative_volume is None or current_relative_volume < MIN_RELATIVE_VOLUME:
-                logger.info(f"❌ [{self.symbol}] فشل فلتر حجم التداول النسبي. الحجم الحالي: {current_relative_volume:.2f} (المطلوب: >= {MIN_RELATIVE_VOLUME})")
+            # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
+            missing_features = [f for f in self.feature_names if f not in df_processed.columns]
+            if missing_features:
+                logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
                 return None
-            logger.info(f"✅ [{self.symbol}] نجح فلتر حجم التداول النسبي. الحجم الحالي: {current_relative_volume:.2f}")           
+            
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any(): return None
             
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0][1]
             
-            if prediction_proba < MODEL_PREDICTION_THRESHOLD: return None
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
             
-            logger.info(f"✅ [العثور على إشارة] {self.symbol}: إشارة محتملة باحتمالية {prediction_proba:.2%}.")
-            signal_details = {
-                'ML_Probability': f"{prediction_proba:.2%}", 
-                'RSI_Value': f"{last_row.get('rsi'):.2f}",
-                'MACD_Cross': last_row.get('macd_cross') # إضافة للشفافية
-            }
-            return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': signal_details}
+            prob_for_class_1 = 0
+            try:
+                class_1_index = list(self.ml_model.classes_).index(1)
+                prob_for_class_1 = prediction_proba[class_1_index]
+            except ValueError:
+                return None
+
+            if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
+                logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}, وهي أعلى من الحد المطلوب ({MODEL_CONFIDENCE_THRESHOLD:.0%}).")
+                
+                return {
+                    'symbol': self.symbol,
+                    'strategy_name': BASE_ML_MODEL_NAME,
+                    'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}
+                }
+            else:
+                return None
+
         except Exception as e:
-            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}")
+            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
@@ -377,17 +378,13 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
-    rsi_value = signal_data['signal_details'].get('RSI_Value', 'N/A')
-    ml_prob = signal_data['signal_details'].get('ML_Probability', 'N/A')
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
                f"⬅️ *سعر الدخول:* `${entry:,.8g}`\n"
                f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
-               f"🔍 *مستوى الثقة (ML):* {ml_prob}\n"
-               f"📊 *مؤشر القوة النسبية (RSI):* `{rsi_value}`\n"
-               f"🔀 *فلتر MACD:* تقاطع صعودي مؤكد")
+               f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
@@ -398,18 +395,16 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
+        entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, trailing_stop_price) 
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
-                (signal['symbol'], float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss']), 
-                 signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), float(signal['stop_loss']))
+                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) 
+                   VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;""",
+                (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})))
             )
-            new_id = cur.fetchone()['id']
-            signal['id'] = new_id
-            signal['trailing_stop_price'] = signal['stop_loss']
+            signal['id'] = cur.fetchone()['id']
         conn.commit()
-        logger.info(f"✅ [قاعدة البيانات] تم إدراج الإشارة لـ {signal['symbol']} (ID: {new_id}).")
+        logger.info(f"✅ [قاعدة البيانات] تم إدراج الإشارة لـ {signal['symbol']} (ID: {signal['id']}).")
         return signal
     except Exception as e:
         logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
@@ -444,18 +439,16 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
-    logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً إلى ذاكرة التتبع...")
+    logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً...")
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals WHERE status = 'open';")
             open_signals = cur.fetchall()
             with signal_cache_lock:
                 open_signals_cache.clear()
-                for signal in open_signals:
-                    open_signals_cache[signal['symbol']] = dict(signal)
-            logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(open_signals)} إشارة مفتوحة. يتم الآن تتبع {len(open_signals_cache)} إشارة.")
-    except Exception as e:
-        logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
+                for signal in open_signals: open_signals_cache[signal['symbol']] = dict(signal)
+            logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(open_signals)} إشارة مفتوحة.")
+    except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
@@ -463,50 +456,43 @@ def load_notifications_to_cache():
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 50;")
-            recent_notifications = cur.fetchall()
+            recent = cur.fetchall()
             with notifications_lock:
                 notifications_cache.clear()
-                for n in reversed(recent_notifications): 
-                    n['timestamp'] = n['timestamp'].isoformat()
-                    notifications_cache.appendleft(dict(n))
+                for n in reversed(recent): n['timestamp'] = n['timestamp'].isoformat(); notifications_cache.appendleft(dict(n))
             logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
-    except Exception as e:
-        logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
+    except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_trend() -> Dict[str, Any]:
-    if not client: 
-        return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
+    if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         df['close'] = pd.to_numeric(df['close'])
         ema = df['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean().iloc[-1]
         current_price = df['close'].iloc[-1]
-        if current_price > ema:
-            status, message = "Uptrend", f"صاعد (السعر فوق متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
-        else:
-            status, message = "Downtrend", f"هابط (السعر تحت متوسط {BTC_TREND_EMA_PERIOD} على إطار {BTC_TREND_TIMEFRAME})"
+        status, message = ("Uptrend", f"صاعد (السعر فوق EMA {BTC_TREND_EMA_PERIOD})") if current_price > ema else ("Downtrend", f"هابط (السعر تحت EMA {BTC_TREND_EMA_PERIOD})")
         return {"status": status, "message": message, "is_uptrend": (status == "Uptrend")}
     except Exception as e:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
-def set_bot_status(status: str, message: str):
-    global bot_status_info
-    with bot_status_lock:
-        bot_status_info = {"status": status, "message": message}
-    logger.info(f"[حالة البوت] {status}: {message}")
+def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
+    logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين لحساب المؤشرات...")
+    btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+    if btc_data is None:
+        logger.error("❌ [بيانات BTC] فشل جلب بيانات البيتكوين. سيتخطى البوت الارتباط.")
+        return None
+    btc_data['btc_returns'] = btc_data['close'].pct_change()
+    return btc_data
 
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
     time.sleep(15) 
     if not validated_symbols_to_scan:
-        message = "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل."
-        log_and_notify("critical", message, "SYSTEM")
-        set_bot_status("ERROR", message)
+        log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
         return
-    
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
     
     while True:
@@ -514,62 +500,62 @@ def main_loop():
             if USE_BTC_TREND_FILTER:
                 trend_data = get_btc_trend()
                 if not trend_data.get("is_uptrend"):
-                    message = f"تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين."
-                    set_bot_status("PAUSED_BTC_TREND", message)
-                    time.sleep(300)
-                    continue
+                    logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
+                    time.sleep(300); continue
 
             with signal_cache_lock: open_count = len(open_signals_cache)
             if open_count >= MAX_OPEN_TRADES:
-                message = f"تم الوصول للحد الأقصى للصفقات المفتوحة ({open_count}/{MAX_OPEN_TRADES})."
-                set_bot_status("PAUSED_MAX_TRADES", message)
-                time.sleep(60)
-                continue
-
+                logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات ({open_count}/{MAX_OPEN_TRADES}).")
+                time.sleep(60); continue
+            
             slots_available = MAX_OPEN_TRADES - open_count
-            set_bot_status("SCANNING", f"جاري البحث عن إشارات... المراكز المفتوحة: {open_count}/{MAX_OPEN_TRADES}")
+            logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
+            
+            btc_data = get_btc_data_for_bot()
+            if btc_data is None:
+                logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
+                time.sleep(120); continue
             
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
                 with signal_cache_lock:
                     if symbol in open_signals_cache: continue
+                
                 try:
                     df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_hist is None or df_hist.empty: continue
+                    
                     strategy = TradingStrategy(symbol)
-                    df_features = strategy.get_features(df_hist)
+                    df_features = strategy.get_features(df_hist, btc_data)
                     if df_features is None or df_features.empty: continue
+                    
                     potential_signal = strategy.generate_signal(df_features)
                     if potential_signal:
                         with prices_lock: current_price = current_prices.get(symbol)
                         if not current_price:
-                             logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي. سيتم التخطي.")
-                             continue
+                             logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي. سيتم التخطي."); continue
+                        
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
                             atr_value = df_features['atr'].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         else:
-                            potential_signal['target_price'] = current_price * 1.015
-                            potential_signal['stop_loss'] = current_price * 0.99
-                        potential_signal['trailing_stop_price'] = potential_signal['stop_loss']
+                            potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
+                        
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
                             with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                             send_new_signal_alert(saved_signal)
                             slots_available -= 1
-                            open_count += 1
-                            set_bot_status("SCANNING", f"إشارة جديدة! المراكز المفتوحة: {open_count}/{MAX_OPEN_TRADES}")
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
-            
+
+            logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار الدورة التالية...")
             time.sleep(60)
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
-            message = f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}"
-            log_and_notify("error", message, "SYSTEM")
-            set_bot_status("ERROR", message)
+            log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM")
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
@@ -582,8 +568,8 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
         response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]
-        original_classification = data['value_classification']
-        return {"value": int(data['value']), "classification": classification_translation.get(original_classification, original_classification)}
+        original = data['value_classification']
+        return {"value": int(data['value']), "classification": classification_translation.get(original, original)}
     except Exception as e:
         logger.error(f"❌ [مؤشر الخوف والطمع] فشل الاتصال بالـ API: {e}")
         return {"value": -1, "classification": classification_translation["Error"]}
@@ -593,45 +579,31 @@ def home():
     try:
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, 'index.html')
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return render_template_string(f.read())
-    except FileNotFoundError:
-        return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
-
-@app.route('/api/bot_status')
-def get_bot_status():
-    with bot_status_lock:
-        return jsonify(bot_status_info)
+        with open(file_path, 'r', encoding='utf-8') as f: return render_template_string(f.read())
+    except FileNotFoundError: return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
 
 @app.route('/api/market_status')
-def get_market_status():
-    btc_trend = get_btc_trend()
-    fear_and_greed = get_fear_and_greed_index()
-    return jsonify({"btc_trend": btc_trend, "fear_and_greed": fear_and_greed})
+def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index()})
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection() or not conn:
-        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT status, profit_percentage FROM signals WHERE status != 'open';")
-            closed_signals = cur.fetchall()
-        wins = sum(1 for s in closed_signals if s.get('profit_percentage', 0) > 0)
-        losses = sum(1 for s in closed_signals if s.get('profit_percentage', 0) <= 0)
-        total_closed = len(closed_signals)
+            closed = cur.fetchall()
+        wins = sum(1 for s in closed if s.get('profit_percentage', 0) > 0)
+        losses = len(closed) - wins
+        total_closed = len(closed)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        loss_rate = (losses / total_closed * 100) if total_closed > 0 else 0
-        total_profit_usdt = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed_signals if s.get('profit_percentage') is not None)
-        return jsonify({"win_rate": win_rate, "loss_rate": loss_rate, "wins": wins, "losses": losses, "total_profit_usdt": total_profit_usdt, "total_closed_trades": total_closed})
+        total_profit = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed if s.get('profit_percentage') is not None)
+        return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_usdt": total_profit, "total_closed_trades": total_closed})
     except Exception as e:
-        logger.error(f"❌ [API إحصائيات] خطأ: {e}")
-        return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
+        logger.error(f"❌ [API إحصائيات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
 
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not conn:
-        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
@@ -642,31 +614,25 @@ def get_signals():
                 with prices_lock: s['current_price'] = current_prices.get(s['symbol'])
         return jsonify(all_signals)
     except Exception as e:
-        logger.error(f"❌ [API إشارات] خطأ: {e}")
-        return jsonify({"error": "تعذر جلب الإشارات"}), 500
+        logger.error(f"❌ [API إشارات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإشارات"}), 500
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
     logger.info(f"ℹ️ [API إغلاق] تم استلام طلب إغلاق يدوي للإشارة ID: {signal_id}")
     signal_to_close = None
     with signal_cache_lock:
-        for signal_data in open_signals_cache.values():
-            if signal_data['id'] == signal_id:
-                signal_to_close = signal_data.copy()
-                break
-    if not signal_to_close:
-        return jsonify({"error": "لم يتم العثور على الإشارة في ذاكرة الصفقات المفتوحة أو أنها أُغلقت بالفعل."}), 404
+        for s in open_signals_cache.values():
+            if s['id'] == signal_id: signal_to_close = s.copy(); break
+    if not signal_to_close: return jsonify({"error": "لم يتم العثور على الإشارة."}), 404
     symbol_to_close = signal_to_close['symbol']
     with prices_lock: closing_price = current_prices.get(symbol_to_close)
-    if not closing_price:
-        return jsonify({"error": f"تعذر الحصول على السعر الحالي للعملة {symbol_to_close} لإتمام الإغلاق."}), 500
+    if not closing_price: return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol_to_close}."}), 500
     Thread(target=close_signal, args=(signal_to_close, 'manual_close', closing_price, "manual")).start()
-    return jsonify({"message": f"جاري إغلاق الإشارة {signal_id} للعملة {symbol_to_close} عند سعر {closing_price}."})
+    return jsonify({"message": f"جاري إغلاق الإشارة {signal_id} لـ {symbol_to_close}."})
 
 @app.route('/api/notifications')
 def get_notifications():
-    with notifications_lock:
-        return jsonify(list(notifications_cache))
+    with notifications_lock: return jsonify(list(notifications_cache))
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
@@ -675,13 +641,13 @@ def run_flask():
         from waitress import serve
         serve(app, host=host, port=port, threads=8)
     except ImportError:
-        logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير (غير مناسب للإنتاج).")
+        logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير.")
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
     global client, validated_symbols_to_scan
-    set_bot_status("INITIALIZING", "بدء تهيئة خدمات البوت...")
+    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
@@ -690,21 +656,17 @@ def initialize_bot_services():
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            message = "لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ."
-            logger.critical(f"❌ {message}")
-            set_bot_status("ERROR", message)
+            logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
             return
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
     except Exception as e:
-        message = f"حدث خطأ حاسم أثناء التهيئة: {e}"
-        log_and_notify("critical", message, "SYSTEM")
-        set_bot_status("ERROR", message)
+        log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
         pass
 
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل تطبيق بوت التداول...")
+    logger.info(f"🚀 بدء تشغيل بوت التداول - إصدار {BASE_ML_MODEL_NAME}...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
