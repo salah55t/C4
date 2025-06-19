@@ -18,11 +18,8 @@ from flask import Flask
 # ==============================================================================
 # --------------------------- إعدادات الاختبار الخلفي ----------------------------
 # ==============================================================================
-# الفترة الزمنية للاختبار بالايام
 BACKTEST_PERIOD_DAYS: int = 180
-# الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
-# اسم النموذج الأساسي الذي سيتم اختباره
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V4'
 
 # --- معلمات الاستراتيجية (يجب أن تطابق إعدادات البوت c4.py) ---
@@ -30,9 +27,8 @@ MODEL_PREDICTION_THRESHOLD: float = 0.85
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 3.0
 
-# --- !!! جديد: فلاتر الاستراتيجية المحدثة لتطابق البوت c4.py !!! ---
-# تم تحديث جميع المعلمات والفلاتر لتعكس بدقة منطق البوت الرئيسي
-USE_BTC_TREND_FILTER: bool = True # *** تفعيل فلتر اتجاه البيتكوين ***
+# --- فلاتر الاستراتيجية المحدثة لتطابق البوت c4.py ---
+USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 10
@@ -102,7 +98,6 @@ except Exception as e:
 # ==============================================================================
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (code remains the same)
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
     if not client: return []
     try:
@@ -121,9 +116,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] Error: {e}", exc_info=True)
         return []
 
-
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    # ... (code remains the same)
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -140,7 +133,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (code remains the same as previous update)
     df_calc = df.copy()
     RSI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL, BBANDS_PERIOD, ATR_PERIOD = 14, 12, 26, 10, 20, 14
     STOCH_RSI_PERIOD, STOCH_RSI_SMA_PERIOD, STOCH_RSI_K_PERIOD, STOCH_RSI_D_PERIOD = 14, 14, 3, 3
@@ -184,7 +176,6 @@ def calculate_features(df: pd.DataFrame) -> pd.DataFrame:
     return df_calc.dropna()
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (code remains the same)
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn: return None
     try:
@@ -202,19 +193,13 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 def prepare_btc_trend_filter_data(days: int) -> Optional[pd.Series]:
-    """
-    *** دالة جديدة ***
-    تجلب بيانات البيتكوين وتحسب حالة الاتجاه (صاعد/هابط) لكل شمعة.
-    """
     logger.info(f"ℹ️ [BTC Filter] Preparing BTC trend filter data for the last {days} days...")
     df_btc = fetch_historical_data(BTC_SYMBOL, BTC_TREND_TIMEFRAME, days)
     if df_btc is None or df_btc.empty:
         logger.error("❌ [BTC Filter] Could not fetch BTC data. The filter will be disabled.")
         return None
-
     df_btc['ema'] = df_btc['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
     df_btc['is_uptrend'] = df_btc['close'] > df_btc['ema']
-
     logger.info("✅ [BTC Filter] BTC trend filter data prepared successfully.")
     return df_btc['is_uptrend']
 
@@ -223,17 +208,12 @@ def prepare_btc_trend_filter_data(days: int) -> Optional[pd.Series]:
 # ==============================================================================
 
 def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any], btc_trend_data: Optional[pd.Series]) -> List[Dict[str, Any]]:
-    """
-    *** محدّثة بالكامل ***
-    تنفيذ محاكاة التداول مع دمج وتطبيق فلتر اتجاه البيتكوين.
-    """
     trades = []
     model, scaler, feature_names = model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
     
     df_featured = calculate_features(data)
     
-    # --- !! جديد: دمج بيانات اتجاه البيتكوين !! ---
-    if USE_BTC_TREND_FILTER and btc_trend_data is not None:
+    if btc_trend_data is not None:
         df_featured = pd.merge_asof(
             df_featured.sort_index(),
             btc_trend_data.rename('btc_is_uptrend').sort_index(),
@@ -273,27 +253,18 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
                 in_trade, trade_details = False, {}
             continue
 
-        # --- !!! جديد: تطبيق جميع الفلاتر بما فيها فلتر البيتكوين !!! ---
-        # 0. فلتر اتجاه البيتكوين (أول وأهم فلتر)
         if not current_candle['btc_is_uptrend']: continue
-        
-        # 1. فلتر توقع النموذج
         if current_candle['prediction'] < MODEL_PREDICTION_THRESHOLD: continue
-        
-        # 2. فلتر تقاطع MACD
         if USE_MACD_CROSS_FILTER and current_candle.get('macd_cross') != 1: continue
         
-        # 3. فلتر RSI
         if USE_RSI_FILTER:
             current_rsi = current_candle.get('rsi')
             if current_rsi is None or not (RSI_LOWER_THRESHOLD <= current_rsi <= RSI_UPPER_THRESHOLD): continue
             
-        # 4. فلتر Stochastic RSI
         if USE_STOCH_RSI_FILTER:
             k, d = current_candle.get('stoch_rsi_k'), current_candle.get('stoch_rsi_d')
             if k is None or d is None or not (STOCH_RSI_LOWER_THRESHOLD <= k <= STOCH_RSI_UPPER_THRESHOLD and STOCH_RSI_LOWER_THRESHOLD <= d <= STOCH_RSI_UPPER_THRESHOLD): continue
 
-        # 5. فلتر حجم التداول النسبي
         rel_vol = current_candle.get('relative_volume')
         if rel_vol is None or rel_vol < MIN_RELATIVE_VOLUME: continue
 
@@ -308,8 +279,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
 
     return trades
 
-def generate_report(all_trades: List[Dict[str, Any]]):
-    # ... (code remains mostly the same, just report header is updated)
+def generate_report(all_trades: List[Dict[str, Any]], btc_filter_was_active: bool):
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
         return
@@ -345,10 +315,9 @@ def generate_report(all_trades: List[Dict[str, Any]]):
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
 
-    # --- !!! جديد: تحديث عنوان التقرير ليشمل فلتر البيتكوين !!! ---
     report_header = f"BACKTESTING REPORT: {BASE_ML_MODEL_NAME}"
     active_filters = []
-    if USE_BTC_TREND_FILTER: active_filters.append("BTC Trend")
+    if btc_filter_was_active: active_filters.append("BTC Trend")
     if USE_RSI_FILTER: active_filters.append(f"RSI ({RSI_LOWER_THRESHOLD}-{RSI_UPPER_THRESHOLD})")
     if USE_MACD_CROSS_FILTER: active_filters.append("MACD Cross")
     if USE_STOCH_RSI_FILTER: active_filters.append(f"StochRSI ({STOCH_RSI_LOWER_THRESHOLD}-{STOCH_RSI_UPPER_THRESHOLD})")
@@ -397,15 +366,13 @@ def start_backtesting_job():
     logger.info("🚀 Starting synchronized backtesting job with BTC Trend Filter...")
     time.sleep(2) 
 
-    # --- !! جديد: إعداد فلتر البيتكوين قبل البدء !! ---
+    # *** تم الإصلاح: استخدام متغير محلي لتتبع حالة الفلتر ***
+    btc_filter_active_for_run = USE_BTC_TREND_FILTER
     btc_trend_series = None
-    if USE_BTC_TREND_FILTER:
-        # نحتاج أيامًا إضافية لحساب المؤشرات بشكل صحيح
+    if btc_filter_active_for_run:
         btc_trend_series = prepare_btc_trend_filter_data(BACKTEST_PERIOD_DAYS + 30)
         if btc_trend_series is None:
-            # في حال فشل جلب بيانات البيتكوين، يتم تعطيل الفلتر تلقائياً
-            global USE_BTC_TREND_FILTER
-            USE_BTC_TREND_FILTER = False
+            btc_filter_active_for_run = False
             logger.warning("Disabling BTC Trend Filter for this run due to data fetch failure.")
 
     symbols_to_test = get_validated_symbols()
@@ -430,13 +397,12 @@ def start_backtesting_job():
             logger.warning(f"[{symbol}] No data for the backtest period. Skipping.")
             continue
         
-        # تمرير بيانات اتجاه البيتكوين إلى دالة الاختبار
         trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle, btc_trend_series)
         if trades: all_trades.extend(trades)
         
         time.sleep(0.1)
 
-    generate_report(all_trades)
+    generate_report(all_trades, btc_filter_active_for_run)
     
     if conn: conn.close(); logger.info("✅ Database connection closed.")
     logger.info("👋 Backtesting job finished.")
