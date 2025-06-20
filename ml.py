@@ -8,7 +8,7 @@ import pandas as pd
 import psycopg2
 import pickle
 import lightgbm as lgb
-import pandas_ta as ta
+import pandas_ta as ta # لتوليد المؤشرات الفنية
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -46,26 +46,27 @@ except Exception as e:
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 # --- V7 Model Constants ---
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7' # تحديث اسم النموذج
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_EnhancedFeatures' # تحديث اسم النموذج
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 200 # زيادة فترة التدريب
 
 # --- Indicator & Feature Parameters ---
-RSI_PERIOD: int = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+# فترات المؤشرات الفنية المستخدمة
+RSI_PERIODS: List[int] = [14, 21]
+MACD_PARAMS: Dict[str, int] = {"fast": 12, "slow": 26, "signal": 9}
 ATR_PERIOD: int = 14
 BOLLINGER_PERIOD: int = 20
 ADX_PERIOD: int = 14
-MOMENTUM_PERIOD: int = 10 # ميزة جديدة
-EMA_SLOW_PERIOD: int = 200
-EMA_FAST_PERIOD: int = 50
-BTC_CORR_PERIOD: int = 30
+MOM_PERIOD: int = 10 # فترة الزخم
+EMA_FAST_PERIODS: List[int] = [12, 50] # فترات EMA سريعة
+EMA_SLOW_PERIODS: List[int] = [26, 200] # فترات EMA بطيئة
+BTC_CORR_PERIOD: int = 30 # فترة الارتباط بالبيتكوين
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Triple-Barrier Method Parameters (V7) ---
 TP_ATR_MULTIPLIER: float = 1.8 # تعديل مضاعف الربح
 SL_ATR_MULTIPLIER: float = 1.2 # تعديل مضاعف الخسارة
-MAX_HOLD_PERIOD: int = 24
+MAX_HOLD_PERIOD: int = 24 # أقصى فترة احتفاظ بالشمعات (24 شمعة = 6 ساعات لـ 15 دقيقة)
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
@@ -139,129 +140,277 @@ def fetch_and_cache_btc_data():
     btc_data_cache = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
     if btc_data_cache is None:
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
-    btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
+    # حساب العوائد اللوغاريتمية للبيتكوين
+    btc_data_cache['btc_log_returns'] = np.log(btc_data_cache['close'] / btc_data_cache['close'].shift(1))
 
 def calculate_features_v7(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.astype('float64')
-    
-    strategy = ta.Strategy(
-        name="V7_Features",
-        ta=[
-            {"kind": "ema", "length": EMA_FAST_PERIOD},
-            {"kind": "ema", "length": EMA_SLOW_PERIOD},
-            {"kind": "atr", "length": ATR_PERIOD},
-            {"kind": "bbands", "length": BOLLINGER_PERIOD},
-            {"kind": "rsi", "length": RSI_PERIOD},
-            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
-            {"kind": "obv"},
-            {"kind": "adx", "length": ADX_PERIOD},
-        ]
-    )
-    df_calc.ta.strategy(strategy)
+    """
+    يضيف ميزات هندسية جديدة إلى DataFrame للبيانات التاريخية.
+    """
+    df_calc = df.copy().astype('float64')
 
-    # V7 - New Features
-    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
-    df_calc['volatility'] = df_calc['log_returns'].rolling(window=ATR_PERIOD).std()
-    df_calc['momentum'] = ta.mom(close=df_calc['close'], length=MOMENTUM_PERIOD)
+    # 1. الميزات الأساسية للسعر والحجم (Core Price & Volume Features)
+    # تم الاحتفاظ بـ 'open', 'high', 'low', 'close', 'volume' كأعمدة أساسية
+    
+    # 2. ميزات التغيرات والنسب (Change & Ratio Features)
+    df_calc['log_returns'] = np.log(df_calc['close'] / df_calc['close'].shift(1))
+    df_calc['candle_range'] = (df_calc['high'] - df_calc['low']) / df_calc['close']
+    df_calc['upper_shadow_ratio'] = (df_calc['high'] - np.maximum(df_calc['open'], df_calc['close'])) / (df_calc['high'] - df_calc['low'])
+    df_calc['lower_shadow_ratio'] = (np.minimum(df_calc['open'], df_calc['close']) - df_calc['low']) / (df_calc['high'] - df_calc['low'])
+    # استبدال NaN التي قد تنتج عن قسمة على صفر بـ 0 (خاصة لـ shadow ratios عندما High == Low)
+    df_calc[['upper_shadow_ratio', 'lower_shadow_ratio']] = df_calc[['upper_shadow_ratio', 'lower_shadow_ratio']].fillna(0)
+    df_calc['volume_change'] = df_calc['volume'].pct_change().fillna(0) #fillna(0) للقيم الأولى/القيم المفقودة
 
-    df_calc['price_vs_ema_fast'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
-    df_calc['price_vs_ema_slow'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
+    # 3. المؤشرات الفنية (Technical Indicators) باستخدام pandas_ta
+    # مؤشرات الاتجاه
+    for period in EMA_FAST_PERIODS:
+        df_calc[f'EMA_{period}'] = ta.ema(close=df_calc['close'], length=period)
+    for period in EMA_SLOW_PERIODS:
+        df_calc[f'EMA_{period}'] = ta.ema(close=df_calc['close'], length=period)
+
+    # MACD
+    macd_data = ta.macd(close=df_calc['close'], fast=MACD_PARAMS["fast"], slow=MACD_PARAMS["slow"], signal=MACD_PARAMS["signal"])
+    if macd_data is not None and not macd_data.empty:
+        df_calc[f'MACD_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}'] = macd_data[f'MACD_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}']
+        df_calc[f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}'] = macd_data[f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}']
+        df_calc[f'MACDS_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}'] = macd_data[f'MACDS_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}']
+    else:
+        # التعامل مع حالة عدم وجود بيانات MACD
+        logger.warning("MACD data not generated by pandas_ta. Skipping MACD features.")
+        for col in [f'MACD_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}', 
+                    f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}',
+                    f'MACDS_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}']:
+            df_calc[col] = np.nan # تعبئة بقيم فارغة لتجنب الأخطاء لاحقًا
+        
+
+    df_calc[f'ADX_{ADX_PERIOD}'] = ta.adx(high=df_calc['high'], low=df_calc['low'], close=df_calc['close'], length=ADX_PERIOD)[f'ADX_{ADX_PERIOD}']
+
+    # مؤشرات الزخم
+    for period in RSI_PERIODS:
+        df_calc[f'RSI_{period}'] = ta.rsi(close=df_calc['close'], length=period)
     
-    btc_df_float = btc_df.astype({'btc_returns': 'float64'})
-    merged_df = pd.merge(df_calc, btc_df_float[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = df_calc['log_returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
+    stoch_data = ta.stoch(high=df_calc['high'], low=df_calc['low'], close=df_calc['close'], k=14, d=3)
+    if stoch_data is not None and not stoch_data.empty:
+        df_calc['STOCH_K_14_3'] = stoch_data['STOCHk_14_3_3']
+        df_calc['STOCH_D_14_3'] = stoch_data['STOCHd_14_3_3']
+    else:
+        logger.warning("Stochastic data not generated by pandas_ta. Skipping Stochastic features.")
+        df_calc['STOCH_K_14_3'] = np.nan
+        df_calc['STOCH_D_14_3'] = np.nan
+
+    df_calc['MOMENTUM'] = ta.mom(close=df_calc['close'], length=MOM_PERIOD)
+    df_calc['OBV'] = ta.obv(close=df_calc['close'], volume=df_calc['volume'])
+
+    # مؤشرات التقلب
+    df_calc[f'ATR_{ATR_PERIOD}'] = ta.atr(high=df_calc['high'], low=df_calc['low'], close=df_calc['close'], length=ATR_PERIOD)
+    bbands_data = ta.bbands(close=df_calc['close'], length=BOLLINGER_PERIOD)
+    if bbands_data is not None and not bbands_data.empty:
+        df_calc[f'BBL_{BOLLINGER_PERIOD}_2.0'] = bbands_data[f'BBL_{BOLLINGER_PERIOD}_2.0']
+        df_calc[f'BBM_{BOLLINGER_PERIOD}_2.0'] = bbands_data[f'BBM_{BOLLINGER_PERIOD}_2.0']
+        df_calc[f'BBU_{BOLLINGER_PERIOD}_2.0'] = bbands_data[f'BBU_{BOLLINGER_PERIOD}_2.0']
+        df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0'] = bbands_data[f'BBB_{BOLLINGER_PERIOD}_2.0'] # Bollinger Bandwidth
+    else:
+        logger.warning("Bollinger Bands data not generated by pandas_ta. Skipping BB features.")
+        for col in [f'BBL_{BOLLINGER_PERIOD}_2.0', f'BBM_{BOLLINGER_PERIOD}_2.0', 
+                    f'BBU_{BOLLINGER_PERIOD}_2.0', f'BBB_{BOLLINGER_PERIOD}_2.0']:
+            df_calc[col] = np.nan
+
+    # 4. الميزات المتأخرة (Lagged Features)
+    lag_periods = [1, 2, 3, 5, 10]
+    for lag in lag_periods:
+        df_calc[f'CLOSE_LAG_{lag}'] = df_calc['close'].shift(lag)
+        df_calc[f'VOLUME_LAG_{lag}'] = df_calc['volume'].shift(lag)
+        df_calc[f'LOG_RETURNS_LAG_{lag}'] = df_calc['log_returns'].shift(lag)
+        df_calc[f'RSI_{RSI_PERIODS[0]}_LAG_{lag}'] = df_calc[f'RSI_{RSI_PERIODS[0]}'].shift(lag)
+        df_calc[f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}_LAG_{lag}'] = df_calc[f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}'].shift(lag)
+
+    # 5. الميزات المستندة إلى الوقت (Time-Based Features)
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
-    
+    df_calc['day_of_month'] = df_calc.index.day
+    df_calc['month'] = df_calc.index.month
+    df_calc['is_weekend'] = ((df_calc.index.dayofweek == 5) | (df_calc.index.dayofweek == 6)).astype(int)
+
+    # 6. ميزات التفاعل (Interaction Features)
+    # دمج بيانات البيتكوين
+    if btc_df is not None and not btc_df.empty:
+        # التأكد من أن الفهرس متطابق قبل الدمج
+        merged_btc = pd.merge(df_calc.index.to_frame(index=False), 
+                              btc_df[['btc_log_returns']].reset_index(), 
+                              left_on='timestamp', right_on='timestamp', how='left')
+        merged_btc.set_index(df_calc.index, inplace=True)
+        df_calc['btc_log_returns'] = merged_btc['btc_log_returns'].fillna(0) # التعامل مع الفجوات
+
+        df_calc[f'BTC_CORRELATION_{BTC_CORR_PERIOD}'] = df_calc['log_returns'].rolling(window=BTC_CORR_PERIOD).corr(df_calc['btc_log_returns'])
+        df_calc['BTC_CORRELATION_SQUARED'] = df_calc[f'BTC_CORRELATION_{BTC_CORR_PERIOD}'] ** 2 # مربع الارتباط قد يكون مؤشرا على قوة العلاقة بغض النظر عن الاتجاه
+        
+    df_calc['price_vs_ema_fast_ratio'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIODS[0]}']) - 1
+    df_calc['price_vs_ema_slow_ratio'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIODS[0]}']) - 1
+    df_calc['volume_x_volatility'] = df_calc['volume'] * df_calc[f'ATR_{ATR_PERIOD}']
+
+    # تنظيف أسماء الأعمدة للتوافق مع LightGBM (تحويلها إلى حروف كبيرة)
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc
 
-
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
+    """
+    تطبق طريقة الحاجز الثلاثي لإنشاء تسميات (labels) للتدريب.
+    """
     labels = pd.Series(0, index=prices.index, dtype='int8')
     for i in tqdm(range(len(prices) - MAX_HOLD_PERIOD), desc="Labeling", leave=False, ncols=100):
         entry_price = prices.iloc[i]
         current_atr = atr.iloc[i]
-        if pd.isna(current_atr) or current_atr == 0: continue
+        
+        # تخطي إذا كان ATR غير صالح لتجنب الأخطاء
+        if pd.isna(current_atr) or current_atr == 0:
+            labels.iloc[i] = np.nan # وضع NaN للقيم التي لا يمكن حسابها
+            continue
         
         upper_barrier = entry_price + (current_atr * TP_ATR_MULTIPLIER)
         lower_barrier = entry_price - (current_atr * SL_ATR_MULTIPLIER)
         
+        triggered = False
         for j in range(1, MAX_HOLD_PERIOD + 1):
-            if i + j >= len(prices): break
+            if i + j >= len(prices):
+                break
             
             future_price = prices.iloc[i + j]
             
             if future_price >= upper_barrier:
-                labels.iloc[i] = 1
+                labels.iloc[i] = 1  # ربح (شراء)
+                triggered = True
                 break
             if future_price <= lower_barrier:
-                labels.iloc[i] = -1
+                labels.iloc[i] = -1 # خسارة (شراء)
+                triggered = True
                 break
+        
+        # إذا لم يتم تشغيل أي حاجز خلال MAX_HOLD_PERIOD، يتم تعيينه 0 (لا تغيير كبير)
+        if not triggered:
+            labels.iloc[i] = 0
+            
     return labels
+
 
 def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep V7] Preparing data for {symbol}...")
     df_featured = calculate_features_v7(df, btc_df)
     
-    atr_series_name = f'ATRR_{ATR_PERIOD}'.upper()
+    # تحديد عمود ATR الصحيح
+    atr_series_name = f'ATR_{ATR_PERIOD}'.upper()
     if atr_series_name not in df_featured.columns:
-        standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
-        if standard_atr_name in df_featured.columns:
-            atr_series_name = standard_atr_name
-        else:
-            logger.error(f"FATAL: ATR column not found for {symbol}.")
-            return None
+        logger.error(f"FATAL: ATR column '{atr_series_name}' not found for {symbol}. Cannot generate labels.")
+        return None
         
     df_featured['TARGET'] = get_triple_barrier_labels(df_featured['CLOSE'], df_featured[atr_series_name])
     
-    # V7 feature list
+    # قائمة الميزات الجديدة التي تم هندستها (تأكد من مطابقتها لما يتم إنشاؤه)
     feature_columns = [
-        f'RSI_{RSI_PERIOD}', f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', 
-        f'MACDH_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
-        atr_series_name, 'BOLLINGER_WIDTH', 'OBV',
-        f'ADX_{ADX_PERIOD}', 'PRICE_VS_EMA_FAST', 'PRICE_VS_EMA_SLOW',
-        'BTC_CORRELATION', 'VOLATILITY', 'MOMENTUM',
-        'DAY_OF_WEEK', 'HOUR_OF_DAY'
+        'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME', # الميزات الأساسية
+        'LOG_RETURNS', 'CANDLE_RANGE', 'UPPER_SHADOW_RATIO', 'LOWER_SHADOW_RATIO', 'VOLUME_CHANGE', # ميزات التغيرات والنسب
     ]
-    feature_columns = [col.upper() for col in feature_columns]
+    
+    # إضافة ميزات المؤشرات الفنية
+    for period in EMA_FAST_PERIODS:
+        feature_columns.append(f'EMA_{period}')
+    for period in EMA_SLOW_PERIODS:
+        feature_columns.append(f'EMA_{period}')
+    feature_columns.extend([
+        f'MACD_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}', 
+        f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}',
+        f'MACDS_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}',
+        f'ADX_{ADX_PERIOD}'
+    ])
+    for period in RSI_PERIODS:
+        feature_columns.append(f'RSI_{period}')
+    feature_columns.extend([
+        'STOCH_K_14_3', 'STOCH_D_14_3', 'MOMENTUM', 'OBV',
+        f'ATR_{ATR_PERIOD}', f'BBL_{BOLLINGER_PERIOD}_2.0', f'BBM_{BOLLINGER_PERIOD}_2.0', 
+        f'BBU_{BOLLINGER_PERIOD}_2.0', f'BBB_{BOLLINGER_PERIOD}_2.0'
+    ])
+    
+    # إضافة الميزات المتأخرة
+    lag_periods = [1, 2, 3, 5, 10]
+    for lag in lag_periods:
+        feature_columns.append(f'CLOSE_LAG_{lag}')
+        feature_columns.append(f'VOLUME_LAG_{lag}')
+        feature_columns.append(f'LOG_RETURNS_LAG_{lag}')
+        feature_columns.append(f'RSI_{RSI_PERIODS[0]}_LAG_{lag}')
+        feature_columns.append(f'MACDH_{MACD_PARAMS["fast"]}_{MACD_PARAMS["slow"]}_{MACD_PARAMS["signal"]}_LAG_{lag}')
 
+    # إضافة الميزات المستندة إلى الوقت
+    feature_columns.extend([
+        'DAY_OF_WEEK', 'HOUR_OF_DAY', 'DAY_OF_MONTH', 'MONTH', 'IS_WEEKEND'
+    ])
+
+    # إضافة ميزات التفاعل
+    if btc_df is not None and not btc_df.empty: # التحقق مرة أخرى لضمان وجود بيانات البيتكوين
+        feature_columns.extend([
+            f'BTC_CORRELATION_{BTC_CORR_PERIOD}', 'BTC_CORRELATION_SQUARED'
+        ])
+    feature_columns.extend([
+        'PRICE_VS_EMA_FAST_RATIO', 'PRICE_VS_EMA_SLOW_RATIO', 'VOLUME_X_VOLATILITY'
+    ])
+    
+    # تنظيف DataFrame من الصفوف التي تحتوي على قيم NaN بعد حساب الميزات (خاصةً Lagged Features والمؤشرات)
+    # وأيضًا إسقاط الصفوف التي لم يتم فيها تعيين TARGET (حيث تم تعيينها إلى NaN في get_triple_barrier_labels)
     df_cleaned = df_featured.dropna(subset=feature_columns + ['TARGET']).copy()
     
+    # إزالة الصفوف ذات TARGET = 0 إذا كان النموذج مخصصًا فقط لتنبؤ الصعود/الهبوط الواضح
+    # إذا كنت تريد تضمين الفئة "لا تغيير"، فقم بإزالة هذا السطر.
+    # في هذا السيناريو، نحن نركز على تنبؤات الشراء (1) والخسارة (-1)
     df_cleaned = df_cleaned[df_cleaned['TARGET'] != 0]
 
     if df_cleaned.empty or df_cleaned['TARGET'].nunique() < 2:
-        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after filtering. Skipping.")
+        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after filtering or is empty. Skipping.")
         return None
     
+    # إعادة تسمية -1 إلى 0 ليتناسب مع مشكلة التصنيف الثنائي (0 = خسارة/هبوط، 1 = ربح/صعود)
     df_cleaned['TARGET'] = df_cleaned['TARGET'].replace(-1, 0)
     
     target_counts = df_cleaned['TARGET'].value_counts(normalize=True)
     logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{target_counts}")
-    if target_counts.min() < 0.1:
+    # التحقق من وجود عدم توازن كبير في الفئات
+    if target_counts.min() < 0.1: # إذا كانت أصغر فئة تمثل أقل من 10%
         logger.warning(f"⚠️ [ML Prep] Severe class imbalance for {symbol}. Min class is {target_counts.min():.2%}. Skipping training.")
+        return None
+
+    # التحقق من أن جميع الأعمدة المحددة كـ features موجودة في DataFrame
+    missing_features = [col for col in feature_columns if col not in df_cleaned.columns]
+    if missing_features:
+        logger.error(f"❌ [ML Prep] Missing features in DataFrame for {symbol}: {missing_features}")
         return None
 
     X = df_cleaned[feature_columns]
     y = df_cleaned['TARGET']
     return X, y, feature_columns
 
+
 def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info("ℹ️ [ML Train V7] Starting training with Walk-Forward Validation...")
-    tscv = TimeSeriesSplit(n_splits=5)
+    tscv = TimeSeriesSplit(n_splits=5) # 5 أقسام للتحقق المتتالي
     
     lgb_params = {
-        'objective': 'binary', 'metric': 'logloss', 'random_state': 42,
-        'verbosity': -1, 'n_estimators': 1500, 'learning_rate': 0.01,
-        'num_leaves': 31, 'max_depth': -1, 'class_weight': 'balanced',
-        'reg_alpha': 0.0, 'reg_lambda': 0.0, 'n_jobs': -1,
-        'colsample_bytree': 0.8, 'min_child_samples': 10, 'boosting_type': 'gbdt',
+        'objective': 'binary', # هدف التصنيف الثنائي
+        'metric': 'logloss',   # مقياس تقييم
+        'random_state': 42,    # لضمان قابلية التكرار
+        'verbosity': -1,       # إيقاف إخراج التفاصيل أثناء التدريب
+        'n_estimators': 1500,  # عدد المقدرين (الأشجار)
+        'learning_rate': 0.01, # معدل التعلم
+        'num_leaves': 31,      # الحد الأقصى لعدد الأوراق في كل شجرة
+        'max_depth': -1,       # لا يوجد حد أقصى للعمق
+        'class_weight': 'balanced', # للتعامل مع عدم توازن الفئات
+        'reg_alpha': 0.0,      # L1 regularization
+        'reg_lambda': 0.0,     # L2 regularization
+        'n_jobs': -1,          # استخدام جميع النوى المتاحة
+        'colsample_bytree': 0.8, # نسبة الميزات التي يتم أخذ عينات منها لكل شجرة
+        'min_child_samples': 10, # الحد الأدنى لعدد العينات المطلوبة لإنشاء ورقة جديدة
+        'boosting_type': 'gbdt', # نوع التعزيز
     }
     
     final_model, final_scaler = None, None
+    all_y_true, all_y_pred = pd.Series(dtype=int), pd.Series(dtype=int)
 
     for i, (train_index, test_index) in enumerate(tscv.split(X)):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
@@ -271,9 +420,9 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
             logger.warning(f"--- Fold {i+1}: Skipping due to empty train/test set.")
             continue
         
-        scaler = StandardScaler().fit(X_train)
-        
-        X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
+        # Scaling features
+        scaler = StandardScaler()
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
         
         model = lgb.LGBMClassifier(**lgb_params)
@@ -281,29 +430,29 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         model.fit(X_train_scaled, y_train, 
                   eval_set=[(X_test_scaled, y_test)],
                   eval_metric='logloss',
-                  callbacks=[lgb.early_stopping(100, verbose=False)])
+                  callbacks=[lgb.early_stopping(100, verbose=False)]) # توقف مبكر
         
         y_pred = model.predict(X_test_scaled)
+        
+        # تجميع النتائج لتقرير نهائي شامل
+        all_y_true = pd.concat([all_y_true, y_test])
+        all_y_pred = pd.concat([all_y_pred, pd.Series(y_pred, index=y_test.index)])
+
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
         logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
                     f"P(Win): {report.get('1', {}).get('precision', 0):.4f}, "
                     f"P(Loss): {report.get('0', {}).get('precision', 0):.4f}")
         
-        final_model, final_scaler = model, scaler
+        final_model, final_scaler = model, scaler # الاحتفاظ بالنموذج وال scaler من الطية الأخيرة
 
-    if not final_model or not final_scaler:
-        logger.error("❌ [ML Train] Training failed, no model was created.")
+    if not final_model or not final_scaler or all_y_true.empty:
+        logger.error("❌ [ML Train] Training failed, no valid model or data for final report.")
         return None, None, None
 
-    # --- THIS IS THE FIX ---
-    # Convert the scaled NumPy array back to a DataFrame with feature names
-    # before making the final prediction for the report. This silences the warning.
-    X_scaled_for_report = pd.DataFrame(final_scaler.transform(X), columns=X.columns, index=X.index)
-    all_preds = final_model.predict(X_scaled_for_report)
-    
-    final_report = classification_report(y, all_preds, output_dict=True, zero_division=0)
+    # تقرير الأداء النهائي على جميع البيانات المختبرة عبر الطيات
+    final_report = classification_report(all_y_true, all_y_pred, output_dict=True, zero_division=0)
     avg_metrics = {
-        'accuracy': accuracy_score(y, all_preds),
+        'accuracy': accuracy_score(all_y_true, all_y_pred),
         'precision_win': final_report.get('1', {}).get('precision', 0),
         'recall_win': final_report.get('1', {}).get('recall', 0),
         'f1_score_win': final_report.get('1', {}).get('f1-score', 0),
@@ -311,7 +460,7 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
     }
 
     metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in avg_metrics.items()])
-    logger.info(f"📊 [ML Train] Final Model Performance on All Data: {metrics_log_str}")
+    logger.info(f"📊 [ML Train] Final Model Performance on All Test Data (Aggregated): {metrics_log_str}")
     return final_model, final_scaler, avg_metrics
 
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
@@ -371,6 +520,8 @@ def run_training_job():
                  logger.warning(f"⚠️ [Main] Training did not produce a valid model for {symbol}. Skipping."); failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
             
+            # معايير قبول النموذج (يمكن تعديلها حسب الحاجة)
+            # نتحقق من أن دقة الفوز (precision_win) ودرجة F1 (f1_score_win) أعلى من عتبة معينة.
             if final_model and final_scaler and model_metrics.get('precision_win', 0) > 0.52 and model_metrics.get('f1_score_win', 0) > 0.5:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -385,9 +536,9 @@ def run_training_job():
         time.sleep(1)
 
     completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
-                        f"- Successfully trained: {successful_models} models\n"
-                        f"- Failed/Discarded: {failed_models} models\n"
-                        f"- Total symbols: {len(symbols_to_train)}")
+                        f"- تم التدريب بنجاح: {successful_models} نموذج\n"
+                        f"- فشل/تم التجاهل: {failed_models} نموذج\n"
+                        f"- إجمالي العملات: {len(symbols_to_train)}")
     send_telegram_message(completion_message)
     logger.info(completion_message)
 
@@ -402,7 +553,7 @@ def health_check():
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
-    training_thread.daemon = True
+    training_thread.daemon = True # سيسمح هذا للخيط بالخروج عند إغلاق التطبيق الرئيسي
     training_thread.start()
     
     port = int(os.environ.get("PORT", 10001))
