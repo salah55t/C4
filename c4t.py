@@ -141,13 +141,15 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}")
         return None
 
-# ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    # FINAL FIX: Cast dataframe to float64 to prevent dtype-related FutureWarnings from pandas_ta.
-    # This is the definitive way to ensure all calculation inputs are floats.
+    """
+    هذه الدالة تقوم بحساب جميع المؤشرات الفنية والميزات الإضافية للنموذج.
+    """
+    # -- الإصلاح --: تحويل نوع بيانات الـ DataFrame إلى float64 بشكل صريح
+    # هذا السطر يمنع ظهور تحذير عدم توافق الأنواع (dtype) من مكتبة pandas.
     df_calc = df.copy().astype('float64')
     
-    # Use pandas_ta strategy to calculate all indicators at once
+    # استخدام استراتيجية pandas_ta لحساب جميع المؤشرات دفعة واحدة
     strategy = ta.Strategy(
         name="V6_Features",
         description="Comprehensive feature set for V6 model",
@@ -167,7 +169,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     )
     df_calc.ta.strategy(strategy)
 
-    # Manual feature calculation
+    # حساب الميزات يدوياً
     df_calc['returns'] = ta.percent_return(close=df_calc['close'])
     df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
@@ -175,15 +177,15 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
     df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    # Broader Market Features
+    # ميزات السوق الأوسع
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # Time and Date Features
+    # ميزات الوقت والتاريخ
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # Standardize all column names to uppercase for consistency
+    # توحيد أسماء الأعمدة إلى حروف كبيرة
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
@@ -263,7 +265,6 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             in_trade = True
             entry_price = current_candle['CLOSE']
             
-            # FINAL FIX V2: Look for 'ATRR_14' first, then fall back to 'ATR_14'
             atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
             if atr_column_name not in current_candle.index:
                  standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
