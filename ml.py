@@ -1,4 +1,4 @@
-# ml_corrected_final.py
+# ml_corrected_final_v2.py
 import time
 import os
 import json
@@ -239,18 +239,23 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series, feature_na
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         if len(y_train) == 0 or len(y_test) == 0: continue
+        
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        # <--- التعديل: الحفاظ على أسماء الميزات بعد التحويل
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
         model = lgb.LGBMClassifier(**lgb_params)
         model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)],
                   eval_metric='logloss', callbacks=[lgb.early_stopping(100, verbose=False)])
         y_pred = model.predict(X_test_scaled)
         all_y_true.extend(y_test)
         all_y_pred.extend(y_pred)
+        
     if not all_y_true:
         logger.error("❌ [ML Train] Validation failed, no data to generate report.")
         return None, None, None
+        
     final_report = classification_report(all_y_true, all_y_pred, output_dict=True, zero_division=0)
     avg_metrics = {
         'accuracy': accuracy_score(all_y_true, all_y_pred),
@@ -260,17 +265,19 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series, feature_na
         'num_samples_trained': len(X),
     }
     logger.info(f"📊 [ML Validate] Aggregated performance: {', '.join([f'{k}: {v:.4f}' for k, v in avg_metrics.items()])}")
+    
     logger.info("ℹ️ [ML Train] Retraining final model on the entire dataset...")
     final_scaler = StandardScaler()
-    X_scaled_full = final_scaler.fit_transform(X)
+    # <--- التعديل: الحفاظ على أسماء الميزات في التدريب النهائي
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
+    
     final_model = lgb.LGBMClassifier(**lgb_params)
     final_model.fit(X_scaled_full, y)
+    
     logger.info("✅ [ML Train] Final model training complete.")
     return final_model, final_scaler, avg_metrics
 
 # --- دوال الحفظ والإرسال ---
-# <--- التعديل: تمت إعادة إضافة الدوال المفقودة هنا
-
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
     logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
     try:
