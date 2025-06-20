@@ -57,16 +57,11 @@ ATR_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
+# --- تمت إضافة معلمات المؤشرات الجديدة ---
 STOCH_RSI_PERIOD: int = 14
 STOCH_K: int = 3
 STOCH_D: int = 3
 REL_VOL_PERIOD: int = 30
-
-# --- تمت إضافة معلمات فلتر التشبع ---
-RSI_OVERBOUGHT: int = 70
-RSI_OVERSOLD: int = 30
-STOCH_RSI_OVERBOUGHT: int = 80
-STOCH_RSI_OVERSOLD: int = 20
 
 
 # --- Trading Logic Constants ---
@@ -202,34 +197,38 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ---!!! تحديث: تم تعديل الدالة لإضافة فلتر التشبع الشرائي والبيعي ---
+# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # ATR
+    # ATR (موجود بالفعل)
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    # RSI
+    # RSI (الفلتر الأول - موجود)
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # MACD and MACD Cross
+    # MACD and MACD Cross (الفلتر الثاني - محدث)
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = ema_fast - ema_slow
     signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
     df_calc['macd_hist'] = macd_line - signal_line
+    # اكتشاف التقاطع
     df_calc['macd_cross'] = 0
+    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
 
-    # Stochastic RSI
+
+    # Stochastic RSI (الفلتر الثالث - جديد)
     rsi = df_calc['rsi']
     min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
     max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
@@ -237,15 +236,10 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
 
-    # Relative Volume
+    # Relative Volume (الفلتر الرابع - موجود)
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
-    # --- فلتر التشبع الشرائي والبيعي (جديد) ---
-    df_calc['market_condition'] = 0 # 0 for Neutral
-    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1 # 1 for Overbought
-    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1 # -1 for Oversold
-
-    # Other existing features
+    # الميزات الأخرى الموجودة
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -335,6 +329,7 @@ class TradingStrategy:
         
         last_row = df_processed.iloc[-1]
         try:
+            # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
             missing_features = [f for f in self.feature_names if f not in df_processed.columns]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
