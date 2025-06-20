@@ -22,9 +22,6 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 from sklearn.preprocessing import StandardScaler
 from collections import deque
 
-# -- الإصلاح النهائي --: تعطيل المعالجة المتعددة بشكل كامل لمكتبة pandas-ta
-ta.set_n_jobs(1)
-
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,

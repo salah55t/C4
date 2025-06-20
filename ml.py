@@ -22,9 +22,6 @@ from tqdm import tqdm
 from flask import Flask
 from threading import Thread
 
-# -- الإصلاح النهائي --: تعطيل المعالجة المتعددة بشكل كامل لمكتبة pandas-ta
-ta.set_n_jobs(1)
-
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,
