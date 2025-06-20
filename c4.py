@@ -192,8 +192,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     """
     هذه الدالة تقوم بحساب جميع المؤشرات الفنية والميزات الإضافية للنموذج.
     """
-    # -- الإصلاح --: تحويل نوع بيانات الـ DataFrame إلى float64 بشكل صريح
-    # هذا السطر يمنع ظهور تحذير عدم توافق الأنواع (dtype) من مكتبة pandas.
+    # تحويل نوع بيانات الـ DataFrame إلى float64 بشكل صريح لتجنب أخطاء الأنواع
     df_calc = df.copy().astype('float64')
     
     # استخدام استراتيجية pandas_ta لحساب جميع المؤشرات دفعة واحدة
@@ -214,7 +213,8 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
             {"kind": "adx", "length": ADX_PERIOD},
         ]
     )
-    df_calc.ta.strategy(strategy)
+    # -- الإصلاح الجديد --: تعطيل المعالجة المتعددة لتجنب التحذير
+    df_calc.ta.strategy(strategy, n_jobs=1)
 
     # حساب الميزات يدوياً
     df_calc['returns'] = ta.percent_return(close=df_calc['close'])
@@ -331,7 +331,6 @@ class TradingStrategy:
             
             prob_for_class_1 = 0
             try:
-                # The model predicts 0 (loss) or 1 (win). We want prob for class 1.
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except (ValueError, IndexError):
