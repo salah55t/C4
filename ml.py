@@ -239,7 +239,13 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     
     df_cleaned['TARGET'] = df_cleaned['TARGET'].replace(-1, 0)
     
-    logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{df_cleaned['TARGET'].value_counts(normalize=True)}")
+    # Check for class imbalance before proceeding
+    target_counts = df_cleaned['TARGET'].value_counts(normalize=True)
+    logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{target_counts}")
+    if target_counts.min() < 0.1: # If one class is less than 10%
+        logger.warning(f"⚠️ [ML Prep] Severe class imbalance for {symbol}. Min class is {target_counts.min():.2%}. Skipping training.")
+        return None
+
     X = df_cleaned[feature_columns]
     y = df_cleaned['TARGET']
     return X, y, feature_columns
@@ -270,6 +276,10 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
+        if len(y_train) == 0 or len(y_test) == 0:
+            logger.warning(f"--- Fold {i+1}: Skipping due to empty train/test set.")
+            continue
+        
         scaler = StandardScaler().fit(X_train)
         
         X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
@@ -277,7 +287,11 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         
         model = lgb.LGBMClassifier(**lgb_params)
         
-        model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)],
+        # FIX: Added eval_metric='logloss' to the fit method.
+        # This tells the early stopping callback which metric to monitor on the evaluation set.
+        model.fit(X_train_scaled, y_train, 
+                  eval_set=[(X_test_scaled, y_test)],
+                  eval_metric='logloss', # <-- ### THIS IS THE FIX ###
                   callbacks=[lgb.early_stopping(50, verbose=False)])
         
         y_pred = model.predict(X_test_scaled)
@@ -298,6 +312,7 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         'accuracy': accuracy_score(y, all_preds),
         'precision_win': final_report.get('1', {}).get('precision', 0),
         'recall_win': final_report.get('1', {}).get('recall', 0),
+        'f1_score_win': final_report.get('1', {}).get('f1-score', 0),
         'num_samples_trained': len(X),
     }
 
@@ -308,6 +323,10 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
     logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
     try:
+        if conn is None or conn.closed:
+            logger.warning("[DB Save] DB connection is closed. Re-initializing.")
+            init_db()
+
         model_binary = pickle.dumps(model_bundle)
         metrics_json = json.dumps(metrics)
         with conn.cursor() as db_cur:
@@ -319,7 +338,8 @@ def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: 
         conn.commit()
         logger.info(f"✅ [DB Save] Model bundle '{model_name}' saved successfully.")
     except Exception as e:
-        logger.error(f"❌ [DB Save] Error saving model bundle: {e}"); conn.rollback()
+        logger.error(f"❌ [DB Save] Error saving model bundle: {e}"); 
+        if conn: conn.rollback()
 
 def send_telegram_message(text: str):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -354,18 +374,19 @@ def run_training_job():
             
             training_result = train_with_walk_forward_validation(X, y)
             if not all(training_result):
-                 failed_models += 1; continue
+                 logger.warning(f"⚠️ [Main] Training did not produce a valid model for {symbol}. Skipping."); failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
             
             # V7 - Stricter condition to save the model
-            if final_model and final_scaler and model_metrics.get('precision_win', 0) > 0.52:
+            if final_model and final_scaler and model_metrics.get('precision_win', 0) > 0.52 and model_metrics.get('f1_score_win', 0) > 0.5:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
                 save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
                 precision = model_metrics.get('precision_win', 0)
-                logger.warning(f"⚠️ [Main] Model for {symbol} is not useful (Precision {precision:.2f} <= 52%). Discarding."); failed_models += 1
+                f1_score = model_metrics.get('f1_score_win', 0)
+                logger.warning(f"⚠️ [Main] Model for {symbol} is not useful (Precision {precision:.2f}, F1-Score: {f1_score:.2f}). Discarding."); failed_models += 1
         except Exception as e:
             logger.critical(f"❌ [Main] A fatal error occurred for {symbol}: {e}", exc_info=True); failed_models += 1
         time.sleep(1)
