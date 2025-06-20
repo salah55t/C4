@@ -22,6 +22,9 @@ from tqdm import tqdm
 from flask import Flask
 from threading import Thread
 
+# -- الإصلاح النهائي --: تعطيل المعالجة المتعددة بشكل كامل لمكتبة pandas-ta
+ta.set_n_jobs(1)
+
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -144,13 +147,8 @@ def fetch_and_cache_btc_data():
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    هذه الدالة تقوم بحساب جميع المؤشرات الفنية والميزات الإضافية للنموذج.
-    """
-    # تحويل نوع بيانات الـ DataFrame إلى float64 بشكل صريح لتجنب أخطاء الأنواع
     df_calc = df.copy().astype('float64')
     
-    # استخدام استراتيجية pandas_ta لحساب جميع المؤشرات دفعة واحدة
     strategy = ta.Strategy(
         name="V6_Features",
         description="Comprehensive feature set for V6 model",
@@ -168,10 +166,8 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
             {"kind": "adx", "length": ADX_PERIOD},
         ]
     )
-    # -- الإصلاح الجديد --: تعطيل المعالجة المتعددة لتجنب التحذير
-    df_calc.ta.strategy(strategy, n_jobs=1)
+    df_calc.ta.strategy(strategy)
 
-    # حساب الميزات يدوياً
     df_calc['returns'] = ta.percent_return(close=df_calc['close'])
     df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
@@ -179,15 +175,12 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
     df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    # ميزات السوق الأوسع
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # ميزات الوقت والتاريخ
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # توحيد أسماء الأعمدة إلى حروف كبيرة
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc
