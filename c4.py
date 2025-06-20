@@ -27,11 +27,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v6.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v7.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV6')
+logger = logging.getLogger('CryptoBotV7')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -45,32 +45,29 @@ except Exception as e:
      logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
      exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V6.1 Model Constants ---
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6'
+# ---------------------- إعداد الثوابت والمتغيرات العامة (V7) ----------------------
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 
-# --- Indicator & Feature Parameters (Matching ml.py V6.1) ---
+# --- Indicator & Feature Parameters (V7) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
 BOLLINGER_PERIOD: int = 20
-STDEV_PERIOD: int = 20
 ADX_PERIOD: int = 14
-ROC_PERIOD: int = 10
-MFI_PERIOD: int = 14
+MOMENTUM_PERIOD: int = 10
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 
-# --- Trading Logic Constants ---
-MODEL_CONFIDENCE_THRESHOLD = 0.70
+# --- Trading Logic Constants (V7) ---
+MODEL_CONFIDENCE_THRESHOLD = 0.75 # زيادة عتبة الثقة
 MAX_OPEN_TRADES: int = 5
 TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
-ATR_SL_MULTIPLIER = 1.5
-ATR_TP_MULTIPLIER = 2.0
+ATR_SL_MULTIPLIER = 1.2 # تعديل وقف الخسارة
+ATR_TP_MULTIPLIER = 1.8 # تعديل الهدف
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
@@ -89,6 +86,7 @@ notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات ----------------------
+# ... (الكود هنا لم يتغير) ...
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
@@ -152,6 +150,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 # ---------------------- دوال Binance والبيانات ----------------------
+# ... (دالة get_validated_symbols و fetch_historical_data لم تتغير) ...
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
@@ -188,37 +187,36 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy().astype('float64')
+# استخدام دالة حساب الميزات الجديدة V7
+def calculate_features_v7(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    df_calc = df.astype('float64')
     
     strategy = ta.Strategy(
-        name="V6_Features",
-        description="Comprehensive feature set for V6 model",
+        name="V7_Features",
         ta=[
             {"kind": "ema", "length": EMA_FAST_PERIOD},
             {"kind": "ema", "length": EMA_SLOW_PERIOD},
             {"kind": "atr", "length": ATR_PERIOD},
             {"kind": "bbands", "length": BOLLINGER_PERIOD},
             {"kind": "rsi", "length": RSI_PERIOD},
-            {"kind": "roc", "length": ROC_PERIOD},
-            {"kind": "mfi", "length": MFI_PERIOD},
             {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
             {"kind": "obv"},
-            {"kind": "ad"},
             {"kind": "adx", "length": ADX_PERIOD},
         ]
     )
     df_calc.ta.strategy(strategy)
 
-    df_calc['returns'] = ta.percent_return(close=df_calc['close'])
     df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
-    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
+    df_calc['volatility'] = df_calc['log_returns'].rolling(window=ATR_PERIOD).std()
+    df_calc['momentum'] = ta.mom(close=df_calc['close'], length=MOMENTUM_PERIOD)
+
+    df_calc['price_vs_ema_fast'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
+    df_calc['price_vs_ema_slow'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
     df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
-    df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    btc_df_float = btc_df.astype({'btc_returns': 'float64'})
+    merged_df = pd.merge(df_calc, btc_df_float[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = df_calc['log_returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
@@ -229,6 +227,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+    # ... (الكود هنا لم يتغير، سيقوم بتحميل نموذج V7 تلقائياً) ...
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
@@ -250,6 +249,7 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
+# ... (دوال WebSocket لم تتغير) ...
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     global open_signals_cache, current_prices
     try:
@@ -297,9 +297,10 @@ class TradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        return calculate_features(df, btc_df)
+        return calculate_features_v7(df, btc_df) # استخدام دالة الميزات V7
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        # ... (منطق توليد الإشارة لم يتغير، لكنه سيستخدم نموذج V7) ...
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
         
@@ -321,7 +322,6 @@ class TradingStrategy:
             
             prob_for_class_1 = 0
             try:
-                # The model predicts 0 (loss) or 1 (win). We want prob for class 1.
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except (ValueError, IndexError):
@@ -343,6 +343,7 @@ class TradingStrategy:
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
+# ... (دوال التنبيهات والإدارة لم تتغير) ...
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -440,6 +441,7 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
+# ... (دوال get_btc_trend و get_btc_data_for_bot لم تتغير) ...
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
@@ -526,7 +528,9 @@ def main_loop():
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         else:
-                            potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
+                            # Fallback logic, though USE_DYNAMIC_SL_TP is true
+                            potential_signal['target_price'] = current_price * 1.02
+                            potential_signal['stop_loss'] = current_price * 0.985
                         
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
@@ -544,6 +548,7 @@ def main_loop():
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
+# ... (الكود هنا لم يتغير) ...
 app = Flask(__name__)
 CORS(app)
 
