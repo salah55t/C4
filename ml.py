@@ -254,20 +254,25 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
     logger.info("ℹ️ [ML Train V7] Starting training with Walk-Forward Validation...")
     tscv = TimeSeriesSplit(n_splits=5)
     
-    # V7 - Improved model parameters
+    # --- FIX 2: Updated model parameters for more flexibility ---
+    # These parameters make the model more complex and less constrained,
+    # which can help overcome the "No further splits" warning.
     lgb_params = {
         'objective': 'binary',
         'metric': 'logloss',
         'random_state': 42,
-        'n_estimators': 500,
-        'learning_rate': 0.02,
-        'num_leaves': 20,
-        'max_depth': 5,
+        'verbosity': -1,             # Suppress verbose warnings
+        'n_estimators': 1500,        # Give it more trees to build
+        'learning_rate': 0.01,       # Lower learning rate requires more estimators
+        'num_leaves': 31,            # Default complexity
+        'max_depth': -1,             # No limit on depth
         'class_weight': 'balanced',
-        'reg_alpha': 0.1,
-        'reg_lambda': 0.1,
+        'reg_alpha': 0.0,            # Turn off L1 regularization for this test
+        'reg_lambda': 0.0,           # Turn off L2 regularization for this test
         'n_jobs': -1,
-        'colsample_bytree': 0.7
+        'colsample_bytree': 0.8,     # Use a bit more features per tree
+        'min_child_samples': 10,     # Allow splits that result in smaller leaves
+        'boosting_type': 'gbdt',
     }
     
     final_model, final_scaler = None, None
@@ -287,12 +292,11 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         
         model = lgb.LGBMClassifier(**lgb_params)
         
-        # FIX: Added eval_metric='logloss' to the fit method.
-        # This tells the early stopping callback which metric to monitor on the evaluation set.
+        # FIX 1: Added eval_metric='logloss' to the fit method.
         model.fit(X_train_scaled, y_train, 
                   eval_set=[(X_test_scaled, y_test)],
-                  eval_metric='logloss', # <-- ### THIS IS THE FIX ###
-                  callbacks=[lgb.early_stopping(50, verbose=False)])
+                  eval_metric='logloss',
+                  callbacks=[lgb.early_stopping(100, verbose=False)]) # Increased patience for early stopping
         
         y_pred = model.predict(X_test_scaled)
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
