@@ -239,10 +239,9 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     
     df_cleaned['TARGET'] = df_cleaned['TARGET'].replace(-1, 0)
     
-    # Check for class imbalance before proceeding
     target_counts = df_cleaned['TARGET'].value_counts(normalize=True)
     logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{target_counts}")
-    if target_counts.min() < 0.1: # If one class is less than 10%
+    if target_counts.min() < 0.1:
         logger.warning(f"⚠️ [ML Prep] Severe class imbalance for {symbol}. Min class is {target_counts.min():.2%}. Skipping training.")
         return None
 
@@ -254,25 +253,12 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
     logger.info("ℹ️ [ML Train V7] Starting training with Walk-Forward Validation...")
     tscv = TimeSeriesSplit(n_splits=5)
     
-    # --- FIX 2: Updated model parameters for more flexibility ---
-    # These parameters make the model more complex and less constrained,
-    # which can help overcome the "No further splits" warning.
     lgb_params = {
-        'objective': 'binary',
-        'metric': 'logloss',
-        'random_state': 42,
-        'verbosity': -1,             # Suppress verbose warnings
-        'n_estimators': 1500,        # Give it more trees to build
-        'learning_rate': 0.01,       # Lower learning rate requires more estimators
-        'num_leaves': 31,            # Default complexity
-        'max_depth': -1,             # No limit on depth
-        'class_weight': 'balanced',
-        'reg_alpha': 0.0,            # Turn off L1 regularization for this test
-        'reg_lambda': 0.0,           # Turn off L2 regularization for this test
-        'n_jobs': -1,
-        'colsample_bytree': 0.8,     # Use a bit more features per tree
-        'min_child_samples': 10,     # Allow splits that result in smaller leaves
-        'boosting_type': 'gbdt',
+        'objective': 'binary', 'metric': 'logloss', 'random_state': 42,
+        'verbosity': -1, 'n_estimators': 1500, 'learning_rate': 0.01,
+        'num_leaves': 31, 'max_depth': -1, 'class_weight': 'balanced',
+        'reg_alpha': 0.0, 'reg_lambda': 0.0, 'n_jobs': -1,
+        'colsample_bytree': 0.8, 'min_child_samples': 10, 'boosting_type': 'gbdt',
     }
     
     final_model, final_scaler = None, None
@@ -292,11 +278,10 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         
         model = lgb.LGBMClassifier(**lgb_params)
         
-        # FIX 1: Added eval_metric='logloss' to the fit method.
         model.fit(X_train_scaled, y_train, 
                   eval_set=[(X_test_scaled, y_test)],
                   eval_metric='logloss',
-                  callbacks=[lgb.early_stopping(100, verbose=False)]) # Increased patience for early stopping
+                  callbacks=[lgb.early_stopping(100, verbose=False)])
         
         y_pred = model.predict(X_test_scaled)
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
@@ -310,7 +295,12 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         logger.error("❌ [ML Train] Training failed, no model was created.")
         return None, None, None
 
-    all_preds = final_model.predict(final_scaler.transform(X))
+    # --- THIS IS THE FIX ---
+    # Convert the scaled NumPy array back to a DataFrame with feature names
+    # before making the final prediction for the report. This silences the warning.
+    X_scaled_for_report = pd.DataFrame(final_scaler.transform(X), columns=X.columns, index=X.index)
+    all_preds = final_model.predict(X_scaled_for_report)
+    
     final_report = classification_report(y, all_preds, output_dict=True, zero_division=0)
     avg_metrics = {
         'accuracy': accuracy_score(y, all_preds),
@@ -381,7 +371,6 @@ def run_training_job():
                  logger.warning(f"⚠️ [Main] Training did not produce a valid model for {symbol}. Skipping."); failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
             
-            # V7 - Stricter condition to save the model
             if final_model and final_scaler and model_metrics.get('precision_win', 0) > 0.52 and model_metrics.get('f1_score_win', 0) > 0.5:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
