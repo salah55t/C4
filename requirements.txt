@@ -1,6 +1,6 @@
 requests
 pandas
-numpy
+numpy==1.24.4
 psycopg2
 python-binance
 Flask
@@ -9,7 +9,7 @@ APScheduler
 scikit-learn
 waitress
 psycopg2-binary
-pandas-ta>=0.3.14b0 
+pandas-ta
 ta
 lightgbm
 Flask-Cors
