@@ -145,7 +145,8 @@ def fetch_and_cache_btc_data():
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy()
+    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
     strategy = ta.Strategy(
@@ -183,7 +184,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # *** FIX: Standardize all column names to uppercase ***
+    # Standardize all column names to uppercase for consistency
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc
@@ -216,15 +217,15 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df, btc_df)
     
-    # *** FIX: Use the correct uppercase ATR column name ***
-    atr_series_name = f'ATRr_{ATR_PERIOD}'.upper()
+    # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
+    atr_series_name = f'ATR_{ATR_PERIOD}'.upper()
     if atr_series_name not in df_featured.columns:
-        logger.error(f"ATR series '{atr_series_name}' not found after feature calculation for {symbol}.")
+        logger.error(f"ATR series '{atr_series_name}' not found after feature calculation for {symbol}. Available columns: {df_featured.columns.tolist()}")
         return None
         
     df_featured['TARGET'] = get_triple_barrier_labels(df_featured['CLOSE'], df_featured[atr_series_name])
     
-    # Define V6 feature list
+    # Define V6 feature list (ensuring all names are uppercase)
     feature_columns = [
         f'RSI_{RSI_PERIOD}', f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', 
         f'MACDH_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', f'MACDS_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
@@ -234,7 +235,7 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
         'PRICE_VS_EMA50', 'PRICE_VS_EMA200', 'BTC_CORRELATION',
         'DAY_OF_WEEK', 'HOUR_OF_DAY'
     ]
-    # Ensure all feature names are uppercase
+    # Ensure all feature names are uppercase (redundant but safe)
     feature_columns = [col.upper() for col in feature_columns]
 
     df_cleaned = df_featured.dropna(subset=feature_columns + ['TARGET']).copy()

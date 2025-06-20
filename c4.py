@@ -190,7 +190,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy()
+    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
     strategy = ta.Strategy(
@@ -228,7 +229,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # *** FIX: Standardize all column names to uppercase ***
+    # Standardize all column names to uppercase for consistency
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
@@ -518,8 +519,11 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            # *** FIX: Use the correct uppercase ATR column name ***
-                            atr_column_name = f'ATRr_{ATR_PERIOD}'.upper()
+                            # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
+                            atr_column_name = f'ATR_{ATR_PERIOD}'.upper()
+                            if atr_column_name not in df_features.columns:
+                                logger.error(f"ATR column '{atr_column_name}' not found for {symbol} in main loop. Skipping.")
+                                continue
                             atr_value = df_features[atr_column_name].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)

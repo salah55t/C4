@@ -4,6 +4,7 @@ import pickle
 import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
+from threading import Thread
 
 import numpy as np
 import pandas as pd
@@ -142,7 +143,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy()
+    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
     strategy = ta.Strategy(
@@ -180,7 +182,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # *** FIX: Standardize all column names to uppercase ***
+    # Standardize all column names to uppercase for consistency
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
@@ -207,14 +209,14 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 # ----------------------------- محرك الاختبار الخلفي ----------------------------
 # ==============================================================================
 
-def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
     trades = []
     
     model = model_bundle['model']
     scaler = model_bundle['scaler']
     feature_names = model_bundle['feature_names']
     
-    df_featured = calculate_features(data, btc_data)
+    df_featured = data # Data is already featured and filtered
     
     missing = [col for col in feature_names if col not in df_featured.columns]
     if missing:
@@ -260,8 +262,12 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
             in_trade = True
             entry_price = current_candle['CLOSE']
             
-            # *** FIX: Use correct uppercase ATR column name ***
-            atr_column_name = f'ATRr_{ATR_PERIOD}'.upper()
+            # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
+            atr_column_name = f'ATR_{ATR_PERIOD}'.upper()
+            if atr_column_name not in current_candle.index:
+                 logger.error(f"ATR column '{atr_column_name}' not found for {symbol} in backtest. Skipping trade.")
+                 in_trade = False
+                 continue
             atr_value = current_candle[atr_column_name]
             
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
@@ -393,7 +399,7 @@ def start_backtesting_job():
             continue
 
         # Pass the already-featured and filtered dataframe to the backtester
-        trades = run_backtest_for_symbol(symbol, df_to_test, btc_data, model_bundle)
+        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle)
         if trades:
             all_trades.extend(trades)
         
