@@ -14,7 +14,7 @@ from binance.client import Client
 from datetime import datetime, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
-from sklearn.model_selection import TimeSeriesSplit # سنستخدمها بعناية
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -334,8 +334,6 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series, numerical_
     logger.info("ℹ️ [ML Train] Starting training with Walk-Forward Validation...")
     
     # استخدام TimeSeriesSplit بشكل صحيح مع عدد كافٍ من الانقسامات.
-    # n_splits=5 يعني 5 أضعاف، كل ضعف يستخدم جزءًا أكبر من البيانات للتدريب.
-    # max_train_size يمكن أن يحد من حجم نافذة التدريب
     tscv = TimeSeriesSplit(n_splits=5) 
     
     final_model, final_scaler = None, None
@@ -343,100 +341,102 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series, numerical_
 
     # معلمات LightGBM المقترحة لتحقيق أداء "قياسي"
     lgbm_params = {
-        'objective': 'multiclass', # لأنه لدينا 3 فئات (-1, 0, 1) التي تم تعيينها إلى (0, 1, 2)
-        'num_class': 3,            # 3 فئات
-        'metric': 'multi_logloss', # مقياس مناسب للتصنيف المتعدد
+        'objective': 'multiclass', 
+        'num_class': 3,            
+        'metric': 'multi_logloss', 
         'boosting_type': 'gbdt',
-        'num_leaves': 63,          # قيمة جيدة، تسمح بتعقيد معقول
-        'max_depth': -1,           # السماح لـ num_leaves بالتحكم
-        'learning_rate': 0.02,     # معدل تعلم صغير
-        'feature_fraction': 0.7,   # أخذ عينات من 70% من الميزات
-        'bagging_fraction': 0.7,   # أخذ عينات من 70% من البيانات
-        'bagging_freq': 1,         # تكرار الـ bagging
-        'lambda_l1': 0.1,          # تقييد L1
-        'lambda_l2': 0.1,          # تقييد L2
-        'min_child_samples': 200,  # عدد كبير في العقدة الطرفية لتقليل التجاوز
-        'verbose': -1,             # إخفاء المخرجات
-        'n_jobs': -1,              # استخدام جميع النوى
-        'seed': 42,                # للتحقق
-        'is_unbalance': True       # مهم للفئات غير المتوازنة
+        'num_leaves': 63,          
+        'max_depth': -1,           
+        'learning_rate': 0.02,     
+        'feature_fraction': 0.7,   
+        'bagging_fraction': 0.7,   
+        'bagging_freq': 1,         
+        'lambda_l1': 0.1,          
+        'lambda_l2': 0.1,          
+        'min_child_samples': 200,  
+        'verbose': -1,             
+        'n_jobs': -1,              
+        'seed': 42,                
+        'is_unbalance': True       
     }
 
     # تحديد الميزات الفئوية لـ LightGBM (يجب أن تكون كـ 'category' dtype)
     lgbm_categorical_features = [col for col in categorical_features if col in X.columns]
     
     for i, (train_index, test_index) in enumerate(tscv.split(X)):
+        logger.info(f"--- [ML Train] Starting Fold {i+1}/{tscv.get_n_splits(X)} ---") # رسالة تقدم جديدة
+
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         # التأكد من وجود عينات كافية في كل مجموعة فرعية للتدريب
         if X_train.empty or X_test.empty or y_train.empty or y_test.empty:
-            logger.warning(f"⚠️ [ML Train] Fold {i+1} has empty train/test sets. Skipping.")
+            logger.warning(f"⚠️ [ML Train] Fold {i+1} has empty train/test sets. Skipping this fold.")
             continue
         
         # التأكد من وجود أكثر من فئة واحدة في y_train و y_test
         if y_train.nunique() < 2 or y_test.nunique() < 2:
-            logger.warning(f"⚠️ [ML Train] Fold {i+1} train/test target has less than 2 classes. Skipping.")
+            logger.warning(f"⚠️ [ML Train] Fold {i+1} train/test target has less than 2 unique classes. Skipping this fold.")
             continue
 
-        # تطبيق StandardScaler فقط على الميزات الرقمية
-        scaler = StandardScaler()
-        # Fit scaler only on numerical features of the training set
-        scaler.fit(X_train[numerical_features])
+        try: # كتلة try-except جديدة لالتقاط الأخطاء داخل كل طية
+            # تطبيق StandardScaler فقط على الميزات الرقمية
+            scaler = StandardScaler()
+            scaler.fit(X_train[numerical_features])
+            
+            X_train_scaled = X_train.copy()
+            X_test_scaled = X_test.copy()
+
+            X_train_scaled[numerical_features] = scaler.transform(X_train[numerical_features])
+            X_test_scaled[numerical_features] = scaler.transform(X_test[numerical_features])
+            
+            # إعادة تعيين الميزات الفئوية إلى نوع 'category' بعد العمليات السابقة (إن لم تكن كذلك)
+            for col in lgbm_categorical_features:
+                if col in X_train_scaled.columns:
+                    X_train_scaled[col] = X_train_scaled[col].astype('category')
+                if col in X_test_scaled.columns:
+                    X_test_scaled[col] = X_test_scaled[col].astype('category')
+
+            logger.info(f"--- [ML Train] Fold {i+1}: Training LGBM model... (Train size: {len(X_train_scaled)}, Test size: {len(X_test_scaled)})")
+            
+            # تدريب LightGBM
+            model = lgb.train(
+                lgbm_params,
+                lgb.Dataset(X_train_scaled, y_train, categorical_feature=lgbm_categorical_features),
+                num_boost_round=1000, # تم تقليلها لتسريع التشخيص
+                valid_sets=[lgb.Dataset(X_test_scaled, y_test, categorical_feature=lgbm_categorical_features)],
+                callbacks=[lgb.early_stopping(stopping_rounds=100, verbose=False)], # توقف مبكر
+            )
+            
+            # التنبؤ والتقييم للضعف الحالي
+            y_pred = model.predict(X_test_scaled, num_iteration=model.best_iteration)
+            y_pred_labels = np.argmax(y_pred, axis=1) # للحصول على الفئة المتوقعة من الاحتمالات
+
+            # مقاييس لكل ضعف
+            acc = accuracy_score(y_test, y_pred_labels)
+            precision_profit = precision_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
+            recall_profit = recall_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
+            f1_profit = f1_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
+            
+            fold_metrics.append({
+                'accuracy': acc,
+                'precision_profit': precision_profit,
+                'recall_profit': recall_profit,
+                'f1_profit': f1_profit,
+                'best_iteration': model.best_iteration
+            })
+
+            logger.info(f"--- Fold {i+1} Completed: Accuracy: {acc:.4f}, Precision (Profit): {precision_profit:.4f}, Recall (Profit): {recall_profit:.4f}, F1 (Profit): {f1_profit:.4f}, Best Iteration: {model.best_iteration}")
+            
+            final_model, final_scaler = model, scaler # حفظ آخر نموذج ومدرب
         
-        # Transform both train and test sets, retaining original column names
-        X_train_scaled = X_train.copy()
-        X_test_scaled = X_test.copy()
+        except Exception as e:
+            logger.error(f"❌ [ML Train] Error during Fold {i+1} training: {e}", exc_info=True)
+            # لا نفشل التدريب بأكمله، بل ننتقل إلى الطية التالية
+            continue
 
-        X_train_scaled[numerical_features] = scaler.transform(X_train[numerical_features])
-        X_test_scaled[numerical_features] = scaler.transform(X_test[numerical_features])
-        
-        # إعادة تعيين الميزات الفئوية إلى نوع 'category' بعد العمليات السابقة (إن لم تكن كذلك)
-        for col in lgbm_categorical_features:
-            if col in X_train_scaled.columns:
-                X_train_scaled[col] = X_train_scaled[col].astype('category')
-            if col in X_test_scaled.columns:
-                X_test_scaled[col] = X_test_scaled[col].astype('category')
-
-        # تدريب LightGBM
-        model = lgb.train(
-            lgbm_params,
-            lgb.Dataset(X_train_scaled, y_train, categorical_feature=lgbm_categorical_features),
-            num_boost_round=2000, # عدد كبير للسماح بالتوقف المبكر
-            valid_sets=[lgb.Dataset(X_test_scaled, y_test, categorical_feature=lgbm_categorical_features)],
-            callbacks=[lgb.early_stopping(stopping_rounds=150, verbose=False)], # توقف مبكر
-            # feature_name = list(X.columns) # للتأكد من استخدام أسماء الميزات الصحيحة
-        )
-        
-        # التنبؤ والتقييم للضعف الحالي
-        y_pred = model.predict(X_test_scaled, num_iteration=model.best_iteration)
-        y_pred_labels = np.argmax(y_pred, axis=1) # للحصول على الفئة المتوقعة من الاحتمالات
-
-        # مقاييس لكل ضعف
-        acc = accuracy_score(y_test, y_pred_labels)
-        # Precision و Recall و F1 لكل فئة على حدة
-        # نركز على فئة الربح (mapped to 2) أو فئة الخسارة (mapped to 0)
-        precision_profit = precision_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
-        recall_profit = recall_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
-        f1_profit = f1_score(y_test, y_pred_labels, labels=[2], average='macro', zero_division=0)
-        
-        # يمكنك إضافة مقاييس لفئة الخسارة إذا أردت
-        # precision_loss = precision_score(y_test, y_pred_labels, labels=[0], average='macro', zero_division=0)
-
-        fold_metrics.append({
-            'accuracy': acc,
-            'precision_profit': precision_profit,
-            'recall_profit': recall_profit,
-            'f1_profit': f1_profit,
-            'best_iteration': model.best_iteration
-        })
-
-        logger.info(f"--- Fold {i+1}: Accuracy: {acc:.4f}, Precision (Profit): {precision_profit:.4f}, Recall (Profit): {recall_profit:.4f}, F1 (Profit): {f1_profit:.4f}, Best Iteration: {model.best_iteration}")
-        
-        final_model, final_scaler = model, scaler # حفظ آخر نموذج ومدرب
-
-    if not final_model or not final_scaler:
-        logger.error("❌ [ML Train] Training failed, no model was created or all folds skipped.")
+    if not fold_metrics: # إذا لم يتم إكمال أي طيات بنجاح
+        logger.error("❌ [ML Train] No successful folds completed. Training failed.")
         return None, None, None
 
     # حساب المتوسطات للمقاييس عبر جميع الأضعاف
@@ -451,18 +451,12 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series, numerical_
         'avg_recall_profit': avg_recall_profit,
         'avg_f1_profit': avg_f1_profit,
         'num_samples_trained': len(X),
-        'num_folds': len(fold_metrics)
+        'num_folds_completed': len(fold_metrics) # عدد الطيات المكتملة
     }
 
     metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in final_metrics.items() if isinstance(v, (int, float))])
-    logger.info(f"📊 [ML Train] Average Walk-Forward Performance: {metrics_log_str}")
+    logger.info(f"📊 [ML Train] Average Walk-Forward Performance Across {len(fold_metrics)} Folds: {metrics_log_str}")
     
-    # ملاحظة: يتم حفظ آخر نموذج ومدرب. لنهج أكثر قوة، يمكنك تدريب نموذج نهائي على مجموعة بيانات أكبر
-    # أو متوسط النماذج، ولكن هذا يعقد العملية. لهذا النهج "القياسي"، نستخدم آخر نموذج كـ "أفضل نموذج"
-    # إذا كان أداؤه هو الأفضل عبر جميع الأضعاف.
-    # بدلاً من ذلك، يمكنك اختيار النموذج الذي حقق أفضل مقياس على مجموعة التحقق من بين جميع الأضعاف.
-    # للتبسيط، نستخدم آخر نموذج مدرب هنا.
-
     return final_model, final_scaler, final_metrics
 
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
@@ -533,14 +527,14 @@ def run_training_job():
 
             # تمرير قوائم الميزات إلى دالة التدريب
             training_result = train_with_walk_forward_validation(X, y, numerical_features, categorical_features)
-            if not all(res is not None for res in training_result): # التحقق من أن جميع العناصر ليست None
-                 logger.warning(f"⚠️ [Main] Training for {symbol} resulted in None values. Skipping."); failed_models += 1; continue
+            # التحقق من أن جميع العناصر ليست None وأن model_metrics موجودة
+            if not all(res is not None for res in training_result) or training_result[2] is None: 
+                 logger.warning(f"⚠️ [Main] Training for {symbol} resulted in None values or no metrics. Skipping."); failed_models += 1; continue
             
             final_model, final_scaler, model_metrics = training_result
             
             # تقييم الأداء بناءً على مقياس الربح (precision_profit) وليس فقط الدقة
-            # يمكن تعديل هذا العتبة بناءً على مدى عدوانية استراتيجيتك
-            if final_model and final_scaler and model_metrics.get('avg_precision_profit', 0) > 0.40: # عتبة أعلى للتدريب القياسي
+            if model_metrics.get('avg_precision_profit', 0) > 0.40: # عتبة أعلى للتدريب القياسي
                 model_bundle = {
                     'model': final_model,
                     'scaler': final_scaler,
@@ -581,11 +575,11 @@ def health_check():
 if __name__ == "__main__":
     # بدء عملية التدريب في خيط منفصل حتى لا تمنع الخادم من العمل
     training_thread = Thread(target=run_training_job)
-    training_thread.daemon = True # سيتم إنهاء الخيط عند إنهاء البرنامج الرئيسي
+    training_thread.daemon = True 
     training_thread.start()
     
     # تشغيل خادم الويب
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
-    # debug=True لا ينصح به في بيئات الإنتاج، قم بإزالته عند النشر الفعلي
     app.run(host='0.0.0.0', port=port)
+
