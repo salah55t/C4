@@ -9,7 +9,7 @@ APScheduler
 scikit-learn
 waitress
 psycopg2-binary
-pandas_ta 
+pandas-ta>=0.3.14b0 
 ta
 lightgbm
 Flask-Cors
