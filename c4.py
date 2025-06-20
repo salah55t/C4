@@ -190,7 +190,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    # FINAL FIX: Cast dataframe to float64 to prevent dtype-related FutureWarnings from pandas_ta.
+    # This is the definitive way to ensure all calculation inputs are floats.
     df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
@@ -328,7 +329,7 @@ class TradingStrategy:
             
             prob_for_class_1 = 0
             try:
-                # The model now predicts 0 (loss) or 1 (win). We want prob for class 1.
+                # The model predicts 0 (loss) or 1 (win). We want prob for class 1.
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except (ValueError, IndexError):
@@ -520,10 +521,9 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            # FIX V2: The log shows the column is named 'ATRR_14'. We will use this name.
+                            # FINAL FIX V2: The log shows the column is named 'ATRR_14'. We use it and fallback.
                             atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
                             if atr_column_name not in df_features.columns:
-                                # Fallback check
                                 standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
                                 if standard_atr_name in df_features.columns:
                                      atr_column_name = standard_atr_name

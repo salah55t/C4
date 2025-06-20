@@ -143,7 +143,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    # FINAL FIX: Cast dataframe to float64 to prevent dtype-related FutureWarnings from pandas_ta.
+    # This is the definitive way to ensure all calculation inputs are floats.
     df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
@@ -220,7 +221,6 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     
     missing = [col for col in feature_names if col not in df_featured.columns]
     if missing:
-        # This can happen if the ATR column name differs between training and backtesting
         logger.error(f"Missing features {missing} for {symbol} in backtest. Skipping.")
         return []
 
@@ -263,7 +263,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             in_trade = True
             entry_price = current_candle['CLOSE']
             
-            # FIX V2: Look for 'ATRR_14' first, then fall back to 'ATR_14'
+            # FINAL FIX V2: Look for 'ATRR_14' first, then fall back to 'ATR_14'
             atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
             if atr_column_name not in current_candle.index:
                  standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()

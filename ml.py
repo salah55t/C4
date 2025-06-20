@@ -145,7 +145,8 @@ def fetch_and_cache_btc_data():
 
 # ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    # FIX: Convert dataframe to float to avoid dtype warnings with pandas_ta
+    # FINAL FIX: Cast dataframe to float64 to prevent dtype-related FutureWarnings from pandas_ta.
+    # This is the definitive way to ensure all calculation inputs are floats.
     df_calc = df.copy().astype('float64')
     
     # Use pandas_ta strategy to calculate all indicators at once
@@ -155,7 +156,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
         ta=[
             {"kind": "ema", "length": EMA_FAST_PERIOD},
             {"kind": "ema", "length": EMA_SLOW_PERIOD},
-            {"kind": "atr", "length": ATR_PERIOD}, # This should generate ATR_14, but we will adapt to the environment's output
+            {"kind": "atr", "length": ATR_PERIOD},
             {"kind": "bbands", "length": BOLLINGER_PERIOD},
             {"kind": "rsi", "length": RSI_PERIOD},
             {"kind": "roc", "length": ROC_PERIOD},
@@ -217,15 +218,14 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df, btc_df)
     
-    # FIX V2: The log shows the column is named 'ATRR_14'. We will use this name directly.
+    # FINAL FIX V2: The log shows the column is named 'ATRR_14'. We will use this name directly and fallback.
     atr_series_name = f'ATRR_{ATR_PERIOD}'.upper()
     if atr_series_name not in df_featured.columns:
-        # Fallback to the standard name if the non-standard one is not found
         standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
         if standard_atr_name in df_featured.columns:
             atr_series_name = standard_atr_name
         else:
-            logger.error(f"Neither '{atr_series_name}' nor '{standard_atr_name}' found for {symbol}. Available: {df_featured.columns.tolist()}")
+            logger.error(f"FATAL: Neither '{atr_series_name}' nor '{standard_atr_name}' found for {symbol}. Available: {df_featured.columns.tolist()}")
             return None
         
     df_featured['TARGET'] = get_triple_barrier_labels(df_featured['CLOSE'], df_featured[atr_series_name])
@@ -240,7 +240,6 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
         'PRICE_VS_EMA50', 'PRICE_VS_EMA200', 'BTC_CORRELATION',
         'DAY_OF_WEEK', 'HOUR_OF_DAY'
     ]
-    # Ensure all feature names are uppercase (redundant but safe)
     feature_columns = [col.upper() for col in feature_columns]
 
     df_cleaned = df_featured.dropna(subset=feature_columns + ['TARGET']).copy()
@@ -252,7 +251,7 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after filtering. Skipping.")
         return None
     
-    # Remap target from {-1, 1} to {0, 1} for binary classification if needed
+    # Remap target from {-1, 1} to {0, 1} for binary classification
     df_cleaned['TARGET'] = df_cleaned['TARGET'].replace(-1, 0)
     
     logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{df_cleaned['TARGET'].value_counts(normalize=True)}")
@@ -282,7 +281,6 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
                   eval_metric='logloss', callbacks=[lgb.early_stopping(30, verbose=False)])
         
         y_pred = model.predict(X_test_scaled)
-        # Convert class names to string for the report to avoid potential errors
         report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
         logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
                     f"P(1): {report.get('1', {}).get('precision', 0):.4f}, "
