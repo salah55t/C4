@@ -312,7 +312,6 @@ class TradingStrategy:
         
         last_row = df_processed.iloc[-1]
         try:
-            # The feature names from the model and the columns from df_processed are now guaranteed to be uppercase
             missing_features = [f for f in self.feature_names if f not in last_row.index]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
@@ -329,9 +328,11 @@ class TradingStrategy:
             
             prob_for_class_1 = 0
             try:
+                # The model now predicts 0 (loss) or 1 (win). We want prob for class 1.
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except (ValueError, IndexError):
+                logger.warning(f"Could not find class '1' in model for {self.symbol}")
                 return None
 
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
@@ -519,11 +520,17 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
-                            atr_column_name = f'ATR_{ATR_PERIOD}'.upper()
+                            # FIX V2: The log shows the column is named 'ATRR_14'. We will use this name.
+                            atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
                             if atr_column_name not in df_features.columns:
-                                logger.error(f"ATR column '{atr_column_name}' not found for {symbol} in main loop. Skipping.")
-                                continue
+                                # Fallback check
+                                standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
+                                if standard_atr_name in df_features.columns:
+                                     atr_column_name = standard_atr_name
+                                else:
+                                    logger.error(f"ATR column not found for {symbol} in main loop. Skipping.")
+                                    continue
+                            
                             atr_value = df_features[atr_column_name].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)

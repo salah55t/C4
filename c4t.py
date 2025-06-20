@@ -220,6 +220,7 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     
     missing = [col for col in feature_names if col not in df_featured.columns]
     if missing:
+        # This can happen if the ATR column name differs between training and backtesting
         logger.error(f"Missing features {missing} for {symbol} in backtest. Skipping.")
         return []
 
@@ -262,12 +263,17 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
             in_trade = True
             entry_price = current_candle['CLOSE']
             
-            # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
-            atr_column_name = f'ATR_{ATR_PERIOD}'.upper()
+            # FIX V2: Look for 'ATRR_14' first, then fall back to 'ATR_14'
+            atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
             if atr_column_name not in current_candle.index:
-                 logger.error(f"ATR column '{atr_column_name}' not found for {symbol} in backtest. Skipping trade.")
-                 in_trade = False
-                 continue
+                 standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
+                 if standard_atr_name in current_candle.index:
+                     atr_column_name = standard_atr_name
+                 else:
+                     logger.error(f"ATR column not found for {symbol} in backtest. Skipping trade.")
+                     in_trade = False
+                     continue
+            
             atr_value = current_candle[atr_column_name]
             
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)

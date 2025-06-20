@@ -155,7 +155,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
         ta=[
             {"kind": "ema", "length": EMA_FAST_PERIOD},
             {"kind": "ema", "length": EMA_SLOW_PERIOD},
-            {"kind": "atr", "length": ATR_PERIOD},
+            {"kind": "atr", "length": ATR_PERIOD}, # This should generate ATR_14, but we will adapt to the environment's output
             {"kind": "bbands", "length": BOLLINGER_PERIOD},
             {"kind": "rsi", "length": RSI_PERIOD},
             {"kind": "roc", "length": ROC_PERIOD},
@@ -217,11 +217,16 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df, btc_df)
     
-    # FIX: Use the correct ATR column name ('ATR_14' not 'ATRR_14')
-    atr_series_name = f'ATR_{ATR_PERIOD}'.upper()
+    # FIX V2: The log shows the column is named 'ATRR_14'. We will use this name directly.
+    atr_series_name = f'ATRR_{ATR_PERIOD}'.upper()
     if atr_series_name not in df_featured.columns:
-        logger.error(f"ATR series '{atr_series_name}' not found after feature calculation for {symbol}. Available columns: {df_featured.columns.tolist()}")
-        return None
+        # Fallback to the standard name if the non-standard one is not found
+        standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
+        if standard_atr_name in df_featured.columns:
+            atr_series_name = standard_atr_name
+        else:
+            logger.error(f"Neither '{atr_series_name}' nor '{standard_atr_name}' found for {symbol}. Available: {df_featured.columns.tolist()}")
+            return None
         
     df_featured['TARGET'] = get_triple_barrier_labels(df_featured['CLOSE'], df_featured[atr_series_name])
     
@@ -246,6 +251,9 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     if df_cleaned.empty or df_cleaned['TARGET'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after filtering. Skipping.")
         return None
+    
+    # Remap target from {-1, 1} to {0, 1} for binary classification if needed
+    df_cleaned['TARGET'] = df_cleaned['TARGET'].replace(-1, 0)
     
     logger.info(f"📊 [ML Prep] Target distribution for {symbol} (after filtering):\n{df_cleaned['TARGET'].value_counts(normalize=True)}")
     X = df_cleaned[feature_columns]
@@ -275,10 +283,10 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         
         y_pred = model.predict(X_test_scaled)
         # Convert class names to string for the report to avoid potential errors
-        report = classification_report(y_test.astype(str), y_pred.astype(str), output_dict=True, zero_division=0)
+        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
         logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
-                    f"P(1): {report.get('1.0', {}).get('precision', 0):.4f}, "
-                    f"P(-1): {report.get('-1.0', {}).get('precision', 0):.4f}")
+                    f"P(1): {report.get('1', {}).get('precision', 0):.4f}, "
+                    f"P(0): {report.get('0', {}).get('precision', 0):.4f}")
         
         final_model, final_scaler = model, scaler
 
@@ -298,8 +306,8 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
     final_report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
     avg_metrics = {
         'accuracy': accuracy_score(all_true, all_preds),
-        'precision_class_1': final_report.get('1.0', {}).get('precision', 0),
-        'recall_class_1': final_report.get('1.0', {}).get('recall', 0),
+        'precision_class_1': final_report.get('1', {}).get('precision', 0),
+        'recall_class_1': final_report.get('1', {}).get('recall', 0),
         'num_samples_trained': len(X),
     }
 
