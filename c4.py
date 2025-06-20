@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
+import pandas_ta as ta
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -26,11 +27,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v5.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v6.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV5')
+logger = logging.getLogger('CryptoBotV6')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -45,24 +46,23 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V5 Model Constants ---
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
+# --- V6 Model Constants ---
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # زيادة طفيفة للحصول على بيانات كافية للمؤشرات الجديدة
 
-# --- Indicator & Feature Parameters (Matching ml.py) ---
+# --- Indicator & Feature Parameters (Matching ml.py V6) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
+BOLLINGER_PERIOD: int = 20
+STDEV_PERIOD: int = 20
+ADX_PERIOD: int = 14
+ROC_PERIOD: int = 10
+MFI_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
-# --- تمت إضافة معلمات المؤشرات الجديدة ---
-STOCH_RSI_PERIOD: int = 14
-STOCH_K: int = 3
-STOCH_D: int = 3
-REL_VOL_PERIOD: int = 30
-
 
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.70
@@ -71,7 +71,7 @@ TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
-USE_TRAILING_STOP = False
+USE_TRAILING_STOP = False # Trailing stop logic not implemented in this version yet
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
@@ -98,6 +98,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # Ensure all tables exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -197,57 +198,62 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
+# ---!!! تحديث: V6 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    V6 Feature Engineering. Uses pandas_ta for consistency and robustness.
+    """
     df_calc = df.copy()
+    
+    # 1. Historical Price Data Features
+    df_calc['returns'] = df_calc.ta.percent_return(close=df_calc['close'], append=True)
+    df_calc['log_returns'] = df_calc.ta.log_return(close=df_calc['close'], append=True)
+    
+    # Moving Averages
+    df_calc.ta.ema(length=EMA_FAST_PERIOD, append=True)
+    df_calc.ta.ema(length=EMA_SLOW_PERIOD, append=True)
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
+    
+    # Volatility Features
+    df_calc.ta.atr(length=ATR_PERIOD, append=True)
+    bbands = df_calc.ta.bbands(length=BOLLINGER_PERIOD, append=True)
+    df_calc['bollinger_width'] = bbands[f'BBB_{BOLLINGER_PERIOD}_2.0']
+    df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
+    
+    # 2. Technical Indicator Features
+    # Momentum Indicators
+    df_calc.ta.rsi(length=RSI_PERIOD, append=True)
+    df_calc.ta.roc(length=ROC_PERIOD, append=True)
+    df_calc.ta.mfi(length=MFI_PERIOD, append=True)
+    macd = df_calc.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
+    
+    # Volume Indicators
+    df_calc.ta.obv(append=True)
+    df_calc.ta.ad(append=True)
+    
+    # Trend Indicators
+    df_calc.ta.adx(length=ADX_PERIOD, append=True)
 
-    # ATR (موجود بالفعل)
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
-    # RSI (الفلتر الأول - موجود)
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-
-    # MACD and MACD Cross (الفلتر الثاني - محدث)
-    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
-    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = macd_line - signal_line
-    # اكتشاف التقاطع
-    df_calc['macd_cross'] = 0
-    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
-    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
-    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
-    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
-
-
-    # Stochastic RSI (الفلتر الثالث - جديد)
-    rsi = df_calc['rsi']
-    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
-    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
-    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
-
-    # Relative Volume (الفلتر الرابع - موجود)
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-
-    # الميزات الأخرى الموجودة
-    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-    df_calc['returns'] = df_calc['close'].pct_change()
+    # 3. Broader Market Features
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    
+    # 4. Time and Date Features
+    df_calc['day_of_week'] = df_calc.index.dayofweek # Monday=0, Sunday=6
     df_calc['hour_of_day'] = df_calc.index.hour
+    
+    # --- Placeholders for future advanced features ---
+    # 5. Order Book Data (Requires WebSocket connection to order book stream)
+    # df_calc['bid_ask_spread'] = np.nan # Example: best_ask - best_bid
+    # df_calc['order_book_imbalance'] = np.nan # Example: (sum_bid_vol - sum_ask_vol) / (sum_bid_vol + sum_ask_vol)
+    
+    # 6. Sentiment Features (Requires API connection to news/social media data providers)
+    # df_calc['news_sentiment'] = np.nan # Example: score from -1 to 1
+    # df_calc['twitter_velocity'] = np.nan # Example: change in mention count
+
+    # Clean up column names generated by pandas_ta
+    df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
 
@@ -329,13 +335,16 @@ class TradingStrategy:
         
         last_row = df_processed.iloc[-1]
         try:
+            # Ensure all columns are uppercase to match feature names
+            last_row.index = last_row.index.str.upper()
+            
             # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
-            missing_features = [f for f in self.feature_names if f not in df_processed.columns]
+            missing_features = [f for f in self.feature_names if f not in last_row.index]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
                 return None
             
-            features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
+            features_df = pd.DataFrame([last_row], columns=self.feature_names)
             if features_df.isnull().values.any(): return None
             
             features_scaled = self.scaler.transform(features_df)
@@ -537,7 +546,8 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            atr_value = df_features['atr'].iloc[-1]
+                            # Use ATR from the last calculated feature row
+                            atr_value = df_features[f'ATRr_{ATR_PERIOD}'.upper()].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         else:
