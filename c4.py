@@ -46,12 +46,12 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V6 Model Constants ---
+# --- V6.1 Model Constants ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15 # زيادة طفيفة للحصول على بيانات كافية للمؤشرات الجديدة
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 
-# --- Indicator & Feature Parameters (Matching ml.py V6) ---
+# --- Indicator & Feature Parameters (Matching ml.py V6.1) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
@@ -71,7 +71,6 @@ TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
-USE_TRAILING_STOP = False # Trailing stop logic not implemented in this version yet
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
@@ -98,21 +97,12 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # Ensure all tables exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY,
-                        symbol TEXT NOT NULL,
-                        entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL,
-                        stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open',
-                        closing_price DOUBLE PRECISION,
-                        closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION,
-                        strategy_name TEXT,
-                        signal_details JSONB
-                    );
+                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB );
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -198,61 +188,47 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ---!!! تحديث: V6 Feature Engineering ---
+# ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    V6 Feature Engineering. Uses pandas_ta for consistency and robustness.
-    """
     df_calc = df.copy()
     
-    # 1. Historical Price Data Features
-    df_calc['returns'] = df_calc.ta.percent_return(close=df_calc['close'], append=True)
-    df_calc['log_returns'] = df_calc.ta.log_return(close=df_calc['close'], append=True)
-    
-    # Moving Averages
-    df_calc.ta.ema(length=EMA_FAST_PERIOD, append=True)
-    df_calc.ta.ema(length=EMA_SLOW_PERIOD, append=True)
+    # Use pandas_ta strategy to calculate all indicators at once
+    strategy = ta.Strategy(
+        name="V6_Features",
+        description="Comprehensive feature set for V6 model",
+        ta=[
+            {"kind": "ema", "length": EMA_FAST_PERIOD},
+            {"kind": "ema", "length": EMA_SLOW_PERIOD},
+            {"kind": "atr", "length": ATR_PERIOD},
+            {"kind": "bbands", "length": BOLLINGER_PERIOD},
+            {"kind": "rsi", "length": RSI_PERIOD},
+            {"kind": "roc", "length": ROC_PERIOD},
+            {"kind": "mfi", "length": MFI_PERIOD},
+            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
+            {"kind": "obv"},
+            {"kind": "ad"},
+            {"kind": "adx", "length": ADX_PERIOD},
+        ]
+    )
+    df_calc.ta.strategy(strategy)
+
+    # Manual feature calculation
+    df_calc['returns'] = ta.percent_return(close=df_calc['close'])
+    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    
-    # Volatility Features
-    df_calc.ta.atr(length=ATR_PERIOD, append=True)
-    bbands = df_calc.ta.bbands(length=BOLLINGER_PERIOD, append=True)
-    df_calc['bollinger_width'] = bbands[f'BBB_{BOLLINGER_PERIOD}_2.0']
+    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
     df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    # 2. Technical Indicator Features
-    # Momentum Indicators
-    df_calc.ta.rsi(length=RSI_PERIOD, append=True)
-    df_calc.ta.roc(length=ROC_PERIOD, append=True)
-    df_calc.ta.mfi(length=MFI_PERIOD, append=True)
-    macd = df_calc.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
-    
-    # Volume Indicators
-    df_calc.ta.obv(append=True)
-    df_calc.ta.ad(append=True)
-    
-    # Trend Indicators
-    df_calc.ta.adx(length=ADX_PERIOD, append=True)
-
-    # 3. Broader Market Features
+    # Broader Market Features
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # 4. Time and Date Features
-    df_calc['day_of_week'] = df_calc.index.dayofweek # Monday=0, Sunday=6
+    # Time and Date Features
+    df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # --- Placeholders for future advanced features ---
-    # 5. Order Book Data (Requires WebSocket connection to order book stream)
-    # df_calc['bid_ask_spread'] = np.nan # Example: best_ask - best_bid
-    # df_calc['order_book_imbalance'] = np.nan # Example: (sum_bid_vol - sum_ask_vol) / (sum_bid_vol + sum_ask_vol)
-    
-    # 6. Sentiment Features (Requires API connection to news/social media data providers)
-    # df_calc['news_sentiment'] = np.nan # Example: score from -1 to 1
-    # df_calc['twitter_velocity'] = np.nan # Example: change in mention count
-
-    # Clean up column names generated by pandas_ta
+    # *** FIX: Standardize all column names to uppercase ***
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
@@ -335,10 +311,7 @@ class TradingStrategy:
         
         last_row = df_processed.iloc[-1]
         try:
-            # Ensure all columns are uppercase to match feature names
-            last_row.index = last_row.index.str.upper()
-            
-            # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
+            # The feature names from the model and the columns from df_processed are now guaranteed to be uppercase
             missing_features = [f for f in self.feature_names if f not in last_row.index]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
@@ -357,7 +330,7 @@ class TradingStrategy:
             try:
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
-            except ValueError:
+            except (ValueError, IndexError):
                 return None
 
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
@@ -368,8 +341,7 @@ class TradingStrategy:
                     'strategy_name': BASE_ML_MODEL_NAME,
                     'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}
                 }
-            else:
-                return None
+            return None
 
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
@@ -546,8 +518,9 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            # Use ATR from the last calculated feature row
-                            atr_value = df_features[f'ATRr_{ATR_PERIOD}'.upper()].iloc[-1]
+                            # *** FIX: Use the correct uppercase ATR column name ***
+                            atr_column_name = f'ATRr_{ATR_PERIOD}'.upper()
+                            atr_value = df_features[atr_column_name].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         else:

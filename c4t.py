@@ -16,27 +16,23 @@ from tqdm import tqdm
 from flask import Flask
 
 # ==============================================================================
-# --------------------------- إعدادات الاختبار الخلفي (محدثة لـ V6) ----------------------------
+# --------------------------- إعدادات الاختبار الخلفي (محدثة لـ V6.1) ----------------------------
 # ==============================================================================
-# الفترة الزمنية للاختبار بالايام
 BACKTEST_PERIOD_DAYS: int = 45
-# الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
-# اسم النموذج الأساسي الذي سيتم اختباره (تم التحديث إلى V6)
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6'
 
-# --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
+# --- معلمات الاستراتيجية ---
 MODEL_PREDICTION_THRESHOLD: float = 0.70
 ATR_SL_MULTIPLIER: float = 1.5
 ATR_TP_MULTIPLIER: float = 2.0
-USE_TRAILING_STOP: bool = False
 
 # --- محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
 SLIPPAGE_PERCENT: float = 0.05
 INITIAL_TRADE_AMOUNT_USDT: float = 10.0
 
-# --- معلمات المؤشرات (من c4.py V6) ---
+# --- معلمات المؤشرات (from c4.py V6.1) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
@@ -54,7 +50,6 @@ BTC_SYMBOL = 'BTCUSDT'
 # ---------------------------- إعدادات النظام والاتصال -------------------------
 # ==============================================================================
 
-# إعداد التسجيل (Logging)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -65,13 +60,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger('BacktesterV6')
 
-# إعداد خادم الويب
 app = Flask(__name__)
 @app.route('/')
 def health_check():
     return "Backtester service for V6 is running."
 
-# تحميل متغيرات البيئة
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
@@ -80,7 +73,6 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# إعداد عميل Binance
 client: Optional[Client] = None
 try:
     client = Client(API_KEY, API_SECRET)
@@ -89,7 +81,6 @@ except Exception as e:
     logger.critical(f"❌ [Binance] فشل الاتصال: {e}")
     exit(1)
 
-# إعداد الاتصال بقاعدة البيانات
 conn: Optional[psycopg2.extensions.connection] = None
 try:
     conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
@@ -149,70 +140,53 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}")
         return None
 
-# ---!!! تحديث: V6 Feature Engineering ---
+# ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    V6 Feature Engineering. Uses pandas_ta for consistency and robustness.
-    """
     df_calc = df.copy()
     
-    # 1. Historical Price Data Features
-    df_calc['returns'] = df_calc.ta.percent_return(close=df_calc['close'], append=True)
-    df_calc['log_returns'] = df_calc.ta.log_return(close=df_calc['close'], append=True)
-    
-    # Moving Averages
-    df_calc.ta.ema(length=EMA_FAST_PERIOD, append=True)
-    df_calc.ta.ema(length=EMA_SLOW_PERIOD, append=True)
+    # Use pandas_ta strategy to calculate all indicators at once
+    strategy = ta.Strategy(
+        name="V6_Features",
+        description="Comprehensive feature set for V6 model",
+        ta=[
+            {"kind": "ema", "length": EMA_FAST_PERIOD},
+            {"kind": "ema", "length": EMA_SLOW_PERIOD},
+            {"kind": "atr", "length": ATR_PERIOD},
+            {"kind": "bbands", "length": BOLLINGER_PERIOD},
+            {"kind": "rsi", "length": RSI_PERIOD},
+            {"kind": "roc", "length": ROC_PERIOD},
+            {"kind": "mfi", "length": MFI_PERIOD},
+            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
+            {"kind": "obv"},
+            {"kind": "ad"},
+            {"kind": "adx", "length": ADX_PERIOD},
+        ]
+    )
+    df_calc.ta.strategy(strategy)
+
+    # Manual feature calculation
+    df_calc['returns'] = ta.percent_return(close=df_calc['close'])
+    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    
-    # Volatility Features
-    df_calc.ta.atr(length=ATR_PERIOD, append=True)
-    bbands = df_calc.ta.bbands(length=BOLLINGER_PERIOD, append=True)
-    df_calc['bollinger_width'] = bbands[f'BBB_{BOLLINGER_PERIOD}_2.0']
+    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
     df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    # 2. Technical Indicator Features
-    # Momentum Indicators
-    df_calc.ta.rsi(length=RSI_PERIOD, append=True)
-    df_calc.ta.roc(length=ROC_PERIOD, append=True)
-    df_calc.ta.mfi(length=MFI_PERIOD, append=True)
-    macd = df_calc.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
-    
-    # Volume Indicators
-    df_calc.ta.obv(append=True)
-    df_calc.ta.ad(append=True)
-    
-    # Trend Indicators
-    df_calc.ta.adx(length=ADX_PERIOD, append=True)
-
-    # 3. Broader Market Features
+    # Broader Market Features
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # 4. Time and Date Features
-    df_calc['day_of_week'] = df_calc.index.dayofweek # Monday=0, Sunday=6
+    # Time and Date Features
+    df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # --- Placeholders for future advanced features ---
-    # 5. Order Book Data (Requires WebSocket connection to order book stream)
-    # df_calc['bid_ask_spread'] = np.nan # Example: best_ask - best_bid
-    # df_calc['order_book_imbalance'] = np.nan # Example: (sum_bid_vol - sum_ask_vol) / (sum_bid_vol + sum_ask_vol)
-    
-    # 6. Sentiment Features (Requires API connection to news/social media data providers)
-    # df_calc['news_sentiment'] = np.nan # Example: score from -1 to 1
-    # df_calc['twitter_velocity'] = np.nan # Example: change in mention count
-
-    # Clean up column names generated by pandas_ta
+    # *** FIX: Standardize all column names to uppercase ***
     df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
 
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    تحمل حزمة النموذج (النموذج + المعاير + أسماء الميزات) من قاعدة البيانات.
-    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn: return None
     try:
@@ -234,9 +208,6 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 # ==============================================================================
 
 def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    تقوم بتنفيذ محاكاة التداول على البيانات التاريخية لعملة واحدة.
-    """
     trades = []
     
     model = model_bundle['model']
@@ -245,10 +216,9 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     
     df_featured = calculate_features(data, btc_data)
     
-    # التأكد من أن جميع الأعمدة المطلوبة موجودة
     missing = [col for col in feature_names if col not in df_featured.columns]
     if missing:
-        logger.error(f"Missing features {missing} for {symbol}. Skipping.")
+        logger.error(f"Missing features {missing} for {symbol} in backtest. Skipping.")
         return []
 
     features_df = df_featured[feature_names]
@@ -256,15 +226,13 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
     
     try:
-        # For binary classification, predict_proba returns shape (n_samples, 2)
-        # We want the probability of the positive class (1)
         class_1_index = list(model.classes_).index(1)
         predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
     except (ValueError, IndexError) as e:
         logger.error(f"Could not get probability for class '1' in model for {symbol}: {e}. Skipping.")
         return []
     
-    df_featured['prediction'] = predictions
+    df_featured['PREDICTION'] = predictions
     
     in_trade = False
     trade_details = {}
@@ -273,7 +241,6 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
         current_candle = df_featured.iloc[i]
         
         if in_trade:
-            # Check for TP/SL hit within the current candle's high/low
             if current_candle['HIGH'] >= trade_details['tp']:
                 trade_details['exit_price'] = trade_details['tp']
                 trade_details['exit_reason'] = 'TP Hit'
@@ -292,8 +259,10 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
         if not in_trade and current_candle['PREDICTION'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
             entry_price = current_candle['CLOSE']
-            atr_series_name = f'ATRr_{ATR_PERIOD}'.upper()
-            atr_value = current_candle[atr_series_name]
+            
+            # *** FIX: Use correct uppercase ATR column name ***
+            atr_column_name = f'ATRr_{ATR_PERIOD}'.upper()
+            atr_value = current_candle[atr_column_name]
             
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
             take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
@@ -310,24 +279,16 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFr
     return trades
 
 def generate_report(all_trades: List[Dict[str, Any]]):
-    """
-    تنشئ وتعرض تقريرًا مفصلاً بنتائج الاختبار الخلفي،
-    مع تطبيق الانزلاق السعري والعمولة للحصول على نتائج واقعية.
-    """
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
         return
 
     df_trades = pd.DataFrame(all_trades)
     
-    # تطبيق الانزلاق السعري (Slippage)
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
-    
-    # حساب الربح/الخسارة قبل العمولات
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
     
-    # حساب العمولات والربح الصافي
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
     commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
@@ -420,15 +381,18 @@ def start_backtesting_job():
         if df_hist is None or df_hist.empty:
             continue
             
-        # Filter data for the actual backtest period after calculating features
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
-        df_with_features = calculate_features(df_hist, btc_data)
         
-        df_to_test = df_with_features[df_with_features.index >= backtest_start_date]
+        # Pass the full historical data to calculate_features to warm up indicators
+        df_featured_full = calculate_features(df_hist, btc_data)
+        
+        # Filter the dataframe with features to the backtesting period
+        df_to_test = df_featured_full[df_featured_full.index >= backtest_start_date].copy()
+
         if df_to_test.empty:
             continue
 
-        # For backtesting, we pass the full featured df to ensure context, but simulate on the filtered period
+        # Pass the already-featured and filtered dataframe to the backtester
         trades = run_backtest_for_symbol(symbol, df_to_test, btc_data, model_bundle)
         if trades:
             all_trades.extend(trades)

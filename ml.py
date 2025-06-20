@@ -45,12 +45,12 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V6 Model Constants ---
+# --- V6.1 Model Constants ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 150 # زيادة المدة لتوفير بيانات كافية للمؤشرات الجديدة
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 150
 
-# --- Indicator & Feature Parameters (Matching c4.py V6) ---
+# --- Indicator & Feature Parameters (Matching c4.py V6.1) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
@@ -143,60 +143,48 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
-# ---!!! تحديث: V6 Feature Engineering ---
+# ---!!! تحديث: V6.1 Feature Engineering ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    V6 Feature Engineering. Uses pandas_ta for consistency and robustness.
-    """
     df_calc = df.copy()
-    df_calc.rename(columns={"close": "Close", "high": "High", "low": "Low", "open": "Open", "volume": "Volume"}, inplace=True, errors='ignore')
     
-    # 1. Historical Price Data Features
-    df_calc['returns'] = df_calc.ta.percent_return(close=df_calc['Close'], append=True)
-    df_calc['log_returns'] = df_calc.ta.log_return(close=df_calc['Close'], append=True)
-    
-    # Moving Averages
-    df_calc.ta.ema(length=EMA_FAST_PERIOD, append=True)
-    df_calc.ta.ema(length=EMA_SLOW_PERIOD, append=True)
-    df_calc['price_vs_ema50'] = (df_calc['Close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
-    df_calc['price_vs_ema200'] = (df_calc['Close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    
-    # Volatility Features
-    df_calc.ta.atr(length=ATR_PERIOD, append=True)
-    bbands = df_calc.ta.bbands(length=BOLLINGER_PERIOD, append=True)
-    df_calc['bollinger_width'] = bbands[f'BBB_{BOLLINGER_PERIOD}_2.0']
+    # Use pandas_ta strategy to calculate all indicators at once
+    strategy = ta.Strategy(
+        name="V6_Features",
+        description="Comprehensive feature set for V6 model",
+        ta=[
+            {"kind": "ema", "length": EMA_FAST_PERIOD},
+            {"kind": "ema", "length": EMA_SLOW_PERIOD},
+            {"kind": "atr", "length": ATR_PERIOD},
+            {"kind": "bbands", "length": BOLLINGER_PERIOD},
+            {"kind": "rsi", "length": RSI_PERIOD},
+            {"kind": "roc", "length": ROC_PERIOD},
+            {"kind": "mfi", "length": MFI_PERIOD},
+            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
+            {"kind": "obv"},
+            {"kind": "ad"},
+            {"kind": "adx", "length": ADX_PERIOD},
+        ]
+    )
+    df_calc.ta.strategy(strategy)
+
+    # Manual feature calculation
+    df_calc['returns'] = ta.percent_return(close=df_calc['close'])
+    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
+    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
     df_calc['return_std_dev'] = df_calc['returns'].rolling(window=STDEV_PERIOD).std()
     
-    # 2. Technical Indicator Features
-    # Momentum Indicators
-    df_calc.ta.rsi(length=RSI_PERIOD, append=True)
-    df_calc.ta.roc(length=ROC_PERIOD, append=True)
-    df_calc.ta.mfi(length=MFI_PERIOD, append=True)
-    macd = df_calc.ta.macd(fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL, append=True)
-    
-    # Volume Indicators
-    df_calc.ta.obv(append=True)
-    df_calc.ta.ad(append=True)
-    
-    # Trend Indicators
-    df_calc.ta.adx(length=ADX_PERIOD, append=True)
-
-    # 3. Broader Market Features
+    # Broader Market Features
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # 4. Time and Date Features
+    # Time and Date Features
     df_calc['day_of_week'] = df_calc.index.dayofweek
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # --- Placeholders for future advanced features ---
-    # 5. Order Book Data (Requires WebSocket connection to order book stream)
-    # df_calc['bid_ask_spread'] = np.nan 
-    # df_calc['order_book_imbalance'] = np.nan
-    
-    # 6. Sentiment Features (Requires API connection to news/social media data providers)
-    # df_calc['news_sentiment'] = np.nan
-    # df_calc['twitter_velocity'] = np.nan
+    # *** FIX: Standardize all column names to uppercase ***
+    df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc
 
@@ -228,28 +216,26 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df, btc_df)
     
-    # Use the ATR calculated from pandas_ta
+    # *** FIX: Use the correct uppercase ATR column name ***
     atr_series_name = f'ATRr_{ATR_PERIOD}'.upper()
     if atr_series_name not in df_featured.columns:
-        logger.error(f"ATR series '{atr_series_name}' not found after feature calculation.")
+        logger.error(f"ATR series '{atr_series_name}' not found after feature calculation for {symbol}.")
         return None
         
-    df_featured['target'] = get_triple_barrier_labels(df_featured['Close'], df_featured[atr_series_name])
+    df_featured['TARGET'] = get_triple_barrier_labels(df_featured['CLOSE'], df_featured[atr_series_name])
     
-    # ---!!! تحديث: قائمة الميزات الجديدة لنموذج V6 ---
+    # Define V6 feature list
     feature_columns = [
         f'RSI_{RSI_PERIOD}', f'MACD_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', 
         f'MACDH_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}', f'MACDS_{MACD_FAST}_{MACD_SLOW}_{MACD_SIGNAL}',
-        f'ATRr_{ATR_PERIOD}', 'BOLLINGER_WIDTH', 'RETURN_STD_DEV',
+        atr_series_name, 'BOLLINGER_WIDTH', 'RETURN_STD_DEV',
         f'ROC_{ROC_PERIOD}', f'MFI_{MFI_PERIOD}', 'OBV', 'AD',
         f'ADX_{ADX_PERIOD}', f'DMP_{ADX_PERIOD}', f'DMN_{ADX_PERIOD}',
         'PRICE_VS_EMA50', 'PRICE_VS_EMA200', 'BTC_CORRELATION',
         'DAY_OF_WEEK', 'HOUR_OF_DAY'
     ]
-    
-    # Uppercase all feature names for consistency
+    # Ensure all feature names are uppercase
     feature_columns = [col.upper() for col in feature_columns]
-    df_featured.columns = [col.upper() for col in df_featured.columns]
 
     df_cleaned = df_featured.dropna(subset=feature_columns + ['TARGET']).copy()
     
@@ -279,7 +265,6 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
         
-        # We now have two classes: 1 (win) and -1 (loss)
         model = lgb.LGBMClassifier(
             objective='binary', random_state=42, n_estimators=300,
             learning_rate=0.05, class_weight='balanced', n_jobs=-1 )
@@ -288,7 +273,8 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
                   eval_metric='logloss', callbacks=[lgb.early_stopping(30, verbose=False)])
         
         y_pred = model.predict(X_test_scaled)
-        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
+        # Convert class names to string for the report to avoid potential errors
+        report = classification_report(y_test.astype(str), y_pred.astype(str), output_dict=True, zero_division=0)
         logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
                     f"P(1): {report.get('1.0', {}).get('precision', 0):.4f}, "
                     f"P(-1): {report.get('-1.0', {}).get('precision', 0):.4f}")
@@ -372,7 +358,6 @@ def run_training_job():
                  failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
             
-            # We want high precision for our buy signals (class 1)
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.40:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -398,8 +383,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    """Endpoint for Render health checks."""
-    return "ML Trainer service (V6) is running and healthy.", 200
+    return "ML Trainer service (V6.1) is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
