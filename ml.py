@@ -49,13 +49,21 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 BTC_SYMBOL = 'BTCUSDT'
 
-# Indicator & Feature Parameters
+# --- Indicator & Feature Parameters (Matching c4.py) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
+RSI_OVERBOUGHT: int = 70
+RSI_OVERSOLD: int = 30
+STOCH_RSI_OVERBOUGHT: int = 80
+STOCH_RSI_OVERSOLD: int = 20
 
 # Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
@@ -136,20 +144,50 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
+# ---!!! تحديث: تم تعديل الدالة لتطابق تمامًا c4.py و c4t.py ---
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+
+    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
+    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # MACD and MACD Cross
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd_hist'] = (ema_fast - ema_slow) - (ema_fast - ema_slow).ewm(span=MACD_SIGNAL, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    df_calc['macd_cross'] = 0
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
+    # Stochastic RSI
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
+    # Relative Volume
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
+    # Overbought/Oversold Filter
+    df_calc['market_condition'] = 0 # 0 for Neutral
+    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1 # 1 for Overbought
+    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1 # -1 for Oversold
+
+    # Other existing features
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -157,8 +195,8 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['returns'] = df_calc['close'].pct_change()
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
     df_calc['hour_of_day'] = df_calc.index.hour
+    
     return df_calc
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
@@ -170,6 +208,7 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
         upper_barrier = entry_price + (current_atr * TP_ATR_MULTIPLIER)
         lower_barrier = entry_price - (current_atr * SL_ATR_MULTIPLIER)
         for j in range(1, MAX_HOLD_PERIOD + 1):
+            if i + j >= len(prices): break
             if prices.iloc[i + j] >= upper_barrier:
                 labels.iloc[i] = 1; break
             if prices.iloc[i + j] <= lower_barrier:
@@ -180,10 +219,14 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df, btc_df)
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
+    
+    # ---!!! تحديث: إضافة الميزات الجديدة إلى قائمة التدريب ---
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
-        'price_vs_ema50', 'price_vs_ema200', 'btc_correlation'
+        'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
+        'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition'
     ]
+    
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes. Skipping.")
@@ -193,7 +236,6 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     y = df_cleaned['target']
     return X, y, feature_columns
 
-# --- !!! تعديل: دالة التدريب لحل مشكلة أسماء الميزات !!! ---
 def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info("ℹ️ [ML Train] Starting training with Walk-Forward Validation...")
     tscv = TimeSeriesSplit(n_splits=5)
@@ -205,7 +247,6 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         
         scaler = StandardScaler().fit(X_train)
         
-        # --- الحل: إعادة إنشاء DataFrame مع أسماء الميزات ---
         X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
         
@@ -228,7 +269,6 @@ def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[O
         logger.error("❌ [ML Train] Training failed, no model was created.")
         return None, None, None
 
-    # --- الحل: التأكد من استخدام DataFrame مع أسماء الميزات لحساب المقاييس النهائية ---
     all_preds = []
     all_true = []
     for _, test_index in tscv.split(X):
@@ -272,7 +312,6 @@ def send_telegram_message(text: str):
     try: requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- !!! تعديل: دالة التدريب الرئيسية للعمل في خيط منفصل !!! ---
 def run_training_job():
     logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
     init_db()
@@ -324,7 +363,6 @@ def run_training_job():
     if conn: conn.close()
     logger.info("👋 [Main] ML training job finished.")
 
-# --- !!! تعديل: إضافة خادم Flask للعمل على Render !!! ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -333,12 +371,10 @@ def health_check():
     return "ML Trainer service is running and healthy.", 200
 
 if __name__ == "__main__":
-    # بدء عملية التدريب في خيط منفصل حتى لا تمنع الخادم من العمل
     training_thread = Thread(target=run_training_job)
     training_thread.daemon = True
     training_thread.start()
     
-    # تشغيل خادم الويب
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 10001))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
