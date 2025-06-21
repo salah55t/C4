@@ -46,6 +46,7 @@ except Exception as e:
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
+HIGHER_TIMEFRAME: str = '4h' # <<< إضافة جديدة: الإطار الزمني الأعلى
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 BTC_SYMBOL = 'BTCUSDT'
 
@@ -126,6 +127,8 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 # --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
+        # For higher timeframes, we might need a longer lookback in terms of days to get enough candles
+        # but for simplicity, we keep it the same. The API call is what matters.
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
@@ -136,7 +139,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df.set_index('timestamp', inplace=True)
         return df[numeric_cols].dropna()
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol}: {e}"); return None
+        logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol} على إطار {interval}: {e}"); return None
 
 def fetch_and_cache_btc_data():
     global btc_data_cache
@@ -147,42 +150,25 @@ def fetch_and_cache_btc_data():
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculates various candlestick patterns and encodes them into a single feature column.
-    Encoding: 0:None, 1:Bullish Engulfing, -1:Bearish Engulfing, 2:Hammer, -2:Shooting Star, 3:Doji
-    """
     df_patterns = df.copy()
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
-    
     body = abs(cl - op)
+    candle_range = hi - lo
+    # To avoid division by zero for Doji candles
+    candle_range[candle_range == 0] = 1e-9
     upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
     lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-    candle_range = hi - lo
     
-    # Initialize pattern column
     df_patterns['candlestick_pattern'] = 0
     
-    # --- Pattern Conditions ---
-    # Marubozu (very strong momentum)
     is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
     is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-    
-    # Engulfing (strong reversal)
     is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
     is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
-
-    # Hammer & Hanging Man (reversal)
     is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
-    is_hanging_man = is_hammer # Same shape, context matters which we can't easily determine here
-
-    # Shooting Star & Inverted Hammer (reversal)
     is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
-    is_inverted_hammer = is_shooting_star # Same shape
-
-    # Doji (indecision)
     is_doji = (body / candle_range) < 0.05
 
-    # --- Assigning values to the feature column (priority matters) ---
     df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
     df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
     df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
@@ -196,7 +182,7 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # ATR (Required for ADX and Triple Barrier)
+    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -219,7 +205,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # MACD and MACD Cross
+    # MACD
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -229,7 +215,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
 
-    # Bollinger Bands Width
+    # Bollinger Bands
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     upper_band = sma + (std_dev * 2)
@@ -247,12 +233,12 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     # Relative Volume
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
-    # Overbought/Oversold Filter
-    df_calc['market_condition'] = 0 # 0 for Neutral
-    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1 # 1 for Overbought
-    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1 # -1 for Oversold
+    # Market Condition Filter
+    df_calc['market_condition'] = 0 
+    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
+    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
 
-    # Other existing features
+    # Other Features
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -262,7 +248,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # <<< --- إضافة جديدة: حساب ميزات الشموع اليابانية --- >>>
+    # Candlestick Patterns
     df_calc = calculate_candlestick_patterns(df_calc)
 
     return df_calc
@@ -283,23 +269,41 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
                 labels.iloc[i] = -1; break
     return labels
 
-def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
-    df_featured = calculate_features(df, btc_df)
+def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol} with Multi-Timeframe Analysis...")
+    
+    # 1. Calculate features on the primary (15m) timeframe
+    df_featured = calculate_features(df_15m, btc_df)
+
+    # 2. Calculate features on the higher (4h) timeframe
+    delta_4h = df_4h['close'].diff()
+    gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+    ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+    
+    # 3. Merge MTF features into the primary dataframe
+    mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
+    df_featured = df_featured.join(mtf_features)
+    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+
+    # 4. Generate labels and clean data
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # ---!!! تحديث: إضافة الميزة الجديدة إلى قائمة التدريب ---
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
-        'bb_width', 'adx', 'candlestick_pattern'  # <<< إضافة الميزة الجديدة هنا
+        'bb_width', 'adx', 'candlestick_pattern',
+        'rsi_4h', 'price_vs_ema50_4h'  # <<< إضافة الميزات الجديدة هنا
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
-        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes. Skipping.")
+        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after MTF prep. Skipping.")
         return None
+        
     logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
@@ -397,11 +401,14 @@ def run_training_job():
     for symbol in symbols_to_train:
         logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
         try:
-            df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
-            if df_hist is None or df_hist.empty:
-                logger.warning(f"⚠️ [Main] No data for {symbol}, skipping."); failed_models += 1; continue
+            # Fetch data for both timeframes
+            df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
+            df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
             
-            prepared_data = prepare_data_for_ml(df_hist, btc_data_cache, symbol)
+            if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
+                logger.warning(f"⚠️ [Main] Not enough data for {symbol} on one of the timeframes, skipping."); failed_models += 1; continue
+            
+            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
             if prepared_data is None:
                 failed_models += 1; continue
             X, y, feature_names = prepared_data
