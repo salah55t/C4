@@ -50,7 +50,7 @@ DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
-ADX_PERIOD: int = 14      # <<< إضافة جديدة: فترة حساب مؤشر ADX
+ADX_PERIOD: int = 14
 BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
@@ -146,6 +146,53 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
+def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates various candlestick patterns and encodes them into a single feature column.
+    Encoding: 0:None, 1:Bullish Engulfing, -1:Bearish Engulfing, 2:Hammer, -2:Shooting Star, 3:Doji
+    """
+    df_patterns = df.copy()
+    op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
+    
+    body = abs(cl - op)
+    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
+    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
+    candle_range = hi - lo
+    
+    # Initialize pattern column
+    df_patterns['candlestick_pattern'] = 0
+    
+    # --- Pattern Conditions ---
+    # Marubozu (very strong momentum)
+    is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    
+    # Engulfing (strong reversal)
+    is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
+    is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
+
+    # Hammer & Hanging Man (reversal)
+    is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
+    is_hanging_man = is_hammer # Same shape, context matters which we can't easily determine here
+
+    # Shooting Star & Inverted Hammer (reversal)
+    is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
+    is_inverted_hammer = is_shooting_star # Same shape
+
+    # Doji (indecision)
+    is_doji = (body / candle_range) < 0.05
+
+    # --- Assigning values to the feature column (priority matters) ---
+    df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
+    df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
+    df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
+    df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
+    df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
+    df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
+    df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
+
+    return df_patterns
+
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
 
@@ -156,16 +203,13 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    # <<< إضافة جديدة: حساب مؤشر ADX >>>
+    # ADX
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    
-    # Using EWM for Wilder's smoothing
     plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-    
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
     
@@ -218,6 +262,9 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
     
+    # <<< --- إضافة جديدة: حساب ميزات الشموع اليابانية --- >>>
+    df_calc = calculate_candlestick_patterns(df_calc)
+
     return df_calc
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
@@ -246,7 +293,7 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
-        'bb_width', 'adx'  # <<< إضافة الميزة الجديدة هنا
+        'bb_width', 'adx', 'candlestick_pattern'  # <<< إضافة الميزة الجديدة هنا
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -350,7 +397,6 @@ def run_training_job():
     for symbol in symbols_to_train:
         logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
         try:
-            # CORRECTED THE VARIABLE NAME IN THE LINE BELOW
             df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
             if df_hist is None or df_hist.empty:
                 logger.warning(f"⚠️ [Main] No data for {symbol}, skipping."); failed_models += 1; continue
