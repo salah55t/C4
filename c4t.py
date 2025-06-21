@@ -9,7 +9,6 @@ from threading import Thread
 import numpy as np
 import pandas as pd
 import psycopg2
-import pandas_ta as ta
 from binance.client import Client
 from decouple import config
 from psycopg2.extras import RealDictCursor
@@ -17,53 +16,63 @@ from tqdm import tqdm
 from flask import Flask
 
 # ==============================================================================
-# --------------------------- V7 Backtesting Settings --------------------------
+# --------------------------- إعدادات الاختبار الخلفي (محدثة لـ V5) ----------------------------
 # ==============================================================================
-BACKTEST_PERIOD_DAYS: int = 45
+# الفترة الزمنية للاختبار بالايام
+BACKTEST_PERIOD_DAYS: int = 30
+# الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7' # استخدام نماذج V7
+# اسم النموذج الأساسي الذي سيتم اختباره (تم التحديث إلى V5)
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 
-# --- Strategy Parameters (V7) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.75 # زيادة عتبة الثقة
-ATR_SL_MULTIPLIER: float = 1.2 # تعديل وقف الخسارة
-ATR_TP_MULTIPLIER: float = 1.8 # تعديل الهدف
+# --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
+MODEL_PREDICTION_THRESHOLD: float = 0.70
+ATR_SL_MULTIPLIER: float = 1.5
+ATR_TP_MULTIPLIER: float = 2.0
+USE_TRAILING_STOP: bool = False
 
-# --- Simulation Costs ---
+# --- محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
 SLIPPAGE_PERCENT: float = 0.05
 INITIAL_TRADE_AMOUNT_USDT: float = 10.0
 
-# --- Indicator Parameters (from V7 ml.py) ---
+# --- معلمات المؤشرات (من c4.py) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
-BOLLINGER_PERIOD: int = 20
-ADX_PERIOD: int = 14
-MOMENTUM_PERIOD: int = 10
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 BTC_SYMBOL = 'BTCUSDT'
+# --- تمت إضافة معلمات المؤشرات الجديدة ---
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
+
 
 # ==============================================================================
 # ---------------------------- إعدادات النظام والاتصال -------------------------
 # ==============================================================================
 
+# إعداد التسجيل (Logging)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtester_v7.log', encoding='utf-8'),
+        logging.FileHandler('backtester_v5.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('BacktesterV7')
+logger = logging.getLogger('BacktesterV5')
 
+# إعداد خادم الويب
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Backtester service for V7 is running."
+    return "Backtester service for V5 is running."
 
+# تحميل متغيرات البيئة
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
@@ -72,16 +81,32 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-client: Optional[Client] = Client(API_KEY, API_SECRET)
-conn: Optional[psycopg2.extensions.connection] = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+# إعداد عميل Binance
+client: Optional[Client] = None
+try:
+    client = Client(API_KEY, API_SECRET)
+    logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
+except Exception as e:
+    logger.critical(f"❌ [Binance] فشل الاتصال: {e}")
+    exit(1)
 
+# إعداد الاتصال بقاعدة البيانات
+conn: Optional[psycopg2.extensions.connection] = None
+try:
+    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+    logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+except Exception as e:
+    logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}")
+    exit(1)
 
 # ==============================================================================
 # ------------------- دوال مساعدة (منسوخة ومعدلة من ملفاتك) --------------------
 # ==============================================================================
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (الكود هنا لم يتغير) ...
+    """
+    تقرأ قائمة العملات وتتحقق من وجودها وصلاحيتها للتداول على Binance.
+    """
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
     if not client:
         logger.error("Binance client not initialized.")
@@ -108,9 +133,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] Error: {e}", exc_info=True)
         return []
 
-
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    # ... (الكود هنا لم يتغير) ...
+    """
+    تجلب البيانات التاريخية من Binance.
+    """
     if not client: return None
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -130,47 +156,68 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}")
         return None
 
-# Use the new V7 feature calculation function
-def calculate_features_v7(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.astype('float64')
-    
-    strategy = ta.Strategy(
-        name="V7_Features",
-        ta=[
-            {"kind": "ema", "length": EMA_FAST_PERIOD},
-            {"kind": "ema", "length": EMA_SLOW_PERIOD},
-            {"kind": "atr", "length": ATR_PERIOD},
-            {"kind": "bbands", "length": BOLLINGER_PERIOD},
-            {"kind": "rsi", "length": RSI_PERIOD},
-            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
-            {"kind": "obv"},
-            {"kind": "adx", "length": ADX_PERIOD},
-        ]
-    )
-    df_calc.ta.strategy(strategy)
+# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    تحسب جميع المؤشرات والميزات المطلوبة لنموذج V5.
+    """
+    df_calc = df.copy()
 
-    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
-    df_calc['volatility'] = df_calc['log_returns'].rolling(window=ATR_PERIOD).std()
-    df_calc['momentum'] = ta.mom(close=df_calc['close'], length=MOMENTUM_PERIOD)
+    # ATR (موجود بالفعل)
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    df_calc['price_vs_ema_fast'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
-    df_calc['price_vs_ema_slow'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
-    
-    btc_df_float = btc_df.astype({'btc_returns': 'float64'})
-    merged_df = pd.merge(df_calc, btc_df_float[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = df_calc['log_returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
-    df_calc['day_of_week'] = df_calc.index.dayofweek
+    # RSI (الفلتر الأول - موجود)
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # MACD and MACD Cross (الفلتر الثاني - محدث)
+    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
+    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    # اكتشاف التقاطع
+    df_calc['macd_cross'] = 0
+    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
+
+    # Stochastic RSI (الفلتر الثالث - جديد)
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
+    # Relative Volume (الفلتر الرابع - موجود)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
+    # الميزات الأخرى الموجودة
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
-    
-    df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
 
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (الكود هنا لم يتغير، سيقوم بتحميل نموذج V7 تلقائياً) ...
+    """
+    تحمل حزمة النموذج (النموذج + المعاير + أسماء الميزات) من قاعدة البيانات.
+    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn: return None
     try:
@@ -191,19 +238,22 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 # ----------------------------- محرك الاختبار الخلفي ----------------------------
 # ==============================================================================
 
-def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # ... (منطق الاختبار الخلفي لم يتغير بشكل كبير، لكنه سيستخدم الآن عتبة ومعلمات جديدة) ...
+def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    تقوم بتنفيذ محاكاة التداول على البيانات التاريخية لعملة واحدة.
+    """
     trades = []
     
     model = model_bundle['model']
     scaler = model_bundle['scaler']
     feature_names = model_bundle['feature_names']
     
-    df_featured = data
+    df_featured = calculate_features(data, btc_data)
     
+    # التأكد من أن جميع الأعمدة المطلوبة موجودة
     missing = [col for col in feature_names if col not in df_featured.columns]
     if missing:
-        logger.error(f"Missing features {missing} for {symbol} in backtest. Skipping.")
+        logger.error(f"Missing features {missing} for {symbol}. Skipping.")
         return []
 
     features_df = df_featured[feature_names]
@@ -213,11 +263,11 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     try:
         class_1_index = list(model.classes_).index(1)
         predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
-    except (ValueError, IndexError) as e:
-        logger.error(f"Could not get probability for class '1' in model for {symbol}: {e}. Skipping.")
+    except (ValueError, IndexError):
+        logger.error(f"Could not find class '1' in model for {symbol}. Skipping.")
         return []
     
-    df_featured['PREDICTION'] = predictions
+    df_featured['prediction'] = predictions
     
     in_trade = False
     trade_details = {}
@@ -226,10 +276,10 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
         current_candle = df_featured.iloc[i]
         
         if in_trade:
-            if current_candle['HIGH'] >= trade_details['tp']:
+            if current_candle['high'] >= trade_details['tp']:
                 trade_details['exit_price'] = trade_details['tp']
                 trade_details['exit_reason'] = 'TP Hit'
-            elif current_candle['LOW'] <= trade_details['sl']:
+            elif current_candle['low'] <= trade_details['sl']:
                 trade_details['exit_price'] = trade_details['sl']
                 trade_details['exit_reason'] = 'SL Hit'
             
@@ -241,21 +291,10 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
                 trade_details = {}
             continue
 
-        if not in_trade and current_candle['PREDICTION'] >= MODEL_PREDICTION_THRESHOLD:
+        if not in_trade and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             in_trade = True
-            entry_price = current_candle['CLOSE']
-            
-            atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
-            if atr_column_name not in current_candle.index:
-                 standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
-                 if standard_atr_name in current_candle.index:
-                     atr_column_name = standard_atr_name
-                 else:
-                     logger.error(f"ATR column not found for {symbol} in backtest. Skipping trade.")
-                     in_trade = False
-                     continue
-            
-            atr_value = current_candle[atr_column_name]
+            entry_price = current_candle['close']
+            atr_value = current_candle['atr']
             
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
             take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
@@ -272,7 +311,10 @@ def run_backtest_for_symbol(symbol: str, data: pd.DataFrame, model_bundle: Dict[
     return trades
 
 def generate_report(all_trades: List[Dict[str, Any]]):
-    # ... (دالة إنشاء التقرير لم تتغير) ...
+    """
+    تنشئ وتعرض تقريرًا مفصلاً بنتائج الاختبار الخلفي،
+    مع تطبيق الانزلاق السعري والعمولة للحصول على نتائج واقعية.
+    """
     if not all_trades:
         logger.warning("No trades were executed during the backtest.")
         return
@@ -342,7 +384,10 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 # ==============================================================================
 
 def start_backtesting_job():
-    logger.info(f"🚀 Starting backtesting job for {BASE_ML_MODEL_NAME} Strategy...")
+    """
+    هذه هي الوظيفة التي تقوم بتشغيل عملية الاختبار الخلفي بأكملها.
+    """
+    logger.info("🚀 Starting backtesting job for V5 Strategy...")
     time.sleep(2) 
     
     symbols_to_test = get_validated_symbols()
@@ -353,7 +398,7 @@ def start_backtesting_job():
         
     all_trades = []
     
-    data_fetch_days = BACKTEST_PERIOD_DAYS + 50 # Fetch more data for indicator warmup
+    data_fetch_days = BACKTEST_PERIOD_DAYS + 30
     
     logger.info(f"ℹ️ [BTC Data] Fetching historical data for {BTC_SYMBOL}...")
     btc_data = fetch_historical_data(BTC_SYMBOL, TIMEFRAME, data_fetch_days)
@@ -363,7 +408,7 @@ def start_backtesting_job():
     btc_data['btc_returns'] = btc_data['close'].pct_change()
     logger.info("✅ [BTC Data] Successfully fetched and processed BTC data.")
 
-    for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols", ncols=100):
+    for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         if symbol == BTC_SYMBOL:
             continue
             
@@ -376,16 +421,12 @@ def start_backtesting_job():
             continue
             
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
-        
-        # Use the V7 feature calculation
-        df_featured_full = calculate_features_v7(df_hist, btc_data)
-        
-        df_to_test = df_featured_full[df_featured_full.index >= backtest_start_date].copy()
+        df_to_test = df_hist[df_hist.index >= backtest_start_date]
+        # التأكد من أن بيانات البيتكوين متوفرة لنفس الفترة
+        btc_to_test = btc_data[btc_data.index.isin(df_to_test.index)]
 
-        if df_to_test.empty:
-            continue
 
-        trades = run_backtest_for_symbol(symbol, df_to_test, model_bundle)
+        trades = run_backtest_for_symbol(symbol, df_to_test, btc_to_test, model_bundle)
         if trades:
             all_trades.extend(trades)
         

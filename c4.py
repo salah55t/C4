@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
-import pandas_ta as ta
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -27,11 +26,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v7.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v5.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV7')
+logger = logging.getLogger('CryptoBotV5')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -45,29 +44,34 @@ except Exception as e:
      logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
      exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة (V7) ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7'
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+# --- V5 Model Constants ---
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
 
-# --- Indicator & Feature Parameters (V7) ---
+# --- Indicator & Feature Parameters (Matching ml.py) ---
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
-BOLLINGER_PERIOD: int = 20
-ADX_PERIOD: int = 14
-MOMENTUM_PERIOD: int = 10
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
+# --- تمت إضافة معلمات المؤشرات الجديدة ---
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
 
-# --- Trading Logic Constants (V7) ---
-MODEL_CONFIDENCE_THRESHOLD = 0.75 # زيادة عتبة الثقة
+
+# --- Trading Logic Constants ---
+MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
 TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
-ATR_SL_MULTIPLIER = 1.2 # تعديل وقف الخسارة
-ATR_TP_MULTIPLIER = 1.8 # تعديل الهدف
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
+USE_TRAILING_STOP = False
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
@@ -86,7 +90,6 @@ notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات ----------------------
-# ... (الكود هنا لم يتغير) ...
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
@@ -97,10 +100,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB );
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL,
+                        stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT,
+                        signal_details JSONB
+                    );
                 """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -150,7 +161,6 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 # ---------------------- دوال Binance والبيانات ----------------------
-# ... (دالة get_validated_symbols و fetch_historical_data لم تتغير) ...
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
@@ -187,47 +197,62 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# استخدام دالة حساب الميزات الجديدة V7
-def calculate_features_v7(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.astype('float64')
-    
-    strategy = ta.Strategy(
-        name="V7_Features",
-        ta=[
-            {"kind": "ema", "length": EMA_FAST_PERIOD},
-            {"kind": "ema", "length": EMA_SLOW_PERIOD},
-            {"kind": "atr", "length": ATR_PERIOD},
-            {"kind": "bbands", "length": BOLLINGER_PERIOD},
-            {"kind": "rsi", "length": RSI_PERIOD},
-            {"kind": "macd", "fast": MACD_FAST, "slow": MACD_SLOW, "signal": MACD_SIGNAL},
-            {"kind": "obv"},
-            {"kind": "adx", "length": ADX_PERIOD},
-        ]
-    )
-    df_calc.ta.strategy(strategy)
+# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    df_calc = df.copy()
 
-    df_calc['log_returns'] = ta.log_return(close=df_calc['close'])
-    df_calc['volatility'] = df_calc['log_returns'].rolling(window=ATR_PERIOD).std()
-    df_calc['momentum'] = ta.mom(close=df_calc['close'], length=MOMENTUM_PERIOD)
+    # ATR (موجود بالفعل)
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    df_calc['price_vs_ema_fast'] = (df_calc['close'] / df_calc[f'EMA_{EMA_FAST_PERIOD}']) - 1
-    df_calc['price_vs_ema_slow'] = (df_calc['close'] / df_calc[f'EMA_{EMA_SLOW_PERIOD}']) - 1
-    df_calc['bollinger_width'] = df_calc[f'BBB_{BOLLINGER_PERIOD}_2.0']
-    
-    btc_df_float = btc_df.astype({'btc_returns': 'float64'})
-    merged_df = pd.merge(df_calc, btc_df_float[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = df_calc['log_returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
-    df_calc['day_of_week'] = df_calc.index.dayofweek
+    # RSI (الفلتر الأول - موجود)
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # MACD and MACD Cross (الفلتر الثاني - محدث)
+    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
+    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    # اكتشاف التقاطع
+    df_calc['macd_cross'] = 0
+    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
+
+    # Stochastic RSI (الفلتر الثالث - جديد)
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
+    # Relative Volume (الفلتر الرابع - موجود)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
+    # الميزات الأخرى الموجودة
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
-    
-    df_calc.columns = [col.upper() for col in df_calc.columns]
     
     return df_calc.dropna()
 
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (الكود هنا لم يتغير، سيقوم بتحميل نموذج V7 تلقائياً) ...
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
@@ -249,7 +274,6 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
-# ... (دوال WebSocket لم تتغير) ...
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     global open_signals_cache, current_prices
     try:
@@ -297,21 +321,21 @@ class TradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        return calculate_features_v7(df, btc_df) # استخدام دالة الميزات V7
+        return calculate_features(df, btc_df)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        # ... (منطق توليد الإشارة لم يتغير، لكنه سيستخدم نموذج V7) ...
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
         
         last_row = df_processed.iloc[-1]
         try:
-            missing_features = [f for f in self.feature_names if f not in last_row.index]
+            # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
+            missing_features = [f for f in self.feature_names if f not in df_processed.columns]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
                 return None
             
-            features_df = pd.DataFrame([last_row], columns=self.feature_names)
+            features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any(): return None
             
             features_scaled = self.scaler.transform(features_df)
@@ -324,8 +348,7 @@ class TradingStrategy:
             try:
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
-            except (ValueError, IndexError):
-                logger.warning(f"Could not find class '1' in model for {self.symbol}")
+            except ValueError:
                 return None
 
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
@@ -336,14 +359,14 @@ class TradingStrategy:
                     'strategy_name': BASE_ML_MODEL_NAME,
                     'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}
                 }
-            return None
+            else:
+                return None
 
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
-# ... (دوال التنبيهات والإدارة لم تتغير) ...
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -441,7 +464,6 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
-# ... (دوال get_btc_trend و get_btc_data_for_bot لم تتغير) ...
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
@@ -515,22 +537,11 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         if USE_DYNAMIC_SL_TP:
-                            atr_column_name = f'ATRR_{ATR_PERIOD}'.upper()
-                            if atr_column_name not in df_features.columns:
-                                standard_atr_name = f'ATR_{ATR_PERIOD}'.upper()
-                                if standard_atr_name in df_features.columns:
-                                     atr_column_name = standard_atr_name
-                                else:
-                                    logger.error(f"ATR column not found for {symbol} in main loop. Skipping.")
-                                    continue
-                            
-                            atr_value = df_features[atr_column_name].iloc[-1]
+                            atr_value = df_features['atr'].iloc[-1]
                             potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                             potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         else:
-                            # Fallback logic, though USE_DYNAMIC_SL_TP is true
-                            potential_signal['target_price'] = current_price * 1.02
-                            potential_signal['stop_loss'] = current_price * 0.985
+                            potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
                         
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
@@ -548,7 +559,6 @@ def main_loop():
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
-# ... (الكود هنا لم يتغير) ...
 app = Flask(__name__)
 CORS(app)
 
