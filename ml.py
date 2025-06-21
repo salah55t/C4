@@ -8,6 +8,7 @@ import pandas as pd
 import psycopg2
 import pickle
 import lightgbm as lgb
+import optuna # <<< إضافة جديدة
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -22,6 +23,9 @@ from flask import Flask
 from threading import Thread
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
+# Suppress Optuna's verbose logging
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -46,8 +50,9 @@ except Exception as e:
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-HIGHER_TIMEFRAME: str = '4h' # <<< إضافة جديدة: الإطار الزمني الأعلى
+HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
+HYPERPARAM_TUNING_TRIALS: int = 30 # <<< إضافة جديدة: عدد محاولات البحث
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -127,8 +132,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 # --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
-        # For higher timeframes, we might need a longer lookback in terms of days to get enough candles
-        # but for simplicity, we keep it the same. The API call is what matters.
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
@@ -154,7 +157,6 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
     body = abs(cl - op)
     candle_range = hi - lo
-    # To avoid division by zero for Doji candles
     candle_range[candle_range == 0] = 1e-9
     upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
     lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
@@ -182,14 +184,12 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    # ADX
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -199,13 +199,11 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
     
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # MACD
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -215,14 +213,12 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
 
-    # Bollinger Bands
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     upper_band = sma + (std_dev * 2)
     lower_band = sma - (std_dev * 2)
     df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
 
-    # Stochastic RSI
     rsi = df_calc['rsi']
     min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
     max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
@@ -230,15 +226,12 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
 
-    # Relative Volume
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
-    # Market Condition Filter
     df_calc['market_condition'] = 0 
     df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
     df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
 
-    # Other Features
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -248,7 +241,6 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    # Candlestick Patterns
     df_calc = calculate_candlestick_patterns(df_calc)
 
     return df_calc
@@ -272,10 +264,8 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol} with Multi-Timeframe Analysis...")
     
-    # 1. Calculate features on the primary (15m) timeframe
     df_featured = calculate_features(df_15m, btc_df)
 
-    # 2. Calculate features on the higher (4h) timeframe
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -283,12 +273,10 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
     
-    # 3. Merge MTF features into the primary dataframe
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
 
-    # 4. Generate labels and clean data
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
     feature_columns = [
@@ -296,7 +284,7 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
         'bb_width', 'adx', 'candlestick_pattern',
-        'rsi_4h', 'price_vs_ema50_4h'  # <<< إضافة الميزات الجديدة هنا
+        'rsi_4h', 'price_vs_ema50_4h'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -309,59 +297,105 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     y = df_cleaned['target']
     return X, y, feature_columns
 
-def train_with_walk_forward_validation(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
-    logger.info("ℹ️ [ML Train] Starting training with Walk-Forward Validation...")
-    tscv = TimeSeriesSplit(n_splits=5)
-    final_model, final_scaler = None, None
+def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
+    """
+    Uses Optuna to find the best hyperparameters and then trains a final model.
+    """
+    logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization with Optuna for {HYPERPARAM_TUNING_TRIALS} trials...")
 
-    for i, (train_index, test_index) in enumerate(tscv.split(X)):
+    def objective(trial: optuna.trial.Trial) -> float:
+        params = {
+            'objective': 'multiclass',
+            'num_class': 3,
+            'metric': 'multi_logloss',
+            'verbosity': -1,
+            'boosting_type': 'gbdt',
+            'class_weight': 'balanced',
+            'random_state': 42,
+            'n_estimators': trial.suggest_int('n_estimators', 200, 1000, step=50),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+            'num_leaves': trial.suggest_int('num_leaves', 20, 300),
+            'max_depth': trial.suggest_int('max_depth', 4, 12),
+            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+        }
+
+        all_preds, all_true = [], []
+        tscv = TimeSeriesSplit(n_splits=5)
+        for train_index, test_index in tscv.split(X):
+            X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+            y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+            
+            scaler = StandardScaler().fit(X_train)
+            X_train_scaled = scaler.transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            model = lgb.LGBMClassifier(**params)
+            model.fit(X_train_scaled, y_train,
+                      eval_set=[(X_test_scaled, y_test)],
+                      eval_metric='multi_logloss',
+                      callbacks=[lgb.early_stopping(30, verbose=False)])
+            
+            y_pred = model.predict(X_test_scaled)
+            all_preds.extend(y_pred)
+            all_true.extend(y_test)
+
+        report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
+        # We optimize for the precision of the buy signal (class 1)
+        return report.get('1', {}).get('precision', 0)
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=HYPERPARAM_TUNING_TRIALS, show_progress_bar=True)
+    
+    best_params = study.best_params
+    logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
+    
+    # --- Retrain final model on all data with best params and get final metrics ---
+    logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
+    final_model_params = {
+        'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
+        'random_state': 42, 'verbosity': -1, **best_params
+    }
+    
+    # Get final metrics using walk-forward on best params
+    all_preds_final, all_true_final = [], []
+    tscv = TimeSeriesSplit(n_splits=5)
+    for train_index, test_index in tscv.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-        
         scaler = StandardScaler().fit(X_train)
-        
-        X_train_scaled = pd.DataFrame(scaler.transform(X_train), columns=X.columns, index=X_train.index)
-        X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
-        
-        model = lgb.LGBMClassifier(
-            objective='multiclass', num_class=3, random_state=42, n_estimators=300,
-            learning_rate=0.05, class_weight='balanced', n_jobs=-1 )
-        
-        model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)],
-                  eval_metric='multi_logloss', callbacks=[lgb.early_stopping(30, verbose=False)])
-        
+        X_train_scaled = scaler.transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        model = lgb.LGBMClassifier(**final_model_params)
+        model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
-        report = classification_report(y_test, y_pred, output_dict=True, zero_division=0)
-        logger.info(f"--- Fold {i+1}: Accuracy: {accuracy_score(y_test, y_pred):.4f}, "
-                    f"P(1): {report.get('1', {}).get('precision', 0):.4f}, "
-                    f"P(-1): {report.get('-1', {}).get('precision', 0):.4f}")
+        all_preds_final.extend(y_pred)
+        all_true_final.extend(y_test)
         
-        final_model, final_scaler = model, scaler
-
-    if not final_model or not final_scaler:
-        logger.error("❌ [ML Train] Training failed, no model was created.")
-        return None, None, None
-
-    all_preds = []
-    all_true = []
-    for _, test_index in tscv.split(X):
-        X_test_final = X.iloc[test_index]
-        y_test_final = y.iloc[test_index]
-        X_test_final_scaled = pd.DataFrame(final_scaler.transform(X_test_final), columns=X.columns, index=X_test_final.index)
-        all_preds.extend(final_model.predict(X_test_final_scaled))
-        all_true.extend(y_test_final)
-
-    final_report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
-    avg_metrics = {
-        'accuracy': accuracy_score(all_true, all_preds),
+    final_report = classification_report(all_true_final, all_preds_final, output_dict=True, zero_division=0)
+    final_metrics = {
+        'accuracy': accuracy_score(all_true_final, all_preds_final),
         'precision_class_1': final_report.get('1', {}).get('precision', 0),
         'recall_class_1': final_report.get('1', {}).get('recall', 0),
+        'f1_score_class_1': final_report.get('1', {}).get('f1-score', 0),
+        'precision_class_-1': final_report.get('-1', {}).get('precision', 0),
         'num_samples_trained': len(X),
+        'best_hyperparameters': json.dumps(best_params)
     }
+    
+    # Train the final model on the entire dataset
+    final_scaler = StandardScaler().fit(X)
+    X_scaled_full = final_scaler.transform(X)
+    final_model = lgb.LGBMClassifier(**final_model_params)
+    final_model.fit(X_scaled_full, y)
+    
+    metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
+    logger.info(f"📊 [ML Train] Final Walk-Forward Performance with Best Params: {metrics_log_str}")
 
-    metrics_log_str = ', '.join([f"{k}: {v:.4f}" for k, v in avg_metrics.items()])
-    logger.info(f"📊 [ML Train] Average Walk-Forward Performance: {metrics_log_str}")
-    return final_model, final_scaler, avg_metrics
+    return final_model, final_scaler, final_metrics
 
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
     logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
@@ -401,19 +435,19 @@ def run_training_job():
     for symbol in symbols_to_train:
         logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
         try:
-            # Fetch data for both timeframes
             df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
             df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
             
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
-                logger.warning(f"⚠️ [Main] Not enough data for {symbol} on one of the timeframes, skipping."); failed_models += 1; continue
+                logger.warning(f"⚠️ [Main] Not enough data for {symbol}, skipping."); failed_models += 1; continue
             
             prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
             if prepared_data is None:
                 failed_models += 1; continue
             X, y, feature_names = prepared_data
             
-            training_result = train_with_walk_forward_validation(X, y)
+            # <<< --- استدعاء دالة التدريب والبحث الجديدة --- >>>
+            training_result = tune_and_train_model(X, y)
             if not all(training_result):
                  failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
@@ -424,7 +458,7 @@ def run_training_job():
                 save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
-                logger.warning(f"⚠️ [Main] Model for {symbol} is not useful. Discarding."); failed_models += 1
+                logger.warning(f"⚠️ [Main] Model for {symbol} is not useful (Precision < 0.35). Discarding."); failed_models += 1
         except Exception as e:
             logger.critical(f"❌ [Main] A fatal error occurred for {symbol}: {e}", exc_info=True); failed_models += 1
         time.sleep(1)
