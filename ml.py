@@ -18,7 +18,6 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
-from multiprocessing import Pool, cpu_count, Manager
 from sklearn.metrics import accuracy_score, precision_score
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
@@ -26,11 +25,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_trainer_optimized.log', encoding='utf-8'),
+        logging.FileHandler('ml_trainer_sequential.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('OptimizedCryptoMLTrainer')
+logger = logging.getLogger('SequentialCryptoMLTrainer')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -44,7 +43,7 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت ----------------------
-BASE_ML_MODEL_NAME = 'LightGBM_Crypto_Predictor_V9_Optimized'
+BASE_ML_MODEL_NAME = 'LightGBM_Crypto_Predictor_V10_Sequential'
 SIGNAL_TIMEFRAME = '15m'
 DATA_LOOKBACK_DAYS = 180
 BTC_SYMBOL = 'BTCUSDT'
@@ -53,53 +52,25 @@ TP_ATR_MULTIPLIER = 1.8
 SL_ATR_MULTIPLIER = 1.2
 MAX_HOLD_PERIOD = 24
 
-# --- متغيرات عالمية ستتم مشاركتها مع العمليات الفرعية ---
-manager = Manager()
-btc_data_cache = manager.dict()
-# سيتم تعريف هذه المتغيرات داخل كل عملية عاملة
-db_connection = None
-binance_client = None
-
-# ---------------------- دوال تهيئة العمليات العاملة ----------------------
-def init_worker():
-    """
-    ✨ دالة التهيئة: يتم استدعاؤها مرة واحدة لكل عملية عاملة.
-    تقوم بإنشاء اتصال قاعدة البيانات وعميل Binance.
-    """
-    global db_connection, binance_client
-    logger.info(f"Initializing worker process {os.getpid()}...")
-    db_connection = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-    binance_client = Client(API_KEY, API_SECRET)
-
 # ---------------------- دوال جلب ومعالجة البيانات ----------------------
-def fetch_historical_data(client, symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+def fetch_historical_data(client: Client, symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
         start_str = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
-        if not klines: return None
+        if not klines:
+            return None
         
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
         df = pd.DataFrame(klines, columns=cols + ['_'] * 6)
         
-        for col in cols[1:]: df[col] = pd.to_numeric(df[col], errors='coerce')
+        for col in cols[1:]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df[cols[1:]].dropna()
     except Exception as e:
         logger.error(f"❌ [Data Fetch] Error fetching data for {symbol}: {e}")
         return None
-
-def fetch_and_cache_btc_data_global():
-    logger.info("ℹ️ [BTC Data] Fetching and caching Bitcoin data...")
-    client = Client(API_KEY, API_SECRET)
-    btc_df = fetch_historical_data(client, BTC_SYMBOL, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
-    if btc_df is None:
-        logger.critical("❌ [BTC Data] Failed to fetch Bitcoin data. Exiting.")
-        exit(1)
-        
-    btc_df['btc_log_return'] = np.log(btc_df['close'] / btc_df['close'].shift(1))
-    btc_data_cache['df'] = btc_df.dropna()
-    logger.info("✅ [BTC Data] Bitcoin data cached successfully.")
 
 def engineer_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df.ta.atr(length=14, append=True)
@@ -119,7 +90,6 @@ def engineer_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     
     return df.replace([np.inf, -np.inf], np.nan).dropna()
 
-
 def get_vectorized_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     upper_barrier = prices + (atr * TP_ATR_MULTIPLIER)
     lower_barrier = prices - (atr * SL_ATR_MULTIPLIER)
@@ -133,9 +103,7 @@ def get_vectorized_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     labels = pd.Series(0, index=prices.index, dtype=int)
     labels.loc[profit_hit & ~loss_hit] = 1
     labels.loc[~profit_hit & loss_hit] = -1
-    
-    both_hit = profit_hit & loss_hit
-    labels.loc[both_hit] = -1
+    labels.loc[profit_hit & loss_hit] = -1
     
     return labels
 
@@ -143,7 +111,7 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[
     lgbm_params = {
         'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
         'boosting_type': 'gbdt', 'n_estimators': 500, 'learning_rate': 0.05,
-        'num_leaves': 31, 'seed': 42, 'n_jobs': 1, 'verbose': -1,
+        'num_leaves': 31, 'seed': 42, 'n_jobs': -1, 'verbose': -1,
     }
     model = lgb.LGBMClassifier(**lgbm_params)
     
@@ -170,27 +138,20 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[
     
     return model, scaler, metrics
 
-# --- الدالة الرئيسية التي سيتم تشغيلها لكل عملية ---
-def process_symbol(symbol: str):
+# --- دالة معالجة العملة الواحدة ---
+def process_symbol(symbol: str, client: Client, conn, btc_df: pd.DataFrame):
     """
     الدالة التي تقوم بكامل عملية التدريب لرمز واحد.
-    تستخدم الاتصالات المعرفة مسبقًا في init_worker.
     """
-    global db_connection, binance_client
     try:
-        logger.info(f"⚙️ [Process {os.getpid()}] Starting to process {symbol}...")
+        logger.info(f"⚙️ [Process] Starting to process {symbol}...")
         
-        hist_data = fetch_historical_data(binance_client, symbol, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
+        hist_data = fetch_historical_data(client, symbol, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
         if hist_data is None or hist_data.empty:
             logger.warning(f"⚠️ [{symbol}] No historical data found.")
             return (symbol, 'No Data', None)
 
-        btc_df_from_cache = btc_data_cache.get('df')
-        if btc_df_from_cache is None:
-            logger.error(f"❌ [{symbol}] BTC data not found in cache.")
-            return (symbol, 'BTC Data Missing', None)
-             
-        df_featured = engineer_features(hist_data, btc_df_from_cache)
+        df_featured = engineer_features(hist_data, btc_df)
         
         df_featured['target'] = get_vectorized_labels(df_featured['close'], df_featured['atr'])
         df_featured['target_mapped'] = df_featured['target'].map({-1: 0, 0: 1, 1: 2})
@@ -213,13 +174,13 @@ def process_symbol(symbol: str):
             
             model_binary = pickle.dumps(model_bundle)
             metrics_json = json.dumps(metrics)
-            with db_connection.cursor() as cur:
+            with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO ml_models (model_name, model_data, metrics) VALUES (%s, %s, %s)
                     ON CONFLICT (model_name) DO UPDATE SET model_data = EXCLUDED.model_data,
                     trained_at = NOW(), metrics = EXCLUDED.metrics;
                 """, (model_name, model_binary, metrics_json))
-            db_connection.commit()
+            conn.commit()
             
             logger.info(f"✅ [{symbol}] Model trained and saved successfully.")
             return (symbol, 'Success', metrics)
@@ -229,9 +190,10 @@ def process_symbol(symbol: str):
             
     except Exception as e:
         logger.critical(f"❌ [{symbol}] Critical error in process_symbol: {e}", exc_info=True)
-        # إعادة الاتصال بقاعدة البيانات في حالة حدوث خطأ في الاتصال
-        if 'db_connection' in locals() and (not db_connection or db_connection.closed):
-            db_connection = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        # محاولة إعادة الاتصال بقاعدة البيانات في حالة حدوث خطأ
+        if conn and conn.closed:
+            logger.info("Reconnecting to the database...")
+            conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
         return (symbol, 'Error', None)
 
 def send_telegram_notification(text: str):
@@ -242,9 +204,8 @@ def send_telegram_notification(text: str):
     except Exception as e:
         logger.error(f"❌ [Telegram] Failed to send notification: {e}")
 
-def filter_tradable_symbols(symbols_to_check: List[str]) -> List[str]:
+def filter_tradable_symbols(client: Client, symbols_to_check: List[str]) -> List[str]:
     logger.info("ℹ️ [Validation] Validating tradable symbols on Binance...")
-    client = Client(API_KEY, API_SECRET)
     try:
         exchange_info = client.get_exchange_info()
         available_symbols = {
@@ -265,57 +226,71 @@ def filter_tradable_symbols(symbols_to_check: List[str]) -> List[str]:
         logger.error(f"❌ [Validation] Error during symbol validation: {e}. Skipping validation.")
         return symbols_to_check
 
-# --- دالة التدريب الرئيسية التي تدير العمليات المتوازية ---
-def parallel_training_job():
-    logger.info(f"🚀 Starting robust training process ({BASE_ML_MODEL_NAME})...")
+# --- ✨ دالة التدريب الرئيسية التسلسلية ✨ ---
+def sequential_training_job():
+    logger.info(f"🚀 Starting SEQUENTIAL training process ({BASE_ML_MODEL_NAME})...")
     
-    fetch_and_cache_btc_data_global()
-    
+    client = Client(API_KEY, API_SECRET)
+    conn = None
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        logger.info("✅ Database connection established.")
+    except Exception as e:
+        logger.critical(f"❌ Could not connect to the database: {e}")
+        return
+
+    # جلب بيانات البيتكوين مرة واحدة
+    logger.info("ℹ️ [BTC Data] Fetching Bitcoin data...")
+    btc_df = fetch_historical_data(client, BTC_SYMBOL, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
+    if btc_df is None:
+        logger.critical("❌ [BTC Data] Failed to fetch Bitcoin data. Exiting.")
+        return
+    btc_df['btc_log_return'] = np.log(btc_df['close'] / btc_df['close'].shift(1))
+    btc_df.dropna(inplace=True)
+    logger.info("✅ [BTC Data] Bitcoin data fetched successfully.")
+
     try:
         with open('crypto_list.txt', 'r', encoding='utf-8') as f:
             symbols_from_file = {s.strip().upper() + 'USDT' for s in f if s.strip()}
     except FileNotFoundError:
         logger.critical("❌ [Main] 'crypto_list.txt' not found. Exiting."); return
 
-    tradable_symbols = filter_tradable_symbols(list(symbols_from_file))
+    tradable_symbols = filter_tradable_symbols(client, list(symbols_from_file))
     if not tradable_symbols:
         logger.warning("⚠️ [Main] No tradable symbols found from the list. Exiting.")
         return
 
-    send_telegram_notification(f"🚀 *Starting robust training for {len(tradable_symbols)} symbols*...")
-    
-    # ✨ تحسين: تحديد عدد العمليات وتقنية إعادة التدوير
-    # تحديد 4 عمليات كحد أقصى لتجنب استهلاك الذاكرة
-    num_processes = min(cpu_count(), 4)
-    # إعادة تشغيل كل عملية بعد معالجة 10 مهام لتحرير الذاكرة
-    maxtasks = 10 
-    logger.info(f"🖥️ Using {num_processes} parallel processes (restarting every {maxtasks} tasks).")
+    send_telegram_notification(f"🚀 *Starting sequential training for {len(tradable_symbols)} symbols*...")
     
     results = []
-    # ✨ تحسين: استخدام initializer و maxtasksperchild
-    with Pool(processes=num_processes, initializer=init_worker, maxtasksperchild=maxtasks) as pool:
-        with tqdm(total=len(tradable_symbols), desc="Training Symbols") as pbar:
-            for result in pool.imap_unordered(process_symbol, tradable_symbols):
-                results.append(result)
-                pbar.update()
+    # استخدام tqdm لإظهار شريط التقدم
+    for symbol in tqdm(tradable_symbols, desc="Training Symbols"):
+        result = process_symbol(symbol, client, conn, btc_df)
+        results.append(result)
 
     successful = sum(1 for r in results if r[1] == 'Success')
     failed = len(tradable_symbols) - successful
     
-    summary_msg = (f"🏁 *Robust training process completed*\n"
+    summary_msg = (f"🏁 *Sequential training process completed*\n"
                    f"- Successful models: {successful}\n"
                    f"- Failed/Skipped models: {failed}")
     send_telegram_notification(summary_msg)
     logger.info(summary_msg)
 
+    # إغلاق الاتصال بقاعدة البيانات في النهاية
+    if conn:
+        conn.close()
+        logger.info("Database connection closed.")
+
+
 # --- خادم Flask للبقاء نشطًا ---
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Robust model training service is running.", 200
+    return "Sequential model training service is running.", 200
 
 if __name__ == "__main__":
-    train_thread = Thread(target=parallel_training_job)
+    train_thread = Thread(target=sequential_training_job)
     train_thread.daemon = True
     train_thread.start()
     
