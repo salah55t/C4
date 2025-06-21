@@ -26,11 +26,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v5.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v5_compatible.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV5')
+logger = logging.getLogger('CryptoBotV5Compatible')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -48,32 +48,37 @@ except Exception as e:
 # --- V5 Model Constants ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
+# --- تمت إضافة الإطار الزمني الأعلى لتحليل MTF ---
+HIGHER_TIMEFRAME: str = '4h'
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 
+# --- تم تمديد فترة جلب البيانات لتغطية حساب المؤشرات على الإطار الزمني الأعلى ---
+DATA_FETCH_LOOKBACK_DAYS: int = 120 
 
-# --- Indicator & Feature Parameters (Matching ml.py) ---
+# --- Indicator & Feature Parameters (Matching ml.py EXACTLY) ---
+ADX_PERIOD: int = 14
+BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
-# --- تمت إضافة معلمات المؤشرات الجديدة ---
 STOCH_RSI_PERIOD: int = 14
 STOCH_K: int = 3
 STOCH_D: int = 3
 REL_VOL_PERIOD: int = 30
-
+RSI_OVERBOUGHT: int = 70
+RSI_OVERSOLD: int = 30
+STOCH_RSI_OVERBOUGHT: int = 80
+STOCH_RSI_OVERSOLD: int = 20
+BTC_SYMBOL = 'BTCUSDT'
 
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
-TRADE_AMOUNT_USDT: float = 10.0
-USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
-USE_TRAILING_STOP = False
 USE_BTC_TREND_FILTER = True
-BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 50
 
@@ -88,8 +93,10 @@ current_prices: Dict[str, float] = {}
 prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
+# --- تمت إضافة ذاكرة تخزين مؤقت لبيانات البيتكوين لتجنب جلبها بشكل متكرر ---
+btc_data_cache: Optional[pd.DataFrame] = None
 
-# ---------------------- دوال قاعدة البيانات ----------------------
+# ---------------------- دوال قاعدة البيانات (بدون تغيير) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
@@ -100,27 +107,17 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY,
-                        symbol TEXT NOT NULL,
-                        entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL,
-                        stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open',
-                        closing_price DOUBLE PRECISION,
-                        closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION,
-                        strategy_name TEXT,
-                        signal_details JSONB
-                    );
+                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB );
                 """)
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS notifications (
-                        id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
+                    CREATE TABLE IF NOT EXISTS notifications ( id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
                         message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
                 cur.execute("""
-                     CREATE TABLE IF NOT EXISTS ml_models (
-                        id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
+                     CREATE TABLE IF NOT EXISTS ml_models ( id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
                         trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
                 """)
             conn.commit()
@@ -197,38 +194,106 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ---!!! تحديث: تم تعديل الدالة لإضافة المؤشرات الجديدة المطلوبة ---
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy()
+def fetch_and_cache_btc_data():
+    """
+    تجلب بيانات البيتكوين وتخزنها مؤقتًا لتجنب الطلبات المتكررة.
+    """
+    global btc_data_cache
+    logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين وتخزينها...")
+    btc_data_cache = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
+    if btc_data_cache is None:
+        logger.critical("❌ [بيانات BTC] فشل جلب بيانات البيتكوين. لن يتمكن البوت من حساب ميزة الارتباط.")
+        # لا نخرج من البرنامج، ولكن نحذر المستخدم
+    else:
+        btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
+        logger.info("✅ [بيانات BTC] تم جلب وتخزين بيانات البيتكوين بنجاح.")
 
-    # ATR (موجود بالفعل)
+
+# ====> START: NEW/UPDATED FEATURE CALCULATION FUNCTIONS <====
+# تم نسخ هذه الدوال مباشرة من ملف ml.py لضمان تطابق 100%
+
+def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    تحسب أنماط الشموع المختلفة وتعطيها قيمة رقمية.
+    """
+    df_patterns = df.copy()
+    op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
+    body = abs(cl - op)
+    candle_range = hi - lo
+    # تجنب القسمة على صفر
+    candle_range[candle_range == 0] = 1e-9 
+    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
+    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
+    
+    df_patterns['candlestick_pattern'] = 0
+    
+    # تعريف الشروط لكل نمط
+    is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
+    is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
+    is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
+    is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
+    is_doji = (body / candle_range) < 0.05
+
+    # تعيين القيم الرقمية للأنماط
+    df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
+    df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
+    df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
+    df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
+    df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
+    df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
+    df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
+
+    return df_patterns
+
+def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """
+    دالة شاملة لحساب جميع الميزات (الأساسية والمتعددة الأطر الزمنية) المطلوبة لنموذج V5.
+    """
+    # 1. حساب الميزات الأساسية على إطار 15 دقيقة
+    df_calc = df_15m.copy()
+
+    # ATR, ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    # RSI (الفلتر الأول - موجود)
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    
+    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # MACD and MACD Cross (الفلتر الثاني - محدث)
-    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
-    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
+    # MACD
+    ema_fast_macd = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
+    ema_slow_macd = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+    macd_line = ema_fast_macd - ema_slow_macd
     signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
     df_calc['macd_hist'] = macd_line - signal_line
-    # اكتشاف التقاطع
     df_calc['macd_cross'] = 0
-    # تقاطع صعودي: macd_hist كان سالبًا، وأصبح الآن موجبًا
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
-    # تقاطع هبوطي: macd_hist كان موجبًا، وأصبح الآن سالبًا
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
 
+    # Bollinger Bands
+    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
+    std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
+    upper_band = sma + (std_dev * 2)
+    lower_band = sma - (std_dev * 2)
+    df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
 
-    # Stochastic RSI (الفلتر الثالث - جديد)
+    # Stochastic RSI
     rsi = df_calc['rsi']
     min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
     max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
@@ -236,10 +301,15 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
 
-    # Relative Volume (الفلتر الرابع - موجود)
+    # Relative Volume
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
-    # الميزات الأخرى الموجودة
+    # Market Condition
+    df_calc['market_condition'] = 0 
+    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
+    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
+
+    # Other Features
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -249,7 +319,26 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
     
-    return df_calc.dropna()
+    # Candlestick Patterns
+    df_calc = calculate_candlestick_patterns(df_calc)
+    
+    # 2. حساب ميزات MTF من إطار 4 ساعات
+    delta_4h = df_4h['close'].diff()
+    gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+    ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+    
+    # 3. دمج الميزات
+    mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
+    df_featured = df_calc.join(mtf_features)
+    # استخدام ffill لملء القيم الفارغة التي تنتج عن اختلاف الأطر الزمنية
+    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+    
+    return df_featured.dropna()
+
+# ====> END: NEW/UPDATED FEATURE CALCULATION FUNCTIONS <====
 
 
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
@@ -320,8 +409,9 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_db(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    def get_features(self, df: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        return calculate_features(df, btc_df)
+    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        # --- تحديث: الآن نستخدم الدالة الشاملة لحساب كل الميزات ---
+        return calculate_all_features(df_15m, df_4h, btc_df)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
@@ -366,7 +456,7 @@ class TradingStrategy:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
 
-# ---------------------- دوال التنبيهات والإدارة ----------------------
+# ---------------------- دوال التنبيهات والإدارة (بدون تغيير) ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -463,7 +553,7 @@ def load_notifications_to_cache():
             logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
-# ---------------------- حلقة العمل الرئيسية ----------------------
+# ---------------------- حلقة العمل الرئيسية (مُعدَّلة) ----------------------
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
@@ -478,15 +568,6 @@ def get_btc_trend() -> Dict[str, Any]:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
-def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
-    logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين لحساب المؤشرات...")
-    btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-    if btc_data is None:
-        logger.error("❌ [بيانات BTC] فشل جلب بيانات البيتكوين. سيتخطى البوت الارتباط.")
-        return None
-    btc_data['btc_returns'] = btc_data['close'].pct_change()
-    return btc_data
-
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
     time.sleep(15) 
@@ -494,6 +575,9 @@ def main_loop():
         log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
         return
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
+    
+    # --- تحديث: جلب بيانات BTC مرة واحدة في بداية كل حلقة ---
+    fetch_and_cache_btc_data()
     
     while True:
         try:
@@ -511,8 +595,8 @@ def main_loop():
             slots_available = MAX_OPEN_TRADES - open_count
             logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
             
-            btc_data = get_btc_data_for_bot()
-            if btc_data is None:
+            # --- تحديث: استخدام بيانات BTC من الذاكرة المؤقتة ---
+            if btc_data_cache is None:
                 logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
                 time.sleep(120); continue
             
@@ -522,11 +606,18 @@ def main_loop():
                     if symbol in open_signals_cache: continue
                 
                 try:
-                    df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_hist is None or df_hist.empty: continue
+                    # --- تحديث: جلب البيانات لكلا الإطارين الزمنيين ---
+                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
+                    df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
+                    
+                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: 
+                        logger.warning(f"⚠️ {symbol}: لا توجد بيانات كافية على الإطارين الزمنيين. سيتم التخطي.")
+                        continue
                     
                     strategy = TradingStrategy(symbol)
-                    df_features = strategy.get_features(df_hist, btc_data)
+                    # --- تحديث: تمرير جميع البيانات اللازمة لحساب الميزات ---
+                    df_features = strategy.get_features(df_15m, df_4h, btc_data_cache)
+                    
                     if df_features is None or df_features.empty: continue
                     
                     potential_signal = strategy.generate_signal(df_features)
@@ -536,12 +627,9 @@ def main_loop():
                              logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي. سيتم التخطي."); continue
                         
                         potential_signal['entry_price'] = current_price
-                        if USE_DYNAMIC_SL_TP:
-                            atr_value = df_features['atr'].iloc[-1]
-                            potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
-                            potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
-                        else:
-                            potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
+                        atr_value = df_features['atr'].iloc[-1]
+                        potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
+                        potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
@@ -552,16 +640,17 @@ def main_loop():
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
 
             logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار الدورة التالية...")
-            time.sleep(60)
+            time.sleep(60) # يمكن زيادة هذا الوقت لتقليل استهلاك الموارد
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
             log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM")
             time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم (بدون تغيير) ----------------------
 app = Flask(__name__)
 CORS(app)
 
+# ... (جميع دوال Flask تبقى كما هي)
 def get_fear_and_greed_index() -> Dict[str, Any]:
     classification_translation = {"Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد", "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"}
     try:
@@ -577,10 +666,15 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
 @app.route('/')
 def home():
     try:
+        # محاولة العثور على الملف في نفس مسار السكريبت
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, 'index.html')
+        if not os.path.exists(file_path):
+             return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1><p>تأكد من وجود الملف في نفس مجلد السكريبت.</p>", 404
         with open(file_path, 'r', encoding='utf-8') as f: return render_template_string(f.read())
     except FileNotFoundError: return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
+    except Exception as e: return f"<h1>خطأ في تحميل لوحة التحكم:</h1><p>{e}</p>", 500
+
 
 @app.route('/api/market_status')
 def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index()})
@@ -596,7 +690,9 @@ def get_stats():
         losses = len(closed) - wins
         total_closed = len(closed)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        total_profit = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed if s.get('profit_percentage') is not None)
+        # ملاحظة: هذا الحساب يفترض أن كل صفقة تستخدم مبلغًا ثابتًا.
+        trade_amount = 10.0 # يجب أن يكون هذا مطابقًا للمبلغ المستخدم في الواقع
+        total_profit = sum(s['profit_percentage'] / 100 * trade_amount for s in closed if s.get('profit_percentage') is not None)
         return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_usdt": total_profit, "total_closed_trades": total_closed})
     except Exception as e:
         logger.error(f"❌ [API إحصائيات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
@@ -666,7 +762,7 @@ def initialize_bot_services():
         pass
 
 if __name__ == "__main__":
-    logger.info(f"🚀 بدء تشغيل بوت التداول - إصدار {BASE_ML_MODEL_NAME}...")
+    logger.info(f"🚀 بدء تشغيل بوت التداول المتوافق - إصدار {BASE_ML_MODEL_NAME}...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
