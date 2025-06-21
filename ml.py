@@ -326,10 +326,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
-            scaler = StandardScaler().fit(X_train)
-            # *** FIX: Convert scaled numpy arrays back to DataFrames with original columns ***
-            X_train_scaled = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
-            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+            # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
+            scaler = StandardScaler()
+            X_train_scaled = X_train.copy()
+            X_test_scaled = X_test.copy()
+            X_train_scaled.loc[:, X_train.columns] = scaler.fit_transform(X_train)
+            X_test_scaled.loc[:, X_test.columns] = scaler.transform(X_test)
             
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train,
@@ -364,10 +366,13 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     for train_index, test_index in tscv.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-        scaler = StandardScaler().fit(X_train)
-        # *** FIX: Convert scaled numpy arrays back to DataFrames with original columns ***
-        X_train_scaled = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
-        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+        
+        # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
+        scaler = StandardScaler()
+        X_train_scaled = X_train.copy()
+        X_test_scaled = X_test.copy()
+        X_train_scaled.loc[:, X_train.columns] = scaler.fit_transform(X_train)
+        X_test_scaled.loc[:, X_test.columns] = scaler.transform(X_test)
 
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
@@ -387,9 +392,10 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     }
     
     # Train the final model on the entire dataset
-    final_scaler = StandardScaler().fit(X)
-    # *** FIX: Convert final scaled numpy array back to a DataFrame ***
-    X_scaled_full = pd.DataFrame(final_scaler.transform(X), index=X.index, columns=X.columns)
+    final_scaler = StandardScaler()
+    X_scaled_full = X.copy()
+    # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
+    X_scaled_full.loc[:, X.columns] = final_scaler.fit_transform(X)
     
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
