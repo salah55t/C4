@@ -350,7 +350,8 @@ def run_training_job():
     for symbol in symbols_to_train:
         logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
         try:
-            df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_for_TRAINING)
+            # CORRECTED THE VARIABLE NAME IN THE LINE BELOW
+            df_hist = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
             if df_hist is None or df_hist.empty:
                 logger.warning(f"⚠️ [Main] No data for {symbol}, skipping."); failed_models += 1; continue
             
