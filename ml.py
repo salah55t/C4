@@ -8,7 +8,7 @@ import pandas as pd
 import psycopg2
 import pickle
 import lightgbm as lgb
-import optuna # <<< إضافة جديدة
+import optuna
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -52,7 +52,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
-HYPERPARAM_TUNING_TRIALS: int = 30 # <<< إضافة جديدة: عدد محاولات البحث
+HYPERPARAM_TUNING_TRIALS: int = 30
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -303,14 +303,11 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     """
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization with Optuna for {HYPERPARAM_TUNING_TRIALS} trials...")
 
+    # A function to run within Optuna to find the best hyperparameters
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
-            'objective': 'multiclass',
-            'num_class': 3,
-            'metric': 'multi_logloss',
-            'verbosity': -1,
-            'boosting_type': 'gbdt',
-            'class_weight': 'balanced',
+            'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
+            'verbosity': -1, 'boosting_type': 'gbdt', 'class_weight': 'balanced',
             'random_state': 42,
             'n_estimators': trial.suggest_int('n_estimators', 200, 1000, step=50),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
@@ -330,8 +327,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler().fit(X_train)
-            X_train_scaled = scaler.transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            # *** FIX: Convert scaled numpy arrays back to DataFrames with original columns ***
+            X_train_scaled = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
             
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train,
@@ -344,9 +342,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             all_true.extend(y_test)
 
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
-        # We optimize for the precision of the buy signal (class 1)
         return report.get('1', {}).get('precision', 0)
 
+    # Start the Optuna study
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=HYPERPARAM_TUNING_TRIALS, show_progress_bar=True)
     
@@ -367,8 +365,10 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         scaler = StandardScaler().fit(X_train)
-        X_train_scaled = scaler.transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        # *** FIX: Convert scaled numpy arrays back to DataFrames with original columns ***
+        X_train_scaled = pd.DataFrame(scaler.transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
@@ -388,7 +388,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     
     # Train the final model on the entire dataset
     final_scaler = StandardScaler().fit(X)
-    X_scaled_full = final_scaler.transform(X)
+    # *** FIX: Convert final scaled numpy array back to a DataFrame ***
+    X_scaled_full = pd.DataFrame(final_scaler.transform(X), index=X.index, columns=X.columns)
+    
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
@@ -446,7 +448,6 @@ def run_training_job():
                 failed_models += 1; continue
             X, y, feature_names = prepared_data
             
-            # <<< --- استدعاء دالة التدريب والبحث الجديدة --- >>>
             training_result = tune_and_train_model(X, y)
             if not all(training_result):
                  failed_models += 1; continue
