@@ -21,7 +21,6 @@ from threading import Thread
 from multiprocessing import Pool, cpu_count, Manager
 from sklearn.metrics import accuracy_score, precision_score
 
-
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -35,43 +34,45 @@ logger = logging.getLogger('OptimizedCryptoMLTrainer')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
-    API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_SECRET')
-    DB_URL: str = config('DATABASE_URL')
-    TELEGRAM_TOKEN: Optional[str] = config('TELEGRAM_BOT_TOKEN', default=None)
-    CHAT_ID: Optional[str] = config('TELEGRAM_CHAT_ID', default=None)
+    API_KEY = config('BINANCE_API_KEY')
+    API_SECRET = config('BINANCE_API_SECRET')
+    DB_URL = config('DATABASE_URL')
+    TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default=None)
+    CHAT_ID = config('TELEGRAM_CHAT_ID', default=None)
 except Exception as e:
-     logger.critical(f"❌ فشل في تحميل متغيرات البيئة الأساسية: {e}")
-     exit(1)
+    logger.critical(f"❌ فشل في تحميل متغيرات البيئة الأساسية: {e}")
+    exit(1)
 
-# ---------------------- إعداد الثوابت (معدلة للسرعة) ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Crypto_Predictor_V9_Optimized'
-SIGNAL_TIMEFRAME: str = '15m'
-DATA_LOOKBACK_DAYS: int = 180 
+# ---------------------- إعداد الثوابت ----------------------
+BASE_ML_MODEL_NAME = 'LightGBM_Crypto_Predictor_V9_Optimized'
+SIGNAL_TIMEFRAME = '15m'
+DATA_LOOKBACK_DAYS = 180
 BTC_SYMBOL = 'BTCUSDT'
 
-# --- معلمات طريقة الحاجز الثلاثي ---
-TP_ATR_MULTIPLIER: float = 1.8
-SL_ATR_MULTIPLIER: float = 1.2
-MAX_HOLD_PERIOD: int = 24
+TP_ATR_MULTIPLIER = 1.8
+SL_ATR_MULTIPLIER = 1.2
+MAX_HOLD_PERIOD = 24
 
-# --- متغيرات عالمية مشتركة بين العمليات ---
+# --- متغيرات عالمية ستتم مشاركتها مع العمليات الفرعية ---
 manager = Manager()
 btc_data_cache = manager.dict()
+# سيتم تعريف هذه المتغيرات داخل كل عملية عاملة
+db_connection = None
+binance_client = None
 
-# --- دوال الاتصال والتحقق ---
-def get_db_connection():
-    """إنشاء اتصال جديد بقاعدة البيانات لكل عملية."""
-    return psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+# ---------------------- دوال تهيئة العمليات العاملة ----------------------
+def init_worker():
+    """
+    ✨ دالة التهيئة: يتم استدعاؤها مرة واحدة لكل عملية عاملة.
+    تقوم بإنشاء اتصال قاعدة البيانات وعميل Binance.
+    """
+    global db_connection, binance_client
+    logger.info(f"Initializing worker process {os.getpid()}...")
+    db_connection = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+    binance_client = Client(API_KEY, API_SECRET)
 
-def get_binance_client():
-    """إنشاء عميل Binance جديد لكل عملية."""
-    return Client(API_KEY, API_SECRET)
-
-
-# --- دوال جلب ومعالجة البيانات ---
+# ---------------------- دوال جلب ومعالجة البيانات ----------------------
 def fetch_historical_data(client, symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """جلب البيانات التاريخية من Binance."""
     try:
         start_str = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
@@ -85,27 +86,24 @@ def fetch_historical_data(client, symbol: str, interval: str, days: int) -> Opti
         df.set_index('timestamp', inplace=True)
         return df[cols[1:]].dropna()
     except Exception as e:
-        logger.error(f"❌ [Data Fetch] خطأ في جلب بيانات {symbol}: {e}")
+        logger.error(f"❌ [Data Fetch] Error fetching data for {symbol}: {e}")
         return None
 
 def fetch_and_cache_btc_data_global():
-    """جلب بيانات BTC مرة واحدة وتخزينها في القاموس المشترك."""
-    logger.info("ℹ️ [BTC Data] جاري جلب بيانات البيتكوين وتخزينها...")
-    client = get_binance_client()
+    logger.info("ℹ️ [BTC Data] Fetching and caching Bitcoin data...")
+    client = Client(API_KEY, API_SECRET)
     btc_df = fetch_historical_data(client, BTC_SYMBOL, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
     if btc_df is None:
-        logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
+        logger.critical("❌ [BTC Data] Failed to fetch Bitcoin data. Exiting.")
+        exit(1)
         
     btc_df['btc_log_return'] = np.log(btc_df['close'] / btc_df['close'].shift(1))
     btc_data_cache['df'] = btc_df.dropna()
-    logger.info("✅ [BTC Data] تم تخزين بيانات البيتكوين بنجاح.")
+    logger.info("✅ [BTC Data] Bitcoin data cached successfully.")
 
 def engineer_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    هندسة الميزات باستخدام pandas-ta للسرعة.
-    """
-    df.ta.atr(length=14, append=True) 
-    df.ta.rsi(length=14, append=True) 
+    df.ta.atr(length=14, append=True)
+    df.ta.rsi(length=14, append=True)
     df.ta.macd(fast=12, slow=26, signal=9, append=True)
     
     df['log_return'] = np.log(df['close'] / df['close'].shift(1))
@@ -123,9 +121,6 @@ def engineer_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_vectorized_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
-    """
-    النسخة الموجهة (Vectorized) والأسرع لتوليد الأهداف.
-    """
     upper_barrier = prices + (atr * TP_ATR_MULTIPLIER)
     lower_barrier = prices - (atr * SL_ATR_MULTIPLIER)
     
@@ -140,22 +135,16 @@ def get_vectorized_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     labels.loc[~profit_hit & loss_hit] = -1
     
     both_hit = profit_hit & loss_hit
-    labels.loc[both_hit] = -1 
+    labels.loc[both_hit] = -1
     
     return labels
 
 def train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
-    """تدريب النموذج بمعلمات خفيفة للسرعة."""
     lgbm_params = {
         'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
-        'boosting_type': 'gbdt', 
-        'n_estimators': 500,
-        'learning_rate': 0.05,
-        'num_leaves': 31,
-        'seed': 42, 'n_jobs': 1,
-        'verbose': -1,
+        'boosting_type': 'gbdt', 'n_estimators': 500, 'learning_rate': 0.05,
+        'num_leaves': 31, 'seed': 42, 'n_jobs': 1, 'verbose': -1,
     }
-
     model = lgb.LGBMClassifier(**lgbm_params)
     
     numerical_features = X.select_dtypes(include=np.number).columns.tolist()
@@ -164,7 +153,8 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[
     
     categorical_features = ['hour', 'day_of_week']
     for col in categorical_features:
-        if col in X.columns: X[col] = X[col].astype('category')
+        if col in X.columns:
+            X.loc[:, col] = X[col].astype('category')
             
     model.fit(X, y, categorical_feature=categorical_features)
     
@@ -184,35 +174,35 @@ def train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[
 def process_symbol(symbol: str):
     """
     الدالة التي تقوم بكامل عملية التدريب لرمز واحد.
+    تستخدم الاتصالات المعرفة مسبقًا في init_worker.
     """
+    global db_connection, binance_client
     try:
-        logger.info(f"⚙️ [Process] بدء معالجة {symbol}...")
-        client = get_binance_client()
-        conn = get_db_connection()
+        logger.info(f"⚙️ [Process {os.getpid()}] Starting to process {symbol}...")
         
-        hist_data = fetch_historical_data(client, symbol, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
+        hist_data = fetch_historical_data(binance_client, symbol, SIGNAL_TIMEFRAME, DATA_LOOKBACK_DAYS)
         if hist_data is None or hist_data.empty:
-            logger.warning(f"⚠️ [{symbol}] لا توجد بيانات تاريخية.")
+            logger.warning(f"⚠️ [{symbol}] No historical data found.")
             return (symbol, 'No Data', None)
 
         btc_df_from_cache = btc_data_cache.get('df')
         if btc_df_from_cache is None:
-             logger.error(f"❌ [{symbol}] لم يتم العثور على بيانات BTC في الذاكرة المؤقتة.")
-             return (symbol, 'BTC Data Missing', None)
+            logger.error(f"❌ [{symbol}] BTC data not found in cache.")
+            return (symbol, 'BTC Data Missing', None)
              
         df_featured = engineer_features(hist_data, btc_df_from_cache)
         
         df_featured['target'] = get_vectorized_labels(df_featured['close'], df_featured['atr'])
         df_featured['target_mapped'] = df_featured['target'].map({-1: 0, 0: 1, 1: 2})
         
-        feature_columns = [col for col in df_featured.columns if col in ['atr', 'rsi', 'macd_hist', 'log_return', 'relative_volume', 'btc_correlation', 'hour', 'day_of_week']]
+        feature_columns = ['atr', 'rsi', 'macd_hist', 'log_return', 'relative_volume', 'btc_correlation', 'hour', 'day_of_week']
         
         df_cleaned = df_featured.dropna(subset=feature_columns + ['target_mapped'])
         if df_cleaned.empty or df_cleaned['target_mapped'].nunique() < 3:
-            logger.warning(f"⚠️ [{symbol}] بيانات غير كافية بعد التنظيف.")
+            logger.warning(f"⚠️ [{symbol}] Insufficient data after cleaning.")
             return (symbol, 'Insufficient Data', None)
 
-        X = df_cleaned[feature_columns]
+        X = df_cleaned[feature_columns].copy()
         y = df_cleaned['target_mapped']
 
         model, scaler, metrics = train_model(X, y)
@@ -223,77 +213,61 @@ def process_symbol(symbol: str):
             
             model_binary = pickle.dumps(model_bundle)
             metrics_json = json.dumps(metrics)
-            with conn.cursor() as cur:
+            with db_connection.cursor() as cur:
                 cur.execute("""
                     INSERT INTO ml_models (model_name, model_data, metrics) VALUES (%s, %s, %s)
                     ON CONFLICT (model_name) DO UPDATE SET model_data = EXCLUDED.model_data,
                     trained_at = NOW(), metrics = EXCLUDED.metrics;
                 """, (model_name, model_binary, metrics_json))
-            conn.commit()
+            db_connection.commit()
             
-            logger.info(f"✅ [{symbol}] تم تدريب وحفظ النموذج بنجاح.")
+            logger.info(f"✅ [{symbol}] Model trained and saved successfully.")
             return (symbol, 'Success', metrics)
         else:
-            logger.warning(f"⚠️ [{symbol}] النموذج لم يحقق الأداء المطلوب.")
+            logger.warning(f"⚠️ [{symbol}] Model did not meet performance criteria.")
             return (symbol, 'Low Performance', metrics)
             
     except Exception as e:
-        logger.critical(f"❌ [{symbol}] خطأ فادح في معالجة الرمز: {e}", exc_info=True)
+        logger.critical(f"❌ [{symbol}] Critical error in process_symbol: {e}", exc_info=True)
+        # إعادة الاتصال بقاعدة البيانات في حالة حدوث خطأ في الاتصال
+        if 'db_connection' in locals() and (not db_connection or db_connection.closed):
+            db_connection = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
         return (symbol, 'Error', None)
-    finally:
-        if 'conn' in locals() and conn:
-            conn.close()
 
 def send_telegram_notification(text: str):
-    """إرسال إشعار إلى تيليجرام."""
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                       json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الإشعار: {e}")
+        logger.error(f"❌ [Telegram] Failed to send notification: {e}")
 
-# ==============================================================================
-# ✨ دالة جديدة للتحقق من العملات المتاحة ✨
-# ==============================================================================
-def filter_tradable_symbols(client: Client, symbols_to_check: List[str]) -> List[str]:
-    """
-    تقوم بتصفية قائمة العملات للتأكد من أنها متاحة وقابلة للتداول على Binance.
-    """
-    logger.info("ℹ️ [Validation] جاري التحقق من العملات المتاحة على Binance...")
+def filter_tradable_symbols(symbols_to_check: List[str]) -> List[str]:
+    logger.info("ℹ️ [Validation] Validating tradable symbols on Binance...")
+    client = Client(API_KEY, API_SECRET)
     try:
         exchange_info = client.get_exchange_info()
-        
-        # إنشاء مجموعة (set) من العملات المتاحة للتداول مع USDT للبحث السريع
         available_symbols = {
-            s['symbol'] 
-            for s in exchange_info['symbols'] 
+            s['symbol'] for s in exchange_info['symbols']
             if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
         }
-        
-        # تحويل قائمة الإدخال إلى مجموعة لإزالة التكرارات
         symbols_set = set(symbols_to_check)
-        
-        # العثور على العملات القابلة للتداول
         tradable = list(symbols_set.intersection(available_symbols))
-        
-        # العثور على العملات غير المتاحة
         untradable = list(symbols_set.difference(available_symbols))
         
         if untradable:
-            logger.warning(f"⚠️ [Validation] العملات التالية تم تخطيها لأنها غير متاحة للتداول: {', '.join(untradable)}")
+            logger.warning(f"⚠️ [Validation] Skipping untradable symbols: {', '.join(untradable)}")
         
-        logger.info(f"✅ [Validation] تم العثور على {len(tradable)} عملة قابلة للتداول من أصل {len(symbols_to_check)}.")
+        logger.info(f"✅ [Validation] Found {len(tradable)} tradable symbols out of {len(symbols_to_check)}.")
         return tradable
         
     except Exception as e:
-        logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملة من Binance: {e}. سيتم تخطي عملية التحقق.")
-        # في حالة الفشل، قم بإرجاع القائمة الأصلية لتجنب إيقاف العملية بأكملها
+        logger.error(f"❌ [Validation] Error during symbol validation: {e}. Skipping validation.")
         return symbols_to_check
 
 # --- دالة التدريب الرئيسية التي تدير العمليات المتوازية ---
 def parallel_training_job():
-    logger.info(f"🚀 بدء عملية التدريب المحسنة ({BASE_ML_MODEL_NAME})...")
+    logger.info(f"🚀 Starting robust training process ({BASE_ML_MODEL_NAME})...")
     
     fetch_and_cache_btc_data_global()
     
@@ -301,26 +275,25 @@ def parallel_training_job():
         with open('crypto_list.txt', 'r', encoding='utf-8') as f:
             symbols_from_file = {s.strip().upper() + 'USDT' for s in f if s.strip()}
     except FileNotFoundError:
-        logger.critical("❌ [Main] ملف 'crypto_list.txt' غير موجود."); return
+        logger.critical("❌ [Main] 'crypto_list.txt' not found. Exiting."); return
 
-    # --- ✨ التحقق من العملات قبل البدء ✨ ---
-    client = get_binance_client() 
-    if not client:
-        logger.critical("❌ [Main] فشل في إنشاء عميل Binance للتحقق من العملات."); return
-
-    tradable_symbols = filter_tradable_symbols(client, list(symbols_from_file))
+    tradable_symbols = filter_tradable_symbols(list(symbols_from_file))
     if not tradable_symbols:
-        logger.warning("⚠️ [Main] لم يتم العثور على أي عملات قابلة للتداول من القائمة المحددة.")
+        logger.warning("⚠️ [Main] No tradable symbols found from the list. Exiting.")
         return
-    # --- نهاية قسم التحقق ---
 
-    send_telegram_notification(f"🚀 *بدء تدريب محسن لـ {len(tradable_symbols)} عملة*...")
+    send_telegram_notification(f"🚀 *Starting robust training for {len(tradable_symbols)} symbols*...")
     
-    num_processes = cpu_count()
-    logger.info(f"🖥️ استخدام {num_processes} عمليات متوازية للتدريب.")
+    # ✨ تحسين: تحديد عدد العمليات وتقنية إعادة التدوير
+    # تحديد 4 عمليات كحد أقصى لتجنب استهلاك الذاكرة
+    num_processes = min(cpu_count(), 4)
+    # إعادة تشغيل كل عملية بعد معالجة 10 مهام لتحرير الذاكرة
+    maxtasks = 10 
+    logger.info(f"🖥️ Using {num_processes} parallel processes (restarting every {maxtasks} tasks).")
     
     results = []
-    with Pool(processes=num_processes) as pool:
+    # ✨ تحسين: استخدام initializer و maxtasksperchild
+    with Pool(processes=num_processes, initializer=init_worker, maxtasksperchild=maxtasks) as pool:
         with tqdm(total=len(tradable_symbols), desc="Training Symbols") as pbar:
             for result in pool.imap_unordered(process_symbol, tradable_symbols):
                 results.append(result)
@@ -329,17 +302,17 @@ def parallel_training_job():
     successful = sum(1 for r in results if r[1] == 'Success')
     failed = len(tradable_symbols) - successful
     
-    summary_msg = (f"🏁 *اكتملت عملية التدريب المحسنة*\n"
-                   f"- النماذج الناجحة: {successful}\n"
-                   f"- النماذج الفاشلة/المتجاهَلة: {failed}")
+    summary_msg = (f"🏁 *Robust training process completed*\n"
+                   f"- Successful models: {successful}\n"
+                   f"- Failed/Skipped models: {failed}")
     send_telegram_notification(summary_msg)
     logger.info(summary_msg)
 
-# --- خادم Flask للبقاء نشطًا على Render ---
+# --- خادم Flask للبقاء نشطًا ---
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "خدمة تدريب النماذج المحسنة تعمل.", 200
+    return "Robust model training service is running.", 200
 
 if __name__ == "__main__":
     train_thread = Thread(target=parallel_training_job)
@@ -347,5 +320,5 @@ if __name__ == "__main__":
     train_thread.start()
     
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"🌍 تشغيل خادم الويب على المنفذ {port}...")
+    logger.info(f"🌍 Web server running on port {port}...")
     app.run(host='0.0.0.0', port=port)
