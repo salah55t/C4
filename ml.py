@@ -9,6 +9,7 @@ import psycopg2
 import pickle
 import lightgbm as lgb
 import optuna
+import warnings
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -21,6 +22,11 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
+
+# ---------------------- تجاهل التحذيرات المستقبلية من Pandas ----------------------
+# This is to suppress the specific dtype warning we are addressing.
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 # Suppress Optuna's verbose logging
@@ -326,12 +332,10 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
-            # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
+            # *** FINAL FIX: Create a new DataFrame from the scaled data to preserve names and have correct dtypes ***
             scaler = StandardScaler()
-            X_train_scaled = X_train.copy()
-            X_test_scaled = X_test.copy()
-            X_train_scaled.loc[:, X_train.columns] = scaler.fit_transform(X_train)
-            X_test_scaled.loc[:, X_test.columns] = scaler.transform(X_test)
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
             
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train,
@@ -367,12 +371,10 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
-        # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
+        # *** FINAL FIX: Create a new DataFrame from the scaled data ***
         scaler = StandardScaler()
-        X_train_scaled = X_train.copy()
-        X_test_scaled = X_test.copy()
-        X_train_scaled.loc[:, X_train.columns] = scaler.fit_transform(X_train)
-        X_test_scaled.loc[:, X_test.columns] = scaler.transform(X_test)
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
 
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
@@ -393,9 +395,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     
     # Train the final model on the entire dataset
     final_scaler = StandardScaler()
-    X_scaled_full = X.copy()
-    # *** FINAL FIX: Apply scaler in-place on a copy to preserve DataFrame structure ***
-    X_scaled_full.loc[:, X.columns] = final_scaler.fit_transform(X)
+    # *** FINAL FIX: Create a new DataFrame for the final scaled data ***
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
     
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
