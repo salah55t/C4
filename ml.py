@@ -50,7 +50,7 @@ DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
-BBANDS_PERIOD: int = 20  # <<< إضافة جديدة: فترة حساب نطاقات بولينجر
+BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
@@ -171,13 +171,11 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
 
-    # <<< إضافة جديدة: عرض نطاقات بولينجر (Bollinger Bands Width) >>>
+    # Bollinger Bands Width
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     upper_band = sma + (std_dev * 2)
     lower_band = sma - (std_dev * 2)
-    # يتم قسمة الفرق بين النطاقين على المتوسط المتحرك لتوحيد القيمة
-    # نضيف قيمة صغيرة للمتوسط لتجنب القسمة على صفر في حال كان المتوسط صفرًا
     df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
 
     # Stochastic RSI
@@ -229,12 +227,11 @@ def prepare_data_for_ml(df: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> 
     df_featured = calculate_features(df, btc_df)
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # ---!!! تحديث: إضافة الميزة الجديدة إلى قائمة التدريب ---
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
-        'bb_width'  # <<< إضافة الميزة الجديدة هنا
+        'bb_width'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -355,7 +352,8 @@ def run_training_job():
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-                save_ml_model_to_db(model_bundle, model_name, model_etrics)
+                # <<< هنا تم التصحيح >>>
+                save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
                 logger.warning(f"⚠️ [Main] Model for {symbol} is not useful. Discarding."); failed_models += 1
