@@ -31,7 +31,7 @@ DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 60
 
 # --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
 MODEL_PREDICTION_THRESHOLD: float = 0.80
-ATR_SL_MULTIPLIER: float = 1.5
+ATR_SL_MULTIPLIER: float = 2
 ATR_TP_MULTIPLIER: float = 2.5
 
 # --- محاكاة التكاليف الواقعية ---
