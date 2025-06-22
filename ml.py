@@ -12,7 +12,6 @@ import optuna
 import warnings
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
-from psycopg2.errors import InterfaceError, OperationalError
 from binance.client import Client
 from datetime import datetime, timedelta
 from decouple import config
@@ -25,10 +24,14 @@ from flask import Flask
 from threading import Thread
 
 # ---------------------- تجاهل التحذيرات المستقبلية من Pandas ----------------------
+# This is to suppress the specific dtype warning we are addressing.
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
+
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
+# Suppress Optuna's verbose logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,8 +58,10 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
-HYPERPARAM_TUNING_TRIALS: int = 5
+HYPERPARAM_TUNING_TRIALS: int = 30
 BTC_SYMBOL = 'BTCUSDT'
+
+# --- Indicator & Feature Parameters ---
 ADX_PERIOD: int = 14
 BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
@@ -73,56 +78,32 @@ RSI_OVERBOUGHT: int = 70
 RSI_OVERSOLD: int = 30
 STOCH_RSI_OVERBOUGHT: int = 80
 STOCH_RSI_OVERSOLD: int = 20
+
+# Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
 SL_ATR_MULTIPLIER: float = 1.5
 MAX_HOLD_PERIOD: int = 24
 
-# --- المتغيرات العامة للاتصالات ---
+# Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 btc_data_cache: Optional[pd.DataFrame] = None
 
-
-# ====> START: DATABASE CONNECTION FIX <====
-def get_db_connection() -> Optional[psycopg2.extensions.connection]:
-    """
-     يتحقق من حالة الاتصال بقاعدة البيانات ويعيد الاتصال إذا كان مغلقًا.
-    هذا يمنع أخطاء 'connection already closed' في العمليات الطويلة.
-    """
+# --- دوال الاتصال والتحقق ---
+def init_db():
     global conn
     try:
-        # السمة 'closed' تكون 0 للاتصال المفتوح. أي قيمة أخرى تعني أنه مغلق.
-        if conn is None or conn.closed != 0:
-            logger.info("ℹ️ [DB] الاتصال مغلق أو غير موجود. جاري إعادة الاتصال...")
-            conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-            # استخدام autocommit يبسط عمليات الإدراج الفردية.
-            conn.autocommit = True
-            logger.info("✅ [DB] تم إعادة الاتصال بنجاح.")
-    except (OperationalError, InterfaceError) as e:
-        logger.error(f"❌ [DB] فشل الاتصال أو إعادة الاتصال بقاعدة البيانات: {e}")
-        conn = None  # تأكد من أن 'conn' هو None في حالة الفشل
-    return conn
-
-def init_db_and_tables():
-    """
-    تُهيئ الاتصال الأولي بقاعدة البيانات وتتحقق من وجود الجدول المطلوب.
-    """
-    db_conn = get_db_connection()
-    if not db_conn:
-        logger.critical("❌ [DB] لا يمكن إنشاء اتصال أولي بقاعدة البيانات. سيتم الخروج.")
-        exit(1)
-    try:
-        with db_conn.cursor() as cur:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS ml_models (
                     id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE,
                     model_data BYTEA NOT NULL, trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
             """)
-        logger.info("✅ [DB] تم تهيئة الجداول بنجاح.")
+        conn.commit()
+        logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
     except Exception as e:
-        logger.critical(f"❌ [DB] فشل في تهيئة الجداول: {e}");
-        exit(1)
-# ====> END: DATABASE CONNECTION FIX <====
+        logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
 
 def get_binance_client():
     global client
@@ -154,7 +135,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except Exception as e:
         logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
 
-# --- دوال جلب ومعالجة البيانات (بدون تغيير) ---
+# --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
@@ -185,7 +166,9 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     candle_range[candle_range == 0] = 1e-9
     upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
     lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
+    
     df_patterns['candlestick_pattern'] = 0
+    
     is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
     is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
     is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
@@ -193,6 +176,7 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
     is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
     is_doji = (body / candle_range) < 0.05
+
     df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
     df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
     df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
@@ -200,15 +184,18 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
     df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
     df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
+
     return df_patterns
 
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -217,10 +204,12 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -229,21 +218,26 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_cross'] = 0
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     upper_band = sma + (std_dev * 2)
     lower_band = sma - (std_dev * 2)
     df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
+
     rsi = df_calc['rsi']
     min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
     max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
     stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+
     df_calc['market_condition'] = 0 
     df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
     df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
+
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
@@ -252,7 +246,9 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
+    
     df_calc = calculate_candlestick_patterns(df_calc)
+
     return df_calc
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
@@ -273,17 +269,22 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol} with Multi-Timeframe Analysis...")
+    
     df_featured = calculate_features(df_15m, btc_df)
+
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+    
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
+    
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
@@ -291,17 +292,24 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
         'bb_width', 'adx', 'candlestick_pattern',
         'rsi_4h', 'price_vs_ema50_4h'
     ]
+    
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after MTF prep. Skipping.")
         return None
+        
     logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
     return X, y, feature_columns
 
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
+    """
+    Uses Optuna to find the best hyperparameters and then trains a final model.
+    """
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization with Optuna for {HYPERPARAM_TUNING_TRIALS} trials...")
+
+    # A function to run within Optuna to find the best hyperparameters
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
             'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
@@ -317,46 +325,63 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
         }
+
         all_preds, all_true = [], []
         tscv = TimeSeriesSplit(n_splits=5)
         for train_index, test_index in tscv.split(X):
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+            
+            # *** FINAL FIX: Create a new DataFrame from the scaled data to preserve names and have correct dtypes ***
             scaler = StandardScaler()
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+            
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train,
                       eval_set=[(X_test_scaled, y_test)],
                       eval_metric='multi_logloss',
                       callbacks=[lgb.early_stopping(30, verbose=False)])
+            
             y_pred = model.predict(X_test_scaled)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
+
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
         return report.get('1', {}).get('precision', 0)
+
+    # Start the Optuna study
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=HYPERPARAM_TUNING_TRIALS, show_progress_bar=True)
+    
     best_params = study.best_params
     logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
+    
+    # --- Retrain final model on all data with best params and get final metrics ---
     logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
     final_model_params = {
         'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
         'random_state': 42, 'verbosity': -1, **best_params
     }
+    
+    # Get final metrics using walk-forward on best params
     all_preds_final, all_true_final = [], []
     tscv = TimeSeriesSplit(n_splits=5)
     for train_index, test_index in tscv.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        
+        # *** FINAL FIX: Create a new DataFrame from the scaled data ***
         scaler = StandardScaler()
         X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
         all_preds_final.extend(y_pred)
         all_true_final.extend(y_test)
+        
     final_report = classification_report(all_true_final, all_preds_final, output_dict=True, zero_division=0)
     final_metrics = {
         'accuracy': accuracy_score(all_true_final, all_preds_final),
@@ -367,41 +392,52 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         'num_samples_trained': len(X),
         'best_hyperparameters': json.dumps(best_params)
     }
+    
+    # Train the final model on the entire dataset
     final_scaler = StandardScaler()
+    # *** FINAL FIX: Create a new DataFrame for the final scaled data ***
     X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
+    
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
+    
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
     logger.info(f"📊 [ML Train] Final Walk-Forward Performance with Best Params: {metrics_log_str}")
+
     return final_model, final_scaler, final_metrics
 
-# ====> START: UPDATED SAVE MODEL FUNCTION <====
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
-    """
-    تحفظ حزمة النموذج في قاعدة البيانات، مع التحقق من الاتصال وإعادة الاتصال عند الحاجة.
-    """
-    logger.info(f"ℹ️ [DB Save] محاولة حفظ حزمة النموذج '{model_name}'...")
-    db_conn = get_db_connection()  # احصل على اتصال صالح مضمون
-    if not db_conn:
-        logger.error(f"❌ [DB Save] لا يوجد اتصال متاح بقاعدة البيانات. لا يمكن حفظ النموذج {model_name}.")
-        return  # الخروج من الدالة إذا لم يكن هناك اتصال
-
+    logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
     try:
         model_binary = pickle.dumps(model_bundle)
         metrics_json = json.dumps(metrics)
-        with db_conn.cursor() as db_cur:
+        with conn.cursor() as db_cur:
             db_cur.execute("""
                 INSERT INTO ml_models (model_name, model_data, trained_at, metrics) 
                 VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET 
                 model_data = EXCLUDED.model_data, trained_at = NOW(), metrics = EXCLUDED.metrics;
             """, (model_name, model_binary, metrics_json))
-        # لا حاجة لـ conn.commit() مع autocommit=True
-        logger.info(f"✅ [DB Save] تم حفظ حزمة النموذج '{model_name}' بنجاح.")
-    except (InterfaceError, OperationalError) as e:
-        logger.error(f"❌ [DB Save] خطأ في اتصال قاعدة البيانات أثناء الحفظ: {e}. سيتم محاولة إعادة الاتصال في الدورة التالية.")
+        conn.commit()
+        logger.info(f"✅ [DB Save] Model bundle '{model_name}' saved successfully.")
     except Exception as e:
-        logger.error(f"❌ [DB Save] حدث خطأ عام أثناء حفظ حزمة النموذج: {e}", exc_info=True)
-# ====> END: UPDATED SAVE MODEL FUNCTION <====
+        logger.error(f"❌ [DB Save] Error saving model bundle: {e}"); conn.rollback()
+
+def check_if_model_exists(model_name: str) -> bool:
+    """
+    Checks if a model with the given name already exists in the database.
+    """
+    if not conn:
+        logger.error("❌ [DB Check] Database connection is not available.")
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM ml_models WHERE model_name = %s LIMIT 1;", (model_name,))
+            return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"❌ [DB Check] Error checking for model '{model_name}': {e}")
+        conn.rollback()
+        # Return False on error to be safe and attempt retraining
+        return False
 
 def send_telegram_message(text: str):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -411,8 +447,7 @@ def send_telegram_message(text: str):
 
 def run_training_job():
     logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
-    # --- تحديث: استدعاء دالة التهيئة الجديدة ---
-    init_db_and_tables()
+    init_db()
     get_binance_client()
     fetch_and_cache_btc_data()
     symbols_to_train = get_validated_symbols(filename='crypto_list.txt')
@@ -422,8 +457,16 @@ def run_training_job():
         
     send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} symbols.")
     
-    successful_models, failed_models = 0, 0
+    successful_models, failed_models, skipped_models = 0, 0, 0
     for symbol in symbols_to_train:
+        model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+        
+        # --- التحقق من وجود النموذج قبل البدء ---
+        if check_if_model_exists(model_name):
+            logger.info(f"⏭️ [Main] Model for {symbol} ({model_name}) already exists. Skipping training.")
+            skipped_models += 1
+            continue
+        
         logger.info(f"\n--- ⏳ [Main] Starting model training for {symbol} ---")
         try:
             df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
@@ -439,12 +482,11 @@ def run_training_job():
             
             training_result = tune_and_train_model(X, y)
             if not all(training_result):
-                 failed_models += 1; continue
+                 logger.warning(f"⚠️ [Main] Training failed for {symbol}. Discarding."); failed_models += 1; continue
             final_model, final_scaler, model_metrics = training_result
             
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
-                model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
                 save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
@@ -454,20 +496,18 @@ def run_training_job():
         time.sleep(1)
 
     completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
-                        f"- Successfully trained: {successful_models} models\n"
-                        f"- Failed/Discarded: {failed_models} models\n"
-                        f"- Total symbols: {len(symbols_to_train)}")
+                        f"- ✅ Successfully trained: {successful_models} models\n"
+                        f"- ❌ Failed/Discarded: {failed_models} models\n"
+                        f"- ⏭️ Already trained (Skipped): {skipped_models} models\n"
+                        f"- 📊 Total symbols processed: {len(symbols_to_train)}")
     send_telegram_message(completion_message)
     logger.info(completion_message)
 
-    # --- تحديث: إغلاق الاتصال النهائي إذا كان لا يزال مفتوحًا ---
-    global conn 
-    if conn and conn.closed == 0:
-        conn.close()
-        logger.info("👋 [Main] تم إغلاق اتصال قاعدة البيانات النهائي.")
+    if conn: conn.close()
     logger.info("👋 [Main] ML training job finished.")
 
 app = Flask(__name__)
+
 @app.route('/')
 def health_check():
     """Endpoint for Render health checks."""
