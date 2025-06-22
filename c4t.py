@@ -27,12 +27,12 @@ HIGHER_TIMEFRAME: str = '4h'
 # اسم النموذج الأساسي الذي سيتم اختباره (تم التحديث إلى V5)
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 # --- فترة جلب البيانات يجب أن تكون أطول لتغطية حساب المؤشرات ---
-DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 60 
+DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 60
 
 # --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.80
-ATR_SL_MULTIPLIER: float = 2
-ATR_TP_MULTIPLIER: float = 2.5
+MODEL_PREDICTION_THRESHOLD: float = 0.70
+ATR_SL_MULTIPLIER: float = 1.5
+ATR_TP_MULTIPLIER: float = 2.0
 
 # --- محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
@@ -90,16 +90,26 @@ try:
 except Exception as e:
     logger.critical(f"❌ [Binance] فشل الاتصال: {e}"); exit(1)
 
-conn: Optional[psycopg2.extensions.connection] = None
-try:
-    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-    logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
-except Exception as e:
-    logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
-
 # ==============================================================================
 # ------------------- دوال مساعدة (منسوخة ومعدلة من ملفاتك) --------------------
 # ==============================================================================
+
+# <<< START: NEW CODE >>>
+# دالة لإنشاء اتصال جديد بقاعدة البيانات عند الحاجة
+def get_db_connection() -> Optional[psycopg2.extensions.connection]:
+    """
+    Creates and returns a new database connection.
+    Returns None if connection fails.
+    """
+    try:
+        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        return conn
+    except Exception as e:
+        logger.error(f"❌ [DB] فشل إنشاء اتصال جديد بقاعدة البيانات: {e}")
+        return None
+# <<< END: NEW CODE >>>
+
+
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
     if not client: logger.error("Binance client not initialized."); return []
@@ -213,7 +223,7 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
     df_calc = calculate_candlestick_patterns(df_calc)
-    
+
     # 2. حساب ميزات MTF من إطار 4 ساعات
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -221,20 +231,29 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
-    
+
     # 3. دمج الميزات
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_calc.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-    
+
     return df_featured.dropna()
 
 # ====> END: NEW/UPDATED FEATURE CALCULATION FUNCTIONS <====
 
+
+# <<< START: MODIFIED CODE >>>
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Connects to the DB, loads the model, and closes the connection.
+    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if not conn: return None
+    conn = None  # Initialize conn to None
     try:
+        conn = get_db_connection() # Get a fresh connection for this operation
+        if not conn:
+            return None # Exit if connection failed
+
         with conn.cursor() as db_cur:
             db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
             result = db_cur.fetchone()
@@ -245,7 +264,15 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
             logger.warning(f"⚠️ [Model] Model '{model_name}' not found in DB for {symbol}.")
             return None
     except Exception as e:
-        logger.error(f"❌ [Model] Error loading model for {symbol}: {e}", exc_info=True); return None
+        logger.error(f"❌ [Model] Error loading model for {symbol}: {e}", exc_info=True)
+        return None
+    finally:
+        # Ensure the connection is closed whether it succeeds or fails
+        if conn:
+            conn.close()
+            logger.debug(f"ℹ️ [DB] Connection closed for {symbol} model loading.")
+# <<< END: MODIFIED CODE >>>
+
 
 # ==============================================================================
 # ----------------------------- محرك الاختبار الخلفي (مُعدَّل) ----------------------------
@@ -253,11 +280,11 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
 
 def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_data: pd.DataFrame, model_bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
     trades = []
-    
+
     model = model_bundle['model']
     scaler = model_bundle['scaler']
     feature_names = model_bundle['feature_names']
-    
+
     # --- تحديث: حساب جميع الميزات باستخدام الدالة الجديدة ---
     df_featured = calculate_all_features(df_15m, df_4h, btc_data)
     if df_featured is None or df_featured.empty:
@@ -272,21 +299,21 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
     features_df = df_featured[feature_names]
     features_scaled_np = scaler.transform(features_df)
     features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
-    
+
     try:
         class_1_index = list(model.classes_).index(1)
         predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
     except (ValueError, IndexError):
         logger.error(f"Could not find class '1' in model for {symbol}. Skipping."); return []
-    
+
     df_featured['prediction'] = predictions
-    
+
     in_trade = False
     trade_details = {}
 
     for i in range(len(df_featured)):
         current_candle = df_featured.iloc[i]
-        
+
         if in_trade:
             # تحقق من الوصول للهدف أو وقف الخسارة
             if current_candle['high'] >= trade_details['tp']:
@@ -295,7 +322,7 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
             elif current_candle['low'] <= trade_details['sl']:
                 trade_details['exit_price'] = trade_details['sl']
                 trade_details['exit_reason'] = 'SL Hit'
-            
+
             # إذا تم إغلاق الصفقة
             if trade_details.get('exit_price'):
                 trade_details['exit_time'] = current_candle.name
@@ -310,10 +337,10 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
             in_trade = True
             entry_price = current_candle['close']
             atr_value = current_candle['atr']
-            
+
             stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
             take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
-            
+
             trade_details = {
                 'symbol': symbol, 'entry_time': current_candle.name, 'entry_price': entry_price,
                 'entry_index': i, 'tp': take_profit, 'sl': stop_loss,
@@ -326,12 +353,12 @@ def generate_report(all_trades: List[Dict[str, Any]]):
         logger.warning("No trades were executed during the backtest."); return
 
     df_trades = pd.DataFrame(all_trades)
-    
+
     # تطبيق الانزلاق السعري والعمولة
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
-    
+
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
     commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
@@ -376,7 +403,7 @@ Gross Loss: -${gross_loss:,.2f} ({len(losing_trades)} trades)
 Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 """
     logger.info(report_str)
-    
+
     try:
         if not os.path.exists('reports'): os.makedirs('reports')
         report_filename = os.path.join('reports', f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
@@ -390,13 +417,13 @@ Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
 # ==============================================================================
 def start_backtesting_job():
     logger.info("🚀 Starting backtesting job for V5 Strategy...")
-    time.sleep(2) 
-    
+    time.sleep(2)
+
     symbols_to_test = get_validated_symbols()
     if not symbols_to_test: logger.critical("❌ No valid symbols to test. Backtesting job will not run."); return
-        
+
     all_trades = []
-    
+
     logger.info(f"ℹ️ [BTC Data] Fetching historical data for {BTC_SYMBOL}...")
     btc_data_15m = fetch_historical_data(BTC_SYMBOL, TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
     if btc_data_15m is None: logger.critical("❌ Failed to fetch BTC data. Cannot proceed."); return
@@ -405,27 +432,31 @@ def start_backtesting_job():
 
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         if symbol == BTC_SYMBOL: continue
-            
+
         model_bundle = load_ml_model_bundle_from_db(symbol)
         if not model_bundle: continue
-        
+
         # --- تحديث: جلب البيانات لكلا الإطارين الزمنيين ---
         df_15m = fetch_historical_data(symbol, TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
         if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: continue
-            
+
         backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
         df_15m_test = df_15m[df_15m.index >= backtest_start_date].copy()
-        
+
         # --- تحديث: تمرير جميع البيانات اللازمة للاختبار ---
         trades = run_backtest_for_symbol(symbol, df_15m_test, df_4h, btc_data_15m, model_bundle)
         if trades: all_trades.extend(trades)
-        
+
         time.sleep(0.5)
 
     generate_report(all_trades)
+
+    # <<< START: REMOVED CODE >>>
+    # لم نعد بحاجة لإغلاق اتصال عام هنا
+    # if conn: conn.close(); logger.info("✅ Database connection closed.")
+    # <<< END: REMOVED CODE >>>
     
-    if conn: conn.close(); logger.info("✅ Database connection closed.")
     logger.info("👋 Backtesting job finished. The web service will remain active.")
 
 # ==============================================================================
@@ -439,4 +470,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
-
