@@ -50,9 +50,9 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 # --- تمت إضافة الإطار الزمني الأعلى لتحليل MTF ---
 HIGHER_TIMEFRAME: str = '4h'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10
 # --- تم تمديد فترة جلب البيانات لتغطية حساب المؤشرات على الإطار الزمني الأعلى ---
-DATA_FETCH_LOOKBACK_DAYS: int = 120 
+DATA_FETCH_LOOKBACK_DAYS: int = 120
 
 # --- Indicator & Feature Parameters (Matching ml.py EXACTLY) ---
 ADX_PERIOD: int = 14
@@ -74,11 +74,11 @@ STOCH_RSI_OVERSOLD: int = 20
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Trading Logic Constants ---
-MODEL_CONFIDENCE_THRESHOLD = 0.80
+MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
-ATR_SL_MULTIPLIER = 2
-ATR_TP_MULTIPLIER = 2.5
-USE_BTC_TREND_FILTER = False
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
+USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 50
 
@@ -221,12 +221,12 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     body = abs(cl - op)
     candle_range = hi - lo
     # تجنب القسمة على صفر
-    candle_range[candle_range == 0] = 1e-9 
+    candle_range[candle_range == 0] = 1e-9
     upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
     lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-    
+
     df_patterns['candlestick_pattern'] = 0
-    
+
     # تعريف الشروط لكل نمط
     is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
     is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
@@ -269,7 +269,7 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
+
     # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -305,7 +305,7 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
     # Market Condition
-    df_calc['market_condition'] = 0 
+    df_calc['market_condition'] = 0
     df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
     df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
 
@@ -318,10 +318,10 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
-    
+
     # Candlestick Patterns
     df_calc = calculate_candlestick_patterns(df_calc)
-    
+
     # 2. حساب ميزات MTF من إطار 4 ساعات
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -329,38 +329,65 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
-    
+
     # 3. دمج الميزات
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_calc.join(mtf_features)
     # استخدام ffill لملء القيم الفارغة التي تنتج عن اختلاف الأطر الزمنية
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-    
+
     return df_featured.dropna()
 
 # ====> END: NEW/UPDATED FEATURE CALCULATION FUNCTIONS <====
 
 
-def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+# <<< START: MODIFIED CODE >>>
+def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    تحميل حزمة النموذج (model, scaler, feature_names) من ملف محلي '.pkl'
+    داخل مجلد 'Mo'.
+    """
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if model_name in ml_models_cache: return ml_models_cache[model_name]
-    if not check_db_connection() or not conn: return None
-    try:
-        with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
-            result = db_cur.fetchone()
-            if result and result['model_data']:
-                model_bundle = pickle.loads(result['model_data'])
-                if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                    ml_models_cache[model_name] = model_bundle
-                    logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من قاعدة البيانات.")
-                    return model_bundle
-            logger.warning(f"⚠️ [نموذج تعلم الآلة] لم يتم العثور على النموذج '{model_name}' للعملة {symbol} في قاعدة البيانات.")
-            return None
-    except Exception as e:
-        logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل حزمة النموذج للعملة {symbol}: {e}", exc_info=True)
+
+    # 1. التحقق من الذاكرة المؤقتة أولاً
+    if model_name in ml_models_cache:
+        return ml_models_cache[model_name]
+
+    # 2. بناء مسار الملف
+    model_dir = 'Mo'
+    file_path = os.path.join(model_dir, f"{model_name}.pkl")
+
+    # 3. التأكد من وجود مجلد النماذج
+    if not os.path.isdir(model_dir):
+        logger.warning(f"⚠️ [نموذج تعلم الآلة] مجلد النماذج '{model_dir}' غير موجود.")
         return None
+
+    # 4. التحقق من وجود ملف النموذج وتحميله
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'rb') as f:
+                model_bundle = pickle.load(f)
+
+            # 5. التحقق من صحة الحزمة وتخزينها مؤقتًا
+            if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+                ml_models_cache[model_name] = model_bundle
+                logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من الملف: {file_path}")
+                return model_bundle
+            else:
+                logger.error(f"❌ [نموذج تعلم الآلة] حزمة النموذج في الملف '{file_path}' غير مكتملة.")
+                return None
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.error(f"❌ [نموذج تعلم الآلة] خطأ في فك حزمة النموذج من الملف '{file_path}': {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"❌ [نموذج تعلم الآلة] خطأ غير متوقع عند تحميل النموذج '{file_path}': {e}", exc_info=True)
+            return None
+    else:
+        logger.warning(f"⚠️ [نموذج تعلم الآلة] لم يتم العثور على ملف النموذج '{file_path}' للعملة {symbol}.")
+        return None
+# <<< END: MODIFIED CODE >>>
+
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
@@ -368,16 +395,16 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
         if not isinstance(data, list): data = [data]
-        
+
         for item in data:
             symbol = item.get('s')
             if not symbol: continue
             price = float(item.get('c', 0))
             if price == 0: continue
-            
+
             with prices_lock: current_prices[symbol] = price
             signal_to_process, status, closing_price = None, None, None
-            
+
             with signal_cache_lock:
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
@@ -388,7 +415,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
 
                     if price >= target_price: status, closing_price, signal_to_process = 'target_hit', target_price, signal
                     elif price <= stop_loss_price: status, closing_price, signal_to_process = 'stop_loss_hit', stop_loss_price, signal
-            
+
             if signal_to_process and status:
                 logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status}' للعملة {symbol} عند سعر {price:.8f}")
                 Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
@@ -406,7 +433,10 @@ def run_websocket_manager() -> None:
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        model_bundle = load_ml_model_bundle_from_db(symbol)
+        # <<< START: MODIFIED CODE >>>
+        # استدعاء الدالة الجديدة لتحميل النموذج من المجلد
+        model_bundle = load_ml_model_bundle_from_folder(symbol)
+        # <<< END: MODIFIED CODE >>>
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
@@ -416,7 +446,7 @@ class TradingStrategy:
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
-        
+
         last_row = df_processed.iloc[-1]
         try:
             # التأكد من أن جميع الأعمدة المطلوبة موجودة قبل التحجيم
@@ -424,16 +454,16 @@ class TradingStrategy:
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
                 return None
-            
+
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any(): return None
-            
+
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-            
+
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
-            
+
             prob_for_class_1 = 0
             try:
                 class_1_index = list(self.ml_model.classes_).index(1)
@@ -443,7 +473,7 @@ class TradingStrategy:
 
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}, وهي أعلى من الحد المطلوب ({MODEL_CONFIDENCE_THRESHOLD:.0%}).")
-                
+
                 return {
                     'symbol': self.symbol,
                     'strategy_name': BASE_ML_MODEL_NAME,
@@ -488,7 +518,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details) 
+                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details)
                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;""",
                 (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})))
             )
@@ -570,15 +600,15 @@ def get_btc_trend() -> Dict[str, Any]:
 
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
-    time.sleep(15) 
+    time.sleep(15)
     if not validated_symbols_to_scan:
         log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
         return
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
-    
+
     # --- تحديث: جلب بيانات BTC مرة واحدة في بداية كل حلقة ---
     fetch_and_cache_btc_data()
-    
+
     while True:
         try:
             if USE_BTC_TREND_FILTER:
@@ -591,46 +621,46 @@ def main_loop():
             if open_count >= MAX_OPEN_TRADES:
                 logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات ({open_count}/{MAX_OPEN_TRADES}).")
                 time.sleep(60); continue
-            
+
             slots_available = MAX_OPEN_TRADES - open_count
             logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
-            
+
             # --- تحديث: استخدام بيانات BTC من الذاكرة المؤقتة ---
             if btc_data_cache is None:
                 logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
                 time.sleep(120); continue
-            
+
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
                 with signal_cache_lock:
                     if symbol in open_signals_cache: continue
-                
+
                 try:
                     # --- تحديث: جلب البيانات لكلا الإطارين الزمنيين ---
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
                     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
-                    
-                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: 
+
+                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                         logger.warning(f"⚠️ {symbol}: لا توجد بيانات كافية على الإطارين الزمنيين. سيتم التخطي.")
                         continue
-                    
+
                     strategy = TradingStrategy(symbol)
                     # --- تحديث: تمرير جميع البيانات اللازمة لحساب الميزات ---
                     df_features = strategy.get_features(df_15m, df_4h, btc_data_cache)
-                    
+
                     if df_features is None or df_features.empty: continue
-                    
+
                     potential_signal = strategy.generate_signal(df_features)
                     if potential_signal:
                         with prices_lock: current_price = current_prices.get(symbol)
                         if not current_price:
                              logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي. سيتم التخطي."); continue
-                        
+
                         potential_signal['entry_price'] = current_price
                         atr_value = df_features['atr'].iloc[-1]
                         potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
                         potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
-                        
+
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
                             with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal

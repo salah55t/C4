@@ -7,10 +7,8 @@ from typing import List, Dict, Optional, Any
 
 import numpy as np
 import pandas as pd
-import psycopg2
 from binance.client import Client
 from decouple import config
-from psycopg2.extras import RealDictCursor
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
@@ -30,9 +28,9 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 60
 
 # --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.80
-ATR_SL_MULTIPLIER: float = 2
-ATR_TP_MULTIPLIER: float = 2.5
+MODEL_PREDICTION_THRESHOLD: float = 0.70
+ATR_SL_MULTIPLIER: float = 1.5
+ATR_TP_MULTIPLIER: float = 2.0
 
 # --- محاكاة التكاليف الواقعية ---
 COMMISSION_PERCENT: float = 0.1
@@ -79,7 +77,8 @@ def health_check():
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
-    DB_URL: str = config('DATABASE_URL')
+    # لم نعد بحاجة إلى الاتصال بقاعدة البيانات لتحميل النماذج
+    # DB_URL: str = config('DATABASE_URL')
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}"); exit(1)
 
@@ -94,21 +93,7 @@ except Exception as e:
 # ------------------- دوال مساعدة (منسوخة ومعدلة من ملفاتك) --------------------
 # ==============================================================================
 
-# <<< START: NEW CODE >>>
-# دالة لإنشاء اتصال جديد بقاعدة البيانات عند الحاجة
-def get_db_connection() -> Optional[psycopg2.extensions.connection]:
-    """
-    Creates and returns a new database connection.
-    Returns None if connection fails.
-    """
-    try:
-        conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-        return conn
-    except Exception as e:
-        logger.error(f"❌ [DB] فشل إنشاء اتصال جديد بقاعدة البيانات: {e}")
-        return None
-# <<< END: NEW CODE >>>
-
+# تم حذف دالة الاتصال بقاعدة البيانات get_db_connection لعدم الحاجة إليها
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
@@ -243,34 +228,42 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
 
 
 # <<< START: MODIFIED CODE >>>
-def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
+def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Connects to the DB, loads the model, and closes the connection.
+    تحميل حزمة النموذج (model, scaler, feature_names) من ملف محلي '.pkl'
+    داخل مجلد 'Mo' للاختبار الخلفي.
     """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    conn = None  # Initialize conn to None
-    try:
-        conn = get_db_connection() # Get a fresh connection for this operation
-        if not conn:
-            return None # Exit if connection failed
 
-        with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
-            result = db_cur.fetchone()
-            if result and result.get('model_data'):
-                model_bundle = pickle.loads(result['model_data'])
-                logger.info(f"✅ [Model] Successfully loaded model '{model_name}' for {symbol}.")
+    # 1. بناء مسار الملف
+    model_dir = 'Mo'
+    file_path = os.path.join(model_dir, f"{model_name}.pkl")
+
+    # 2. التحقق من وجود ملف النموذج وتحميله
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'rb') as f:
+                model_bundle = pickle.load(f)
+
+            # 3. التحقق من صحة الحزمة
+            if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+                logger.info(f"✅ [Model] Successfully loaded model '{model_name}' for {symbol} from file: {file_path}")
                 return model_bundle
-            logger.warning(f"⚠️ [Model] Model '{model_name}' not found in DB for {symbol}.")
+            else:
+                logger.error(f"❌ [Model] Model bundle in file '{file_path}' is incomplete.")
+                return None
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.error(f"❌ [Model] Error unpickling model from file '{file_path}': {e}", exc_info=True)
             return None
-    except Exception as e:
-        logger.error(f"❌ [Model] Error loading model for {symbol}: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"❌ [Model] Unexpected error loading model from '{file_path}': {e}", exc_info=True)
+            return None
+    else:
+        logger.warning(f"⚠️ [Model] Model file '{file_path}' not found for {symbol}.")
+        # من الجيد التحقق مما إذا كان المجلد نفسه موجودًا
+        if not os.path.isdir(model_dir):
+            logger.warning(f"⚠️ [Model] The model directory '{model_dir}' does not exist.")
         return None
-    finally:
-        # Ensure the connection is closed whether it succeeds or fails
-        if conn:
-            conn.close()
-            logger.debug(f"ℹ️ [DB] Connection closed for {symbol} model loading.")
 # <<< END: MODIFIED CODE >>>
 
 
@@ -432,8 +425,12 @@ def start_backtesting_job():
 
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         if symbol == BTC_SYMBOL: continue
-
-        model_bundle = load_ml_model_bundle_from_db(symbol)
+        
+        # <<< START: MODIFIED CODE >>>
+        # استدعاء الدالة الجديدة لتحميل النموذج من المجلد
+        model_bundle = load_ml_model_bundle_from_folder(symbol)
+        # <<< END: MODIFIED CODE >>>
+        
         if not model_bundle: continue
 
         # --- تحديث: جلب البيانات لكلا الإطارين الزمنيين ---
@@ -452,11 +449,6 @@ def start_backtesting_job():
 
     generate_report(all_trades)
 
-    # <<< START: REMOVED CODE >>>
-    # لم نعد بحاجة لإغلاق اتصال عام هنا
-    # if conn: conn.close(); logger.info("✅ Database connection closed.")
-    # <<< END: REMOVED CODE >>>
-    
     logger.info("👋 Backtesting job finished. The web service will remain active.")
 
 # ==============================================================================
