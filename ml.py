@@ -10,7 +10,7 @@ import pickle
 import lightgbm as lgb
 import optuna
 import warnings
-import gc # --- NEW ---: Import garbage collector module
+import gc
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -55,10 +55,8 @@ except Exception as e:
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-# --- MEMORY OPTIMIZATION ---: Consider reducing these values if memory issues persist
-# --- تحسين الذاكرة ---: فكر في تقليل هذه القيم إذا استمرت مشاكل الذاكرة
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90  # Reduced from 120
-HYPERPARAM_TUNING_TRIALS: int = 5       # Reduced from 30
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -106,12 +104,9 @@ def init_db():
         logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
 
 def keep_db_alive():
-    if not conn:
-        logger.warning("⚠️ [DB Keep-Alive] لا يوجد اتصال للحفاظ عليه.")
-        return
+    if not conn: return
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1;")
+        with conn.cursor() as cur: cur.execute("SELECT 1;")
         logger.debug("[DB Keep-Alive] Ping successful.")
     except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
         logger.error(f"❌ [DB Keep-Alive] انقطع اتصال قاعدة البيانات: {e}. محاولة إعادة الاتصال...")
@@ -122,19 +117,13 @@ def keep_db_alive():
         if conn: conn.rollback()
 
 def get_trained_symbols_from_db() -> set:
-    if not conn:
-        logger.error("❌ [DB Check] لا يوجد اتصال بقاعدة البيانات.")
-        return set()
+    if not conn: return set()
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT model_name FROM ml_models WHERE model_name LIKE %s;", (f"{BASE_ML_MODEL_NAME}_%",))
             trained_models = cur.fetchall()
             prefix_to_remove = f"{BASE_ML_MODEL_NAME}_"
-            trained_symbols = {
-                row['model_name'].replace(prefix_to_remove, '')
-                for row in trained_models
-                if row['model_name'].startswith(prefix_to_remove)
-            }
+            trained_symbols = {row['model_name'].replace(prefix_to_remove, '') for row in trained_models if row['model_name'].startswith(prefix_to_remove)}
             logger.info(f"✅ [DB Check] تم العثور على {len(trained_symbols)} نموذج مدرب مسبقاً في قاعدة البيانات.")
             return trained_symbols
     except Exception as e:
@@ -152,9 +141,7 @@ def get_binance_client():
         logger.critical(f"❌ [Binance] فشل تهيئة عميل Binance: {e}"); exit(1)
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    if not client:
-        logger.error("❌ [Validation] عميل Binance لم يتم تهيئته.")
-        return []
+    if not client: return []
     try:
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, filename)
@@ -173,22 +160,15 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
 
 # --- دوال جلب ومعالجة البيانات ---
-# --- UPDATED ---: Added memory optimization for data types
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
         start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
-        
-        # Select necessary columns early
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        
-        # --- MEMORY OPTIMIZATION ---: Use more memory-efficient data types
-        # --- تحسين الذاكرة ---: استخدم أنواع بيانات أكثر كفاءة في استخدام الذاكرة
         numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
         df = df.astype(numeric_cols)
-
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df.dropna()
@@ -235,20 +215,12 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # To save memory, we calculate indicators and try to drop intermediate columns
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    
-    # ... other feature calculations ...
-    # (The existing calculations are kept as they are generally efficient)
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -257,6 +229,11 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
@@ -266,7 +243,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_cross'] = 0
     df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
     df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
-    
+
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
     upper_band = sma + (std_dev * 2)
@@ -297,7 +274,7 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     
     df_calc = calculate_candlestick_patterns(df_calc)
 
-    return df_calc.astype('float32', errors='ignore') # Convert all possible columns to float32
+    return df_calc.astype('float32', errors='ignore')
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     labels = pd.Series(0, index=prices.index)
@@ -316,10 +293,9 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     return labels
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol} with Multi-Timeframe Analysis...")
+    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df_15m, btc_df)
     
-    # Process 4h data
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -349,8 +325,14 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     y = df_cleaned['target']
     return X, y, feature_columns
 
+# --- UPDATED --- : The entire training and tuning function is updated for robustness and to fix warnings.
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
+    """
+    Uses Optuna for hyperparameter tuning and then trains a final model,
+    ensuring feature names are preserved to prevent warnings.
+    """
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
+
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
             'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
@@ -366,19 +348,28 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
         }
+
         all_preds, all_true = [], []
-        tscv = TimeSeriesSplit(n_splits=4) # Reduced splits for memory
+        tscv = TimeSeriesSplit(n_splits=4)
         for train_index, test_index in tscv.split(X):
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+            
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            # --- FIX ---: Wrap scaled data in a DataFrame to preserve feature names
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+            
             model = lgb.LGBMClassifier(**params)
-            model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], callbacks=[lgb.early_stopping(20, verbose=False)])
+            model.fit(X_train_scaled, y_train,
+                      eval_set=[(X_test_scaled, y_test)],
+                      callbacks=[lgb.early_stopping(20, verbose=False)])
+            
             y_pred = model.predict(X_test_scaled)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
+
+        # Use precision for buy signals as the optimization metric
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
         return report.get('1', {}).get('precision', 0)
 
@@ -387,18 +378,53 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     best_params = study.best_params
     logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
     
+    # --- Retrain final model on all data with best params and get final metrics ---
     logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
-    final_model_params = {'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced', 'random_state': 42, 'verbosity': -1, **best_params}
+    final_model_params = {
+        'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
+        'random_state': 42, 'verbosity': -1, **best_params
+    }
     
-    # Final training
+    # Get final metrics using walk-forward validation with the best params
+    all_preds_final, all_true_final = [], []
+    tscv_final = TimeSeriesSplit(n_splits=5)
+    for train_index, test_index in tscv_final.split(X):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+        
+        scaler = StandardScaler()
+        # --- FIX ---: Preserve feature names
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+
+        model = lgb.LGBMClassifier(**final_model_params)
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
+        all_preds_final.extend(y_pred)
+        all_true_final.extend(y_test)
+        
+    final_report = classification_report(all_true_final, all_preds_final, output_dict=True, zero_division=0)
+    final_metrics = {
+        'accuracy': accuracy_score(all_true_final, all_preds_final),
+        'precision_class_1': final_report.get('1', {}).get('precision', 0),
+        'recall_class_1': final_report.get('1', {}).get('recall', 0),
+        'f1_score_class_1': final_report.get('1', {}).get('f1-score', 0),
+        'precision_class_-1': final_report.get('-1', {}).get('precision', 0),
+        'num_samples_trained': len(X),
+        'best_hyperparameters': json.dumps(best_params)
+    }
+    
+    # Train the final model on the entire dataset
     final_scaler = StandardScaler()
-    X_scaled_full = final_scaler.fit_transform(X)
+    # --- FIX ---: Preserve feature names for the final model
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), columns=X.columns, index=X.index)
+    
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
-    # Simplified metrics calculation to save memory (no full walk-forward here)
-    final_metrics = {'best_hyperparameters': json.dumps(best_params), 'num_samples_trained': len(X)}
-    
+    metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
+    logger.info(f"📊 [ML Train] Final Walk-Forward Performance: {metrics_log_str}")
+
     return final_model, final_scaler, final_metrics
 
 def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
@@ -423,7 +449,6 @@ def send_telegram_message(text: str):
     try: requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- UPDATED ---: Main training function with memory management
 def run_training_job():
     logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
     init_db()
@@ -432,19 +457,18 @@ def run_training_job():
     
     all_valid_symbols = get_validated_symbols(filename='crypto_list.txt')
     if not all_valid_symbols:
-        logger.critical("❌ [Main] لم يتم العثور على رموز صالحة. سيتم الخروج.")
-        return
+        logger.critical("❌ [Main] لم يتم العثور على رموز صالحة. سيتم الخروج."); return
     
     trained_symbols = get_trained_symbols_from_db()
     symbols_to_train = [s for s in all_valid_symbols if s not in trained_symbols]
     
     if not symbols_to_train:
-        logger.info("✅ [Main] جميع الرموز مدربة بالفعل ومحدثة.")
+        logger.info("✅ [Main] جميع الرموز مدربة بالفعل ومحدثة.");
         if conn: conn.close()
         return
 
-    logger.info(f"ℹ️ [Main] Total valid symbols: {len(all_valid_symbols)}. Already trained: {len(trained_symbols)}. To be trained: {len(symbols_to_train)}.")
-    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nAttempting to train models for {len(symbols_to_train)} new symbols.")
+    logger.info(f"ℹ️ [Main] Total: {len(all_valid_symbols)}. Trained: {len(trained_symbols)}. To Train: {len(symbols_to_train)}.")
+    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} new symbols.")
     
     successful_models, failed_models = 0, 0
     for symbol in symbols_to_train:
@@ -457,11 +481,7 @@ def run_training_job():
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
             prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
-            
-            # --- NEW ---: Free up memory from initial dataframes
-            # --- جديد ---: حرر الذاكرة من إطارات البيانات الأولية
-            del df_15m, df_4h
-            gc.collect()
+            del df_15m, df_4h; gc.collect()
 
             if prepared_data is None:
                 failed_models += 1; continue
@@ -470,38 +490,32 @@ def run_training_job():
             training_result = tune_and_train_model(X, y)
             if not all(training_result):
                  logger.warning(f"⚠️ [Main] فشل تدريب النموذج لـ {symbol}."); failed_models += 1
-                 del X, y, prepared_data
-                 gc.collect()
+                 del X, y, prepared_data; gc.collect()
                  continue
             final_model, final_scaler, model_metrics = training_result
             
-            # Simplified check as full metrics are not calculated to save memory
-            if final_model and final_scaler:
+            # We use precision on the "buy" (1) class as a quality gate
+            if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
                 save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
-                logger.warning(f"⚠️ [Main] النموذج الخاص بـ {symbol} غير مفيد. سيتم تجاهله."); failed_models += 1
+                logger.warning(f"⚠️ [Main] النموذج الخاص بـ {symbol} غير مفيد (Precision < 0.35). سيتم تجاهله."); failed_models += 1
             
-            # --- NEW ---: Explicitly delete large objects to free memory
-            # --- جديد ---: احذف الكائنات الكبيرة بشكل صريح لتحرير الذاكرة
-            del X, y, prepared_data, training_result, final_model, final_scaler, model_metrics
-            gc.collect()
+            del X, y, prepared_data, training_result, final_model, final_scaler, model_metrics; gc.collect()
 
         except Exception as e:
             logger.critical(f"❌ [Main] حدث خطأ فادح للرمز {symbol}: {e}", exc_info=True); failed_models += 1
-            # Clean up memory on error as well
             gc.collect()
 
-        logger.debug("[DB Keep-Alive] إرسال Ping إلى قاعدة البيانات للحفاظ على الاتصال.")
         keep_db_alive()
         time.sleep(1)
 
     completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
-                        f"- تم التدريب بنجاح: {successful_models} نماذج جديدة\n"
-                        f"- فشل/تم تجاهل: {failed_models} نماذج\n"
-                        f"- الرموز التي تمت معالجتها في هذه الجولة: {len(symbols_to_train)}")
+                        f"- Successfully trained: {successful_models} new models\n"
+                        f"- Failed/Discarded: {failed_models} models\n"
+                        f"- Processed this run: {len(symbols_to_train)}")
     send_telegram_message(completion_message)
     logger.info(completion_message)
 
