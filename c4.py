@@ -85,7 +85,7 @@ BTC_TREND_EMA_PERIOD = 10
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
 # **جديد**: فلتر حجم السيولة اللحظي (قيمة التداول بالدولار في آخر شمعة 15 دقيقة)
-MINIMUM_15M_VOLUME_USDT = 200_000 # 200 ألف دولار كحد أدنى
+MINIMUM_15M_VOLUME_USDT = 100_000 # 200 ألف دولار كحد أدنى
 
 
 # --- المتغيرات العامة وقفل العمليات ---
