@@ -188,14 +188,16 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
                 conn.commit()
                 logger.info("✅ [قاعدة البيانات] تم إضافة العمود 'details' بنجاح.")
 
-            # الخطوة 3: التحقق من نوع عمود 'strength' وتحديثه إلى NUMERIC إذا كان BIGINT
+            # ---- التعديل الرئيسي ----
+            # الخطوة 3: التحقق من نوع عمود 'strength' وتحديثه إلى NUMERIC إذا كان integer أو bigint
             cur.execute("""
                 SELECT data_type FROM information_schema.columns 
                 WHERE table_name = 'support_resistance_levels' AND column_name = 'strength';
             """)
             result = cur.fetchone()
-            if result and result['data_type'] == 'bigint':
-                logger.info("[قاعدة البيانات] العمود 'strength' من نوع BIGINT. جاري التحديث إلى NUMERIC...")
+            # التحقق مما إذا كان النوع الحالي هو أحد أنواع الأعداد الصحيحة التي قد تسبب الخطأ
+            if result and result['data_type'] in ('bigint', 'integer'):
+                logger.info(f"[قاعدة البيانات] العمود 'strength' من نوع {result['data_type']}. جاري التحديث إلى NUMERIC...")
                 cur.execute("ALTER TABLE support_resistance_levels ALTER COLUMN strength TYPE NUMERIC USING strength::numeric;")
                 conn.commit()
                 logger.info("✅ [قاعدة البيانات] تم تحديث نوع العمود 'strength' إلى NUMERIC بنجاح.")
@@ -216,6 +218,7 @@ def save_levels_to_db(conn: psycopg2.extensions.connection, symbol: str, levels:
     logger.info(f"⏳ [{symbol}] جاري حفظ {len(levels)} مستوى في قاعدة البيانات...")
     try:
         with conn.cursor() as cur:
+            # تم حذف المستويات القديمة للعملة لضمان تحديث البيانات
             cur.execute("DELETE FROM support_resistance_levels WHERE symbol = %s;", (symbol,))
             insert_query = """
                 INSERT INTO support_resistance_levels 
@@ -297,7 +300,9 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
     poc_price = bin_centers[poc_index]
     poc_volume = volume_by_bin[poc_index]
     
-    return [{"level_price": float(poc_price), "level_type": 'poc', "strength": int(poc_volume), "last_tested_at": None}]
+    # ---- التعديل الرئيسي ----
+    # استخدام float للقوة المستندة إلى الحجم لتجنب تجاوز حدود الأعداد الصحيحة
+    return [{"level_price": float(poc_price), "level_type": 'poc', "strength": float(poc_volume), "last_tested_at": None}]
 
 
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
@@ -344,7 +349,9 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             confluence_zones.append({
                 "level_price": avg_price,
                 "level_type": 'confluence',
-                "strength": total_strength,
+                # ---- التعديل الرئيسي ----
+                # ضمان أن القوة النهائية هي float لتكون متوافقة مع الأنواع الأخرى
+                "strength": float(total_strength), 
                 "timeframe": ",".join(timeframes),
                 "details": ",".join(details),
                 "last_tested_at": last_tested
