@@ -81,11 +81,11 @@ USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
 
-# **جديد**: ثوابت فلترة الصفقات
+# --- ثوابت فلترة الصفقات ---
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-# **جديد**: فلتر حجم السيولة (بالـ USDT) - يضمن أن العملة نشطة بما فيه الكفاية
-MINIMUM_24H_VOLUME_USDT = 10_000_000 # 10 مليون دولار كحد أدنى لحجم التداول في 24 ساعة
+# **جديد**: فلتر حجم السيولة اللحظي (قيمة التداول بالدولار في آخر شمعة 15 دقيقة)
+MINIMUM_15M_VOLUME_USDT = 200_000 # 200 ألف دولار كحد أدنى
 
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -197,59 +197,21 @@ def fetch_sr_levels(symbol: str) -> Optional[Dict[str, List[float]]]:
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    """
-    تقرأ الرموز من ملف، تتحقق من وجودها في Binance، ثم تقوم بفلترتها بناءً على حجم التداول اليومي.
-    """
-    logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' وتطبيق فلتر السيولة...")
-    if not client:
-        logger.error("❌ [التحقق] كائن Binance client غير مهيأ.")
-        return []
+    logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
+    if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
     try:
-        # --- الخطوة 1: قراءة الرموز المطلوبة من الملف المحلي ---
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, filename)
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
-        symbols_from_file = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
-        logger.info(f"🔎 [التحقق] تم العثور على {len(symbols_from_file)} رمز في الملف '{filename}'.")
-
-        # --- الخطوة 2: جلب بيانات كل العملات من Binance للحصول على حجم التداول ---
-        logger.info("⏳ [التحقق] جلب بيانات التداول وحجم السيولة لكل العملات من Binance...")
-        all_tickers = client.get_ticker()
-        
-        # --- الخطوة 3: فلترة العملات بناءً على القائمة المطلوبة وحجم السيولة ---
-        validated = []
-        rejected_by_volume = []
-        
-        # إنشاء مجموعة من رموز التداول النشطة لتسريع البحث
-        active_trading_symbols = {ticker['symbol'] for ticker in all_tickers}
-        
-        symbols_to_check = symbols_from_file.intersection(active_trading_symbols)
-        
-        for ticker in all_tickers:
-            symbol = ticker['symbol']
-            if symbol in symbols_to_check:
-                volume_24h = float(ticker.get('quoteVolume', 0))
-                # تطبيق فلتر حجم السيولة
-                if volume_24h >= MINIMUM_24H_VOLUME_USDT:
-                    validated.append(symbol)
-                else:
-                    rejected_by_volume.append(f"{symbol} (Volume: ${volume_24h:,.0f})")
-
-        if rejected_by_volume:
-            logger.warning(f"📉 [فلتر السيولة] تم رفض {len(rejected_by_volume)} عملة لضعف حجم التداول (أقل من ${MINIMUM_24H_VOLUME_USDT:,.0f}).")
-            # لإظهار العملات المرفوضة، أزل علامة التعليق من السطر التالي
-            # logger.debug(f"العملات المرفوضة: {rejected_by_volume}")
-
-        logger.info(f"✅ [التحقق] سيقوم البوت بمراقبة {len(validated)} عملة معتمدة بعد تطبيق فلتر السيولة.")
-        return sorted(validated)
-
-    except BinanceAPIException as e:
-        logger.error(f"❌ [API Binance] خطأ أثناء التحقق من الرموز: {e}", exc_info=True)
-        return []
+        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        exchange_info = client.get_exchange_info()
+        active = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+        validated = sorted(list(formatted.intersection(active)))
+        logger.info(f"✅ [التحقق] سيقوم البوت بمراقبة {len(validated)} عملة معتمدة.")
+        return validated
     except Exception as e:
-        logger.error(f"❌ [التحقق] حدث خطأ عام أثناء التحقق من الرموز: {e}", exc_info=True)
-        return []
+        logger.error(f"❌ [التحقق] حدث خطأ أثناء التحقق من الرموز: {e}", exc_info=True); return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
@@ -458,13 +420,16 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     
     sr_info = signal_data.get('signal_details', {}).get('sr_info', 'ATR Default')
     rr_ratio_info = signal_data.get('signal_details', {}).get('risk_reward_ratio', 'N/A')
-    
+    # **جديد**: إضافة معلومات السيولة للرسالة
+    volume_info = signal_data.get('signal_details', {}).get('last_15m_volume_usdt', 'N/A')
+
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
                f"⬅️ *سعر الدخول:* `${entry:,.8g}`\n"
                f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
+               f"💧 *سيولة آخر 15د:* `{volume_info}`\n"
                f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}\n"
                f"⚖️ *المخاطرة/العائد:* `{rr_ratio_info}`\n"
                f"🛠️ *أساس الهدف/الوقف:* {sr_info}")
@@ -618,6 +583,20 @@ def main_loop():
                     
                     potential_signal = strategy.generate_signal(df_features)
                     if potential_signal:
+                        # --- **جديد**: فلتر حجم السيولة اللحظي (15 دقيقة) ---
+                        last_candle = df_features.iloc[-1]
+                        last_15m_volume_asset = last_candle['volume']
+                        last_15m_close_price = last_candle['close']
+                        last_15m_volume_usdt = last_15m_volume_asset * last_15m_close_price
+
+                        if last_15m_volume_usdt < MINIMUM_15M_VOLUME_USDT:
+                            logger.info(f"📉 [{symbol}] تم تجاهل الإشارة. حجم السيولة في آخر 15 دقيقة (${last_15m_volume_usdt:,.0f}) أقل من الحد الأدنى (${MINIMUM_15M_VOLUME_USDT:,.0f}).")
+                            continue
+                        
+                        logger.info(f"✅ [{symbol}] تم اجتياز فلتر السيولة اللحظية. حجم التداول: ${last_15m_volume_usdt:,.0f}.")
+                        potential_signal['signal_details']['last_15m_volume_usdt'] = f"${last_15m_volume_usdt:,.0f}"
+                        # --- نهاية فلتر السيولة اللحظية ---
+                        
                         with prices_lock: current_price = current_prices.get(symbol)
                         if not current_price:
                              logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي. سيتم التخطي."); continue
@@ -646,7 +625,7 @@ def main_loop():
                                     logger.info(f"🎯 [{symbol}] تم تعديل الهدف إلى {target_price:.8g} بناءً على مقاومة عند {closest_resistance:.8g}.")
                                     sr_info = "S/R Levels"
                         
-                        # --- **جديد**: منطق فلترة الصفقات الضعيفة ---
+                        # --- منطق فلترة الصفقات الضعيفة ---
                         if target_price <= current_price or stop_loss >= current_price:
                             logger.info(f"⚠️ [{symbol}] تم إلغاء الإشارة. الهدف ({target_price:.8g}) أو الوقف ({stop_loss:.8g}) غير منطقي.")
                             continue
@@ -674,8 +653,7 @@ def main_loop():
                         potential_signal['target_price'] = target_price
                         potential_signal['signal_details']['sr_info'] = sr_info
                         potential_signal['signal_details']['risk_reward_ratio'] = f"{risk_reward_ratio:.2f} : 1"
-                        # --- نهاية منطق الفلترة ---
-
+                        
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
                             with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
@@ -804,7 +782,6 @@ def initialize_bot_services():
         init_db()
         load_open_signals_to_cache()
         load_notifications_to_cache()
-        # هنا يتم استدعاء الدالة الجديدة التي تتضمن فلتر السيولة
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
