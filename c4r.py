@@ -10,6 +10,9 @@ from psycopg2.extras import RealDictCursor
 from scipy.signal import find_peaks
 from sklearn.cluster import DBSCAN
 from typing import List, Dict, Optional, Tuple
+import threading
+import http.server
+import socketserver
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
@@ -32,6 +35,8 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت ----------------------
+ANALYSIS_INTERVAL_HOURS = 4  # الفاصل الزمني بين كل دورة تحليل (بالساعات)
+
 # كمية البيانات التاريخية
 DATA_FETCH_DAYS_1D = 600
 DATA_FETCH_DAYS_4H = 200
@@ -46,11 +51,51 @@ PROMINENCE_15M = 0.008
 WIDTH_15M = 10
 
 # معايير التجميع والدمج
-CLUSTER_EPS_PERCENT = 0.005 # نسبة التقارب لتجميع القمم/القيعان
-CONFLUENCE_ZONE_PERCENT = 0.005 # نسبة التقارب لدمج مستويات من فريمات مختلفة (0.5%)
+CLUSTER_EPS_PERCENT = 0.005
+CONFLUENCE_ZONE_PERCENT = 0.005
 
 # معايير تحليل بروفايل الحجم
 VOLUME_PROFILE_BINS = 100
+
+# ---------------------- قسم خادم الويب (للتوافق مع المنصة) ----------------------
+class WebServerHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        """الاستجابة لطلبات GET بصفحة HTML بسيطة."""
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        html_content = """
+        <!DOCTYPE html>
+        <html lang="ar" dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>حالة الماسح</title>
+            <style>
+                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f9; color: #333; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .container { text-align: center; padding: 40px; background-color: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+                h1 { color: #0056b3; }
+                p { font-size: 1.2rem; }
+                .status { font-weight: bold; color: #28a745; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>📊 ماسح الدعم والمقاومة</h1>
+                <p>الخدمة <span class="status">تعمل</span> في الخلفية.</p>
+                <p>يتم إجراء التحليل بشكل دوري.</p>
+            </div>
+        </body>
+        </html>
+        """
+        self.wfile.write(html_content.encode('utf-8'))
+
+def run_web_server():
+    """تشغيل خادم الويب على المنفذ المحدد من قبل المنصة."""
+    PORT = int(os.environ.get("PORT", 8080))
+    with socketserver.TCPServer(("", PORT), WebServerHandler) as httpd:
+        logger.info(f"🌐 خادم الويب يعمل على المنفذ {PORT}")
+        httpd.serve_forever()
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_binance_client() -> Optional[Client]:
@@ -115,55 +160,49 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
     try:
         conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
-            # الخطوة 1: إنشاء الجدول بالكامل إذا لم يكن موجودًا
-            # The original CREATE TABLE statement is correct, it includes the 'details' column.
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS support_resistance_levels (
                     id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     level_price DOUBLE PRECISION NOT NULL,
-                    level_type TEXT NOT NULL, -- 'support','resistance','poc','hvn','confluence'
-                    timeframe TEXT NOT NULL, -- '15m', '4h', '1d', '15m,4h' etc. for confluence
-                    strength BIGINT NOT NULL, -- Weighted strength score
+                    level_type TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    strength BIGINT NOT NULL,
                     last_tested_at TIMESTAMP,
-                    details TEXT, -- Contributing level types for confluence, e.g., 'poc,support'
+                    details TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
                 );
             """)
             conn.commit()
 
-            # الخطوة 2: التحقق من وجود عمود 'details' وإضافته إذا كان مفقودًا (للتوافق مع الإصدارات القديمة من الجدول)
             cur.execute("""
                 SELECT 1 FROM information_schema.columns 
                 WHERE table_name='support_resistance_levels' AND column_name='details';
             """)
             if cur.fetchone() is None:
-                logger.info("[قاعدة البيانات] العمود 'details' غير موجود. جاري إضافته لتحديث الجدول...")
+                logger.info("[قاعدة البيانات] العمود 'details' غير موجود. جاري إضافته...")
                 cur.execute("ALTER TABLE support_resistance_levels ADD COLUMN details TEXT;")
                 conn.commit()
                 logger.info("✅ [قاعدة البيانات] تم إضافة العمود 'details' بنجاح.")
 
-        logger.info("✅ [قاعدة البيانات] تم تهيئة جدول 'support_resistance_levels' والتأكد من تحديثه بنجاح.")
+        logger.info("✅ [قاعدة البيانات] تم تهيئة جدول 'support_resistance_levels' بنجاح.")
         return conn
     except Exception as e:
         logger.critical(f"❌ [قاعدة البيانات] فشل الاتصال أو تهيئة الجدول: {e}")
-        # It's important to rollback on failure
         if conn:
             conn.rollback()
         return None
 
 def save_levels_to_db(conn: psycopg2.extensions.connection, symbol: str, levels: List[Dict]):
-    """حفظ المستويات النهائية والمُصفّاة في قاعدة البيانات."""
+    """حفظ المستويات النهائية في قاعدة البيانات."""
     if not levels:
         logger.info(f"ℹ️ [{symbol}] لا توجد مستويات نهائية ليتم حفظها.")
         return
-
-    logger.info(f"⏳ [{symbol}] جاري حفظ {len(levels)} مستوى مُصفّى في قاعدة البيانات...")
+    logger.info(f"⏳ [{symbol}] جاري حفظ {len(levels)} مستوى في قاعدة البيانات...")
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM support_resistance_levels WHERE symbol = %s;", (symbol,))
-            
             insert_query = """
                 INSERT INTO support_resistance_levels 
                 (symbol, level_price, level_type, timeframe, strength, last_tested_at, details) 
@@ -177,13 +216,12 @@ def save_levels_to_db(conn: psycopg2.extensions.connection, symbol: str, levels:
                     level.get('last_tested_at'), level.get('details')
                 ))
         conn.commit()
-        logger.info(f"✅ [{symbol}] تم حفظ جميع المستويات المُصفّاة بنجاح.")
+        logger.info(f"✅ [{symbol}] تم حفظ جميع المستويات بنجاح.")
     except Exception as e:
         logger.error(f"❌ [{symbol}] حدث خطأ أثناء الحفظ في قاعدة البيانات: {e}")
         conn.rollback()
 
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
-
 def find_price_action_levels(df: pd.DataFrame, prominence: float, width: int, cluster_eps_percent: float) -> List[Dict]:
     """تحديد القمم والقيعان وتجميعها لتحديد مناطق الدعم والمقاومة."""
     lows = df['low'].to_numpy()
@@ -214,56 +252,42 @@ def find_price_action_levels(df: pd.DataFrame, prominence: float, width: int, cl
     return support_levels + resistance_levels
 
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
-    """
-    تحليل بروفايل الحجم لتحديد نقطة التحكم (POC). (إصدار مصحح)
-    """
+    """تحليل بروفايل الحجم لتحديد نقطة التحكم (POC)."""
     price_min, price_max = df['low'].min(), df['high'].max()
     if price_min >= price_max:
         logger.warning("[Volume Profile] النطاق السعري غير صالح. يتم التخطي.")
         return []
 
-    # إنشاء "حدود" السلات وحساب "مراكز" السلات
     price_bins = np.linspace(price_min, price_max, bins + 1)
     bin_centers = (price_bins[:-1] + price_bins[1:]) / 2
     volume_by_bin = np.zeros(bins)
 
     for _, row in df.iterrows():
-        # تحديد مؤشرات السلات التي تغطيها الشمعة
-        low_idx = np.searchsorted(price_bins, row['low']) - 1
-        high_idx = np.searchsorted(price_bins, row['high']) -1
-
-        # التأكد من أن المؤشرات ضمن الحدود الصحيحة
-        low_idx = max(0, low_idx)
-        high_idx = min(bins - 1, high_idx)
+        low_idx = np.searchsorted(price_bins, row['low'], side='right') - 1
+        high_idx = np.searchsorted(price_bins, row['high'], side='left')
         
-        if high_idx >= low_idx:
-            num_bins_spanned = (high_idx - low_idx) + 1
-            volume_per_bin = row['volume'] / num_bins_spanned
-            # توزيع حجم التداول على السلات التي مرت بها الشمعة
-            for i in range(low_idx, high_idx + 1):
-                volume_by_bin[i] += volume_per_bin
-    
+        low_idx = max(0, low_idx)
+        high_idx = min(bins, high_idx)
+
+        if high_idx > low_idx:
+            num_bins_spanned = high_idx - low_idx
+            volume_per_bin = row['volume'] / num_bins_spanned if num_bins_spanned > 0 else row['volume']
+            for i in range(low_idx, high_idx):
+                 volume_by_bin[i] += volume_per_bin
+
     if np.sum(volume_by_bin) == 0:
         logger.warning("[Volume Profile] لم يتم حساب أي حجم.")
         return []
-
-    # تحديد السلة ذات الحجم الأعلى (POC)
+    
     poc_index = np.argmax(volume_by_bin)
     poc_price = bin_centers[poc_index]
     poc_volume = volume_by_bin[poc_index]
     
-    return [{
-        "level_price": float(poc_price),
-        "level_type": 'poc',
-        "strength": int(poc_volume),
-        "last_tested_at": None
-    }]
+    return [{"level_price": float(poc_price), "level_type": 'poc', "strength": int(poc_volume), "last_tested_at": None}]
 
 
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
-    """
-    تحديد مناطق التوافق (Confluence) عن طريق دمج المستويات المتقاربة.
-    """
+    """تحديد مناطق التوافق (Confluence) عن طريق دمج المستويات المتقاربة."""
     if not levels: return [], []
     levels.sort(key=lambda x: x['level_price'])
     
@@ -313,14 +337,13 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             })
 
     remaining_levels = [level for i, level in enumerate(levels) if i not in used_indices]
-    
     logger.info(f"🤝 [Confluence] تم العثور على {len(confluence_zones)} منطقة توافق و {len(remaining_levels)} مستوى فردي متبقي.")
     return confluence_zones, remaining_levels
 
-
-# ---------------------- حلقة العمل الرئيسية ----------------------
-def main():
-    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات (الإصدار 3.1 مع Confluence مصحح)...")
+# ---------------------- حلقة العمل الرئيسية للتحليل ----------------------
+def run_full_analysis():
+    """الدالة الرئيسية التي تحتوي على منطق التحليل الكامل."""
+    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات...")
     
     client = get_binance_client()
     if not client: return
@@ -331,6 +354,7 @@ def main():
     symbols_to_scan = get_validated_symbols(client, 'crypto_list.txt')
     if not symbols_to_scan:
         logger.warning("⚠️ لا توجد عملات لتحليلها. سيتم إيقاف التشغيل.")
+        conn.close()
         return
 
     logger.info(f"🌀 سيتم تحليل {len(symbols_to_scan)} عملة.")
@@ -369,8 +393,36 @@ def main():
         time.sleep(2)
 
     conn.close()
-    logger.info("🎉🎉🎉 اكتملت عملية تحليل وحفظ جميع المستويات لجميع العملات بنجاح! 🎉🎉🎉")
+    logger.info("🎉🎉🎉 اكتملت عملية تحليل جميع المستويات لجميع العملات! 🎉🎉🎉")
 
+def analysis_scheduler():
+    """تقوم بجدولة وتشغيل دورة التحليل بشكل دوري."""
+    while True:
+        try:
+            run_full_analysis()
+        except Exception as e:
+            logger.error(f"❌ حدث خطأ فادح في دورة التحليل الرئيسية: {e}", exc_info=True)
+        
+        sleep_duration_seconds = ANALYSIS_INTERVAL_HOURS * 60 * 60
+        logger.info(f" ciclo de análisis finalizado. Durmiendo durante {ANALYSIS_INTERVAL_HOURS} horas.")
+        time.sleep(sleep_duration_seconds)
 
+# ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
-    main()
+    # إنشاء وتشغيل خيط خادم الويب
+    web_server_thread = threading.Thread(target=run_web_server)
+    web_server_thread.daemon = True  # للتأكد من إغلاق الخيط عند إغلاق البرنامج الرئيسي
+    web_server_thread.start()
+
+    # إنشاء وتشغيل خيط التحليل المجدول
+    analysis_thread = threading.Thread(target=analysis_scheduler)
+    analysis_thread.daemon = True
+    analysis_thread.start()
+
+    # إبقاء الخيط الرئيسي حيًا للسماح للخيوط الأخرى بالعمل
+    # هذا ضروري لأن الخيوط الـ daemon تتوقف إذا انتهى البرنامج الرئيسي
+    try:
+        while True:
+            time.sleep(3600) # يمكن أن ينام إلى الأبد، الخيوط الأخرى تقوم بالعمل
+    except KeyboardInterrupt:
+        logger.info("🛑 تم طلب إيقاف البرنامج. وداعاً!")
