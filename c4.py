@@ -50,10 +50,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 
-# <<< START: AGGRESSIVE MEMORY OPTIMIZATION >>>
-# تم تقليل فترة جلب البيانات بشكل كبير لتخفيف الضغط على الذاكرة
 DATA_FETCH_LOOKBACK_DAYS: int = 15
-# <<< END: AGGRESSIVE MEMORY OPTIMIZATION >>>
 
 # --- Indicator & Feature Parameters (Matching ml.py EXACTLY) ---
 ADX_PERIOD: int = 14
@@ -77,7 +74,8 @@ BTC_SYMBOL = 'BTCUSDT'
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.80
 MAX_OPEN_TRADES: int = 5
-ATR_SL_MULTIPLIER = 2
+USE_SR_LEVELS = True # <-- مفتاح تفعيل/تعطيل ميزة استخدام الدعوم والمقاومات
+ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
@@ -86,8 +84,6 @@ BTC_TREND_EMA_PERIOD = 10
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
-# تم إزالة ذاكرة التخزين المؤقت للنماذج لتوفير الذاكرة
-# ml_models_cache: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
@@ -97,7 +93,7 @@ notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
 
 
-# ---------------------- دوال قاعدة البيانات (بدون تغيير) ----------------------
+# ---------------------- دوال قاعدة البيانات (مُعدَّلة) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
@@ -105,8 +101,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
         try:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
-            # ... (بقية الدالة كما هي)
             with conn.cursor() as cur:
+                # جدول الإشارات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -114,16 +110,27 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB );
                 """)
+                # جدول التنبيهات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications ( id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
                         message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
+                # جدول نماذج تعلم الآلة
                 cur.execute("""
                      CREATE TABLE IF NOT EXISTS ml_models ( id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
                         trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
                 """)
+                # **جديد**: التأكد من وجود جدول الدعوم والمقاومات
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS support_resistance_levels (
+                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
+                        level_type TEXT NOT NULL, timeframe TEXT NOT NULL, strength INTEGER NOT NULL,
+                        last_tested_at TIMESTAMP, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
+                    );
+                """)
             conn.commit()
-            logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
+            logger.info("✅ [قاعدة البيانات] تم تهيئة جميع جداول قاعدة البيانات بنجاح.")
             return
         except Exception as e:
             logger.error(f"❌ [قاعدة البيانات] خطأ في الاتصال (المحاولة {attempt + 1}): {e}")
@@ -159,6 +166,35 @@ def log_and_notify(level: str, message: str, notification_type: str):
         logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}");
         if conn: conn.rollback()
 
+# **جديد**: دالة لجلب مستويات الدعم والمقاومة من قاعدة البيانات
+def fetch_sr_levels(symbol: str) -> Optional[Dict[str, List[float]]]:
+    """
+    يجلب مستويات الدعم والمقاومة لعملة معينة من قاعدة البيانات.
+    """
+    if not check_db_connection() or not conn:
+        logger.warning(f"⚠️ [{symbol}] لا يمكن جلب مستويات الدعم والمقاومة، اتصال قاعدة البيانات غير متاح.")
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT level_price, level_type FROM support_resistance_levels WHERE symbol = %s ORDER BY level_price ASC",
+                (symbol,)
+            )
+            levels = cur.fetchall()
+            if not levels:
+                logger.info(f"ℹ️ [{symbol}] لا توجد مستويات دعم ومقاومة محفوظة في قاعدة البيانات.")
+                return None
+
+            supports = sorted([float(level['level_price']) for level in levels if level['level_type'] == 'support'])
+            resistances = sorted([float(level['level_price']) for level in levels if level['level_type'] == 'resistance'])
+
+            logger.info(f"📈 [{symbol}] تم جلب {len(supports)} دعم و {len(resistances)} مقاومة من قاعدة البيانات.")
+            return {"supports": supports, "resistances": resistances}
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] خطأ أثناء جلب مستويات الدعم والمقاومة: {e}")
+        if conn: conn.rollback()
+        return None
+
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
@@ -189,14 +225,9 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
-        
-        # <<< START: AGGRESSIVE MEMORY OPTIMIZATION >>>
-        # تحويل الأعمدة الرقمية إلى نوع أصغر لتوفير الذاكرة
         for col in numeric_cols:
             if df[col].dtype == 'float64':
                 df[col] = df[col].astype('float32')
-        # <<< END: AGGRESSIVE MEMORY OPTIMIZATION >>>
-        
         return df[numeric_cols].dropna()
     except BinanceAPIException as e:
         logger.warning(f"⚠️ [API Binance] خطأ في جلب بيانات {symbol}: {e}")
@@ -205,10 +236,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# دالة fetch_and_cache_btc_data لم تعد ضرورية، سيتم جلب البيانات داخل الحلقة الرئيسية
-
 def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    # ... (هذه الدالة تبقى كما هي، لا تغييرات هنا)
     df_calc = df_15m.copy()
     high_low = df_calc['high'] - df_calc['low']; high_close = (df_calc['high'] - df_calc['close'].shift()).abs(); low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
@@ -275,28 +303,17 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df_patterns
     
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
-    # <<< START: AGGRESSIVE MEMORY OPTIMIZATION >>>
-    # تم إزالة ذاكرة التخزين المؤقت، يتم التحميل من الملف مباشرة في كل مرة
-    # global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    # if model_name in ml_models_cache: return ml_models_cache[model_name]
-    # <<< END: AGGRESSIVE MEMORY OPTIMIZATION >>>
-
     model_dir = 'Mo'
     file_path = os.path.join(model_dir, f"{model_name}.pkl")
-
     if not os.path.isdir(model_dir):
         logger.warning(f"⚠️ [نموذج تعلم الآلة] مجلد النماذج '{model_dir}' غير موجود.")
         return None
-
     if os.path.exists(file_path):
         try:
             with open(file_path, 'rb') as f:
                 model_bundle = pickle.load(f)
-
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                # لا يتم التخزين في الذاكرة المؤقتة
-                # ml_models_cache[model_name] = model_bundle 
                 logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من الملف.")
                 return model_bundle
             else:
@@ -311,32 +328,25 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    # ... (هذه الدالة تبقى كما هي، لا تغييرات هنا)
     global open_signals_cache, current_prices
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
         if not isinstance(data, list): data = [data]
-
         for item in data:
             symbol = item.get('s')
             if not symbol: continue
             price = float(item.get('c', 0))
             if price == 0: continue
-
             with prices_lock: current_prices[symbol] = price
             signal_to_process, status, closing_price = None, None, None
-
             with signal_cache_lock:
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
                     target_price = signal.get('target_price')
                     stop_loss_price = signal.get('stop_loss')
-
                     if not all(isinstance(p, (int, float)) for p in [price, target_price, stop_loss_price]): continue
-
                     if price >= target_price: status, closing_price, signal_to_process = 'target_hit', target_price, signal
                     elif price <= stop_loss_price: status, closing_price, signal_to_process = 'stop_loss_hit', stop_loss_price, signal
-
             if signal_to_process and status:
                 logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status}' للعملة {symbol} عند سعر {price:.8f}")
                 Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
@@ -362,36 +372,28 @@ class TradingStrategy:
         return calculate_all_features(df_15m, df_4h, btc_df)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        # ... (هذه الدالة تبقى كما هي، لا تغييرات هنا)
         if not all([self.ml_model, self.scaler, self.feature_names]):
             return None
-
         last_row = df_processed.iloc[-1]
         try:
             missing_features = [f for f in self.feature_names if f not in df_processed.columns]
             if missing_features:
                 logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: ميزات مفقودة: {missing_features}. سيتم التخطي.")
                 return None
-
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
             if features_df.isnull().values.any(): return None
-
             features_scaled = self.scaler.transform(features_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
-
             prob_for_class_1 = 0
             try:
                 class_1_index = list(self.ml_model.classes_).index(1)
                 prob_for_class_1 = prediction_proba[class_1_index]
             except ValueError:
                 return None
-
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}, وهي أعلى من الحد المطلوب ({MODEL_CONFIDENCE_THRESHOLD:.0%}).")
-
                 return {
                     'symbol': self.symbol,
                     'strategy_name': BASE_ML_MODEL_NAME,
@@ -399,15 +401,13 @@ class TradingStrategy:
                 }
             else:
                 return None
-
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
 
 
-# ---------------------- دوال التنبيهات والإدارة (بدون تغيير) ----------------------
+# ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
-    # ... (هذه الدالة تبقى كما هي)
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
@@ -415,17 +415,21 @@ def send_telegram_message(target_chat_id: str, text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    # ... (هذه الدالة تبقى كما هي)
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
-    profit_pct = ((target / entry) - 1) * 100
+    profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
+    
+    sr_info = signal_data.get('signal_details', {}).get('sr_info', 'ATR Default')
+    
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
                f"📈 *النوع:* شراء (LONG)\n\n"
                f"⬅️ *سعر الدخول:* `${entry:,.8g}`\n"
                f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
-               f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}")
+               f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}\n"
+               f"🛠️ *أساس الهدف/الوقف:* {sr_info}")
+               
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
@@ -434,7 +438,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # ... (هذه الدالة تبقى كما هي)
     if not check_db_connection() or not conn: return None
     try:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
@@ -454,7 +457,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    # ... (هذه الدالة تبقى كما هي)
     symbol = signal['symbol']
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']: return
@@ -481,7 +483,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         if conn: conn.rollback()
 
 def load_open_signals_to_cache():
-    # ... (هذه الدالة تبقى كما هي)
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً...")
     try:
@@ -495,7 +496,6 @@ def load_open_signals_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
 def load_notifications_to_cache():
-    # ... (هذه الدالة تبقى كما هي)
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل آخر التنبيهات...")
     try:
@@ -509,11 +509,10 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
 
-# ---------------------- حلقة العمل الرئيسية (مُعدَّلة بشكل كبير) ----------------------
+# ---------------------- حلقة العمل الرئيسية (مُعدَّلة بشكل كبير) ----------------------
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
-        # ملاحظة: جلب البيانات هنا يبقى كما هو لأنه لعدد محدود من الشموع
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         df['close'] = pd.to_numeric(df['close'])
@@ -532,8 +531,6 @@ def main_loop():
         log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
         return
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
-
-    # تم حذف جلب بيانات BTC من هنا، سيتم جلبها داخل الحلقة
     
     while True:
         try:
@@ -551,8 +548,6 @@ def main_loop():
             slots_available = MAX_OPEN_TRADES - open_count
             logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
             
-            # <<< START: AGGRESSIVE MEMORY OPTIMIZATION >>>
-            # جلب نسخة جديدة ومصغرة من بيانات BTC في كل دورة
             logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين لهذه الدورة...")
             btc_data_cycle = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
             
@@ -560,7 +555,6 @@ def main_loop():
                 logger.error("❌ فشل في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
                 time.sleep(120); continue
             btc_data_cycle['btc_returns'] = btc_data_cycle['close'].pct_change()
-            # <<< END: AGGRESSIVE MEMORY OPTIMIZATION >>>
             
             for symbol in validated_symbols_to_scan:
                 if slots_available <= 0: break
@@ -576,7 +570,6 @@ def main_loop():
                         continue
                     
                     strategy = TradingStrategy(symbol)
-                    # تمرير بيانات BTC الخاصة بالدورة الحالية
                     df_features = strategy.get_features(df_15m, df_4h, btc_data_cycle)
                     
                     if df_features is None or df_features.empty:
@@ -592,33 +585,60 @@ def main_loop():
                         
                         potential_signal['entry_price'] = current_price
                         atr_value = df_features['atr'].iloc[-1]
-                        potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
-                        potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         
+                        # --- **جديد**: منطق تحديد الهدف ووقف الخسارة بناءً على الدعم والمقاومة ---
+                        stop_loss = current_price - (atr_value * ATR_SL_MULTIPLIER)
+                        target_price = current_price + (atr_value * ATR_TP_MULTIPLIER)
+                        sr_info = "ATR Default"
+
+                        if USE_SR_LEVELS:
+                            sr_levels = fetch_sr_levels(symbol)
+                            if sr_levels:
+                                # تحديد وقف الخسارة
+                                supports_below = [s for s in sr_levels['supports'] if s < current_price]
+                                if supports_below:
+                                    closest_support = max(supports_below)
+                                    stop_loss = closest_support * 0.998 # 0.2% buffer below support
+                                    logger.info(f"🛡️ [{symbol}] تم تعديل وقف الخسارة إلى {stop_loss:.8g} بناءً على دعم عند {closest_support:.8g}.")
+                                    sr_info = "S/R Levels"
+                                
+                                # تحديد الهدف
+                                resistances_above = [r for r in sr_levels['resistances'] if r > current_price]
+                                if resistances_above:
+                                    closest_resistance = min(resistances_above)
+                                    target_price = closest_resistance * 0.998 # 0.2% buffer below resistance
+                                    logger.info(f"🎯 [{symbol}] تم تعديل الهدف إلى {target_price:.8g} بناءً على مقاومة عند {closest_resistance:.8g}.")
+                                    sr_info = "S/R Levels"
+                        
+                        # التأكد من أن الهدف أعلى من سعر الدخول وأن وقف الخسارة أقل
+                        if target_price <= current_price or stop_loss >= current_price:
+                            logger.warning(f"⚠️ [{symbol}] تم إلغاء الإشارة بسبب عدم منطقية الهدف ({target_price:.8g}) أو وقف الخسارة ({stop_loss:.8g}) مقارنة بسعر الدخول ({current_price:.8g}).")
+                            continue
+
+                        potential_signal['stop_loss'] = stop_loss
+                        potential_signal['target_price'] = target_price
+                        potential_signal['signal_details']['sr_info'] = sr_info
+                        # --- نهاية المنطق الجديد ---
+
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
                             with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                             send_new_signal_alert(saved_signal)
                             slots_available -= 1
                     
-                    # حذف الكائنات الكبيرة بشكل صريح لتحرير الذاكرة فوراً
                     del df_15m, df_4h, df_features, strategy
                     
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
 
-            # <<< START: AGGRESSIVE MEMORY OPTIMIZATION >>>
-            # حذف بيانات BTC الخاصة بالدورة بعد الانتهاء منها
             del btc_data_cycle
             
             logger.info("ℹ️ [إدارة الذاكرة] بدء عملية تحرير الذاكرة غير المستخدمة في نهاية الدورة...")
             unreachable_count = gc.collect()
             logger.info(f"✅ [إدارة الذاكرة] تم تحرير {unreachable_count} كائن. انتهاء دورة المسح.")
             
-            # زيادة فترة الراحة بين الدورات لإعطاء الخادم وقتاً أكبر
             logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار 120 ثانية...")
             time.sleep(120) 
-            # <<< END: AGGRESSIVE MEMORY OPTIMIZATION >>>
 
         except (KeyboardInterrupt, SystemExit):
             break
@@ -627,11 +647,10 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم (بدون تغيير) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
 app = Flask(__name__)
 CORS(app)
 
-# ... (جميع دوال Flask تبقى كما هي)
 def get_fear_and_greed_index() -> Dict[str, Any]:
     classification_translation = {"Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد", "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"}
     try:
@@ -747,4 +766,3 @@ if __name__ == "__main__":
     run_flask()
     logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
     os._exit(0)
-
