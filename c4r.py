@@ -196,21 +196,44 @@ def find_price_action_levels(df: pd.DataFrame, prominence: float, width: int, cl
     return support_levels + resistance_levels
 
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
-    """تحليل بروفايل الحجم لتحديد نقطة التحكم (POC)."""
+    """
+    تحليل بروفايل الحجم لتحديد نقطة التحكم (POC). (إصدار مصحح)
+    """
     price_min, price_max = df['low'].min(), df['high'].max()
-    price_bins = np.linspace(price_min, price_max, bins)
-    volume_by_price = pd.Series(0, index=price_bins)
+    if price_min >= price_max:
+        logger.warning("[Volume Profile] النطاق السعري غير صالح. يتم التخطي.")
+        return []
+
+    # إنشاء "حدود" السلات وحساب "مراكز" السلات
+    price_bins = np.linspace(price_min, price_max, bins + 1)
+    bin_centers = (price_bins[:-1] + price_bins[1:]) / 2
+    volume_by_bin = np.zeros(bins)
 
     for _, row in df.iterrows():
-        price_range = price_bins[(price_bins >= row['low']) & (price_bins <= row['high'])]
-        if not price_range.empty:
-            volume_per_bin = row['volume'] / len(price_range)
-            volume_by_price.loc[price_range.index] += volume_per_bin
-            
-    if volume_by_price.sum() == 0: return []
+        # تحديد مؤشرات السلات التي تغطيها الشمعة
+        low_idx = np.searchsorted(price_bins, row['low']) - 1
+        high_idx = np.searchsorted(price_bins, row['high']) -1
 
-    poc_price = volume_by_price.idxmax()
-    poc_volume = volume_by_price.max()
+        # التأكد من أن المؤشرات ضمن الحدود الصحيحة
+        low_idx = max(0, low_idx)
+        high_idx = min(bins - 1, high_idx)
+        
+        if high_idx >= low_idx:
+            num_bins_spanned = (high_idx - low_idx) + 1
+            volume_per_bin = row['volume'] / num_bins_spanned
+            # توزيع حجم التداول على السلات التي مرت بها الشمعة
+            for i in range(low_idx, high_idx + 1):
+                volume_by_bin[i] += volume_per_bin
+    
+    if np.sum(volume_by_bin) == 0:
+        logger.warning("[Volume Profile] لم يتم حساب أي حجم.")
+        return []
+
+    # تحديد السلة ذات الحجم الأعلى (POC)
+    poc_index = np.argmax(volume_by_bin)
+    poc_price = bin_centers[poc_index]
+    poc_volume = volume_by_bin[poc_index]
+    
     return [{
         "level_price": float(poc_price),
         "level_type": 'poc',
@@ -218,17 +241,16 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
         "last_tested_at": None
     }]
 
+
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
     """
     تحديد مناطق التوافق (Confluence) عن طريق دمج المستويات المتقاربة.
-    ترجع قائمتين: مناطق التوافق، والمستويات الفردية المتبقية.
     """
     if not levels: return [], []
-
     levels.sort(key=lambda x: x['level_price'])
     
     tf_weights = {'1d': 3, '4h': 2, '15m': 1}
-    type_weights = {'poc': 2, 'support': 1.5, 'resistance': 1.5, 'hvn': 1}
+    type_weights = {'poc': 2.5, 'support': 1.5, 'resistance': 1.5, 'hvn': 1, 'confluence': 4}
 
     confluence_zones = []
     used_indices = set()
@@ -236,8 +258,8 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
     for i in range(len(levels)):
         if i in used_indices: continue
         
-        current_zone = [levels[i]]
-        zone_indices = {i}
+        current_zone_levels = [levels[i]]
+        current_zone_indices = {i}
         
         for j in range(i + 1, len(levels)):
             if j in used_indices: continue
@@ -246,24 +268,22 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             price_j = levels[j]['level_price']
 
             if (abs(price_j - price_i) / price_i) <= confluence_percent:
-                current_zone.append(levels[j])
-                zone_indices.add(j)
+                current_zone_levels.append(levels[j])
+                current_zone_indices.add(j)
 
-        if len(current_zone) > 1:
-            used_indices.update(zone_indices)
+        if len(current_zone_levels) > 1:
+            used_indices.update(current_zone_indices)
             
-            # حساب خصائص منطقة التوافق
-            avg_price = sum(l['level_price'] for l in current_zone) / len(current_zone)
-            
+            avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / sum(l['strength'] for l in current_zone_levels)
             total_strength = 0
-            for l in current_zone:
+            for l in current_zone_levels:
                 tf_w = tf_weights.get(l['timeframe'], 1)
                 type_w = type_weights.get(l['level_type'], 1)
                 total_strength += l['strength'] * tf_w * type_w
 
-            timeframes = sorted(list(set(l['timeframe'] for l in current_zone)))
-            details = sorted(list(set(l['level_type'] for l in current_zone)))
-            last_tested = max((l['last_tested_at'] for l in current_zone if l['last_tested_at']), default=None)
+            timeframes = sorted(list(set(l['timeframe'] for l in current_zone_levels)))
+            details = sorted(list(set(l['level_type'] for l in current_zone_levels)))
+            last_tested = max((l['last_tested_at'] for l in current_zone_levels if l['last_tested_at']), default=None)
 
             confluence_zones.append({
                 "level_price": avg_price,
@@ -282,7 +302,7 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def main():
-    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات (الإصدار 3 مع Confluence)...")
+    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات (الإصدار 3.1 مع Confluence مصحح)...")
     
     client = get_binance_client()
     if not client: return
@@ -310,12 +330,9 @@ def main():
         for tf, config in timeframes_config.items():
             df = fetch_historical_data(client, symbol, tf, config['days'])
             if df is not None and not df.empty:
-                # 1. تحليل القمم والقيعان
                 pa_levels = find_price_action_levels(df, config['prominence'], config['width'], CLUSTER_EPS_PERCENT)
-                # 2. تحليل بروفايل الحجم
                 vol_levels = analyze_volume_profile(df, bins=VOLUME_PROFILE_BINS)
                 
-                # إضافة الإطار الزمني لكل مستوى مكتشف
                 for level in pa_levels + vol_levels:
                     level['timeframe'] = tf
                 raw_levels.extend(pa_levels + vol_levels)
@@ -323,11 +340,8 @@ def main():
                 logger.warning(f"⚠️ [{symbol}-{tf}] تعذر جلب البيانات.")
             time.sleep(1) 
             
-        # بعد جمع كل المستويات الأولية للعملة، نقوم بتحليل التوافق
         if raw_levels:
             confluence_zones, remaining_singles = find_confluence_zones(raw_levels, CONFLUENCE_ZONE_PERCENT)
-            
-            # القائمة النهائية التي سيتم حفظها هي مناطق التوافق + المستويات الفردية المتبقية
             final_levels = confluence_zones + remaining_singles
             save_levels_to_db(conn, symbol, final_levels)
         else:
