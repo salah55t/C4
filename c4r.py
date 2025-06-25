@@ -20,11 +20,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('sr_scanner_v6_volume.log', encoding='utf-8'),
+        logging.FileHandler('sr_scanner_scalping_edition.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('SR_Scanner_V6_Volume')
+logger = logging.getLogger('SR_Scanner_Scalping')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -35,41 +35,39 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت ----------------------
-ANALYSIS_INTERVAL_HOURS = 4
+# ---------------------- إعداد الثوابت (نسخة السكالبينج) ----------------------
+ANALYSIS_INTERVAL_MINUTES = 15  # تحديث كل 15 دقيقة
 MAX_WORKERS = 10
 API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY = 5
 
-# كمية البيانات التاريخية
-DATA_FETCH_DAYS_1D = 600
-DATA_FETCH_DAYS_4H = 200
-DATA_FETCH_DAYS_15M = 30
+# كمية البيانات التاريخية (أيام أقل للتركيز على الحركة الحديثة)
+DATA_FETCH_DAYS_1H = 30   # إطار ساعة للمستويات الأقوى قليلاً
+DATA_FETCH_DAYS_15M = 7   # 7 أيام لإطار 15 دقيقة
+DATA_FETCH_DAYS_5M = 3    # 3 أيام لإطار 5 دقائق
 
-# مضاعفات البروز المعتمدة على ATR
-ATR_PROMINENCE_MULTIPLIER_1D = 1.5
-ATR_PROMINENCE_MULTIPLIER_4H = 1.0
-ATR_PROMINENCE_MULTIPLIER_15M = 0.75
+# مضاعفات البروز (قيم أقل لزيادة الحساسية للقمم والقيعان الصغيرة)
+ATR_PROMINENCE_MULTIPLIER_1H = 0.8
+ATR_PROMINENCE_MULTIPLIER_15M = 0.6
+ATR_PROMINENCE_MULTIPLIER_5M = 0.5
 ATR_PERIOD = 14
 
-# عرض القمم (عدد الشموع)
-WIDTH_1D = 10
-WIDTH_4H = 5
-WIDTH_15M = 10
+# عرض القمم (أصغر ليتناسب مع الفريمات الصغيرة)
+WIDTH_1H = 8
+WIDTH_15M = 5
+WIDTH_5M = 3
 
-# --- جديد: معايير تأكيد حجم التداول ---
-# هذا القسم يضيف طبقة فلترة للقمم والقيعان بناءً على حجم التداول
-VOLUME_CONFIRMATION_ENABLED = True  # مفتاح لتشغيل/إيقاف الميزة بسهولة
-VOLUME_AVG_PERIOD = 50              # الفترة الزمنية لحساب متوسط حجم التداول (SMA)
-VOLUME_SPIKE_FACTOR = 1.8           # لتأكيد القمة/القاع، يجب أن يكون حجم التداول أعلى بـ 1.8 مرة من متوسطه
+# معايير تأكيد حجم التداول (أكثر حساسية)
+VOLUME_CONFIRMATION_ENABLED = True
+VOLUME_AVG_PERIOD = 20           # فترة أقصر لمتوسط الفوليوم
+VOLUME_SPIKE_FACTOR = 1.6        # عامل أقل لزيادة حساسية رصد السبايك
 
-# معايير التجميع والدمج
-CLUSTER_EPS_PERCENT = 0.005
-CONFLUENCE_ZONE_PERCENT = 0.005
+# معايير التجميع والدمج (نسب أقل بسبب تقارب الأسعار في الفريمات الصغيرة)
+CLUSTER_EPS_PERCENT = 0.0015     # تقليل نسبة التجميع
+CONFLUENCE_ZONE_PERCENT = 0.002  # تقليل نسبة دمج المناطق
 VOLUME_PROFILE_BINS = 100
 
 # ---------------------- قسم خادم الويب ----------------------
-# (لا تغيير هنا)
 class WebServerHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -77,8 +75,8 @@ class WebServerHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         html_content = """
         <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>حالة الماسح</title>
-        <style>body{font-family: 'Segoe UI', sans-serif; background-color: #f4f4f9; color: #333; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;} .container{text-align: center; padding: 40px; background-color: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);} h1{color: #0056b3;} .status{font-weight: bold; color: #28a745;}</style>
-        </head><body><div class="container"><h1>📊 ماسح الدعم والمقاومة V6</h1><h2>(مع بروز ATR الديناميكي وتأكيد حجم التداول)</h2><p>الخدمة <span class="status">تعمل</span>.</p></div></body></html>
+        <style>body{font-family: 'Segoe UI', sans-serif; background-color: #1a1a1a; color: #f0f0f0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;} .container{text-align: center; padding: 40px; background-color: #2b2b2b; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #00aaff;} h1{color: #00aaff;} .status{font-weight: bold; color: #28a745;}</style>
+        </head><body><div class="container"><h1>⚡️ ماسح الدعم والمقاومة - إصدار السكالبينج ⚡️</h1><h2>(مخصص للإطارات الزمنية الصغيرة)</h2><p>الخدمة <span class="status">تعمل</span>.</p><p>يتم التحديث كل 15 دقيقة.</p></div></body></html>
         """
         self.wfile.write(html_content.encode('utf-8'))
 
@@ -121,6 +119,7 @@ def fetch_historical_data_with_retry(client: Client, symbol: str, interval: str,
     return None
 
 def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> List[str]:
+    # (The function body is unchanged)
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -169,6 +168,7 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
         return None
 
 def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_levels: List[Dict]):
+    # (The function body is unchanged)
     if not all_final_levels:
         logger.info("ℹ️ [DB] لا توجد مستويات نهائية ليتم حفظها.")
         return
@@ -190,6 +190,7 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    # (The function body is unchanged)
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -198,9 +199,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     return atr.iloc[-1] if not atr.empty else 0
 
 def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_multiplier: float, width: int, cluster_eps_percent: float) -> List[Dict]:
-    """
-    --- معدّل: تحديد القمم والقيعان مع فلترة إضافية باستخدام حجم التداول ---
-    """
+    # (The function logic is unchanged, but it will receive the new scalping-specific parameters)
     lows = df['low'].to_numpy()
     highs = df['high'].to_numpy()
     
@@ -213,12 +212,9 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     low_peaks_indices, _ = find_peaks(-lows, prominence=dynamic_prominence, width=width)
     high_peaks_indices, _ = find_peaks(highs, prominence=dynamic_prominence, width=width)
 
-    # --- جديد: قسم تأكيد حجم التداول ---
     if VOLUME_CONFIRMATION_ENABLED and not df.empty:
-        # حساب متوسط حجم التداول المتحرك البسيط
         df['volume_avg'] = df['volume'].rolling(window=VOLUME_AVG_PERIOD, min_periods=1).mean()
         
-        # فلترة القيعان (الدعم) التي يتزامن معها فوليوم عالٍ
         confirmed_low_indices = []
         for idx in low_peaks_indices:
             peak_volume = df['volume'].iloc[idx]
@@ -226,7 +222,6 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
             if not pd.isna(avg_volume) and avg_volume > 0 and peak_volume >= avg_volume * VOLUME_SPIKE_FACTOR:
                 confirmed_low_indices.append(idx)
         
-        # فلترة القمم (المقاومة) التي يتزامن معها فوليوم عالٍ
         confirmed_high_indices = []
         for idx in high_peaks_indices:
             peak_volume = df['volume'].iloc[idx]
@@ -237,15 +232,14 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
         logger.debug(f"[Volume Filter] Lows before: {len(low_peaks_indices)}, after: {len(confirmed_low_indices)}. "
                      f"Highs before: {len(high_peaks_indices)}, after: {len(confirmed_high_indices)}")
         
-        # استخدام المؤشرات المؤكدة فقط
         low_peaks_indices = np.array(confirmed_low_indices)
         high_peaks_indices = np.array(confirmed_high_indices)
-    # --- نهاية قسم التأكيد ---
 
     def cluster_and_strengthen(prices: np.ndarray, indices: np.ndarray, level_type: str) -> List[Dict]:
         if len(indices) < 2: return []
         points = prices[indices].reshape(-1, 1)
         eps_value = points.mean() * cluster_eps_percent
+        if eps_value == 0: return []
         db = DBSCAN(eps=eps_value, min_samples=2).fit(points)
         clustered_levels = []
         for label in set(db.labels_):
@@ -264,8 +258,8 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     resistance_levels = cluster_and_strengthen(highs, high_peaks_indices, 'resistance')
     return support_levels + resistance_levels
 
-# (باقي دوال التحليل لا تتغير)
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
+    # (The function body is unchanged)
     price_min, price_max = df['low'].min(), df['high'].max()
     if price_min >= price_max: return []
     price_bins = np.linspace(price_min, price_max, bins + 1)
@@ -283,9 +277,10 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
     return [{"level_price": float(bin_centers[poc_index]), "level_type": 'poc', "strength": float(volume_by_bin[poc_index]), "last_tested_at": None}]
 
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
+    # (The function body is unchanged, but uses new scalping confluence percent)
     if not levels: return [], []
     levels.sort(key=lambda x: x['level_price'])
-    tf_weights = {'1d': 3, '4h': 2, '15m': 1}
+    tf_weights = {'1h': 3, '15m': 2, '5m': 1} # Adjusted weights for new timeframes
     type_weights = {'poc': 2.5, 'support': 1.5, 'resistance': 1.5}
     confluence_zones, used_indices = [], set()
     for i in range(len(levels)):
@@ -294,12 +289,14 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
         for j in range(i + 1, len(levels)):
             if j in used_indices: continue
             price_i, price_j = levels[i]['level_price'], levels[j]['level_price']
-            if (abs(price_j - price_i) / price_i) <= confluence_percent:
+            if price_i > 0 and (abs(price_j - price_i) / price_i) <= confluence_percent:
                 current_zone_levels.append(levels[j])
                 current_zone_indices.add(j)
         if len(current_zone_levels) > 1:
             used_indices.update(current_zone_indices)
-            avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / sum(l['strength'] for l in current_zone_levels)
+            total_strength_for_avg = sum(l['strength'] for l in current_zone_levels)
+            if total_strength_for_avg == 0: continue
+            avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / total_strength_for_avg
             total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l['level_type'], 1) for l in current_zone_levels)
             timeframes = sorted(list(set(l['timeframe'] for l in current_zone_levels)))
             details = sorted(list(set(l['level_type'] for l in current_zone_levels)))
@@ -314,13 +311,14 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
 # ---------------------- حلقة العمل الرئيسية للتحليل ----------------------
 
 def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
-    logger.info(f"--- بدء تحليل العملة: {symbol} ---")
+    logger.info(f"--- بدء تحليل (سكالبينج) للعملة: {symbol} ---")
     raw_levels = []
     
+    # --- إعدادات الإطارات الزمنية للسكالبينج ---
     timeframes_config = {
-        '1d':  {'days': DATA_FETCH_DAYS_1D,  'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_1D,  'width': WIDTH_1D},
-        '4h':  {'days': DATA_FETCH_DAYS_4H,  'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_4H,  'width': WIDTH_4H},
-        '15m': {'days': DATA_FETCH_DAYS_15M, 'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_15M, 'width': WIDTH_15M}
+        '1h':  {'days': DATA_FETCH_DAYS_1H,  'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_1H,  'width': WIDTH_1H},
+        '15m': {'days': DATA_FETCH_DAYS_15M, 'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_15M, 'width': WIDTH_15M},
+        '5m':  {'days': DATA_FETCH_DAYS_5M,  'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_5M,  'width': WIDTH_5M}
     }
 
     for tf, config in timeframes_config.items():
@@ -357,9 +355,8 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     logger.info(f"--- ✅ انتهى تحليل {symbol}، تم العثور على {len(final_levels)} مستوى نهائي. ---")
     return final_levels
 
-
 def run_full_analysis():
-    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات V6 (مع تأكيد حجم التداول)...")
+    logger.info("🚀 بدء تشغيل محلل السكالبينج...")
     
     client = get_binance_client()
     if not client: return
@@ -391,7 +388,7 @@ def run_full_analysis():
         logger.info("ℹ️ لم يتم العثور على أي مستويات في أي عملة خلال هذه الدورة.")
 
     conn.close()
-    logger.info("🎉🎉🎉 اكتملت عملية تحليل جميع المستويات لجميع العملات! 🎉🎉🎉")
+    logger.info("🎉🎉🎉 اكتملت دورة تحليل السكالبينج! 🎉🎉🎉")
 
 def analysis_scheduler():
     while True:
@@ -399,8 +396,9 @@ def analysis_scheduler():
             run_full_analysis()
         except Exception as e:
             logger.error(f"❌ حدث خطأ فادح في دورة التحليل الرئيسية: {e}", exc_info=True)
-        sleep_duration_seconds = ANALYSIS_INTERVAL_HOURS * 60 * 60
-        logger.info(f"👍 اكتملت دورة التحليل. سيتم الانتظار لمدة {ANALYSIS_INTERVAL_HOURS} ساعات.")
+        
+        sleep_duration_seconds = ANALYSIS_INTERVAL_MINUTES * 60
+        logger.info(f"👍 اكتملت دورة التحليل. سيتم الانتظار لمدة {ANALYSIS_INTERVAL_MINUTES} دقيقة.")
         time.sleep(sleep_duration_seconds)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
