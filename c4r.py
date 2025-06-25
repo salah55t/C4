@@ -20,11 +20,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('sr_scanner_v5_atr.log', encoding='utf-8'),
+        logging.FileHandler('sr_scanner_v6_volume.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('SR_Scanner_V5_ATR')
+logger = logging.getLogger('SR_Scanner_V6_Volume')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -46,19 +46,22 @@ DATA_FETCH_DAYS_1D = 600
 DATA_FETCH_DAYS_4H = 200
 DATA_FETCH_DAYS_15M = 30
 
-# --- جديد: مضاعفات البروز المعتمدة على ATR ---
-# هذه القيم تحدد مدى "أهمية" القمة/القاع بالنسبة للتقلب الحالي (ATR).
-# قيمة 1.5 تعني أن بروز القمة يجب أن يكون على الأقل 1.5 مرة ضعف قيمة ATR الحالية.
-# قيم أعلى تتطلب قمم وقيعان أكثر وضوحًا، وقيم أقل تكتشف مستويات أكثر دقة.
+# مضاعفات البروز المعتمدة على ATR
 ATR_PROMINENCE_MULTIPLIER_1D = 1.5
 ATR_PROMINENCE_MULTIPLIER_4H = 1.0
 ATR_PROMINENCE_MULTIPLIER_15M = 0.75
-ATR_PERIOD = 14 # الفترة الزمنية لحساب ATR (القيمة الشائعة هي 14)
+ATR_PERIOD = 14
 
 # عرض القمم (عدد الشموع)
 WIDTH_1D = 10
 WIDTH_4H = 5
 WIDTH_15M = 10
+
+# --- جديد: معايير تأكيد حجم التداول ---
+# هذا القسم يضيف طبقة فلترة للقمم والقيعان بناءً على حجم التداول
+VOLUME_CONFIRMATION_ENABLED = True  # مفتاح لتشغيل/إيقاف الميزة بسهولة
+VOLUME_AVG_PERIOD = 50              # الفترة الزمنية لحساب متوسط حجم التداول (SMA)
+VOLUME_SPIKE_FACTOR = 1.8           # لتأكيد القمة/القاع، يجب أن يكون حجم التداول أعلى بـ 1.8 مرة من متوسطه
 
 # معايير التجميع والدمج
 CLUSTER_EPS_PERCENT = 0.005
@@ -75,7 +78,7 @@ class WebServerHandler(http.server.SimpleHTTPRequestHandler):
         html_content = """
         <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>حالة الماسح</title>
         <style>body{font-family: 'Segoe UI', sans-serif; background-color: #f4f4f9; color: #333; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;} .container{text-align: center; padding: 40px; background-color: white; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);} h1{color: #0056b3;} .status{font-weight: bold; color: #28a745;}</style>
-        </head><body><div class="container"><h1>📊 ماسح الدعم والمقاومة V5</h1><h2>(مع بروز ATR الديناميكي)</h2><p>الخدمة <span class="status">تعمل</span>.</p></div></body></html>
+        </head><body><div class="container"><h1>📊 ماسح الدعم والمقاومة V6</h1><h2>(مع بروز ATR الديناميكي وتأكيد حجم التداول)</h2><p>الخدمة <span class="status">تعمل</span>.</p></div></body></html>
         """
         self.wfile.write(html_content.encode('utf-8'))
 
@@ -86,7 +89,7 @@ def run_web_server():
         httpd.serve_forever()
 
 # ---------------------- دوال Binance والبيانات ----------------------
-# (الدوال هنا لا تتغير)
+# (لا تغيير هنا)
 def get_binance_client() -> Optional[Client]:
     try:
         client = Client(API_KEY, API_SECRET)
@@ -135,7 +138,7 @@ def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> 
         return []
 
 # ---------------------- دوال قاعدة البيانات ----------------------
-# (الدوال هنا لا تتغير)
+# (لا تغيير هنا)
 def init_db() -> Optional[psycopg2.extensions.connection]:
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
     conn = None
@@ -187,44 +190,57 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    """
-    --- جديد: دالة لحساب متوسط المدى الحقيقي (ATR) ---
-    الـ ATR هو مؤشر لتقلب الأسعار.
-    """
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
-    
-    # الـ True Range هو القيمة الأعلى من بين الفروقات الثلاثة
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    
-    # حساب المتوسط المتحرك الأسي للـ True Range
     atr = tr.ewm(alpha=1/period, adjust=False).mean()
-    
-    # إرجاع آخر قيمة لـ ATR، التي تمثل التقلب الحالي للسوق
     return atr.iloc[-1] if not atr.empty else 0
-
 
 def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_multiplier: float, width: int, cluster_eps_percent: float) -> List[Dict]:
     """
-    --- معدّل: تحديد القمم والقيعان باستخدام بروز ديناميكي معتمد على ATR ---
+    --- معدّل: تحديد القمم والقيعان مع فلترة إضافية باستخدام حجم التداول ---
     """
     lows = df['low'].to_numpy()
     highs = df['high'].to_numpy()
     
-    # --- تعديل رئيسي: حساب البروز الديناميكي ---
-    # بدلاً من نسبة مئوية ثابتة، نستخدم قيمة ATR مضروبة في معامل
     dynamic_prominence = atr_value * prominence_multiplier
-    
-    # إجراء وقائي في حال كانت قيمة ATR تساوي صفرًا
     if dynamic_prominence == 0:
         logger.warning("[Peaks] قيمة ATR تساوي صفر، سيتم استخدام قيمة بروز افتراضية صغيرة.")
         dynamic_prominence = highs.mean() * 0.01 
-        
     logger.debug(f"[Peaks] استخدام بروز ديناميكي بقيمة: {dynamic_prominence:.4f}")
 
     low_peaks_indices, _ = find_peaks(-lows, prominence=dynamic_prominence, width=width)
     high_peaks_indices, _ = find_peaks(highs, prominence=dynamic_prominence, width=width)
+
+    # --- جديد: قسم تأكيد حجم التداول ---
+    if VOLUME_CONFIRMATION_ENABLED and not df.empty:
+        # حساب متوسط حجم التداول المتحرك البسيط
+        df['volume_avg'] = df['volume'].rolling(window=VOLUME_AVG_PERIOD, min_periods=1).mean()
+        
+        # فلترة القيعان (الدعم) التي يتزامن معها فوليوم عالٍ
+        confirmed_low_indices = []
+        for idx in low_peaks_indices:
+            peak_volume = df['volume'].iloc[idx]
+            avg_volume = df['volume_avg'].iloc[idx]
+            if not pd.isna(avg_volume) and avg_volume > 0 and peak_volume >= avg_volume * VOLUME_SPIKE_FACTOR:
+                confirmed_low_indices.append(idx)
+        
+        # فلترة القمم (المقاومة) التي يتزامن معها فوليوم عالٍ
+        confirmed_high_indices = []
+        for idx in high_peaks_indices:
+            peak_volume = df['volume'].iloc[idx]
+            avg_volume = df['volume_avg'].iloc[idx]
+            if not pd.isna(avg_volume) and avg_volume > 0 and peak_volume >= avg_volume * VOLUME_SPIKE_FACTOR:
+                confirmed_high_indices.append(idx)
+        
+        logger.debug(f"[Volume Filter] Lows before: {len(low_peaks_indices)}, after: {len(confirmed_low_indices)}. "
+                     f"Highs before: {len(high_peaks_indices)}, after: {len(confirmed_high_indices)}")
+        
+        # استخدام المؤشرات المؤكدة فقط
+        low_peaks_indices = np.array(confirmed_low_indices)
+        high_peaks_indices = np.array(confirmed_high_indices)
+    # --- نهاية قسم التأكيد ---
 
     def cluster_and_strengthen(prices: np.ndarray, indices: np.ndarray, level_type: str) -> List[Dict]:
         if len(indices) < 2: return []
@@ -298,9 +314,6 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
 # ---------------------- حلقة العمل الرئيسية للتحليل ----------------------
 
 def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
-    """
-    --- معدّل: دالة تحليل عملة واحدة، الآن تحسب ATR أولاً ---
-    """
     logger.info(f"--- بدء تحليل العملة: {symbol} ---")
     raw_levels = []
     
@@ -313,8 +326,6 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     for tf, config in timeframes_config.items():
         df = fetch_historical_data_with_retry(client, symbol, tf, config['days'])
         if df is not None and not df.empty:
-            
-            # --- تعديل رئيسي: حساب ATR وتمريره ---
             atr_value = calculate_atr(df, period=ATR_PERIOD)
             logger.debug(f"[{symbol}-{tf}] Calculated ATR: {atr_value:.4f}")
             
@@ -348,8 +359,7 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
 
 
 def run_full_analysis():
-    """الدالة الرئيسية التي تدير التحليل المتوازي."""
-    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات V5 (مع بروز ATR الديناميكي)...")
+    logger.info("🚀 بدء تشغيل محلل الدعوم والمقاومات V6 (مع تأكيد حجم التداول)...")
     
     client = get_binance_client()
     if not client: return
