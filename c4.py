@@ -74,12 +74,16 @@ BTC_SYMBOL = 'BTCUSDT'
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.80
 MAX_OPEN_TRADES: int = 5
-USE_SR_LEVELS = True # <-- مفتاح تفعيل/تعطيل ميزة استخدام الدعوم والمقاومات
+USE_SR_LEVELS = True
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
+
+# **جديد**: ثوابت فلترة الصفقات
+MINIMUM_PROFIT_PERCENTAGE = 0.5  # على الأقل 0.5% ربح متوقع
+MINIMUM_RISK_REWARD_RATIO = 1.2   # الهدف يجب أن يكون على الأقل 1.2 ضعف المخاطرة
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -102,7 +106,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # جدول الإشارات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -110,17 +113,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB );
                 """)
-                # جدول التنبيهات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications ( id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL,
                         message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
-                # جدول نماذج تعلم الآلة
                 cur.execute("""
                      CREATE TABLE IF NOT EXISTS ml_models ( id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
                         trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
                 """)
-                # **جديد**: التأكد من وجود جدول الدعوم والمقاومات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS support_resistance_levels (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
@@ -166,11 +166,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
         logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}");
         if conn: conn.rollback()
 
-# **جديد**: دالة لجلب مستويات الدعم والمقاومة من قاعدة البيانات
 def fetch_sr_levels(symbol: str) -> Optional[Dict[str, List[float]]]:
-    """
-    يجلب مستويات الدعم والمقاومة لعملة معينة من قاعدة البيانات.
-    """
     if not check_db_connection() or not conn:
         logger.warning(f"⚠️ [{symbol}] لا يمكن جلب مستويات الدعم والمقاومة، اتصال قاعدة البيانات غير متاح.")
         return None
@@ -420,6 +416,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
     
     sr_info = signal_data.get('signal_details', {}).get('sr_info', 'ATR Default')
+    rr_ratio_info = signal_data.get('signal_details', {}).get('risk_reward_ratio', 'N/A')
     
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
@@ -428,6 +425,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)\n"
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
                f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}\n"
+               f"⚖️ *المخاطرة/العائد:* `{rr_ratio_info}`\n"
                f"🛠️ *أساس الهدف/الوقف:* {sr_info}")
                
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
@@ -586,7 +584,6 @@ def main_loop():
                         potential_signal['entry_price'] = current_price
                         atr_value = df_features['atr'].iloc[-1]
                         
-                        # --- **جديد**: منطق تحديد الهدف ووقف الخسارة بناءً على الدعم والمقاومة ---
                         stop_loss = current_price - (atr_value * ATR_SL_MULTIPLIER)
                         target_price = current_price + (atr_value * ATR_TP_MULTIPLIER)
                         sr_info = "ATR Default"
@@ -594,31 +591,49 @@ def main_loop():
                         if USE_SR_LEVELS:
                             sr_levels = fetch_sr_levels(symbol)
                             if sr_levels:
-                                # تحديد وقف الخسارة
                                 supports_below = [s for s in sr_levels['supports'] if s < current_price]
                                 if supports_below:
                                     closest_support = max(supports_below)
-                                    stop_loss = closest_support * 0.998 # 0.2% buffer below support
+                                    stop_loss = closest_support * 0.998
                                     logger.info(f"🛡️ [{symbol}] تم تعديل وقف الخسارة إلى {stop_loss:.8g} بناءً على دعم عند {closest_support:.8g}.")
                                     sr_info = "S/R Levels"
                                 
-                                # تحديد الهدف
                                 resistances_above = [r for r in sr_levels['resistances'] if r > current_price]
                                 if resistances_above:
                                     closest_resistance = min(resistances_above)
-                                    target_price = closest_resistance * 0.998 # 0.2% buffer below resistance
+                                    target_price = closest_resistance * 0.998
                                     logger.info(f"🎯 [{symbol}] تم تعديل الهدف إلى {target_price:.8g} بناءً على مقاومة عند {closest_resistance:.8g}.")
                                     sr_info = "S/R Levels"
                         
-                        # التأكد من أن الهدف أعلى من سعر الدخول وأن وقف الخسارة أقل
+                        # --- **جديد**: منطق فلترة الصفقات الضعيفة ---
                         if target_price <= current_price or stop_loss >= current_price:
-                            logger.warning(f"⚠️ [{symbol}] تم إلغاء الإشارة بسبب عدم منطقية الهدف ({target_price:.8g}) أو وقف الخسارة ({stop_loss:.8g}) مقارنة بسعر الدخول ({current_price:.8g}).")
+                            logger.info(f"⚠️ [{symbol}] تم إلغاء الإشارة. الهدف ({target_price:.8g}) أو الوقف ({stop_loss:.8g}) غير منطقي.")
                             continue
+
+                        potential_profit_pct = ((target_price / current_price) - 1) * 100
+                        if potential_profit_pct < MINIMUM_PROFIT_PERCENTAGE:
+                            logger.info(f"⚠️ [{symbol}] تم تجاهل الإشارة. الربح المتوقع ({potential_profit_pct:.2f}%) أقل من الحد الأدنى ({MINIMUM_PROFIT_PERCENTAGE}%).")
+                            continue
+
+                        potential_risk = current_price - stop_loss
+                        potential_reward = target_price - current_price
+                        
+                        if potential_risk <= 0:
+                            logger.warning(f"⚠️ [{symbol}] تم تجاهل الإشارة. المخاطرة المحسوبة غير صالحة ({potential_risk:.8g}).")
+                            continue
+
+                        risk_reward_ratio = potential_reward / potential_risk
+                        if risk_reward_ratio < MINIMUM_RISK_REWARD_RATIO:
+                            logger.info(f"⚠️ [{symbol}] تم تجاهل الإشارة. نسبة المخاطرة/العائد ({risk_reward_ratio:.2f}) أقل من الحد الأدنى ({MINIMUM_RISK_REWARD_RATIO}).")
+                            continue
+                        
+                        logger.info(f"✅ [{symbol}] إشارة صالحة: ربح متوقع {potential_profit_pct:.2f}%, نسبة المخاطرة/العائد {risk_reward_ratio:.2f}")
 
                         potential_signal['stop_loss'] = stop_loss
                         potential_signal['target_price'] = target_price
                         potential_signal['signal_details']['sr_info'] = sr_info
-                        # --- نهاية المنطق الجديد ---
+                        potential_signal['signal_details']['risk_reward_ratio'] = f"{risk_reward_ratio:.2f} : 1"
+                        # --- نهاية منطق الفلترة ---
 
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
