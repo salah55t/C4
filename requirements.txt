@@ -17,4 +17,3 @@ ta>=0.10.2
 lightgbm
 optuna
 scikit-learn
-binance-client
