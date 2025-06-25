@@ -154,12 +154,13 @@ def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> 
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db() -> Optional[psycopg2.extensions.connection]:
-    """تهيئة الاتصال بقاعدة البيانات وإنشاء/تحديث الجدول تلقائيًا."""
+    """تهيئة الاتصال بقاعدة البيانات وتحديث بنية الجدول تلقائيًا."""
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
     conn = None
     try:
         conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # الخطوة 1: إنشاء الجدول باستخدام النوع NUMERIC للقوة لتجنب الأخطاء
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS support_resistance_levels (
                     id SERIAL PRIMARY KEY,
@@ -167,7 +168,7 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
                     level_price DOUBLE PRECISION NOT NULL,
                     level_type TEXT NOT NULL,
                     timeframe TEXT NOT NULL,
-                    strength BIGINT NOT NULL,
+                    strength NUMERIC NOT NULL, -- استخدام NUMERIC للأرقام الكبيرة جداً
                     last_tested_at TIMESTAMP,
                     details TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -176,6 +177,7 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
             """)
             conn.commit()
 
+            # الخطوة 2: التحقق من وجود عمود 'details' وإضافته (للتوافق مع الإصدارات القديمة)
             cur.execute("""
                 SELECT 1 FROM information_schema.columns 
                 WHERE table_name='support_resistance_levels' AND column_name='details';
@@ -186,7 +188,19 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
                 conn.commit()
                 logger.info("✅ [قاعدة البيانات] تم إضافة العمود 'details' بنجاح.")
 
-        logger.info("✅ [قاعدة البيانات] تم تهيئة جدول 'support_resistance_levels' بنجاح.")
+            # الخطوة 3: التحقق من نوع عمود 'strength' وتحديثه إلى NUMERIC إذا كان BIGINT
+            cur.execute("""
+                SELECT data_type FROM information_schema.columns 
+                WHERE table_name = 'support_resistance_levels' AND column_name = 'strength';
+            """)
+            result = cur.fetchone()
+            if result and result['data_type'] == 'bigint':
+                logger.info("[قاعدة البيانات] العمود 'strength' من نوع BIGINT. جاري التحديث إلى NUMERIC...")
+                cur.execute("ALTER TABLE support_resistance_levels ALTER COLUMN strength TYPE NUMERIC USING strength::numeric;")
+                conn.commit()
+                logger.info("✅ [قاعدة البيانات] تم تحديث نوع العمود 'strength' إلى NUMERIC بنجاح.")
+
+        logger.info("✅ [قاعدة البيانات] تم تهيئة وتحديث جدول 'support_resistance_levels' بنجاح.")
         return conn
     except Exception as e:
         logger.critical(f"❌ [قاعدة البيانات] فشل الاتصال أو تهيئة الجدول: {e}")
@@ -330,7 +344,7 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             confluence_zones.append({
                 "level_price": avg_price,
                 "level_type": 'confluence',
-                "strength": int(total_strength),
+                "strength": total_strength,
                 "timeframe": ",".join(timeframes),
                 "details": ",".join(details),
                 "last_tested_at": last_tested
@@ -404,14 +418,14 @@ def analysis_scheduler():
             logger.error(f"❌ حدث خطأ فادح في دورة التحليل الرئيسية: {e}", exc_info=True)
         
         sleep_duration_seconds = ANALYSIS_INTERVAL_HOURS * 60 * 60
-        logger.info(f" ciclo de análisis finalizado. Durmiendo durante {ANALYSIS_INTERVAL_HOURS} horas.")
+        logger.info(f"👍 اكتملت دورة التحليل. سيتم الانتظار لمدة {ANALYSIS_INTERVAL_HOURS} ساعات.")
         time.sleep(sleep_duration_seconds)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
     # إنشاء وتشغيل خيط خادم الويب
     web_server_thread = threading.Thread(target=run_web_server)
-    web_server_thread.daemon = True  # للتأكد من إغلاق الخيط عند إغلاق البرنامج الرئيسي
+    web_server_thread.daemon = True
     web_server_thread.start()
 
     # إنشاء وتشغيل خيط التحليل المجدول
@@ -420,9 +434,8 @@ if __name__ == "__main__":
     analysis_thread.start()
 
     # إبقاء الخيط الرئيسي حيًا للسماح للخيوط الأخرى بالعمل
-    # هذا ضروري لأن الخيوط الـ daemon تتوقف إذا انتهى البرنامج الرئيسي
     try:
         while True:
-            time.sleep(3600) # يمكن أن ينام إلى الأبد، الخيوط الأخرى تقوم بالعمل
+            time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("🛑 تم طلب إيقاف البرنامج. وداعاً!")
