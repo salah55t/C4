@@ -109,11 +109,14 @@ def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> 
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db() -> Optional[psycopg2.extensions.connection]:
-    """تهيئة الاتصال بقاعدة البيانات وإنشاء/تحديث الجدول."""
+    """تهيئة الاتصال بقاعدة البيانات وإنشاء/تحديث الجدول تلقائيًا."""
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
+    conn = None
     try:
         conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # الخطوة 1: إنشاء الجدول بالكامل إذا لم يكن موجودًا
+            # The original CREATE TABLE statement is correct, it includes the 'details' column.
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS support_resistance_levels (
                     id SERIAL PRIMARY KEY,
@@ -128,11 +131,26 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
                     CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
                 );
             """)
-        conn.commit()
-        logger.info("✅ [قاعدة البيانات] تم تهيئة جدول 'support_resistance_levels' بنجاح.")
+            conn.commit()
+
+            # الخطوة 2: التحقق من وجود عمود 'details' وإضافته إذا كان مفقودًا (للتوافق مع الإصدارات القديمة من الجدول)
+            cur.execute("""
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='support_resistance_levels' AND column_name='details';
+            """)
+            if cur.fetchone() is None:
+                logger.info("[قاعدة البيانات] العمود 'details' غير موجود. جاري إضافته لتحديث الجدول...")
+                cur.execute("ALTER TABLE support_resistance_levels ADD COLUMN details TEXT;")
+                conn.commit()
+                logger.info("✅ [قاعدة البيانات] تم إضافة العمود 'details' بنجاح.")
+
+        logger.info("✅ [قاعدة البيانات] تم تهيئة جدول 'support_resistance_levels' والتأكد من تحديثه بنجاح.")
         return conn
     except Exception as e:
         logger.critical(f"❌ [قاعدة البيانات] فشل الاتصال أو تهيئة الجدول: {e}")
+        # It's important to rollback on failure
+        if conn:
+            conn.rollback()
         return None
 
 def save_levels_to_db(conn: psycopg2.extensions.connection, symbol: str, levels: List[Dict]):
