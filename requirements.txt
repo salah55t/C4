@@ -14,3 +14,7 @@ tqdm>=4.64.0
 APScheduler>=3.10.0
 pandas-ta>=0.3.14b
 ta>=0.10.2
+lightgbm
+optuna
+scikit-learn
+binance-client
