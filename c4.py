@@ -112,9 +112,19 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                     );
                 """)
+                
+                # Check and add 'generation_price' column if it doesn't exist
                 cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='signals' AND column_name='generation_price'")
                 if not cur.fetchone():
                     cur.execute("ALTER TABLE signals ADD COLUMN generation_price DOUBLE PRECISION;")
+                    logger.info("✅ [DB] تم إضافة عمود 'generation_price' إلى جدول 'signals'.")
+
+                # Check and add 'created_at' column if it doesn't exist
+                cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='signals' AND column_name='created_at'")
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE signals ADD COLUMN created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();")
+                    logger.info("✅ [DB] تم إضافة عمود 'created_at' إلى جدول 'signals'.")
+
 
                 cur.execute("""
                      CREATE TABLE IF NOT EXISTS notifications (
@@ -135,22 +145,26 @@ def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
-        init_db()
+        # Attempt to re-initialize the database connection
+        init_db() 
     try:
         if conn:
             with conn.cursor() as cur:
                  cur.execute("SELECT 1;")
             return True
         return False
-    except (OperationalError, InterfaceError):
-        logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال. محاولة إعادة الاتصال...")
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال أو خطأ في العملية. محاولة إعادة الاتصال... الخطأ: {e}")
         try:
             init_db()
             return conn is not None and conn.closed == 0
         except Exception as retry_e:
-            logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
+            logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال بعد فقدان الاتصال: {retry_e}")
             return False
-    return False
+    except Exception as e:
+        logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع في check_db_connection: {e}")
+        return False
+    return False # Should not be reached but for safety
 
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
@@ -426,8 +440,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
             with signal_cache_lock:
                 if symbol in pending_signals_cache:
                     signal = pending_signals_cache[symbol]
-                    # تم عكس الشرط هنا ليصبح السعر الحالي أقل من أو يساوي سعر تفعيل الدخول
-                    if price <= signal.get('generation_price'): # تم تغييرها من trigger_price إلى generation_price
+                    if price <= signal.get('generation_price'):
                         signal_to_activate = signal
             if signal_to_activate:
                 logger.info(f"⚡ [Tracker] تم تفعيل الدخول للتوصية {symbol} عند سعر {price:.8f}")
@@ -456,7 +469,6 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
 
     generation_price = signal_to_activate['generation_price']
     original_target = signal_to_activate['target_price']
-    # تم تغيير ATR_SL_MULTIPLIER إلى ATR_TP_MULTIPLIER هنا
     atr_at_generation = signal_to_activate.get('signal_details', {}).get('atr_at_generation')
 
     if not atr_at_generation:
@@ -464,12 +476,10 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
         return
 
     new_entry_price = activation_price
-    # الهدف الأول سيكون سعر التوليد الأصلي
     new_target_1 = generation_price 
     new_target_2 = original_target
     new_stop_loss = new_entry_price - (atr_at_generation * ATR_SL_MULTIPLIER)
 
-    # التحقق من أن نسبة المخاطرة إلى المكافأة مقبولة
     risk = abs(new_entry_price - new_stop_loss)
     reward_to_target2 = abs(new_target_2 - new_entry_price)
     if risk == 0:
@@ -479,16 +489,15 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
     risk_reward_ratio_2 = reward_to_target2 / risk
     if risk_reward_ratio_2 < MINIMUM_RISK_REWARD_RATIO:
         logger.warning(f"⚠️ [{symbol}] نسبة المخاطرة إلى المكافأة (للهدف الثاني) غير كافية ({risk_reward_ratio_2:.2f}). لن يتم تفعيل التوصية.")
-        # يمكن هنا حفظها في قاعدة البيانات بحالة "مرفوضة" إذا أردت تتبعها
         return
 
     updated_signal = signal_to_activate.copy()
     updated_signal['status'] = 'open'
     updated_signal['entry_price'] = new_entry_price
-    updated_signal['target_price'] = new_target_2 # الهدف النهائي هو الهدف الثاني
+    updated_signal['target_price'] = new_target_2
     updated_signal['stop_loss'] = new_stop_loss
     updated_signal['signal_details']['activated_at'] = datetime.now(UTC).isoformat()
-    updated_signal['signal_details']['target_1'] = new_target_1 # إضافة الهدف الأول لتفاصيل الإشارة
+    updated_signal['signal_details']['target_1'] = new_target_1
 
     if not check_db_connection() or not conn:
         logger.error(f"❌ [{symbol}] فشل تفعيل التوصية، لا يوجد اتصال بقاعدة البيانات.")
@@ -638,7 +647,7 @@ def main_loop():
 
                         pending_recommendation = {
                             'symbol': symbol, 'generation_price': current_price,
-                            'original_target': target_price, 'trigger_price': stop_loss_price, # trigger_price هنا هو SL الأولي
+                            'original_target': target_price, 'trigger_price': stop_loss_price,
                             'strategy_name': BASE_ML_MODEL_NAME,
                             'signal_details': {
                                 'ML_Probability_Buy': potential_signal['signal_details']['ML_Probability_Buy'],
@@ -649,8 +658,6 @@ def main_loop():
                         if saved_signal:
                             with signal_cache_lock: pending_signals_cache[saved_signal['symbol']] = saved_signal
                             log_and_notify('info', f"توصية جديدة قيد الانتظار لـ {symbol}", "NEW_PENDING_SIGNAL")
-                    # else:
-                    #     logger.debug(f"ℹ️ [رفض الإشارة] {symbol}: النموذج لم يولد إشارة بثقة كافية.") # تم نقل هذا التسجيل إلى دالة generate_signal
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] {symbol}: {e}", exc_info=True)
                 finally:
