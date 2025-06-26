@@ -29,23 +29,19 @@
             background-color: rgba(239, 68, 68, 0.1);
             border: 1px solid rgba(239, 68, 68, 0.3);
         }
+        .status-pending {
+            color: #facc15; /* yellow-400 */
+            background-color: rgba(250, 204, 21, 0.1);
+            border: 1px solid rgba(250, 204, 21, 0.3);
+        }
         .profit { color: #22c55e; } /* green-500 */
         .loss { color: #ef4444; } /* red-500 */
 
         /* Custom scrollbar */
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        ::-webkit-scrollbar-track {
-            background: #1f2937;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: #4b5563;
-            border-radius: 10px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: #6b7280;
-        }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #6b7280; }
     </style>
 </head>
 <body>
@@ -57,7 +53,6 @@
 
         <!-- Market Status & Stats -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <!-- Market Status -->
             <div class="card p-4 rounded-lg flex flex-col justify-center items-center">
                 <h2 class="text-lg font-bold text-gray-300 mb-2">حالة السوق</h2>
                 <div id="fear-greed" class="text-center">
@@ -69,7 +64,6 @@
                     <p class="text-lg font-bold animate-pulse">...</p>
                 </div>
             </div>
-            <!-- Stats -->
             <div class="card p-4 rounded-lg flex flex-col justify-center items-center">
                 <h2 class="text-lg font-bold text-gray-300 mb-2">معدل النجاح</h2>
                 <p id="win-rate" class="text-4xl font-bold text-green-400 animate-pulse">0%</p>
@@ -85,38 +79,61 @@
             </div>
         </div>
 
-        <!-- Main Content: Signals and Notifications -->
+        <!-- Main Content Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Signals Table (takes 2/3 width) -->
-            <div class="lg:col-span-2 card rounded-lg p-4 overflow-hidden">
-                <h2 class="text-xl font-bold mb-4">التوصيات الحالية والسابقة</h2>
-                <div class="overflow-x-auto max-h-[60vh]">
-                    <table class="min-w-full text-sm text-left">
-                        <thead class="table-header sticky top-0">
-                            <tr>
-                                <th class="p-3">العملة</th>
-                                <th class="p-3">الحالة</th>
-                                <th class="p-3">سعر الدخول</th>
-                                <th class="p-3">السعر الحالي/الإغلاق</th>
-                                <th class="p-3">الهدف (TP)</th>
-                                <th class="p-3">وقف الخسارة (SL)</th>
-                                <th class="p-3">الربح %</th>
-                                <th class="p-3">إجراء</th>
-                            </tr>
-                        </thead>
-                        <tbody id="signals-table">
-                           <!-- سيتم ملء الصفوف هنا عبر JavaScript -->
-                           <tr><td colspan="8" class="text-center p-8 text-gray-400 animate-pulse">جاري تحميل التوصيات...</td></tr>
-                        </tbody>
-                    </table>
+            <!-- Main Content Area (Tables) -->
+            <div class="lg:col-span-2 space-y-6">
+                <!-- Pending Recommendations Table -->
+                <div class="card rounded-lg p-4 overflow-hidden">
+                    <h2 class="text-xl font-bold mb-4 text-yellow-400">🕒 توصيات قيد الانتظار</h2>
+                    <div class="overflow-x-auto max-h-[40vh]">
+                        <table class="min-w-full text-sm text-left">
+                            <thead class="table-header sticky top-0">
+                                <tr>
+                                    <th class="p-3">العملة</th>
+                                    <th class="p-3">السعر الحالي</th>
+                                    <th class="p-3">سعر التفعيل</th>
+                                    <th class="p-3">الهدف الأولي</th>
+                                    <th class="p-3">وقت الإنشاء</th>
+                                    <th class="p-3">إجراء</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pending-recs-table">
+                               <tr><td colspan="6" class="text-center p-8 text-gray-400 animate-pulse">جاري تحميل التوصيات قيد الانتظار...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Active and Closed Signals Table -->
+                <div class="card rounded-lg p-4 overflow-hidden">
+                    <h2 class="text-xl font-bold mb-4">التوصيات النشطة والسابقة</h2>
+                    <div class="overflow-x-auto max-h-[60vh]">
+                        <table class="min-w-full text-sm text-left">
+                            <thead class="table-header sticky top-0">
+                                <tr>
+                                    <th class="p-3">العملة</th>
+                                    <th class="p-3">الحالة</th>
+                                    <th class="p-3">سعر الدخول</th>
+                                    <th class="p-3">السعر الحالي/الإغلاق</th>
+                                    <th class="p-3">الهدف (TP)</th>
+                                    <th class="p-3">وقف الخسارة (SL)</th>
+                                    <th class="p-3">الربح %</th>
+                                    <th class="p-3">إجراء</th>
+                                </tr>
+                            </thead>
+                            <tbody id="signals-table">
+                               <tr><td colspan="8" class="text-center p-8 text-gray-400 animate-pulse">جاري تحميل التوصيات...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
-            <!-- Notifications (takes 1/3 width) -->
-            <div class="card rounded-lg p-4 flex flex-col max-h-[calc(60vh+80px)]">
+            <!-- Notifications Column -->
+            <div class="card rounded-lg p-4 flex flex-col lg:max-h-[calc(40vh+60vh+4.5rem)]">
                 <h2 class="text-xl font-bold mb-4">سجل التنبيهات</h2>
                 <div id="notifications-log" class="flex-grow overflow-y-auto space-y-3 pr-2">
-                    <!-- سيتم ملء التنبيهات هنا -->
                      <p class="text-center p-8 text-gray-400 animate-pulse">جاري تحميل التنبيهات...</p>
                 </div>
             </div>
@@ -142,11 +159,11 @@ function formatPercent(percent) {
 
 function getNotificationIcon(type) {
     switch(type) {
-        case 'NEW_TRADE': return '🚀';
-        case 'TRADE_CLOSE': return '🏁';
-        case 'TSL_UPDATE': return '📈';
+        case 'NEW_SIGNAL': return '🚀';
+        case 'CLOSE_SIGNAL': return '🏁';
+        case 'PENDING_SIGNAL': return '⏳';
         case 'SYSTEM_ERROR': return '❌';
-        case 'SYSTEM_INFO':
+        case 'SYSTEM':
         case 'SYSTEM_WARNING': return 'ℹ️';
         default: return '🔔';
     }
@@ -159,30 +176,108 @@ async function manualCloseSignal(signalId) {
     try {
         const response = await fetch(`${API_BASE_URL}/api/close/${signalId}`, { method: 'POST' });
         const result = await response.json();
-        if (!response.ok) {
-            throw new Error(result.error || 'فشل إغلاق الصفقة');
-        }
+        if (!response.ok) throw new Error(result.error || 'فشل إغلاق الصفقة');
         alert(result.message || 'تم إرسال طلب إغلاق الصفقة بنجاح.');
-        fetchData(); // Refresh data
+        fetchData();
     } catch (error) {
         alert(`خطأ: ${error.message}`);
     }
 }
 
+async function triggerPendingSignal(recId) {
+    if (!confirm('هل أنت متأكد من أنك تريد تفعيل هذه التوصية والدخول بالسعر الحالي؟ سيؤدي هذا إلى إنشاء صفقة جديدة.')) {
+        return;
+    }
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/trigger_pending/${recId}`, { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'فشل تفعيل التوصية');
+        alert(result.message || 'تم إرسال طلب تفعيل التوصية بنجاح.');
+        fetchData();
+    } catch (error) {
+        alert(`خطأ: ${error.message}`);
+    }
+}
+
+function updatePendingTable(pendingRecs) {
+    const tableBody = document.getElementById('pending-recs-table');
+    tableBody.innerHTML = '';
+    if (!pendingRecs || pendingRecs.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="6" class="text-center p-8 text-gray-400">لا توجد توصيات قيد الانتظار حاليًا.</td></tr>';
+        return;
+    }
+    pendingRecs.forEach(rec => {
+        const row = `
+            <tr class="border-b border-gray-700 hover:bg-gray-800">
+                <td class="p-3 font-mono font-bold">${rec.symbol}</td>
+                <td class="p-3 font-mono animate-pulse">${formatPrice(rec.current_price)}</td>
+                <td class="p-3 font-mono text-yellow-400">${formatPrice(rec.trigger_price)}</td>
+                <td class="p-3 font-mono">${formatPrice(rec.original_target_price)}</td>
+                <td class="p-3 text-gray-400 text-xs">${new Date(rec.created_at).toLocaleString('ar-EG')}</td>
+                <td class="p-3">
+                    <button onclick="triggerPendingSignal(${rec.id})" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1 rounded">دخول فوري</button>
+                </td>
+            </tr>
+        `;
+        tableBody.innerHTML += row;
+    });
+}
+
+function updateSignalsTable(signals) {
+    const signalsTable = document.getElementById('signals-table');
+    signalsTable.innerHTML = '';
+    if (!signals || signals.length === 0) {
+        signalsTable.innerHTML = '<tr><td colspan="8" class="text-center p-8 text-gray-400">لا توجد توصيات حاليًا.</td></tr>';
+    } else {
+        let openTradesCount = 0;
+        signals.forEach(s => {
+            if (s.status === 'open') openTradesCount++;
+            const isClosed = s.status !== 'open';
+            const priceToShow = isClosed ? s.closing_price : s.current_price;
+            
+            const row = `
+                <tr class="border-b border-gray-700 hover:bg-gray-800">
+                    <td class="p-3 font-mono font-bold">${s.symbol}</td>
+                    <td class="p-3">
+                        <span class="px-2 py-1 text-xs font-bold rounded-full ${isClosed ? 'status-closed' : 'status-open'}">
+                            ${isClosed ? 'مغلقة' : 'مفتوحة'}
+                        </span>
+                    </td>
+                    <td class="p-3 font-mono">${formatPrice(s.entry_price)}</td>
+                    <td class="p-3 font-mono ${isClosed ? '' : 'text-cyan-400 animate-pulse'}">${formatPrice(priceToShow)}</td>
+                    <td class="p-3 font-mono">${formatPrice(s.target_price)}</td>
+                    <td class="p-3 font-mono">${formatPrice(s.stop_loss)}</td>
+                    <td class="p-3 font-mono">${isClosed ? formatPercent(s.profit_percentage) : 'N/A'}</td>
+                    <td class="p-3">
+                        ${!isClosed ? `<button onclick="manualCloseSignal(${s.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded">إغلاق</button>` : '-'}
+                    </td>
+                </tr>
+            `;
+            signalsTable.innerHTML += row;
+        });
+        document.getElementById('open-trades-count').textContent = openTradesCount;
+    }
+}
 
 async function fetchData() {
     try {
-        const [signalsRes, statsRes, statusRes, notificationsRes] = await Promise.all([
+        const [signalsRes, statsRes, statusRes, notificationsRes, pendingRes] = await Promise.all([
             fetch(`${API_BASE_URL}/api/signals`),
             fetch(`${API_BASE_URL}/api/stats`),
             fetch(`${API_BASE_URL}/api/market_status`),
             fetch(`${API_BASE_URL}/api/notifications`),
+            fetch(`${API_BASE_URL}/api/pending_recommendations`),
         ]);
+
+        if (!signalsRes.ok || !statsRes.ok || !statusRes.ok || !notificationsRes.ok || !pendingRes.ok) {
+            throw new Error('Network response was not ok');
+        }
 
         const signals = await signalsRes.json();
         const stats = await statsRes.json();
         const marketStatus = await statusRes.json();
         const notifications = await notificationsRes.json();
+        const pendingRecs = await pendingRes.json();
 
         // Update Stats & Market Status
         document.getElementById('fear-greed').innerHTML = `
@@ -195,41 +290,10 @@ async function fetchData() {
         document.getElementById('win-loss-count').textContent = `${stats.wins} فوز / ${stats.losses} خسارة`;
         document.getElementById('total-profit').innerHTML = formatPercent(stats.total_profit_percent);
         
-        // Update Signals Table
-        const signalsTable = document.getElementById('signals-table');
-        signalsTable.innerHTML = '';
-        if (signals.length === 0) {
-            signalsTable.innerHTML = '<tr><td colspan="8" class="text-center p-8 text-gray-400">لا توجد توصيات حاليًا.</td></tr>';
-        } else {
-            let openTradesCount = 0;
-            signals.forEach(s => {
-                if(s.status === 'open') openTradesCount++;
-                const isClosed = s.status !== 'open';
-                const priceToShow = isClosed ? s.closing_price : s.current_price;
-                
-                const row = `
-                    <tr class="border-b border-gray-700 hover:bg-gray-800">
-                        <td class="p-3 font-mono font-bold">${s.symbol}</td>
-                        <td class="p-3">
-                            <span class="px-2 py-1 text-xs font-bold rounded-full ${isClosed ? 'status-closed' : 'status-open'}">
-                                ${isClosed ? 'مغلقة' : 'مفتوحة'}
-                            </span>
-                        </td>
-                        <td class="p-3 font-mono">${formatPrice(s.entry_price)}</td>
-                        <td class="p-3 font-mono ${isClosed ? '' : 'animate-pulse'}">${formatPrice(priceToShow)}</td>
-                        <td class="p-3 font-mono">${formatPrice(s.target_price)}</td>
-                        <td class="p-3 font-mono">${formatPrice(s.trailing_stop_price || s.stop_loss)}</td>
-                        <td class="p-3 font-mono">${formatPercent(s.profit_percentage)}</td>
-                        <td class="p-3">
-                            ${!isClosed ? `<button onclick="manualCloseSignal(${s.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1 rounded">إغلاق</button>` : '-'}
-                        </td>
-                    </tr>
-                `;
-                signalsTable.innerHTML += row;
-            });
-            document.getElementById('open-trades-count').textContent = openTradesCount;
-        }
-
+        // Update Tables
+        updateSignalsTable(signals);
+        updatePendingTable(pendingRecs);
+        
         // Update Notifications
         const notificationsLog = document.getElementById('notifications-log');
         notificationsLog.innerHTML = '';
@@ -250,10 +314,10 @@ async function fetchData() {
             });
         }
 
-
     } catch (error) {
         console.error("Failed to fetch data:", error);
         document.getElementById('signals-table').innerHTML = `<tr><td colspan="8" class="text-center p-8 text-red-400">فشل تحميل البيانات. تحقق من اتصال الخادم.</td></tr>`;
+        document.getElementById('pending-recs-table').innerHTML = `<tr><td colspan="6" class="text-center p-8 text-red-400">فشل تحميل البيانات. تحقق من اتصال الخادم.</td></tr>`;
     } finally {
         document.getElementById('last-updated').textContent = `آخر تحديث: ${new Date().toLocaleTimeString('ar-EG')}`;
     }
