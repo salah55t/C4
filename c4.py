@@ -27,11 +27,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v5_compatible.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v5_advanced_sr.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV5Compatible')
+logger = logging.getLogger('CryptoBotV5_AdvancedSR')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -75,6 +75,8 @@ BTC_SYMBOL = 'BTCUSDT'
 MODEL_CONFIDENCE_THRESHOLD = 0.80
 MAX_OPEN_TRADES: int = 5
 USE_SR_LEVELS = True
+# **جديد**: الحد الأدنى لدرجة قوة المستوى (score) ليتم اعتماده
+MINIMUM_SR_SCORE = 30
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 USE_BTC_TREND_FILTER = True
@@ -84,8 +86,7 @@ BTC_TREND_EMA_PERIOD = 10
 # --- ثوابت فلترة الصفقات ---
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-# **جديد**: فلتر حجم السيولة اللحظي (قيمة التداول بالدولار في آخر شمعة 15 دقيقة)
-MINIMUM_15M_VOLUME_USDT = 100_000 # 200 ألف دولار كحد أدنى
+MINIMUM_15M_VOLUME_USDT = 200_000 # 200 ألف دولار كحد أدنى
 
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -109,6 +110,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # Ensure the 'signals', 'notifications', and 'ml_models' tables exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -124,14 +126,26 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                      CREATE TABLE IF NOT EXISTS ml_models ( id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE, model_data BYTEA NOT NULL,
                         trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
                 """)
+                # Check for the support_resistance_levels table and its 'score' column
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS support_resistance_levels (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
-                        level_type TEXT NOT NULL, timeframe TEXT NOT NULL, strength INTEGER NOT NULL,
-                        last_tested_at TIMESTAMP, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        level_price DOUBLE PRECISION NOT NULL,
+                        level_type TEXT NOT NULL,
+                        timeframe TEXT NOT NULL,
+                        strength NUMERIC NOT NULL,
+                        score NUMERIC DEFAULT 0,
+                        last_tested_at TIMESTAMP WITH TIME ZONE,
+                        details TEXT,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
                     );
                 """)
+                cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='support_resistance_levels' AND column_name='score'")
+                if not cur.fetchone():
+                    logger.info("[DB] عمود 'score' غير موجود في جدول support_resistance_levels، سيتم إضافته...")
+                    cur.execute("ALTER TABLE support_resistance_levels ADD COLUMN score NUMERIC DEFAULT 0;")
             conn.commit()
             logger.info("✅ [قاعدة البيانات] تم تهيئة جميع جداول قاعدة البيانات بنجاح.")
             return
@@ -147,13 +161,21 @@ def check_db_connection() -> bool:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
         init_db()
     try:
-        if conn: conn.cursor().execute("SELECT 1;"); return True
+        if conn:
+            with conn.cursor() as cur:
+                 cur.execute("SELECT 1;")
+            return True
         return False
     except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال: {e}. محاولة إعادة الاتصال...")
-        try: init_db(); return conn is not None and conn.closed == 0
-        except Exception as retry_e: logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}"); return False
+        try:
+            init_db()
+            return conn is not None and conn.closed == 0
+        except Exception as retry_e:
+            logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
+            return False
     return False
+
 
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
@@ -169,26 +191,38 @@ def log_and_notify(level: str, message: str, notification_type: str):
         logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}");
         if conn: conn.rollback()
 
-def fetch_sr_levels(symbol: str) -> Optional[Dict[str, List[float]]]:
+# **جديد**: تم تعديل الدالة لجلب معلومات إضافية (score) وترتيب النتائج
+def fetch_sr_levels(symbol: str) -> Optional[List[Dict]]:
+    """
+    Fetches support and resistance levels from the database, including their score.
+    
+    Args:
+        symbol (str): The symbol to fetch levels for.
+
+    Returns:
+        Optional[List[Dict]]: A list of level dictionaries, or None if failed.
+    """
     if not check_db_connection() or not conn:
         logger.warning(f"⚠️ [{symbol}] لا يمكن جلب مستويات الدعم والمقاومة، اتصال قاعدة البيانات غير متاح.")
         return None
     try:
         with conn.cursor() as cur:
+            # جلب كل الأعمدة المهمة وترتيبها حسب السعر
             cur.execute(
-                "SELECT level_price, level_type FROM support_resistance_levels WHERE symbol = %s ORDER BY level_price ASC",
+                "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s ORDER BY level_price ASC",
                 (symbol,)
             )
             levels = cur.fetchall()
             if not levels:
-                logger.info(f"ℹ️ [{symbol}] لا توجد مستويات دعم ومقاومة محفوظة في قاعدة البيانات.")
+                # logger.info(f"ℹ️ [{symbol}] لا توجد مستويات دعم ومقاومة محفوظة في قاعدة البيانات.")
                 return None
+            
+            # تحويل score إلى float للتعامل معه بسهولة
+            for level in levels:
+                level['score'] = float(level.get('score', 0))
 
-            supports = sorted([float(level['level_price']) for level in levels if level['level_type'] == 'support'])
-            resistances = sorted([float(level['level_price']) for level in levels if level['level_type'] == 'resistance'])
-
-            logger.info(f"📈 [{symbol}] تم جلب {len(supports)} دعم و {len(resistances)} مقاومة من قاعدة البيانات.")
-            return {"supports": supports, "resistances": resistances}
+            logger.info(f"📈 [{symbol}] تم جلب {len(levels)} مستوى دعم ومقاومة من قاعدة البيانات.")
+            return levels
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ أثناء جلب مستويات الدعم والمقاومة: {e}")
         if conn: conn.rollback()
@@ -236,6 +270,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    # This function remains unchanged
     df_calc = df_15m.copy()
     high_low = df_calc['high'] - df_calc['low']; high_close = (df_calc['high'] - df_calc['close'].shift()).abs(); low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
@@ -286,6 +321,7 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     return df_featured.dropna()
 
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    # This function remains unchanged
     df_patterns = df.copy()
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
     body = abs(cl - op); candle_range = hi - lo; candle_range[candle_range == 0] = 1e-9 
@@ -302,6 +338,7 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df_patterns
     
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
+    # This function remains unchanged
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     model_dir = 'Mo'
     file_path = os.path.join(model_dir, f"{model_name}.pkl")
@@ -327,6 +364,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
+    # This function remains unchanged
     global open_signals_cache, current_prices
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
@@ -354,6 +392,7 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
 
 
 def run_websocket_manager() -> None:
+    # This function remains unchanged
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
@@ -362,6 +401,7 @@ def run_websocket_manager() -> None:
     twm.join()
 
 class TradingStrategy:
+    # This class remains unchanged
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_folder(symbol)
@@ -407,6 +447,7 @@ class TradingStrategy:
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
+    # This function remains unchanged
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
@@ -414,13 +455,13 @@ def send_telegram_message(target_chat_id: str, text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
+    # This function remains unchanged
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
     
     sr_info = signal_data.get('signal_details', {}).get('sr_info', 'ATR Default')
     rr_ratio_info = signal_data.get('signal_details', {}).get('risk_reward_ratio', 'N/A')
-    # **جديد**: إضافة معلومات السيولة للرسالة
     volume_info = signal_data.get('signal_details', {}).get('last_15m_volume_usdt', 'N/A')
 
     message = (f"💡 *إشارة تداول جديدة ({BASE_ML_MODEL_NAME})* 💡\n\n"
@@ -442,6 +483,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # This function remains unchanged
     if not check_db_connection() or not conn: return None
     try:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
@@ -461,6 +503,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
+    # This function remains unchanged
     symbol = signal['symbol']
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']: return
@@ -487,6 +530,7 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         if conn: conn.rollback()
 
 def load_open_signals_to_cache():
+    # This function remains unchanged
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً...")
     try:
@@ -500,6 +544,7 @@ def load_open_signals_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
 def load_notifications_to_cache():
+    # This function remains unchanged
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل آخر التنبيهات...")
     try:
@@ -508,13 +553,17 @@ def load_notifications_to_cache():
             recent = cur.fetchall()
             with notifications_lock:
                 notifications_cache.clear()
-                for n in reversed(recent): n['timestamp'] = n['timestamp'].isoformat(); notifications_cache.appendleft(dict(n))
+                for n in reversed(recent):
+                    if 'timestamp' in n and isinstance(n['timestamp'], datetime):
+                        n['timestamp'] = n['timestamp'].isoformat()
+                    notifications_cache.appendleft(dict(n))
             logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
 
 # ---------------------- حلقة العمل الرئيسية (مُعدَّلة بشكل كبير) ----------------------
 def get_btc_trend() -> Dict[str, Any]:
+    # This function remains unchanged
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
@@ -570,7 +619,7 @@ def main_loop():
                     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
 
                     if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
-                        logger.warning(f"⚠️ {symbol}: لا توجد بيانات كافية. سيتم التخطي.")
+                        # logger.warning(f"⚠️ {symbol}: لا توجد بيانات كافية. سيتم التخطي.")
                         continue
                     
                     strategy = TradingStrategy(symbol)
@@ -590,7 +639,7 @@ def main_loop():
                         last_15m_volume_usdt = last_15m_volume_asset * last_15m_close_price
 
                         if last_15m_volume_usdt < MINIMUM_15M_VOLUME_USDT:
-                            logger.info(f"📉 [{symbol}] تم تجاهل الإشارة. حجم السيولة في آخر 15 دقيقة (${last_15m_volume_usdt:,.0f}) أقل من الحد الأدنى (${MINIMUM_15M_VOLUME_USDT:,.0f}).")
+                            logger.info(f"📉 [{symbol}] تم تجاهل الإشارة. حجم السيولة (${last_15m_volume_usdt:,.0f}) أقل من الحد الأدنى (${MINIMUM_15M_VOLUME_USDT:,.0f}).")
                             continue
                         
                         logger.info(f"✅ [{symbol}] تم اجتياز فلتر السيولة اللحظية. حجم التداول: ${last_15m_volume_usdt:,.0f}.")
@@ -604,28 +653,36 @@ def main_loop():
                         potential_signal['entry_price'] = current_price
                         atr_value = df_features['atr'].iloc[-1]
                         
+                        # **جديد**: المنطق الجديد لتحديد الأهداف بناء على نقاط القوة
                         stop_loss = current_price - (atr_value * ATR_SL_MULTIPLIER)
                         target_price = current_price + (atr_value * ATR_TP_MULTIPLIER)
-                        sr_info = "ATR Default"
+                        sr_info = "ATR Default" # القيمة الافتراضية
 
                         if USE_SR_LEVELS:
-                            sr_levels = fetch_sr_levels(symbol)
-                            if sr_levels:
-                                supports_below = [s for s in sr_levels['supports'] if s < current_price]
-                                if supports_below:
-                                    closest_support = max(supports_below)
-                                    stop_loss = closest_support * 0.998
-                                    logger.info(f"🛡️ [{symbol}] تم تعديل وقف الخسارة إلى {stop_loss:.8g} بناءً على دعم عند {closest_support:.8g}.")
-                                    sr_info = "S/R Levels"
+                            all_levels = fetch_sr_levels(symbol)
+                            if all_levels:
+                                # فلترة المستويات القوية فقط
+                                strong_levels = [lvl for lvl in all_levels if lvl.get('score', 0) >= MINIMUM_SR_SCORE]
                                 
-                                resistances_above = [r for r in sr_levels['resistances'] if r > current_price]
-                                if resistances_above:
-                                    closest_resistance = min(resistances_above)
-                                    target_price = closest_resistance * 0.998
-                                    logger.info(f"🎯 [{symbol}] تم تعديل الهدف إلى {target_price:.8g} بناءً على مقاومة عند {closest_resistance:.8g}.")
-                                    sr_info = "S/R Levels"
-                        
-                        # --- منطق فلترة الصفقات الضعيفة ---
+                                # فلترة الدعوم والمقاومات القوية
+                                strong_supports = [lvl for lvl in strong_levels if 'support' in lvl.get('level_type', '') and lvl['level_price'] < current_price]
+                                strong_resistances = [lvl for lvl in strong_levels if 'resistance' in lvl.get('level_type', '') and lvl['level_price'] > current_price]
+
+                                # تحديد وقف الخسارة بناءً على أقوى دعم قريب
+                                if strong_supports:
+                                    closest_strong_support = max(strong_supports, key=lambda x: x['level_price'])
+                                    stop_loss = closest_strong_support['level_price'] * 0.998 # هامش أمان صغير
+                                    sr_info = f"Strong S/R (Score > {MINIMUM_SR_SCORE})"
+                                    logger.info(f"🛡️ [{symbol}] تم تعديل وقف الخسارة إلى {stop_loss:.8g} بناءً على دعم قوي عند {closest_strong_support['level_price']:.8g} (Score: {closest_strong_support['score']}).")
+                                
+                                # تحديد الهدف بناءً على أقوى مقاومة قريبة
+                                if strong_resistances:
+                                    closest_strong_resistance = min(strong_resistances, key=lambda x: x['level_price'])
+                                    target_price = closest_strong_resistance['level_price'] * 0.998 # هامش أمان صغير
+                                    sr_info = f"Strong S/R (Score > {MINIMUM_SR_SCORE})"
+                                    logger.info(f"🎯 [{symbol}] تم تعديل الهدف إلى {target_price:.8g} بناءً على مقاومة قوية عند {closest_strong_resistance['level_price']:.8g} (Score: {closest_strong_resistance['score']}).")
+
+                        # --- منطق فلترة الصفقات الضعيفة (لا تغيير هنا) ---
                         if target_price <= current_price or stop_loss >= current_price:
                             logger.info(f"⚠️ [{symbol}] تم إلغاء الإشارة. الهدف ({target_price:.8g}) أو الوقف ({stop_loss:.8g}) غير منطقي.")
                             continue
@@ -737,7 +794,8 @@ def get_signals():
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
             all_signals = cur.fetchall()
         for s in all_signals:
-            if s.get('closed_at'): s['closed_at'] = s['closed_at'].isoformat()
+            if s.get('closed_at') and isinstance(s['closed_at'], datetime):
+                s['closed_at'] = s['closed_at'].isoformat()
             if s['status'] == 'open':
                 with prices_lock: s['current_price'] = current_prices.get(s['symbol'])
         return jsonify(all_signals)
@@ -791,12 +849,14 @@ def initialize_bot_services():
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
+        # Do not exit, let Flask run if possible
         pass
 
 if __name__ == "__main__":
-    logger.info(f"🚀 بدء تشغيل بوت التداول المتوافق - إصدار {BASE_ML_MODEL_NAME}...")
+    logger.info(f"🚀 بدء تشغيل بوت التداول المتقدم - إصدار {BASE_ML_MODEL_NAME}...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
     logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت.")
     os._exit(0)
+
