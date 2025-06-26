@@ -1,7 +1,5 @@
 S
 DOT
-BTC
-ETH
 APT
 XRP
 API3
