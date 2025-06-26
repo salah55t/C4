@@ -70,7 +70,7 @@ BTC_SYMBOL = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 10
+BTC_TREND_EMA_PERIOD = 50
 
 # --- ML Strategy Constants ---
 USE_ML_STRATEGY = True
@@ -84,7 +84,7 @@ MINIMUM_SR_SCORE_FOR_SIGNAL = 50 # الحد الأدنى لقوة المستوى
 # --- General Signal Filtering ---
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-MINIMUM_15M_VOLUME_USDT = 200_000 # 200 ألف دولار كحد أدنى
+MINIMUM_15M_VOLUME_USDT = 50_000 # 200 ألف دولار كحد أدنى
 
 # --- Default TP/SL Fallback ---
 ATR_SL_MULTIPLIER = 2.0
