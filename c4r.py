@@ -50,7 +50,9 @@ DATA_FETCH_DAYS_5M = 3    # 3 أيام لإطار 5 دقائق
 ATR_PROMINENCE_MULTIPLIER_1H = 0.8
 ATR_PROMINENCE_MULTIPLIER_15M = 0.6
 ATR_PROMINENCE_MULTIPLIER_5M = 0.5
-ATR_PERIOD = 14
+ATR_PERIOD = 14 # ATR القياسي
+ATR_SHORT_PERIOD = 7 # ATR قصير الأجل لقياس التقلبات الحالية
+ATR_LONG_PERIOD = 28 # ATR طويل الأجل لقياس التقلبات الأساسية
 
 # عرض القمم (أصغر ليتناسب مع الفريمات الصغيرة)
 WIDTH_1H = 8
@@ -87,7 +89,6 @@ def run_web_server():
         httpd.serve_forever()
 
 # ---------------------- دوال Binance والبيانات ----------------------
-# (لا تغيير هنا)
 def get_binance_client() -> Optional[Client]:
     try:
         client = Client(API_KEY, API_SECRET)
@@ -119,7 +120,6 @@ def fetch_historical_data_with_retry(client: Client, symbol: str, interval: str,
     return None
 
 def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> List[str]:
-    # (The function body is unchanged)
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -137,7 +137,6 @@ def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> 
         return []
 
 # ---------------------- دوال قاعدة البيانات ----------------------
-# (لا تغيير هنا)
 def init_db() -> Optional[psycopg2.extensions.connection]:
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
     conn = None
@@ -168,7 +167,6 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
         return None
 
 def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_levels: List[Dict]):
-    # (The function body is unchanged)
     if not all_final_levels:
         logger.info("ℹ️ [DB] لا توجد مستويات نهائية ليتم حفظها.")
         return
@@ -189,8 +187,10 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
 
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
 
-def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
-    # (The function body is unchanged)
+def calculate_atr(df: pd.DataFrame, period: int) -> float:
+    # تم تغيير الدالة لتقبل `period` كمتغير
+    if df.empty or len(df) < period:
+        return 0
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -199,7 +199,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     return atr.iloc[-1] if not atr.empty else 0
 
 def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_multiplier: float, width: int, cluster_eps_percent: float) -> List[Dict]:
-    # (The function logic is unchanged, but it will receive the new scalping-specific parameters)
+    # لا تغييرات هنا، ستستقبل الدالة المضاعف الديناميكي الجديد
     lows = df['low'].to_numpy()
     highs = df['high'].to_numpy()
     
@@ -207,7 +207,7 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     if dynamic_prominence == 0:
         logger.warning("[Peaks] قيمة ATR تساوي صفر، سيتم استخدام قيمة بروز افتراضية صغيرة.")
         dynamic_prominence = highs.mean() * 0.01 
-    logger.debug(f"[Peaks] استخدام بروز ديناميكي بقيمة: {dynamic_prominence:.4f}")
+    logger.debug(f"[Peaks] استخدام بروز ديناميكي بقيمة: {dynamic_prominence:.4f} ومضاعف: {prominence_multiplier:.2f}")
 
     low_peaks_indices, _ = find_peaks(-lows, prominence=dynamic_prominence, width=width)
     high_peaks_indices, _ = find_peaks(highs, prominence=dynamic_prominence, width=width)
@@ -215,19 +215,8 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     if VOLUME_CONFIRMATION_ENABLED and not df.empty:
         df['volume_avg'] = df['volume'].rolling(window=VOLUME_AVG_PERIOD, min_periods=1).mean()
         
-        confirmed_low_indices = []
-        for idx in low_peaks_indices:
-            peak_volume = df['volume'].iloc[idx]
-            avg_volume = df['volume_avg'].iloc[idx]
-            if not pd.isna(avg_volume) and avg_volume > 0 and peak_volume >= avg_volume * VOLUME_SPIKE_FACTOR:
-                confirmed_low_indices.append(idx)
-        
-        confirmed_high_indices = []
-        for idx in high_peaks_indices:
-            peak_volume = df['volume'].iloc[idx]
-            avg_volume = df['volume_avg'].iloc[idx]
-            if not pd.isna(avg_volume) and avg_volume > 0 and peak_volume >= avg_volume * VOLUME_SPIKE_FACTOR:
-                confirmed_high_indices.append(idx)
+        confirmed_low_indices = [idx for idx in low_peaks_indices if df['volume'].iloc[idx] >= df['volume_avg'].iloc[idx] * VOLUME_SPIKE_FACTOR]
+        confirmed_high_indices = [idx for idx in high_peaks_indices if df['volume'].iloc[idx] >= df['volume_avg'].iloc[idx] * VOLUME_SPIKE_FACTOR]
         
         logger.debug(f"[Volume Filter] Lows before: {len(low_peaks_indices)}, after: {len(confirmed_low_indices)}. "
                      f"Highs before: {len(high_peaks_indices)}, after: {len(confirmed_high_indices)}")
@@ -259,7 +248,7 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     return support_levels + resistance_levels
 
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
-    # (The function body is unchanged)
+    # No changes here
     price_min, price_max = df['low'].min(), df['high'].max()
     if price_min >= price_max: return []
     price_bins = np.linspace(price_min, price_max, bins + 1)
@@ -277,10 +266,10 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
     return [{"level_price": float(bin_centers[poc_index]), "level_type": 'poc', "strength": float(volume_by_bin[poc_index]), "last_tested_at": None}]
 
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
-    # (The function body is unchanged, but uses new scalping confluence percent)
+    # No changes here
     if not levels: return [], []
     levels.sort(key=lambda x: x['level_price'])
-    tf_weights = {'1h': 3, '15m': 2, '5m': 1} # Adjusted weights for new timeframes
+    tf_weights = {'1h': 3, '15m': 2, '5m': 1} 
     type_weights = {'poc': 2.5, 'support': 1.5, 'resistance': 1.5}
     confluence_zones, used_indices = [], set()
     for i in range(len(levels)):
@@ -314,7 +303,6 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     logger.info(f"--- بدء تحليل (سكالبينج) للعملة: {symbol} ---")
     raw_levels = []
     
-    # --- إعدادات الإطارات الزمنية للسكالبينج ---
     timeframes_config = {
         '1h':  {'days': DATA_FETCH_DAYS_1H,  'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_1H,  'width': WIDTH_1H},
         '15m': {'days': DATA_FETCH_DAYS_15M, 'prominence_multiplier': ATR_PROMINENCE_MULTIPLIER_15M, 'width': WIDTH_15M},
@@ -324,16 +312,43 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     for tf, config in timeframes_config.items():
         df = fetch_historical_data_with_retry(client, symbol, tf, config['days'])
         if df is not None and not df.empty:
-            atr_value = calculate_atr(df, period=ATR_PERIOD)
-            logger.debug(f"[{symbol}-{tf}] Calculated ATR: {atr_value:.4f}")
             
+            # =========================================================================
+            # =============== START: المرحلة الأولى - تحسين البروز الديناميكي ===============
+            # =========================================================================
+            
+            # 1. حساب مؤشرات ATR متعددة لقياس حالة التقلب
+            atr_standard = calculate_atr(df, period=ATR_PERIOD)
+            atr_short = calculate_atr(df, period=ATR_SHORT_PERIOD)
+            atr_long = calculate_atr(df, period=ATR_LONG_PERIOD)
+            
+            # 2. تعديل مضاعف البروز بناءً على حالة التقلب
+            dynamic_prominence_multiplier = config['prominence_multiplier'] # ابدأ بالقيمة الأساسية
+            
+            # إذا كانت التقلبات الحالية (القصيرة) أعلى بكثير من المتوسط (الطويلة)، زد المضاعف لتقليل الضوضاء
+            if atr_long > 0 and atr_short > atr_long * 1.25:
+                dynamic_prominence_multiplier *= 1.2
+                logger.debug(f"[{symbol}-{tf}] تقلبات عالية. زيادة المضاعف إلى {dynamic_prominence_multiplier:.2f}")
+            # إذا كانت التقلبات الحالية منخفضة، قلل المضاعف لزيادة الحساسية
+            elif atr_long > 0 and atr_short < atr_long * 0.8:
+                dynamic_prominence_multiplier *= 0.8
+                logger.debug(f"[{symbol}-{tf}] تقلبات منخفضة. تقليل المضاعف إلى {dynamic_prominence_multiplier:.2f}")
+
+            logger.debug(f"[{symbol}-{tf}] ATR(14): {atr_standard:.4f}, ATR(7): {atr_short:.4f}, ATR(28): {atr_long:.4f}")
+            
+            # 3. استخدام المضاعف الديناميكي الجديد في تحديد المستويات
             pa_levels = find_price_action_levels(
                 df, 
-                atr_value, 
-                config['prominence_multiplier'], 
+                atr_standard, # استخدم ATR القياسي كقيمة أساسية
+                dynamic_prominence_multiplier, # استخدم المضاعف المعدل ديناميكيًا
                 config['width'], 
                 CLUSTER_EPS_PERCENT
             )
+            
+            # =======================================================================
+            # ================= END: المرحلة الأولى - تحسين البروز الديناميكي ================
+            # =======================================================================
+
             vol_levels = analyze_volume_profile(df, bins=VOLUME_PROFILE_BINS)
             
             for level in pa_levels + vol_levels:
