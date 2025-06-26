@@ -145,7 +145,6 @@ def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
-        # Attempt to re-initialize the database connection
         init_db() 
     try:
         if conn:
@@ -164,7 +163,7 @@ def check_db_connection() -> bool:
     except Exception as e:
         logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع في check_db_connection: {e}")
         return False
-    return False # Should not be reached but for safety
+    return False
 
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
@@ -340,13 +339,17 @@ class TradingStrategy:
 
     def load_ml_model_bundle_from_folder(self, symbol: str) -> None:
         model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-        model_dir = 'Mo'
-        file_path = os.path.join(model_dir, f"{model_name}.pkl")
         
-        logger.info(f"ℹ️ [تحميل النموذج] جاري محاولة تحميل النموذج لـ {self.symbol} من: {file_path}")
+        # الحصول على المسار المطلق لملف السكربت الحالي
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # بناء المسار الكامل لمجلد النماذج
+        model_dir_abs = os.path.join(script_dir, 'Mo')
+        file_path = os.path.join(model_dir_abs, f"{model_name}.pkl")
         
-        if not os.path.isdir(model_dir):
-            logger.warning(f"⚠️ [تحميل النموذج] مجلد النموذج '{model_dir}' غير موجود لـ {self.symbol}.")
+        logger.info(f"ℹ️ [تحميل النموذج] جاري محاولة تحميل النموذج لـ {self.symbol} من المسار المطلق: {file_path}")
+        
+        if not os.path.isdir(model_dir_abs):
+            logger.warning(f"⚠️ [تحميل النموذج] مجلد النموذج '{model_dir_abs}' غير موجود لـ {self.symbol}. تأكد من وجود مجلد 'Mo' في نفس مجلد ملف السكربت.")
             return
         
         if os.path.exists(file_path):
@@ -360,7 +363,7 @@ class TradingStrategy:
             except Exception as e:
                 logger.error(f"❌ [تحميل النموذج] فشل تحميل النموذج لـ {self.symbol} من {file_path}: {e}", exc_info=True)
         else:
-            logger.warning(f"⚠️ [تحميل النموذج] ملف النموذج '{file_path}' غير موجود لـ {self.symbol}.")
+            logger.warning(f"⚠️ [تحميل النموذج] ملف النموذج '{file_path}' غير موجود لـ {self.symbol}. تأكد من اسم الملف والتواجد.")
         
         if not all([self.ml_model, self.scaler, self.feature_names]):
             logger.warning(f"⚠️ [تحميل النموذج] لم يتم تحميل جميع مكونات النموذج (النموذج، المقياس، أسماء الميزات) لـ {self.symbol}.")
