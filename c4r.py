@@ -360,7 +360,8 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             total_strength_for_avg = sum(l['strength'] for l in current_zone_levels)
             if total_strength_for_avg == 0: continue
             avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / total_strength_for_avg
-            total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l.get('level_type'], 1) for l in current_zone_levels)
+            # --- سطر الكود الذي تم إصلاحه ---
+            total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l.get('level_type'), 1) for l in current_zone_levels)
             timeframes = sorted(list(set(l['timeframe'] for l in current_zone_levels)))
             details = sorted(list(set(l['level_type'] for l in current_zone_levels)))
             last_tested = max((l['last_tested_at'] for l in current_zone_levels if l['last_tested_at']), default=None)
