@@ -46,7 +46,8 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5_Pending'
+# تم تحديث اسم النموذج الأساسي ليتطابق مع أسماء ملفات النماذج الفعلية.
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5' 
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_FETCH_LOOKBACK_DAYS: int = 15
@@ -547,9 +548,9 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         with signal_cache_lock: del open_signals_cache[symbol]
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
-        alert_msg_db = f"{status_message}: {signal['symbol']} | الربح: {db_profit_pct:+.2f}%"
+        alert_msg_db = f"{status_message}: {symbol} | الربح: {db_profit_pct:+.2f}%"
         log_and_notify('info', alert_msg_db, 'CLOSE_SIGNAL')
-        send_telegram_message(CHAT_ID, f"*{status_message}*\n`{signal['symbol']}` | *الربح:* `{db_profit_pct:+.2f}%`")
+        send_telegram_message(CHAT_ID, f"*{status_message}*\n`{symbol}` | *الربح:* `{db_profit_pct:+.2f}%`")
     except Exception as e:
         logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']}: {e}", exc_info=True)
         if conn: conn.rollback()
