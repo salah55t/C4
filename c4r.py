@@ -74,7 +74,7 @@ class WebServerHandler(http.server.SimpleHTTPRequestHandler):
         html_content = """
         <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><title>حالة الماسح</title>
         <style>body{font-family: 'Segoe UI', sans-serif; background-color: #1a1a1a; color: #f0f0f0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;} .container{text-align: center; padding: 40px; background-color: #2b2b2b; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #00aaff;} h1{color: #00aaff;} .status{font-weight: bold; color: #28a745;}</style>
-        </head><body><div class="container"><h1>⚡️ ماسح الدعم والمقاومة - إصدار السكالبينج ⚡️</h1><h2>(مخصص للإطارات الزمنية الصغيرة)</h2><p>الخدمة <span class="status">تعمل</span>.</p><p>يتم التحديث كل 15 دقيقة.</p></div></body></html>
+        </head><body><div class="container"><h1>⚡️ ماسح الدعم والمقاومة - إصدار السكالبينج مع فيبوناتشي ⚡️</h1><h2>(مخصص للإطارات الزمنية الصغيرة)</h2><p>الخدمة <span class="status">تعمل</span>.</p><p>يتم التحديث كل 15 دقيقة.</p></div></body></html>
         """
         self.wfile.write(html_content.encode('utf-8'))
 
@@ -116,7 +116,6 @@ def fetch_historical_data_with_retry(client: Client, symbol: str, interval: str,
     return None
 
 def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (no changes in this function)
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -140,7 +139,6 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
     try:
         conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
-            # تحديث الجدول ليشمل عمود 'score'
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS support_resistance_levels (
                     id SERIAL PRIMARY KEY,
@@ -156,7 +154,6 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
                     CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
                 );
             """)
-            # التأكد من وجود عمود 'score' وإضافته إذا لم يكن موجودًا
             cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='support_resistance_levels' AND column_name='score'")
             if not cur.fetchone():
                 logger.info("[DB] عمود 'score' غير موجود، سيتم إضافته...")
@@ -182,13 +179,11 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
             cur.execute("DELETE FROM support_resistance_levels WHERE symbol = ANY(%s);", (symbols_processed,))
             logger.info(f"[DB] تم حذف البيانات القديمة لـ {len(symbols_processed)} عملة.")
             
-            # تحديث استعلام الإدخال ليشمل 'score'
             insert_query = """
                 INSERT INTO support_resistance_levels 
                 (symbol, level_price, level_type, timeframe, strength, score, last_tested_at, details) 
                 VALUES %s;
             """
-            # تحديث البيانات المدخلة لتشمل 'score'
             values_to_insert = [
                 (level.get('symbol'), level.get('level_price'), level.get('level_type'), 
                  level.get('timeframe'), level.get('strength'), level.get('score', 0), 
@@ -205,66 +200,46 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
 
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
 
-# =========================================================================
-# =============== START: المرحلة الثانية - دالة تقييم قوة المستوى ===============
-# =========================================================================
 def calculate_level_score(level: Dict) -> int:
     """
     تحسب "درجة" للمستوى بناءً على عدة معايير لتحديد قوته وأهميته.
-    
-    Args:
-        level (Dict): قاموس يحتوي على تفاصيل المستوى.
-
-    Returns:
-        int: الدرجة النهائية للمستوى.
     """
     score = 0
     
     # 1. نقاط القوة الأساسية (عدد الارتكازات)
-    # كل ارتكاز يضيف 10 نقاط.
     score += float(level.get('strength', 1)) * 10
 
     # 2. نقاط حداثة المستوى (Recency)
-    # كلما كان المستوى حديثًا، كان أكثر أهمية.
     last_tested = level.get('last_tested_at')
     if last_tested:
-        # تأكد من أن last_tested هو كائن datetime مدرك للمنطقة الزمنية
         if isinstance(last_tested, dt.datetime) and last_tested.tzinfo is None:
              last_tested = last_tested.replace(tzinfo=dt.timezone.utc)
-        
         days_since_tested = (dt.datetime.now(dt.timezone.utc) - last_tested).days
-        
-        if days_since_tested < 2:
-            score += 30  # نقاط إضافية عالية للمستويات التي تم اختبارها مؤخرًا جدًا
-        elif days_since_tested < 7:
-            score += 15  # نقاط إضافية للمستويات التي تم اختبارها خلال الأسبوع الماضي
-        elif days_since_tested < 30:
-            score += 5   # نقاط قليلة للمستويات التي تم اختبارها خلال الشهر الماضي
+        if days_since_tested < 2: score += 30
+        elif days_since_tested < 7: score += 15
+        elif days_since_tested < 30: score += 5
 
     # 3. نقاط التوافق (Confluence)
-    # المستويات التي تجمع بين عدة تحليلات هي الأقوى.
     if level.get('level_type') == 'confluence':
         num_timeframes = len(level.get('timeframe', '').split(','))
         num_details = len(level.get('details', '').split(','))
-        # كل إطار زمني أو نوع مستوى مدمج يضيف 20 نقطة
         score += (num_timeframes + num_details) * 20
-        # إضافة نقاط إضافية إذا كان الـ POC جزءًا من منطقة التوافق
-        if 'poc' in level.get('details', ''):
-            score += 25 
+        if 'poc' in level.get('details', ''): score += 25
             
     # 4. نقاط لنقاط التحكم في الحجم (POC)
     if level.get('level_type') == 'poc':
-        score += 15 # إعطاء نقاط أساسية للـ POC
+        score += 15
+
+    # 5. نقاط إضافية لمستويات فيبوناتشي (إضافة جديدة)
+    if 'fib' in level.get('level_type', ''):
+        score += 5 # نقاط أساسية لكونه مستوى فيبوناتشي
+        if 'Golden Level' in level.get('details', ''):
+            score += 20 # نقاط إضافية للمستوى الذهبي
 
     return int(score)
-# =======================================================================
-# ================= END: المرحلة الثانية - دالة تقييم قوة المستوى ================
-# =======================================================================
-
 
 def calculate_atr(df: pd.DataFrame, period: int) -> float:
-    if df.empty or len(df) < period:
-        return 0
+    if df.empty or len(df) < period: return 0
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -280,22 +255,15 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     if dynamic_prominence == 0:
         logger.warning("[Peaks] قيمة ATR تساوي صفر، سيتم استخدام قيمة بروز افتراضية صغيرة.")
         dynamic_prominence = highs.mean() * 0.01 
-    logger.debug(f"[Peaks] استخدام بروز ديناميكي بقيمة: {dynamic_prominence:.4f} ومضاعف: {prominence_multiplier:.2f}")
-
+    
     low_peaks_indices, _ = find_peaks(-lows, prominence=dynamic_prominence, width=width)
     high_peaks_indices, _ = find_peaks(highs, prominence=dynamic_prominence, width=width)
 
     if VOLUME_CONFIRMATION_ENABLED and not df.empty:
         df['volume_avg'] = df['volume'].rolling(window=VOLUME_AVG_PERIOD, min_periods=1).mean()
-        
         confirmed_low_indices = [idx for idx in low_peaks_indices if df['volume'].iloc[idx] >= df['volume_avg'].iloc[idx] * VOLUME_SPIKE_FACTOR]
         confirmed_high_indices = [idx for idx in high_peaks_indices if df['volume'].iloc[idx] >= df['volume_avg'].iloc[idx] * VOLUME_SPIKE_FACTOR]
-        
-        logger.debug(f"[Volume Filter] Lows before: {len(low_peaks_indices)}, after: {len(confirmed_low_indices)}. "
-                     f"Highs before: {len(high_peaks_indices)}, after: {len(confirmed_high_indices)}")
-        
-        low_peaks_indices = np.array(confirmed_low_indices)
-        high_peaks_indices = np.array(confirmed_high_indices)
+        low_peaks_indices, high_peaks_indices = np.array(confirmed_low_indices), np.array(confirmed_high_indices)
 
     def cluster_and_strengthen(prices: np.ndarray, indices: np.ndarray, level_type: str) -> List[Dict]:
         if len(indices) < 2: return []
@@ -321,7 +289,6 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     return support_levels + resistance_levels
 
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
-    # ... (no changes in this function)
     price_min, price_max = df['low'].min(), df['high'].max()
     if price_min >= price_max: return []
     price_bins = np.linspace(price_min, price_max, bins + 1)
@@ -338,13 +305,77 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
     poc_index = np.argmax(volume_by_bin)
     return [{"level_price": float(bin_centers[poc_index]), "level_type": 'poc', "strength": float(volume_by_bin[poc_index]), "last_tested_at": None}]
 
+# =========================================================================
+# =============== START: دالة جديدة لحساب مستويات فيبوناتشي ===============
+# =========================================================================
+def calculate_fibonacci_levels(df: pd.DataFrame) -> List[Dict]:
+    """
+    تحسب مستويات فيبوناتشي للدعم والمقاومة بناءً على أعلى قمة وأدنى قاع في الفترة المحددة.
+    يتم الحساب بناءً على طلب المستخدم المحدد.
+    
+    Args:
+        df (pd.DataFrame): إطار بيانات يحتوي على أسعار 'high' و 'low'.
+
+    Returns:
+        List[Dict]: قائمة بقواميس تمثل مستويات فيبوناتشي.
+    """
+    if df.empty:
+        return []
+
+    max_high = df['high'].max()
+    min_low = df['low'].min()
+    diff = max_high - min_low
+
+    if diff <= 0:
+        return []
+
+    fib_ratios = [0.236, 0.382, 0.5, 0.618, 0.786]
+    all_fib_levels = []
+
+    # لتحديد الدعوم: تكون القيمة 0 هي أعلى قمة والقيمة 1 هي أدنى نقطة
+    # المعادلة: الدعم = أعلى قمة - (الفرق * نسبة فيبوناتشي)
+    for ratio in fib_ratios:
+        level_price = max_high - (diff * ratio)
+        strength = 20 if ratio == 0.618 else 5 # قوة أعلى للمستوى الذهبي
+        details = f"Fibonacci Support {ratio*100:.1f}%"
+        if ratio == 0.618:
+            details += " (Golden Level)"
+        
+        all_fib_levels.append({
+            "level_price": float(level_price),
+            "level_type": 'fib_support',
+            "strength": strength,
+            "details": details,
+            "last_tested_at": None
+        })
+
+    # لتحديد المقاومات: تكون القيمة 0 هي أدنى نقطة والقيمة 1 هي أعلى قمة
+    # المعادلة: المقاومة = أدنى نقطة + (الفرق * نسبة فيبوناتشي)
+    for ratio in fib_ratios:
+        level_price = min_low + (diff * ratio)
+        strength = 20 if ratio == 0.618 else 5 # قوة أعلى للمستوى الذهبي
+        details = f"Fibonacci Resistance {ratio*100:.1f}%"
+        if ratio == 0.618:
+            details += " (Golden Level)"
+
+        all_fib_levels.append({
+            "level_price": float(level_price),
+            "level_type": 'fib_resistance',
+            "strength": strength,
+            "details": details,
+            "last_tested_at": None
+        })
+        
+    return all_fib_levels
+# =======================================================================
+# ================== END: دالة جديدة لحساب مستويات فيبوناتشي =================
+# =======================================================================
 
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
-    # ... (no changes in this function)
     if not levels: return [], []
     levels.sort(key=lambda x: x['level_price'])
     tf_weights = {'1h': 3, '15m': 2, '5m': 1} 
-    type_weights = {'poc': 2.5, 'support': 1.5, 'resistance': 1.5}
+    type_weights = {'poc': 2.5, 'support': 1.5, 'resistance': 1.5, 'fib_support': 1.2, 'fib_resistance': 1.2}
     confluence_zones, used_indices = [], set()
     for i in range(len(levels)):
         if i in used_indices: continue
@@ -360,7 +391,6 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             total_strength_for_avg = sum(l['strength'] for l in current_zone_levels)
             if total_strength_for_avg == 0: continue
             avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / total_strength_for_avg
-            # --- سطر الكود الذي تم إصلاحه ---
             total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l.get('level_type'), 1) for l in current_zone_levels)
             timeframes = sorted(list(set(l['timeframe'] for l in current_zone_levels)))
             details = sorted(list(set(l['level_type'] for l in current_zone_levels)))
@@ -398,15 +428,18 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
             elif atr_long > 0 and atr_short < atr_long * 0.8:
                 dynamic_prominence_multiplier *= 0.8
 
+            # --- حساب جميع أنواع المستويات ---
             pa_levels = find_price_action_levels(
                 df, atr_standard, dynamic_prominence_multiplier, config['width'], CLUSTER_EPS_PERCENT
             )
-            
             vol_levels = analyze_volume_profile(df, bins=VOLUME_PROFILE_BINS)
+            fib_levels = calculate_fibonacci_levels(df) # <-- الإضافة الجديدة
             
-            for level in pa_levels + vol_levels:
+            # --- تجميع كل المستويات التي تم العثور عليها ---
+            all_new_levels = pa_levels + vol_levels + fib_levels # <-- تم التحديث
+            for level in all_new_levels:
                 level['timeframe'] = tf
-            raw_levels.extend(pa_levels + vol_levels)
+            raw_levels.extend(all_new_levels)
         else:
             logger.warning(f"⚠️ [{symbol}-{tf}] تعذر جلب البيانات، سيتم التخطي.")
         
@@ -417,21 +450,14 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     confluence_zones, remaining_singles = find_confluence_zones(raw_levels, CONFLUENCE_ZONE_PERCENT)
     final_levels = confluence_zones + remaining_singles
     
-    # =========================================================================
-    # =============== START: المرحلة الثانية - حساب درجة كل مستوى ===============
-    # =========================================================================
     for level in final_levels:
         level['symbol'] = symbol
         level['score'] = calculate_level_score(level)
-    # =======================================================================
-    # ================= END: المرحلة الثانية - حساب درجة كل مستوى ================
-    # =======================================================================
         
     logger.info(f"--- ✅ انتهى تحليل {symbol}، تم العثور على {len(final_levels)} مستوى نهائي. ---")
     return final_levels
 
 def run_full_analysis():
-    # ... (no changes in this function)
     logger.info("🚀 بدء تشغيل محلل السكالبينج...")
     
     client = get_binance_client()
@@ -459,7 +485,6 @@ def run_full_analysis():
                 logger.error(f"❌ حدث خطأ فادح أثناء تحليل {symbol}: {e}", exc_info=True)
 
     if all_final_levels:
-        # ترتيب المستويات حسب الدرجة قبل الحفظ (اختياري لكن مفيد)
         all_final_levels.sort(key=lambda x: x.get('score', 0), reverse=True)
         save_levels_to_db_batch(conn, all_final_levels)
     else:
