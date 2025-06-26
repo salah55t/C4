@@ -16,7 +16,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, request, Response, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
 from sklearn.preprocessing import StandardScaler
@@ -226,7 +226,8 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
+        # *** FIX: Use datetime.now(UTC) instead of deprecated datetime.utcnow() ***
+        start_str = (datetime.now(UTC) - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -291,7 +292,8 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_calc.join(mtf_features)
-    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+    # *** FIX: Use .ffill() instead of deprecated .fillna(method='ffill') ***
+    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].ffill()
     return df_featured.dropna()
 
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
@@ -602,7 +604,6 @@ def main_loop():
                     logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
                     time.sleep(300); continue
 
-            # logger.info("ℹ️ [بدء المسح] بدء دورة مسح جديدة لتوليد/تحديث التوصيات المعلقة.")
             btc_data_cycle = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
             if btc_data_cycle is None:
                 logger.error("❌ فشل في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
@@ -677,9 +678,7 @@ def main_loop():
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
 
             del btc_data_cycle
-            unreachable_count = gc.collect()
-            # logger.info(f"✅ [إدارة الذاكرة] تم تحرير {unreachable_count} كائن. انتهاء دورة المسح.")
-            # logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار 120 ثانية...")
+            gc.collect()
             time.sleep(120)
 
         except (KeyboardInterrupt, SystemExit): break
