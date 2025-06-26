@@ -100,9 +100,6 @@ notifications_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات (مُعدَّلة) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    """
-    تهيئة الاتصال بقاعدة البيانات وإنشاء الجداول اللازمة، بما في ذلك جدول التوصيات المعلقة الجديد.
-    """
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
     for attempt in range(retries):
@@ -110,7 +107,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # الجداول الموجودة مسبقًا
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals ( id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
                         target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL, status TEXT DEFAULT 'open',
@@ -136,7 +132,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 if not cur.fetchone():
                     cur.execute("ALTER TABLE support_resistance_levels ADD COLUMN score NUMERIC DEFAULT 0;")
 
-                # *** جديد: جدول لتخزين التوصيات قيد الانتظار ***
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS pending_recommendations (
                         id SERIAL PRIMARY KEY,
@@ -538,6 +533,13 @@ def save_pending_recommendation(signal: Dict[str, Any]) -> None:
         return
 
     try:
+        # *** FIX: Convert all potential numpy types to standard Python floats ***
+        original_entry = float(signal['entry_price'])
+        original_target = float(signal['target_price'])
+        trigger_price_val = float(signal['stop_loss'])
+        atr_value = signal['signal_details'].get('atr_value')
+        atr_value_float = float(atr_value) if atr_value is not None else None
+
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -555,10 +557,10 @@ def save_pending_recommendation(signal: Dict[str, Any]) -> None:
                 """,
                 (
                     signal['symbol'],
-                    signal['entry_price'],
-                    signal['target_price'],
-                    signal['stop_loss'],
-                    signal['signal_details'].get('atr_value'),
+                    original_entry,
+                    original_target,
+                    trigger_price_val,
+                    atr_value_float,
                     json.dumps(signal.get('signal_details', {}))
                 )
             )
@@ -600,7 +602,7 @@ def main_loop():
                     logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
                     time.sleep(300); continue
 
-            logger.info("ℹ️ [بدء المسح] بدء دورة مسح جديدة لتوليد/تحديث التوصيات المعلقة.")
+            # logger.info("ℹ️ [بدء المسح] بدء دورة مسح جديدة لتوليد/تحديث التوصيات المعلقة.")
             btc_data_cycle = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
             if btc_data_cycle is None:
                 logger.error("❌ فشل في جلب بيانات BTC. سيتم تخطي دورة المسح هذه.")
@@ -676,8 +678,8 @@ def main_loop():
 
             del btc_data_cycle
             unreachable_count = gc.collect()
-            logger.info(f"✅ [إدارة الذاكرة] تم تحرير {unreachable_count} كائن. انتهاء دورة المسح.")
-            logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار 120 ثانية...")
+            # logger.info(f"✅ [إدارة الذاكرة] تم تحرير {unreachable_count} كائن. انتهاء دورة المسح.")
+            # logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار 120 ثانية...")
             time.sleep(120)
 
         except (KeyboardInterrupt, SystemExit): break
@@ -814,10 +816,7 @@ def get_stats():
         losses = len(closed) - wins
         total_closed = len(closed)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        
-        # حساب الربح الكلي كنسبة مئوية
         total_profit_percent = sum(s['profit_percentage'] for s in closed if s.get('profit_percentage') is not None)
-
         return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_percent": total_profit_percent, "total_closed_trades": total_closed})
     except Exception as e:
         logger.error(f"❌ [API إحصائيات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
@@ -855,7 +854,6 @@ def manual_close_signal(signal_id):
 @app.route('/api/notifications')
 def get_notifications():
     with notifications_lock:
-        # تحويل كائنات datetime إلى سلاسل نصية قبل إرسالها كـ JSON
         notifications_list = []
         for n in list(notifications_cache):
             notif_copy = n.copy()
@@ -864,7 +862,6 @@ def get_notifications():
             notifications_list.append(notif_copy)
         return jsonify(notifications_list)
 
-# *** جديد: API لجلب التوصيات المعلقة ***
 @app.route('/api/pending_recommendations')
 def get_pending_recommendations():
     if not check_db_connection() or not conn:
@@ -873,7 +870,6 @@ def get_pending_recommendations():
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM pending_recommendations ORDER BY created_at DESC;")
             pending_recs = cur.fetchall()
-
         for rec in pending_recs:
             with prices_lock:
                 rec['current_price'] = current_prices.get(rec['symbol'])
@@ -884,24 +880,19 @@ def get_pending_recommendations():
         logger.error(f"❌ [API توصيات معلقة] خطأ: {e}")
         return jsonify({"error": "تعذر جلب التوصيات المعلقة"}), 500
 
-# *** جديد: API لتفعيل توصية معلقة يدويًا ***
 @app.route('/api/trigger_pending/<int:rec_id>', methods=['POST'])
 def trigger_pending_recommendation(rec_id):
     logger.info(f"ℹ️ [API تفعيل فوري] تم استلام طلب تفعيل فوري للتوصية المعلقة ID: {rec_id}")
     if not check_db_connection() or not conn:
         return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
-
     with signal_cache_lock:
         if len(open_signals_cache) >= MAX_OPEN_TRADES:
             return jsonify({"error": f"لا يمكن التفعيل، تم الوصول للحد الأقصى للصفقات ({MAX_OPEN_TRADES})."}), 400
-
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM pending_recommendations WHERE id = %s;", (rec_id,))
             rec = cur.fetchone()
-
         if not rec: return jsonify({"error": "لم يتم العثور على التوصية المعلقة."}), 404
-
         symbol = rec['symbol']
         with prices_lock:
             current_price = current_prices.get(symbol)
@@ -939,7 +930,6 @@ def trigger_pending_recommendation(rec_id):
             'signal_details': { **original_details, 'TP1': tp1, 'TP2': tp2,
                 'trigger_event': 'Manual trigger from dashboard', 'sr_info': sl_info }
         }
-
         saved_signal = insert_signal_into_db(new_signal)
         if saved_signal:
             with signal_cache_lock:
@@ -952,7 +942,6 @@ def trigger_pending_recommendation(rec_id):
             return jsonify({"message": f"تم تفعيل الصفقة لـ {symbol} بنجاح."})
         else:
             return jsonify({"error": "فشل حفظ الصفقة الجديدة في قاعدة البيانات."}), 500
-
     except Exception as e:
         logger.error(f"❌ [API تفعيل فوري] خطأ فادح: {e}", exc_info=True)
         if conn: conn.rollback()
