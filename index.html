@@ -39,6 +39,14 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        .error-message {
+            color: #fca5a5;
+            background-color: #450a0a;
+            border: 1px solid #991b1b;
+            padding: 1rem;
+            text-align: center;
+            border-radius: 0.5rem;
+        }
     </style>
 </head>
 <body class="p-4 md:p-8">
@@ -46,7 +54,7 @@
         <header class="flex justify-between items-center mb-6 pb-4 border-b-2 border-gray-700">
             <h1 class="text-2xl md:text-3xl font-bold text-white">لوحة تحكم بوت التداول</h1>
             <div id="stats-container" class="flex items-center gap-4 text-sm md:text-base">
-                <div id="loader-stats" class="loader"></div>
+                <!-- Stats will be loaded here -->
             </div>
         </header>
 
@@ -54,7 +62,7 @@
             <!-- قسم التوصيات قيد الانتظار -->
             <div>
                 <h2 class="text-xl font-semibold mb-3 text-blue-400">⏳ توصيات قيد الانتظار</h2>
-                <div class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
+                <div id="pending-signals-wrapper" class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
                     <div class="table-container">
                         <table class="w-full text-sm text-left">
                             <thead class="bg-gray-700 text-xs text-gray-300 uppercase">
@@ -67,18 +75,17 @@
                                 </tr>
                             </thead>
                             <tbody id="pending-signals-body">
-                                <!-- سيتم ملء البيانات هنا بواسطة JavaScript -->
+                                <!-- Data will be loaded by JS -->
                             </tbody>
                         </table>
                     </div>
                 </div>
-                 <p id="no-pending-signals" class="text-center text-gray-400 py-6 hidden">لا توجد توصيات قيد الانتظار حالياً.</p>
             </div>
 
             <!-- قسم الصفقات المفتوحة -->
             <div>
                 <h2 class="text-xl font-semibold mb-3 text-green-400">🚀 صفقات مفتوحة</h2>
-                <div class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
+                <div id="open-signals-wrapper" class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
                     <div class="table-container">
                         <table class="w-full text-sm text-left">
                             <thead class="bg-gray-700 text-xs text-gray-300 uppercase">
@@ -93,18 +100,17 @@
                                 </tr>
                             </thead>
                             <tbody id="open-signals-body">
-                                <!-- سيتم ملء البيانات هنا بواسطة JavaScript -->
+                                <!-- Data will be loaded by JS -->
                             </tbody>
                         </table>
                     </div>
                 </div>
-                 <p id="no-open-signals" class="text-center text-gray-400 py-6 hidden">لا توجد صفقات مفتوحة حالياً.</p>
             </div>
 
             <!-- قسم سجل الصفقات -->
             <div>
                 <h2 class="text-xl font-semibold mb-3 text-gray-400">📚 سجل الصفقات</h2>
-                <div class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
+                <div id="closed-signals-wrapper" class="bg-gray-800 shadow-lg rounded-lg overflow-hidden">
                     <div class="table-container">
                         <table class="w-full text-sm text-left">
                             <thead class="bg-gray-700 text-xs text-gray-300 uppercase">
@@ -118,19 +124,17 @@
                                 </tr>
                             </thead>
                             <tbody id="closed-signals-body">
-                               <!-- سيتم ملء البيانات هنا بواسطة JavaScript -->
+                               <!-- Data will be loaded by JS -->
                             </tbody>
                         </table>
                     </div>
                 </div>
-                <p id="no-closed-signals" class="text-center text-gray-400 py-6 hidden">لا يوجد سجل للصفقات بعد.</p>
             </div>
              <!-- قسم التنبيهات -->
             <div>
                 <h2 class="text-xl font-semibold mb-3 text-yellow-400">🔔 التنبيهات</h2>
-                <div id="notifications-container" class="bg-gray-800 shadow-lg rounded-lg p-4 space-y-2 table-container">
-                     <div id="loader-notifications" class="loader mx-auto"></div>
-                     <p id="no-notifications" class="text-center text-gray-400 py-6 hidden">لا توجد تنبيهات جديدة.</p>
+                <div id="notifications-wrapper" class="bg-gray-800 shadow-lg rounded-lg p-4 space-y-2 table-container">
+                     <!-- Notifications will be loaded here -->
                 </div>
             </div>
         </main>
@@ -139,6 +143,16 @@
     <script>
         const API_BASE_URL = window.location.origin;
 
+        function showLoading(containerId) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = `<div class="flex justify-center items-center p-6"><div class="loader"></div></div>`;
+        }
+
+        function showErrorMessage(containerId, message) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
         function formatPrice(price) {
             if (price === null || typeof price === 'undefined') return '---';
             return parseFloat(price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 });
@@ -146,18 +160,23 @@
 
         function formatDate(dateString) {
             if (!dateString) return '---';
-            const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-            return new Date(dateString).toLocaleString('ar-EG', options);
+            try {
+                const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+                return new Date(dateString).toLocaleString('ar-EG', options);
+            } catch(e) {
+                return dateString;
+            }
         }
 
         async function fetchStats() {
+            const containerId = 'stats-container';
+            showLoading(containerId);
             try {
                 const response = await fetch(`${API_BASE_URL}/api/stats`);
-                if (!response.ok) throw new Error('Network response was not ok');
+                if (!response.ok) throw new Error(`Network response error: ${response.statusText}`);
                 const stats = await response.json();
                 
-                const statsContainer = document.getElementById('stats-container');
-                statsContainer.innerHTML = `
+                document.getElementById(containerId).innerHTML = `
                     <div class="text-center">
                         <div class="font-bold text-lg text-white">${stats.total_closed_trades || 0}</div>
                         <div class="text-xs text-gray-400">إجمالي الصفقات</div>
@@ -177,15 +196,23 @@
                 `;
             } catch (error) {
                 console.error('Error fetching stats:', error);
-                document.getElementById('stats-container').innerHTML = '<span class="text-red-500">فشل تحميل الإحصائيات</span>';
+                showErrorMessage(containerId, 'فشل تحميل الإحصائيات');
             }
         }
 
         async function fetchSignals() {
+            const pendingWrapper = document.getElementById('pending-signals-wrapper');
+            const openWrapper = document.getElementById('open-signals-wrapper');
+            const closedWrapper = document.getElementById('closed-signals-wrapper');
+            showLoading('pending-signals-body');
+            showLoading('open-signals-body');
+            showLoading('closed-signals-body');
+            
             try {
                 const response = await fetch(`${API_BASE_URL}/api/signals`);
-                if (!response.ok) throw new Error('Network response was not ok');
+                if (!response.ok) throw new Error(`Network response error: ${response.statusText}`);
                 const signals = await response.json();
+                if (signals.error) throw new Error(signals.error);
 
                 const pendingBody = document.getElementById('pending-signals-body');
                 const openBody = document.getElementById('open-signals-body');
@@ -200,25 +227,21 @@
                 signals.forEach(s => {
                     if (s.status === 'pending') {
                         pendingCount++;
-                        // stop_loss is the trigger price for pending signals
                         const triggerPrice = s.stop_loss;
-                        const row = `
+                        pendingBody.innerHTML += `
                             <tr class="border-b border-gray-700 hover:bg-gray-900">
                                 <td class="px-4 py-3 font-medium">${s.symbol}</td>
                                 <td class="px-4 py-3">${formatPrice(s.generation_price)}</td>
                                 <td class="px-4 py-3 font-bold text-red-400">${formatPrice(triggerPrice)}</td>
                                 <td class="px-4 py-3 text-green-400">${formatPrice(s.target_price)}</td>
                                 <td class="px-4 py-3 text-gray-400">${formatDate(s.created_at)}</td>
-                            </tr>
-                        `;
-                        pendingBody.innerHTML += row;
+                            </tr>`;
                     } else if (s.status === 'open') {
                         openCount++;
-                        const pnl = ((s.current_price / s.entry_price) - 1) * 100;
+                        const pnl = s.current_price && s.entry_price ? ((s.current_price / s.entry_price) - 1) * 100 : 0;
                         const pnlClass = pnl >= 0 ? 'profit' : 'loss';
                         const target1 = s.signal_details?.target_1 || 'N/A';
-
-                        const row = `
+                        openBody.innerHTML += `
                             <tr class="border-b border-gray-700 hover:bg-gray-900">
                                 <td class="px-4 py-3 font-medium">${s.symbol}</td>
                                 <td class="px-4 py-3">${formatPrice(s.entry_price)}</td>
@@ -229,20 +252,13 @@
                                 <td class="px-4 py-3">
                                     <button onclick="manualClose(${s.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1 px-2 rounded">إغلاق</button>
                                 </td>
-                            </tr>
-                        `;
-                        openBody.innerHTML += row;
-                    } else { // Closed signals
+                            </tr>`;
+                    } else {
                         closedCount++;
                         const profitClass = s.profit_percentage >= 0 ? 'profit' : 'loss';
                         const statusClass = `status-${s.status}`;
-                        const statusText = {
-                            'target_hit': 'تحقق الهدف',
-                            'stop_loss_hit': 'وقف الخسارة',
-                            'manual_close': 'إغلاق يدوي'
-                        }[s.status] || s.status;
-
-                        const row = `
+                        const statusText = { 'target_hit': 'تحقق الهدف', 'stop_loss_hit': 'وقف الخسارة', 'manual_close': 'إغلاق يدوي' }[s.status] || s.status;
+                        closedBody.innerHTML += `
                              <tr class="border-b border-gray-700 hover:bg-gray-900">
                                 <td class="px-4 py-3 font-medium">${s.symbol}</td>
                                 <td class="px-4 py-3">${formatPrice(s.entry_price)}</td>
@@ -250,63 +266,55 @@
                                 <td class="px-4 py-3"><span class="px-2 py-1 text-xs rounded-full ${statusClass}">${statusText}</span></td>
                                 <td class="px-4 py-3 font-bold ${profitClass}">${(s.profit_percentage || 0).toFixed(2)}%</td>
                                 <td class="px-4 py-3 text-gray-400">${formatDate(s.closed_at)}</td>
-                            </tr>
-                        `;
-                        closedBody.innerHTML += row;
+                            </tr>`;
                     }
                 });
                 
-                document.getElementById('no-pending-signals').style.display = pendingCount === 0 ? 'block' : 'none';
-                document.getElementById('no-open-signals').style.display = openCount === 0 ? 'block' : 'none';
-                document.getElementById('no-closed-signals').style.display = closedCount === 0 ? 'block' : 'none';
-
+                if (pendingCount === 0) pendingBody.innerHTML = `<tr><td colspan="5" class="text-center p-6 text-gray-400">لا توجد توصيات قيد الانتظار حالياً.</td></tr>`;
+                if (openCount === 0) openBody.innerHTML = `<tr><td colspan="7" class="text-center p-6 text-gray-400">لا توجد صفقات مفتوحة حالياً.</td></tr>`;
+                if (closedCount === 0) closedBody.innerHTML = `<tr><td colspan="6" class="text-center p-6 text-gray-400">لا يوجد سجل للصفقات بعد.</td></tr>`;
 
             } catch (error) {
                 console.error('Error fetching signals:', error);
+                showErrorMessage('pending-signals-body', 'فشل تحميل التوصيات قيد الانتظار.');
+                showErrorMessage('open-signals-body', 'فشل تحميل الصفقات المفتوحة.');
+                showErrorMessage('closed-signals-body', 'فشل تحميل سجل الصفقات.');
             }
         }
         
         async function fetchNotifications() {
+            const containerId = 'notifications-wrapper';
+            showLoading(containerId);
              try {
                 const response = await fetch(`${API_BASE_URL}/api/notifications`);
-                if (!response.ok) throw new Error('Network response was not ok');
+                if (!response.ok) throw new Error(`Network response error: ${response.statusText}`);
                 const notifications = await response.json();
                 
-                const container = document.getElementById('notifications-container');
+                const container = document.getElementById(containerId);
                 container.innerHTML = '';
 
-                if(notifications.length === 0){
-                    document.getElementById('no-notifications').style.display = 'block';
+                if(!notifications || notifications.length === 0){
+                    container.innerHTML = `<p class="text-center text-gray-400 py-6">لا توجد تنبيهات جديدة.</p>`;
                     return;
                 }
                 
                 notifications.forEach(n => {
-                    const typeClass = {
-                        'NEW_PENDING_SIGNAL': 'text-blue-400',
-                        'TRADE_ACTIVATED': 'text-green-400',
-                        'CLOSE_SIGNAL': 'text-yellow-400',
-                        'SYSTEM': 'text-gray-400',
-                        'ERROR': 'text-red-500'
-                    }[n.type] || 'text-gray-300';
-                    const row = `
-                        <div class="flex items-start gap-3 text-sm">
+                    const typeClass = { 'NEW_PENDING_SIGNAL': 'text-blue-400', 'TRADE_ACTIVATED': 'text-green-400', 'CLOSE_SIGNAL': 'text-yellow-400', 'SYSTEM': 'text-gray-400', 'ERROR': 'text-red-500'}[n.type] || 'text-gray-300';
+                    container.innerHTML += `
+                        <div class="flex items-start gap-3 text-sm p-2 border-b border-gray-700 last:border-0">
                             <span class="font-semibold ${typeClass}">[${formatDate(n.timestamp)}]</span>
                             <p class="flex-1">${n.message}</p>
-                        </div>
-                    `;
-                    container.innerHTML += row;
+                        </div>`;
                 });
 
             } catch (error) {
                  console.error('Error fetching notifications:', error);
-                 document.getElementById('notifications-container').innerHTML = '<span class="text-red-500">فشل تحميل التنبيهات</span>';
+                 showErrorMessage(containerId, 'فشل تحميل التنبيهات');
             }
         }
 
         async function manualClose(signalId) {
-            if (!confirm(`هل أنت متأكد أنك تريد إغلاق الصفقة #${signalId} يدوياً؟`)) {
-                return;
-            }
+            // Confirmation removed to avoid browser blocking issues.
             try {
                 const response = await fetch(`${API_BASE_URL}/api/close/${signalId}`, {
                     method: 'POST'
@@ -315,7 +323,8 @@
                 if (!response.ok) {
                     alert(`خطأ: ${result.error || 'فشل إغلاق الصفقة'}`);
                 } else {
-                    alert(result.message);
+                    // Temporarily show a success message. For a real app, a toast notification is better.
+                    alert(`تم إرسال طلب إغلاق الصفقة #${signalId}.`);
                     fetchSignals(); // Refresh the list
                 }
             } catch (error) {
@@ -324,7 +333,7 @@
             }
         }
 
-        functionfetchAllData() {
+        function fetchAllData() {
             fetchStats();
             fetchSignals();
             fetchNotifications();
@@ -332,7 +341,7 @@
 
         document.addEventListener('DOMContentLoaded', () => {
             fetchAllData();
-            setInterval(fetchAllData, 15000); // تحديث كل 15 ثانية
+            setInterval(fetchAllData, 15000); // Refresh every 15 seconds
         });
     </script>
 </body>
