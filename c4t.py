@@ -27,15 +27,12 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
 DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 60
 
 # --- معلمات الاستراتيجية (تم تحديثها لتطابق إعدادات البوت c4.py) ---
-MODEL_PREDICTION_THRESHOLD: float = 0.80 # عتبة ثقة النموذج لتوليد إشارة أولية
+MODEL_PREDICTION_THRESHOLD: float = 0.80
 
 # *** جديد: معلمات استراتيجية التوصيات المعلقة ***
-USE_PENDING_RECOMMENDATION_STRATEGY: bool = True # تفعيل/إلغاء الاستراتيجية الجديدة
-# وقف الخسارة الأولي (يستخدم كسعر تفعيل)
+USE_PENDING_RECOMMENDATION_STRATEGY: bool = True
 INITIAL_SL_ATR_MULTIPLIER: float = 1.5
-# الهدف الأولي (يستخدم كهدف ثاني في الصفقة المفعلة)
 INITIAL_TP_ATR_MULTIPLIER: float = 2.5
-# وقف الخسارة للصفقة المفعلة (بعد التفعيل)
 ACTIVATED_SL_ATR_MULTIPLIER: float = 2.0
 
 # --- محاكاة التكاليف الواقعية ---
@@ -125,6 +122,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        # *** FIX: Make the datetime index timezone-aware (UTC) to prevent comparison errors ***
+        df.index = df.index.tz_localize('UTC')
         return df[['open', 'high', 'low', 'close', 'volume']].dropna()
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
@@ -215,7 +214,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
             with open(file_path, 'rb') as f:
                 model_bundle = pickle.load(f)
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                logger.info(f"✅ [Model] Successfully loaded model '{model_name}' for {symbol} from file: {file_path}")
+                # logger.info(f"✅ [Model] Successfully loaded model '{model_name}' for {symbol} from file: {file_path}")
                 return model_bundle
             else:
                 logger.error(f"❌ [Model] Model bundle in file '{file_path}' is incomplete.")
@@ -224,7 +223,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
             logger.error(f"❌ [Model] Unexpected error loading model from '{file_path}': {e}", exc_info=True)
             return None
     else:
-        logger.warning(f"⚠️ [Model] Model file '{file_path}' not found for {symbol}.")
+        # logger.warning(f"⚠️ [Model] Model file '{file_path}' not found for {symbol}.")
         if not os.path.isdir(model_dir):
             logger.warning(f"⚠️ [Model] The model directory '{model_dir}' does not exist.")
         return None
@@ -256,7 +255,6 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
 
     df_featured['prediction'] = predictions
 
-    # --- متغيرات محاكاة الاستراتيجية الجديدة ---
     in_trade = False
     trade_details = {}
     pending_recommendation: Optional[Dict[str, Any]] = None
@@ -265,9 +263,7 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
         current_candle = df_featured.iloc[i]
         candle_time = current_candle.name
 
-        # --- 1. إدارة الصفقة النشطة ---
         if in_trade:
-            # التحقق من إغلاق الصفقة (هدف أو وقف)
             exit_price = None
             exit_reason = None
             if current_candle['high'] >= trade_details['tp']:
@@ -285,34 +281,29 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
                 trades.append(trade_details)
                 in_trade = False
                 trade_details = {}
-            continue # الانتقال للشمعة التالية بعد إدارة الصفقة
+            continue
 
-        # --- 2. إدارة التوصية المعلقة (فقط إذا لم نكن في صفقة) ---
         if pending_recommendation and USE_PENDING_RECOMMENDATION_STRATEGY:
             if current_candle['low'] <= pending_recommendation['trigger_price']:
-                # *** تفعيل التوصية المعلقة ***
                 in_trade = True
-                entry_price = pending_recommendation['trigger_price'] # الدخول عند سعر التفعيل
-                atr_value = pending_recommendation['atr_at_creation'] # استخدام ATR الأصلي للثبات
+                entry_price = pending_recommendation['trigger_price']
+                atr_value = pending_recommendation['atr_at_creation']
 
-                # حساب الأهداف الجديدة ووقف الخسارة
                 tp1 = pending_recommendation['original_entry_price']
                 tp2 = pending_recommendation['original_target_price']
                 new_stop_loss = entry_price - (atr_value * ACTIVATED_SL_ATR_MULTIPLIER)
 
                 trade_details = {
                     'symbol': symbol, 'entry_time': candle_time, 'entry_price': entry_price,
-                    'entry_index': i, 'tp': tp2, # الهدف النهائي هو الهدف الثاني
+                    'entry_index': i, 'tp': tp2,
                     'sl': new_stop_loss, 'strategy_type': 'Pending-Triggered',
                     'details': {'TP1': tp1, 'TP2': tp2}
                 }
-                pending_recommendation = None # استهلاك التوصية
-                continue # الانتقال للشمعة التالية بعد فتح الصفقة
+                pending_recommendation = None
+                continue
 
-        # --- 3. توليد إشارة جديدة (توصية معلقة أو صفقة مباشرة) ---
         if current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
             if USE_PENDING_RECOMMENDATION_STRATEGY:
-                # *** إنشاء توصية معلقة جديدة (أو تحديثها) ***
                 initial_entry = current_candle['close']
                 atr_value = current_candle['atr']
                 initial_sl = initial_entry - (atr_value * INITIAL_SL_ATR_MULTIPLIER)
@@ -327,7 +318,6 @@ def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFra
                     'atr_at_creation': atr_value
                 }
             else:
-                # *** فتح صفقة مباشرة (الاستراتيجية القديمة) ***
                 in_trade = True
                 entry_price = current_candle['close']
                 atr_value = current_candle['atr']
@@ -348,7 +338,6 @@ def generate_report(all_trades: List[Dict[str, Any]]):
 
     df_trades = pd.DataFrame(all_trades)
 
-    # تطبيق الانزلاق السعري والعمولة
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
