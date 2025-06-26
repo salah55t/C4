@@ -86,7 +86,7 @@ BTC_TREND_EMA_PERIOD = 10
 # --- ثوابت فلترة الصفقات ---
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-MINIMUM_15M_VOLUME_USDT = 200_000 # 200 ألف دولار كحد أدنى
+MINIMUM_15M_VOLUME_USDT = 50_000 # 200 ألف دولار كحد أدنى
 
 
 # --- المتغيرات العامة وقفل العمليات ---
