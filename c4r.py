@@ -4,6 +4,7 @@ import logging
 import psycopg2
 import numpy as np
 import pandas as pd
+import datetime as dt
 from decouple import config
 from binance.client import Client
 from psycopg2.extras import RealDictCursor, execute_values
@@ -36,37 +37,32 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت (نسخة السكالبينج) ----------------------
-ANALYSIS_INTERVAL_MINUTES = 15  # تحديث كل 15 دقيقة
+ANALYSIS_INTERVAL_MINUTES = 15
 MAX_WORKERS = 10
 API_RETRY_ATTEMPTS = 3
 API_RETRY_DELAY = 5
 
-# كمية البيانات التاريخية (أيام أقل للتركيز على الحركة الحديثة)
-DATA_FETCH_DAYS_1H = 30   # إطار ساعة للمستويات الأقوى قليلاً
-DATA_FETCH_DAYS_15M = 7   # 7 أيام لإطار 15 دقيقة
-DATA_FETCH_DAYS_5M = 3    # 3 أيام لإطار 5 دقائق
+DATA_FETCH_DAYS_1H = 30
+DATA_FETCH_DAYS_15M = 7
+DATA_FETCH_DAYS_5M = 3
 
-# مضاعفات البروز (قيم أقل لزيادة الحساسية للقمم والقيعان الصغيرة)
 ATR_PROMINENCE_MULTIPLIER_1H = 0.8
 ATR_PROMINENCE_MULTIPLIER_15M = 0.6
 ATR_PROMINENCE_MULTIPLIER_5M = 0.5
-ATR_PERIOD = 14 # ATR القياسي
-ATR_SHORT_PERIOD = 7 # ATR قصير الأجل لقياس التقلبات الحالية
-ATR_LONG_PERIOD = 28 # ATR طويل الأجل لقياس التقلبات الأساسية
+ATR_PERIOD = 14
+ATR_SHORT_PERIOD = 7
+ATR_LONG_PERIOD = 28
 
-# عرض القمم (أصغر ليتناسب مع الفريمات الصغيرة)
 WIDTH_1H = 8
 WIDTH_15M = 5
 WIDTH_5M = 3
 
-# معايير تأكيد حجم التداول (أكثر حساسية)
 VOLUME_CONFIRMATION_ENABLED = True
-VOLUME_AVG_PERIOD = 20           # فترة أقصر لمتوسط الفوليوم
-VOLUME_SPIKE_FACTOR = 1.6        # عامل أقل لزيادة حساسية رصد السبايك
+VOLUME_AVG_PERIOD = 20
+VOLUME_SPIKE_FACTOR = 1.6
 
-# معايير التجميع والدمج (نسب أقل بسبب تقارب الأسعار في الفريمات الصغيرة)
-CLUSTER_EPS_PERCENT = 0.0015     # تقليل نسبة التجميع
-CONFLUENCE_ZONE_PERCENT = 0.002  # تقليل نسبة دمج المناطق
+CLUSTER_EPS_PERCENT = 0.0015
+CONFLUENCE_ZONE_PERCENT = 0.002
 VOLUME_PROFILE_BINS = 100
 
 # ---------------------- قسم خادم الويب ----------------------
@@ -110,7 +106,7 @@ def fetch_historical_data_with_retry(client: Client, symbol: str, interval: str,
             df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
             numeric_cols = ['open', 'high', 'low', 'close', 'volume']
             for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms').dt.tz_localize('UTC')
             df.set_index('timestamp', inplace=True)
             return df[numeric_cols].dropna()
         except Exception as e:
@@ -120,6 +116,7 @@ def fetch_historical_data_with_retry(client: Client, symbol: str, interval: str,
     return None
 
 def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> List[str]:
+    # ... (no changes in this function)
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -143,22 +140,30 @@ def init_db() -> Optional[psycopg2.extensions.connection]:
     try:
         conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # تحديث الجدول ليشمل عمود 'score'
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS support_resistance_levels (
-                    id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
-                    level_type TEXT NOT NULL, timeframe TEXT NOT NULL, strength NUMERIC NOT NULL,
-                    last_tested_at TIMESTAMP, details TEXT, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    level_price DOUBLE PRECISION NOT NULL,
+                    level_type TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    strength NUMERIC NOT NULL,
+                    score NUMERIC DEFAULT 0,
+                    last_tested_at TIMESTAMP WITH TIME ZONE,
+                    details TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     CONSTRAINT unique_level UNIQUE (symbol, level_price, timeframe, level_type)
                 );
             """)
+            # التأكد من وجود عمود 'score' وإضافته إذا لم يكن موجودًا
+            cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name='support_resistance_levels' AND column_name='score'")
+            if not cur.fetchone():
+                logger.info("[DB] عمود 'score' غير موجود، سيتم إضافته...")
+                cur.execute("ALTER TABLE support_resistance_levels ADD COLUMN score NUMERIC DEFAULT 0;")
+                logger.info("✅ [DB] تم إضافة عمود 'score' بنجاح.")
+
             conn.commit()
-            cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name = 'support_resistance_levels' AND column_name = 'strength';")
-            result = cur.fetchone()
-            if result and result['data_type'] in ('bigint', 'integer'):
-                logger.info(f"[DB] 'strength' column is {result['data_type']}. Altering to NUMERIC...")
-                cur.execute("ALTER TABLE support_resistance_levels ALTER COLUMN strength TYPE NUMERIC USING strength::numeric;")
-                conn.commit()
-                logger.info("✅ [DB] Successfully altered 'strength' column to NUMERIC.")
         logger.info("✅ [قاعدة البيانات] تم تهيئة وتحديث جدول 'support_resistance_levels' بنجاح.")
         return conn
     except Exception as e:
@@ -176,8 +181,20 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
             symbols_processed = list(set(level['symbol'] for level in all_final_levels))
             cur.execute("DELETE FROM support_resistance_levels WHERE symbol = ANY(%s);", (symbols_processed,))
             logger.info(f"[DB] تم حذف البيانات القديمة لـ {len(symbols_processed)} عملة.")
-            insert_query = "INSERT INTO support_resistance_levels (symbol, level_price, level_type, timeframe, strength, last_tested_at, details) VALUES %s;"
-            values_to_insert = [(level.get('symbol'), level.get('level_price'), level.get('level_type'), level.get('timeframe'), level.get('strength'), level.get('last_tested_at'), level.get('details')) for level in all_final_levels]
+            
+            # تحديث استعلام الإدخال ليشمل 'score'
+            insert_query = """
+                INSERT INTO support_resistance_levels 
+                (symbol, level_price, level_type, timeframe, strength, score, last_tested_at, details) 
+                VALUES %s;
+            """
+            # تحديث البيانات المدخلة لتشمل 'score'
+            values_to_insert = [
+                (level.get('symbol'), level.get('level_price'), level.get('level_type'), 
+                 level.get('timeframe'), level.get('strength'), level.get('score', 0), 
+                 level.get('last_tested_at'), level.get('details')) 
+                for level in all_final_levels
+            ]
             execute_values(cur, insert_query, values_to_insert)
         conn.commit()
         logger.info(f"✅ [DB] تم حفظ جميع المستويات بنجاح باستخدام الحفظ المجمع.")
@@ -185,10 +202,67 @@ def save_levels_to_db_batch(conn: psycopg2.extensions.connection, all_final_leve
         logger.error(f"❌ [DB] حدث خطأ أثناء الحفظ المجمع في قاعدة البيانات: {e}", exc_info=True)
         conn.rollback()
 
+
 # ---------------------- دوال التحليل وتحديد المستويات ----------------------
 
+# =========================================================================
+# =============== START: المرحلة الثانية - دالة تقييم قوة المستوى ===============
+# =========================================================================
+def calculate_level_score(level: Dict) -> int:
+    """
+    تحسب "درجة" للمستوى بناءً على عدة معايير لتحديد قوته وأهميته.
+    
+    Args:
+        level (Dict): قاموس يحتوي على تفاصيل المستوى.
+
+    Returns:
+        int: الدرجة النهائية للمستوى.
+    """
+    score = 0
+    
+    # 1. نقاط القوة الأساسية (عدد الارتكازات)
+    # كل ارتكاز يضيف 10 نقاط.
+    score += float(level.get('strength', 1)) * 10
+
+    # 2. نقاط حداثة المستوى (Recency)
+    # كلما كان المستوى حديثًا، كان أكثر أهمية.
+    last_tested = level.get('last_tested_at')
+    if last_tested:
+        # تأكد من أن last_tested هو كائن datetime مدرك للمنطقة الزمنية
+        if isinstance(last_tested, dt.datetime) and last_tested.tzinfo is None:
+             last_tested = last_tested.replace(tzinfo=dt.timezone.utc)
+        
+        days_since_tested = (dt.datetime.now(dt.timezone.utc) - last_tested).days
+        
+        if days_since_tested < 2:
+            score += 30  # نقاط إضافية عالية للمستويات التي تم اختبارها مؤخرًا جدًا
+        elif days_since_tested < 7:
+            score += 15  # نقاط إضافية للمستويات التي تم اختبارها خلال الأسبوع الماضي
+        elif days_since_tested < 30:
+            score += 5   # نقاط قليلة للمستويات التي تم اختبارها خلال الشهر الماضي
+
+    # 3. نقاط التوافق (Confluence)
+    # المستويات التي تجمع بين عدة تحليلات هي الأقوى.
+    if level.get('level_type') == 'confluence':
+        num_timeframes = len(level.get('timeframe', '').split(','))
+        num_details = len(level.get('details', '').split(','))
+        # كل إطار زمني أو نوع مستوى مدمج يضيف 20 نقطة
+        score += (num_timeframes + num_details) * 20
+        # إضافة نقاط إضافية إذا كان الـ POC جزءًا من منطقة التوافق
+        if 'poc' in level.get('details', ''):
+            score += 25 
+            
+    # 4. نقاط لنقاط التحكم في الحجم (POC)
+    if level.get('level_type') == 'poc':
+        score += 15 # إعطاء نقاط أساسية للـ POC
+
+    return int(score)
+# =======================================================================
+# ================= END: المرحلة الثانية - دالة تقييم قوة المستوى ================
+# =======================================================================
+
+
 def calculate_atr(df: pd.DataFrame, period: int) -> float:
-    # تم تغيير الدالة لتقبل `period` كمتغير
     if df.empty or len(df) < period:
         return 0
     high_low = df['high'] - df['low']
@@ -199,7 +273,6 @@ def calculate_atr(df: pd.DataFrame, period: int) -> float:
     return atr.iloc[-1] if not atr.empty else 0
 
 def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_multiplier: float, width: int, cluster_eps_percent: float) -> List[Dict]:
-    # لا تغييرات هنا، ستستقبل الدالة المضاعف الديناميكي الجديد
     lows = df['low'].to_numpy()
     highs = df['high'].to_numpy()
     
@@ -248,7 +321,7 @@ def find_price_action_levels(df: pd.DataFrame, atr_value: float, prominence_mult
     return support_levels + resistance_levels
 
 def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
-    # No changes here
+    # ... (no changes in this function)
     price_min, price_max = df['low'].min(), df['high'].max()
     if price_min >= price_max: return []
     price_bins = np.linspace(price_min, price_max, bins + 1)
@@ -265,8 +338,9 @@ def analyze_volume_profile(df: pd.DataFrame, bins: int) -> List[Dict]:
     poc_index = np.argmax(volume_by_bin)
     return [{"level_price": float(bin_centers[poc_index]), "level_type": 'poc', "strength": float(volume_by_bin[poc_index]), "last_tested_at": None}]
 
+
 def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tuple[List[Dict], List[Dict]]:
-    # No changes here
+    # ... (no changes in this function)
     if not levels: return [], []
     levels.sort(key=lambda x: x['level_price'])
     tf_weights = {'1h': 3, '15m': 2, '5m': 1} 
@@ -286,7 +360,7 @@ def find_confluence_zones(levels: List[Dict], confluence_percent: float) -> Tupl
             total_strength_for_avg = sum(l['strength'] for l in current_zone_levels)
             if total_strength_for_avg == 0: continue
             avg_price = sum(l['level_price'] * l['strength'] for l in current_zone_levels) / total_strength_for_avg
-            total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l['level_type'], 1) for l in current_zone_levels)
+            total_strength = sum(l['strength'] * tf_weights.get(l.get('timeframe'), 1) * type_weights.get(l.get('level_type'], 1) for l in current_zone_levels)
             timeframes = sorted(list(set(l['timeframe'] for l in current_zone_levels)))
             details = sorted(list(set(l['level_type'] for l in current_zone_levels)))
             last_tested = max((l['last_tested_at'] for l in current_zone_levels if l['last_tested_at']), default=None)
@@ -313,42 +387,20 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
         df = fetch_historical_data_with_retry(client, symbol, tf, config['days'])
         if df is not None and not df.empty:
             
-            # =========================================================================
-            # =============== START: المرحلة الأولى - تحسين البروز الديناميكي ===============
-            # =========================================================================
-            
-            # 1. حساب مؤشرات ATR متعددة لقياس حالة التقلب
             atr_standard = calculate_atr(df, period=ATR_PERIOD)
             atr_short = calculate_atr(df, period=ATR_SHORT_PERIOD)
             atr_long = calculate_atr(df, period=ATR_LONG_PERIOD)
             
-            # 2. تعديل مضاعف البروز بناءً على حالة التقلب
-            dynamic_prominence_multiplier = config['prominence_multiplier'] # ابدأ بالقيمة الأساسية
-            
-            # إذا كانت التقلبات الحالية (القصيرة) أعلى بكثير من المتوسط (الطويلة)، زد المضاعف لتقليل الضوضاء
+            dynamic_prominence_multiplier = config['prominence_multiplier']
             if atr_long > 0 and atr_short > atr_long * 1.25:
                 dynamic_prominence_multiplier *= 1.2
-                logger.debug(f"[{symbol}-{tf}] تقلبات عالية. زيادة المضاعف إلى {dynamic_prominence_multiplier:.2f}")
-            # إذا كانت التقلبات الحالية منخفضة، قلل المضاعف لزيادة الحساسية
             elif atr_long > 0 and atr_short < atr_long * 0.8:
                 dynamic_prominence_multiplier *= 0.8
-                logger.debug(f"[{symbol}-{tf}] تقلبات منخفضة. تقليل المضاعف إلى {dynamic_prominence_multiplier:.2f}")
 
-            logger.debug(f"[{symbol}-{tf}] ATR(14): {atr_standard:.4f}, ATR(7): {atr_short:.4f}, ATR(28): {atr_long:.4f}")
-            
-            # 3. استخدام المضاعف الديناميكي الجديد في تحديد المستويات
             pa_levels = find_price_action_levels(
-                df, 
-                atr_standard, # استخدم ATR القياسي كقيمة أساسية
-                dynamic_prominence_multiplier, # استخدم المضاعف المعدل ديناميكيًا
-                config['width'], 
-                CLUSTER_EPS_PERCENT
+                df, atr_standard, dynamic_prominence_multiplier, config['width'], CLUSTER_EPS_PERCENT
             )
             
-            # =======================================================================
-            # ================= END: المرحلة الأولى - تحسين البروز الديناميكي ================
-            # =======================================================================
-
             vol_levels = analyze_volume_profile(df, bins=VOLUME_PROFILE_BINS)
             
             for level in pa_levels + vol_levels:
@@ -364,13 +416,21 @@ def analyze_single_symbol(symbol: str, client: Client) -> List[Dict]:
     confluence_zones, remaining_singles = find_confluence_zones(raw_levels, CONFLUENCE_ZONE_PERCENT)
     final_levels = confluence_zones + remaining_singles
     
+    # =========================================================================
+    # =============== START: المرحلة الثانية - حساب درجة كل مستوى ===============
+    # =========================================================================
     for level in final_levels:
         level['symbol'] = symbol
+        level['score'] = calculate_level_score(level)
+    # =======================================================================
+    # ================= END: المرحلة الثانية - حساب درجة كل مستوى ================
+    # =======================================================================
         
     logger.info(f"--- ✅ انتهى تحليل {symbol}، تم العثور على {len(final_levels)} مستوى نهائي. ---")
     return final_levels
 
 def run_full_analysis():
+    # ... (no changes in this function)
     logger.info("🚀 بدء تشغيل محلل السكالبينج...")
     
     client = get_binance_client()
@@ -398,6 +458,8 @@ def run_full_analysis():
                 logger.error(f"❌ حدث خطأ فادح أثناء تحليل {symbol}: {e}", exc_info=True)
 
     if all_final_levels:
+        # ترتيب المستويات حسب الدرجة قبل الحفظ (اختياري لكن مفيد)
+        all_final_levels.sort(key=lambda x: x.get('score', 0), reverse=True)
         save_levels_to_db_batch(conn, all_final_levels)
     else:
         logger.info("ℹ️ لم يتم العثور على أي مستويات في أي عملة خلال هذه الدورة.")
