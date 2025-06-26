@@ -204,7 +204,6 @@ def fetch_sr_levels(symbol: str) -> Optional[List[Dict]]:
             levels = cur.fetchall()
             if not levels: return None
             for level in levels: level['score'] = float(level.get('score', 0))
-            # logger.info(f"📈 [{symbol}] تم جلب {len(levels)} مستوى دعم ومقاومة من قاعدة البيانات.")
             return levels
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ أثناء جلب مستويات الدعم والمقاومة: {e}")
@@ -328,7 +327,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
             with open(file_path, 'rb') as f:
                 model_bundle = pickle.load(f)
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                # logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من الملف.")
                 return model_bundle
             else:
                 logger.error(f"❌ [نموذج تعلم الآلة] حزمة النموذج في الملف '{file_path}' غير مكتملة.")
@@ -337,7 +335,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
             logger.error(f"❌ [نموذج تعلم الآلة] خطأ عند تحميل النموذج '{file_path}': {e}", exc_info=True)
             return None
     else:
-        # logger.warning(f"⚠️ [نموذج تعلم الآلة] لم يتم العثور على ملف النموذج '{file_path}' للعملة {symbol}.")
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية (بدون تغيير) ----------------------
@@ -422,15 +419,11 @@ def send_telegram_message(target_chat_id: str, text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    """
-    إرسال تنبيه بإشارة جديدة. تم تعديلها لدعم الأهداف المتعددة.
-    """
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry = signal_data['entry_price']
     sl = signal_data['stop_loss']
     signal_details = signal_data.get('signal_details', {})
 
-    # التحقق من وجود أهداف متعددة في تفاصيل الإشارة
     if 'TP1' in signal_details and 'TP2' in signal_details:
         target1 = signal_details['TP1']
         target2 = signal_details['TP2']
@@ -439,7 +432,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
         target_text = (f"🎯 *الهدف 1:* `${target1:,.8g}` (ربح `{profit_pct1:+.2f}%`)\n"
                        f"🎯 *الهدف 2:* `${target2:,.8g}` (ربح `{profit_pct2:+.2f}%`)")
     else:
-        # الحالة الافتراضية لهدف واحد
         target = signal_data['target_price']
         profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
         target_text = f"🎯 *الهدف:* `${target:,.8g}` (ربح متوقع `{profit_pct:+.2f}%`)"
@@ -540,12 +532,7 @@ def load_notifications_to_cache():
             logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
 
-# *** جديد: دالة لحفظ التوصيات قيد الانتظار ***
 def save_pending_recommendation(signal: Dict[str, Any]) -> None:
-    """
-    حفظ أو تحديث توصية في جدول التوصيات المعلقة.
-    تستخدم ON CONFLICT لتجنب تكرار الرموز.
-    """
     if not check_db_connection() or not conn:
         logger.warning(f"⚠️ [{signal['symbol']}] لا يمكن حفظ توصية قيد الانتظار، اتصال قاعدة البيانات غير متاح.")
         return
@@ -568,10 +555,10 @@ def save_pending_recommendation(signal: Dict[str, Any]) -> None:
                 """,
                 (
                     signal['symbol'],
-                    signal['entry_price'],       # سعر الدخول الأصلي
-                    signal['target_price'],      # الهدف الأصلي
-                    signal['stop_loss'],         # وقف الخسارة الأصلي (سعر التفعيل)
-                    signal['signal_details'].get('atr_value'), # حفظ قيمة ATR
+                    signal['entry_price'],
+                    signal['target_price'],
+                    signal['stop_loss'],
+                    signal['signal_details'].get('atr_value'),
                     json.dumps(signal.get('signal_details', {}))
                 )
             )
@@ -581,7 +568,6 @@ def save_pending_recommendation(signal: Dict[str, Any]) -> None:
     except Exception as e:
         logger.error(f"❌ [حفظ توصية معلقة] خطأ في حفظ توصية {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
-
 
 # ---------------------- حلقة العمل الرئيسية والجديدة ----------------------
 def get_btc_trend() -> Dict[str, Any]:
@@ -599,9 +585,6 @@ def get_btc_trend() -> Dict[str, Any]:
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
 def main_loop():
-    """
-    الحلقة الرئيسية: تبحث الآن عن إشارات أولية وتحفظها كتوصيات معلقة فقط.
-    """
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
     time.sleep(15)
     if not validated_symbols_to_scan:
@@ -643,7 +626,6 @@ def main_loop():
                         last_candle = df_features.iloc[-1]
                         last_15m_volume_usdt = last_candle['volume'] * last_candle['close']
                         if last_15m_volume_usdt < MINIMUM_15M_VOLUME_USDT:
-                            # logger.info(f"📉 [{symbol}] تم تجاهل الإشارة الأولية. حجم السيولة (${last_15m_volume_usdt:,.0f}) أقل من الحد الأدنى.")
                             continue
 
                         potential_signal['signal_details']['last_15m_volume_usdt'] = f"${last_15m_volume_usdt:,.0f}"
@@ -686,7 +668,6 @@ def main_loop():
                         potential_signal['signal_details']['sr_info'] = sr_info
                         potential_signal['signal_details']['risk_reward_ratio'] = f"{risk_reward_ratio:.2f} : 1"
 
-                        # *** التغيير الرئيسي: بدلاً من فتح صفقة، نحفظها كتوصية معلقة ***
                         save_pending_recommendation(potential_signal)
 
                     del df_15m, df_4h, df_features, strategy
@@ -704,15 +685,9 @@ def main_loop():
             log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM")
             time.sleep(120)
 
-# *** جديد: حلقة لمراقبة التوصيات المعلقة وتفعيلها ***
 def monitor_pending_loop():
-    """
-    تراقب هذه الحلقة التوصيات في جدول `pending_recommendations`.
-    إذا وصل سعر العملة إلى سعر التفعيل (وقف الخسارة الأولي)،
-    فإنها تولد إشارة جديدة وتفتح صفقة فعلية.
-    """
     logger.info("⏳ [مراقب التوصيات] بدء حلقة مراقبة التوصيات المعلقة...")
-    time.sleep(25) # الانتظار لبدء المكونات الأخرى
+    time.sleep(25)
 
     while True:
         try:
@@ -738,7 +713,6 @@ def monitor_pending_loop():
                 with prices_lock: current_price = current_prices.get(symbol)
                 if not current_price: continue
 
-                # --- شرط التفعيل ---
                 if current_price <= trigger_price:
                     logger.info(f"💥 [{symbol}] تم تفعيل توصية معلقة! السعر الحالي ({current_price}) وصل لسعر التفعيل ({trigger_price}).")
 
@@ -747,13 +721,11 @@ def monitor_pending_loop():
                             logger.warning(f"⚠️ [{symbol}] تم تفعيل التوصية ولكن لا توجد أماكن متاحة للصفقات. سيتم المحاولة لاحقاً.")
                             continue
 
-                    # --- توليد الإشارة الجديدة ---
                     new_entry_price = trigger_price
                     tp1 = rec['original_entry_price']
                     tp2 = rec['original_target_price']
                     atr_at_creation = rec.get('atr_at_creation')
 
-                    # حساب وقف الخسارة الجديد
                     new_stop_loss, sl_info = 0, "ATR Fallback"
                     strong_supports = []
                     if USE_SR_LEVELS:
@@ -768,17 +740,15 @@ def monitor_pending_loop():
                     elif atr_at_creation:
                         new_stop_loss = new_entry_price - (atr_at_creation * ATR_SL_MULTIPLIER)
                     else:
-                        new_stop_loss = new_entry_price * 0.98 # احتياطي
+                        new_stop_loss = new_entry_price * 0.98
                         sl_info = "Failsafe 2%"
 
-                    # التحقق النهائي من صلاحية الإشارة الجديدة
                     if tp2 <= new_entry_price or new_stop_loss >= new_entry_price:
                         logger.error(f"❌ [{symbol}] تم إلغاء التوصية المفعلة. الأهداف أو الوقف غير منطقية. سيتم حذفها.")
                         with conn.cursor() as del_cur:
                             del_cur.execute("DELETE FROM pending_recommendations WHERE id = %s;", (rec['id'],))
                         conn.commit(); continue
 
-                    # بناء وحفظ الإشارة الجديدة
                     new_signal = { 'symbol': symbol, 'entry_price': new_entry_price, 'target_price': tp2,
                         'stop_loss': new_stop_loss, 'strategy_name': "Pending-Triggered",
                         'signal_details': { **json.loads(rec.get('signal_details', '{}')),
@@ -801,9 +771,9 @@ def monitor_pending_loop():
             logger.error(f"❌ [مراقب التوصيات] خطأ غير متوقع في حلقة المراقبة: {e}", exc_info=True)
             time.sleep(60)
 
-        time.sleep(5) # التحقق كل 5 ثواني
+        time.sleep(5)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (بدون تغيير) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (مُعدَّلة) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -844,9 +814,11 @@ def get_stats():
         losses = len(closed) - wins
         total_closed = len(closed)
         win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        trade_amount = 10.0
-        total_profit = sum(s['profit_percentage'] / 100 * trade_amount for s in closed if s.get('profit_percentage') is not None)
-        return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_usdt": total_profit, "total_closed_trades": total_closed})
+        
+        # حساب الربح الكلي كنسبة مئوية
+        total_profit_percent = sum(s['profit_percentage'] for s in closed if s.get('profit_percentage') is not None)
+
+        return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_percent": total_profit_percent, "total_closed_trades": total_closed})
     except Exception as e:
         logger.error(f"❌ [API إحصائيات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
 
@@ -882,7 +854,109 @@ def manual_close_signal(signal_id):
 
 @app.route('/api/notifications')
 def get_notifications():
-    with notifications_lock: return jsonify(list(notifications_cache))
+    with notifications_lock:
+        # تحويل كائنات datetime إلى سلاسل نصية قبل إرسالها كـ JSON
+        notifications_list = []
+        for n in list(notifications_cache):
+            notif_copy = n.copy()
+            if 'timestamp' in notif_copy and isinstance(notif_copy['timestamp'], (datetime, str)):
+                 notif_copy['timestamp'] = pd.to_datetime(notif_copy['timestamp']).isoformat()
+            notifications_list.append(notif_copy)
+        return jsonify(notifications_list)
+
+# *** جديد: API لجلب التوصيات المعلقة ***
+@app.route('/api/pending_recommendations')
+def get_pending_recommendations():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM pending_recommendations ORDER BY created_at DESC;")
+            pending_recs = cur.fetchall()
+
+        for rec in pending_recs:
+            with prices_lock:
+                rec['current_price'] = current_prices.get(rec['symbol'])
+            if 'created_at' in rec and isinstance(rec['created_at'], datetime):
+                 rec['created_at'] = rec['created_at'].isoformat()
+        return jsonify(pending_recs)
+    except Exception as e:
+        logger.error(f"❌ [API توصيات معلقة] خطأ: {e}")
+        return jsonify({"error": "تعذر جلب التوصيات المعلقة"}), 500
+
+# *** جديد: API لتفعيل توصية معلقة يدويًا ***
+@app.route('/api/trigger_pending/<int:rec_id>', methods=['POST'])
+def trigger_pending_recommendation(rec_id):
+    logger.info(f"ℹ️ [API تفعيل فوري] تم استلام طلب تفعيل فوري للتوصية المعلقة ID: {rec_id}")
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+
+    with signal_cache_lock:
+        if len(open_signals_cache) >= MAX_OPEN_TRADES:
+            return jsonify({"error": f"لا يمكن التفعيل، تم الوصول للحد الأقصى للصفقات ({MAX_OPEN_TRADES})."}), 400
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM pending_recommendations WHERE id = %s;", (rec_id,))
+            rec = cur.fetchone()
+
+        if not rec: return jsonify({"error": "لم يتم العثور على التوصية المعلقة."}), 404
+
+        symbol = rec['symbol']
+        with prices_lock:
+            current_price = current_prices.get(symbol)
+        if not current_price:
+            return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol}."}), 500
+
+        new_entry_price = current_price
+        tp1 = rec['original_entry_price']
+        tp2 = rec['original_target_price']
+        atr_at_creation = rec.get('atr_at_creation')
+
+        new_stop_loss, sl_info = 0, "ATR Fallback"
+        strong_supports = []
+        if USE_SR_LEVELS:
+            all_levels = fetch_sr_levels(symbol)
+            if all_levels:
+                strong_lvls = [lvl for lvl in all_levels if lvl.get('score', 0) >= MINIMUM_SR_SCORE]
+                strong_supports = [lvl for lvl in strong_lvls if 'support' in lvl.get('level_type','') and lvl['level_price'] < new_entry_price]
+        if strong_supports:
+            closest_support = max(strong_supports, key=lambda x: x['level_price'])
+            new_stop_loss = closest_support['level_price'] * 0.998
+            sl_info = f"Strong Support (Score > {MINIMUM_SR_SCORE})"
+        elif atr_at_creation:
+            new_stop_loss = new_entry_price - (atr_at_creation * ATR_SL_MULTIPLIER)
+        else:
+            new_stop_loss = new_entry_price * 0.98
+
+        if tp2 <= new_entry_price or new_stop_loss >= new_entry_price:
+            return jsonify({"error": "فشل التفعيل. الهدف أو الوقف غير منطقي بالسعر الحالي."}), 400
+
+        original_details = json.loads(rec.get('signal_details', '{}'))
+        new_signal = {
+            'symbol': symbol, 'entry_price': new_entry_price, 'target_price': tp2,
+            'stop_loss': new_stop_loss, 'strategy_name': "Manual-Triggered",
+            'signal_details': { **original_details, 'TP1': tp1, 'TP2': tp2,
+                'trigger_event': 'Manual trigger from dashboard', 'sr_info': sl_info }
+        }
+
+        saved_signal = insert_signal_into_db(new_signal)
+        if saved_signal:
+            with signal_cache_lock:
+                open_signals_cache[saved_signal['symbol']] = saved_signal
+            send_new_signal_alert(saved_signal)
+            with conn.cursor() as del_cur:
+                del_cur.execute("DELETE FROM pending_recommendations WHERE id = %s;", (rec_id,))
+            conn.commit()
+            logger.info(f"✅ [{symbol}] تم تفعيل التوصية المعلقة يدوياً بنجاح.")
+            return jsonify({"message": f"تم تفعيل الصفقة لـ {symbol} بنجاح."})
+        else:
+            return jsonify({"error": "فشل حفظ الصفقة الجديدة في قاعدة البيانات."}), 500
+
+    except Exception as e:
+        logger.error(f"❌ [API تفعيل فوري] خطأ فادح: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({"error": "حدث خطأ داخلي في الخادم."}), 500
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
@@ -908,10 +982,8 @@ def initialize_bot_services():
         if not validated_symbols_to_scan:
             logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
             return
-        # بدء العمليات في threads منفصلة
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
-        # *** جديد: بدء حلقة مراقبة التوصيات المعلقة ***
         Thread(target=monitor_pending_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
     except Exception as e:
