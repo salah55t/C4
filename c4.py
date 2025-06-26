@@ -72,7 +72,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-MINIMUM_15M_VOLUME_USDT = 200_000
+MINIMUM_15M_VOLUME_USDT = 50_000
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
