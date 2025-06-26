@@ -16,7 +16,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-from datetime import datetime, timedelta, UTC # <-- تم تحديث هذه الجزئية
+from datetime import datetime, timedelta, UTC
 from decouple import config
 from typing import List, Dict, Optional, Any, Union
 from sklearn.preprocessing import StandardScaler
@@ -72,7 +72,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-MINIMUM_15M_VOLUME_USDT = 50_000
+MINIMUM_15M_VOLUME_USDT = 200_000
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -232,7 +232,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # --- **تم التحديث هنا** ---
         start_str = (datetime.now(UTC) - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
@@ -310,31 +309,48 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
         df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
         mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
         df_featured = df_calc.join(mtf_features)
-        # --- **تم التحديث هنا** ---
         df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].ffill()
         return df_featured.dropna()
     except Exception as e:
-        logger.error(f"Error calculating features: {e}")
+        logger.error(f"❌ [Features] خطأ في حساب الميزات: {e}")
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        model_bundle = self.load_ml_model_bundle_from_folder(symbol)
-        self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
+        self.ml_model = None
+        self.scaler = None
+        self.feature_names = None
+        self.load_ml_model_bundle_from_folder(symbol)
 
-    def load_ml_model_bundle_from_folder(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def load_ml_model_bundle_from_folder(self, symbol: str) -> None:
         model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
         model_dir = 'Mo'
         file_path = os.path.join(model_dir, f"{model_name}.pkl")
-        if not os.path.isdir(model_dir): return None
+        
+        logger.info(f"ℹ️ [تحميل النموذج] جاري محاولة تحميل النموذج لـ {self.symbol} من: {file_path}")
+        
+        if not os.path.isdir(model_dir):
+            logger.warning(f"⚠️ [تحميل النموذج] مجلد النموذج '{model_dir}' غير موجود لـ {self.symbol}.")
+            return
+        
         if os.path.exists(file_path):
             try:
                 with open(file_path, 'rb') as f:
-                    return pickle.load(f)
-            except Exception: return None
-        return None
+                    model_bundle = pickle.load(f)
+                    self.ml_model = model_bundle.get('model')
+                    self.scaler = model_bundle.get('scaler')
+                    self.feature_names = model_bundle.get('feature_names')
+                    logger.info(f"✅ [تحميل النموذج] تم تحميل النموذج لـ {self.symbol} بنجاح.")
+            except Exception as e:
+                logger.error(f"❌ [تحميل النموذج] فشل تحميل النموذج لـ {self.symbol} من {file_path}: {e}", exc_info=True)
+        else:
+            logger.warning(f"⚠️ [تحميل النموذج] ملف النموذج '{file_path}' غير موجود لـ {self.symbol}.")
+        
+        if not all([self.ml_model, self.scaler, self.feature_names]):
+            logger.warning(f"⚠️ [تحميل النموذج] لم يتم تحميل جميع مكونات النموذج (النموذج، المقياس، أسماء الميزات) لـ {self.symbol}.")
+
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         btc_data_cycle = btc_df.copy()
@@ -343,20 +359,42 @@ class TradingStrategy:
         return calculate_all_features(df_15m, df_4h, btc_data_cycle)
 
     def generate_signal(self, df_processed: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]): return None
+        if not self.ml_model:
+            logger.debug(f"ℹ️ [رفض الإشارة] {self.symbol}: لا يوجد نموذج ML محمل.")
+            return None
+        if not self.scaler:
+            logger.debug(f"ℹ️ [رفض الإشارة] {self.symbol}: لا يوجد Scaler محمل.")
+            return None
+        if not self.feature_names:
+            logger.debug(f"ℹ️ [رفض الإشارة] {self.symbol}: لا توجد أسماء ميزات محملة.")
+            return None
+
         last_row = df_processed.iloc[-1]
         try:
             missing_features = [f for f in self.feature_names if f not in df_processed.columns]
-            if missing_features: return None
+            if missing_features:
+                logger.debug(f"ℹ️ [رفض الإشارة] {self.symbol}: ميزات مفقودة: {missing_features}")
+                return None
+            
             features_df = pd.DataFrame([last_row], columns=df_processed.columns)[self.feature_names]
-            if features_df.isnull().values.any(): return None
+            
+            if features_df.isnull().values.any():
+                nan_features = features_df.columns[features_df.isnull().any()].tolist()
+                logger.warning(f"⚠️ [رفض الإشارة] {self.symbol}: قيم NaN موجودة في الميزات: {nan_features}")
+                return None
+            
             features_scaled = self.scaler.transform(features_df)
             prob_for_class_1 = self.ml_model.predict_proba(features_scaled)[0][1]
+            
             if prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [توليد توصية] {self.symbol}: تنبأ النموذج 'شراء' بثقة {prob_for_class_1:.2%}.")
                 return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}}
+            else:
+                logger.debug(f"ℹ️ [رفض الإشارة] {self.symbol}: ثقة النموذج ({prob_for_class_1:.2%}) أقل من الحد الأدنى ({MODEL_CONFIDENCE_THRESHOLD:.2%}).")
+                return None
+        except Exception as e:
+            logger.error(f"❌ [توليد توصية] خطأ أثناء توليد الإشارة لـ {self.symbol}: {e}", exc_info=True)
             return None
-        except Exception: return None
 
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     global open_signals_cache, pending_signals_cache, current_prices
@@ -388,7 +426,8 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
             with signal_cache_lock:
                 if symbol in pending_signals_cache:
                     signal = pending_signals_cache[symbol]
-                    if price <= signal.get('stop_loss'):
+                    # تم عكس الشرط هنا ليصبح السعر الحالي أقل من أو يساوي سعر تفعيل الدخول
+                    if price <= signal.get('generation_price'): # تم تغييرها من trigger_price إلى generation_price
                         signal_to_activate = signal
             if signal_to_activate:
                 logger.info(f"⚡ [Tracker] تم تفعيل الدخول للتوصية {symbol} عند سعر {price:.8f}")
@@ -417,6 +456,7 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
 
     generation_price = signal_to_activate['generation_price']
     original_target = signal_to_activate['target_price']
+    # تم تغيير ATR_SL_MULTIPLIER إلى ATR_TP_MULTIPLIER هنا
     atr_at_generation = signal_to_activate.get('signal_details', {}).get('atr_at_generation')
 
     if not atr_at_generation:
@@ -424,17 +464,31 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
         return
 
     new_entry_price = activation_price
-    new_target_1 = generation_price
+    # الهدف الأول سيكون سعر التوليد الأصلي
+    new_target_1 = generation_price 
     new_target_2 = original_target
     new_stop_loss = new_entry_price - (atr_at_generation * ATR_SL_MULTIPLIER)
+
+    # التحقق من أن نسبة المخاطرة إلى المكافأة مقبولة
+    risk = abs(new_entry_price - new_stop_loss)
+    reward_to_target2 = abs(new_target_2 - new_entry_price)
+    if risk == 0:
+        logger.error(f"❌ [{symbol}] قيمة المخاطرة (risk) صفرية، لا يمكن تفعيل التوصية.")
+        return
+
+    risk_reward_ratio_2 = reward_to_target2 / risk
+    if risk_reward_ratio_2 < MINIMUM_RISK_REWARD_RATIO:
+        logger.warning(f"⚠️ [{symbol}] نسبة المخاطرة إلى المكافأة (للهدف الثاني) غير كافية ({risk_reward_ratio_2:.2f}). لن يتم تفعيل التوصية.")
+        # يمكن هنا حفظها في قاعدة البيانات بحالة "مرفوضة" إذا أردت تتبعها
+        return
 
     updated_signal = signal_to_activate.copy()
     updated_signal['status'] = 'open'
     updated_signal['entry_price'] = new_entry_price
-    updated_signal['target_price'] = new_target_2
+    updated_signal['target_price'] = new_target_2 # الهدف النهائي هو الهدف الثاني
     updated_signal['stop_loss'] = new_stop_loss
     updated_signal['signal_details']['activated_at'] = datetime.now(UTC).isoformat()
-    updated_signal['signal_details']['target_1'] = new_target_1
+    updated_signal['signal_details']['target_1'] = new_target_1 # إضافة الهدف الأول لتفاصيل الإشارة
 
     if not check_db_connection() or not conn:
         logger.error(f"❌ [{symbol}] فشل تفعيل التوصية، لا يوجد اتصال بقاعدة البيانات.")
@@ -529,31 +583,62 @@ def main_loop():
             
             for symbol in validated_symbols_to_scan:
                 with signal_cache_lock:
-                    if symbol in open_signals_cache or symbol in pending_signals_cache: continue
+                    if symbol in open_signals_cache or symbol in pending_signals_cache:
+                        logger.debug(f"ℹ️ [تخطي المسح] {symbol}: توجد إشارة مفتوحة أو قيد الانتظار بالفعل.")
+                        continue
                 try:
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
                     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
-                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: continue
+                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
+                        logger.debug(f"ℹ️ [تخطي المسح] {symbol}: بيانات تاريخية غير كافية أو فارغة.")
+                        continue
 
                     strategy = TradingStrategy(symbol)
+                    # تحقق مما إذا كان النموذج قد تم تحميله بالفعل
+                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                        logger.debug(f"ℹ️ [تخطي المسح] {symbol}: لم يتم تحميل نموذج ML بالكامل، تخطي التوليد.")
+                        continue
+
                     df_features = strategy.get_features(df_15m, df_4h, btc_data_cycle)
-                    if df_features is None or df_features.empty: continue
+                    if df_features is None or df_features.empty:
+                        logger.warning(f"⚠️ [تخطي المسح] {symbol}: فشل في حساب الميزات أو كانت فارغة.")
+                        continue
 
                     potential_signal = strategy.generate_signal(df_features)
                     if potential_signal:
                         last_candle = df_features.iloc[-1]
-                        if (last_candle['volume'] * last_candle['close']) < MINIMUM_15M_VOLUME_USDT: continue
+                        
+                        # التحقق من حجم التداول
+                        if (last_candle['volume'] * last_candle['close']) < MINIMUM_15M_VOLUME_USDT:
+                            logger.info(f"ℹ️ [رفض الإشارة] {symbol}: حجم التداول الحالي ({last_candle['volume'] * last_candle['close']:.2f} USDT) أقل من الحد الأدنى ({MINIMUM_15M_VOLUME_USDT} USDT).")
+                            continue
 
                         with prices_lock: current_price = current_prices.get(symbol)
-                        if not current_price: continue
+                        if not current_price:
+                            logger.warning(f"⚠️ [رفض الإشارة] {symbol}: لم يتم الحصول على السعر الحالي.")
+                            continue
 
                         atr_value = df_features['atr'].iloc[-1]
+                        # حساب سعر وقف الخسارة وسعر الهدف
                         stop_loss_price = current_price - (atr_value * ATR_SL_MULTIPLIER)
                         target_price = current_price + (atr_value * ATR_TP_MULTIPLIER)
 
+                        # التحقق من أن نسبة المخاطرة إلى المكافأة مقبولة قبل الإدراج
+                        risk = abs(current_price - stop_loss_price)
+                        reward = abs(target_price - current_price)
+                        
+                        if risk == 0:
+                            logger.warning(f"⚠️ [رفض الإشارة] {symbol}: قيمة المخاطرة صفرية عند توليد الإشارة.")
+                            continue
+
+                        risk_reward_ratio = reward / risk
+                        if risk_reward_ratio < MINIMUM_RISK_REWARD_RATIO:
+                            logger.info(f"ℹ️ [رفض الإشارة] {symbol}: نسبة المخاطرة إلى المكافأة ({risk_reward_ratio:.2f}) أقل من الحد الأدنى ({MINIMUM_RISK_REWARD_RATIO}).")
+                            continue
+
                         pending_recommendation = {
                             'symbol': symbol, 'generation_price': current_price,
-                            'original_target': target_price, 'trigger_price': stop_loss_price,
+                            'original_target': target_price, 'trigger_price': stop_loss_price, # trigger_price هنا هو SL الأولي
                             'strategy_name': BASE_ML_MODEL_NAME,
                             'signal_details': {
                                 'ML_Probability_Buy': potential_signal['signal_details']['ML_Probability_Buy'],
@@ -564,6 +649,8 @@ def main_loop():
                         if saved_signal:
                             with signal_cache_lock: pending_signals_cache[saved_signal['symbol']] = saved_signal
                             log_and_notify('info', f"توصية جديدة قيد الانتظار لـ {symbol}", "NEW_PENDING_SIGNAL")
+                    # else:
+                    #     logger.debug(f"ℹ️ [رفض الإشارة] {symbol}: النموذج لم يولد إشارة بثقة كافية.") # تم نقل هذا التسجيل إلى دالة generate_signal
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] {symbol}: {e}", exc_info=True)
                 finally:
@@ -571,7 +658,9 @@ def main_loop():
 
             logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار 120 ثانية...")
             time.sleep(120)
-        except (KeyboardInterrupt, SystemExit): break
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("👋 [إيقاف] تم إيقاف الحلقة الرئيسية.")
+            break
         except Exception as main_err:
             log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
 
