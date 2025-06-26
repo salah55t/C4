@@ -205,7 +205,7 @@ def fetch_sr_levels(symbol: str) -> Optional[List[Dict]]:
         if conn: conn.rollback()
         return None
 
-# ---------------------- دوال Binance والبيانات (بدون تغيير) ----------------------
+# ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
@@ -226,7 +226,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # *** FIX: Use datetime.now(UTC) instead of deprecated datetime.utcnow() ***
         start_str = (datetime.now(UTC) - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
@@ -292,7 +291,6 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_calc.join(mtf_features)
-    # *** FIX: Use .ffill() instead of deprecated .fillna(method='ffill') ***
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].ffill()
     return df_featured.dropna()
 
@@ -334,7 +332,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     else:
         return None
 
-# ---------------------- دوال WebSocket والاستراتيجية (بدون تغيير) ----------------------
+# ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
     global open_signals_cache, current_prices
     try:
@@ -407,7 +405,7 @@ class TradingStrategy:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
 
-# ---------------------- دوال التنبيهات والإدارة (مُعدَّلة) ----------------------
+# ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -535,7 +533,6 @@ def save_pending_recommendation(signal: Dict[str, Any]) -> None:
         return
 
     try:
-        # *** FIX: Convert all potential numpy types to standard Python floats ***
         original_entry = float(signal['entry_price'])
         original_target = float(signal['target_price'])
         trigger_price_val = float(signal['stop_loss'])
@@ -721,7 +718,10 @@ def monitor_pending_loop():
                         if len(open_signals_cache) >= MAX_OPEN_TRADES:
                             logger.warning(f"⚠️ [{symbol}] تم تفعيل التوصية ولكن لا توجد أماكن متاحة للصفقات. سيتم المحاولة لاحقاً.")
                             continue
-
+                    
+                    # *** FIX: rec['signal_details'] is already a dict, no need for json.loads() ***
+                    original_details = rec.get('signal_details') or {}
+                    
                     new_entry_price = trigger_price
                     tp1 = rec['original_entry_price']
                     tp2 = rec['original_target_price']
@@ -752,7 +752,7 @@ def monitor_pending_loop():
 
                     new_signal = { 'symbol': symbol, 'entry_price': new_entry_price, 'target_price': tp2,
                         'stop_loss': new_stop_loss, 'strategy_name': "Pending-Triggered",
-                        'signal_details': { **json.loads(rec.get('signal_details', '{}')),
+                        'signal_details': { **original_details,
                             'TP1': tp1, 'TP2': tp2,
                             'trigger_event': 'SL of pending recommendation hit', 'sr_info': sl_info } }
 
@@ -774,7 +774,7 @@ def monitor_pending_loop():
 
         time.sleep(5)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (مُعدَّلة) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -898,6 +898,9 @@ def trigger_pending_recommendation(rec_id):
         if not current_price:
             return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol}."}), 500
 
+        # *** FIX: rec['signal_details'] is already a dict ***
+        original_details = rec.get('signal_details') or {}
+
         new_entry_price = current_price
         tp1 = rec['original_entry_price']
         tp2 = rec['original_target_price']
@@ -922,7 +925,6 @@ def trigger_pending_recommendation(rec_id):
         if tp2 <= new_entry_price or new_stop_loss >= new_entry_price:
             return jsonify({"error": "فشل التفعيل. الهدف أو الوقف غير منطقي بالسعر الحالي."}), 400
 
-        original_details = json.loads(rec.get('signal_details', '{}'))
         new_signal = {
             'symbol': symbol, 'entry_price': new_entry_price, 'target_price': tp2,
             'stop_loss': new_stop_loss, 'strategy_name': "Manual-Triggered",
@@ -956,7 +958,7 @@ def run_flask():
         logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير.")
         app.run(host=host, port=port)
 
-# ---------------------- نقطة انطلاق البرنامج (مُعدَّلة) ----------------------
+# ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
