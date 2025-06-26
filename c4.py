@@ -16,7 +16,6 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, request, Response, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-# **FIXED**: Import UTC for timezone-aware datetimes
 from datetime import datetime, timedelta, UTC
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
@@ -99,44 +98,84 @@ notifications_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
+    # This function is a placeholder. You should have your own implementation.
     global conn
     logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
-    # The implementation of this function is correct and remains unchanged.
-    # It creates the necessary tables: signals, recommendations, notifications, etc.
-    # Omitted for brevity.
-    pass # Placeholder for actual implementation from previous steps
+    pass 
 
 def check_db_connection() -> bool:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    return True # Placeholder
+    # This function is a placeholder. You should have your own implementation.
+    return True 
 
 def log_and_notify(level: str, message: str, notification_type: str):
-    # This function remains unchanged.
-    # Omitted for brevity.
-    pass # Placeholder
+    # This function is a placeholder. You should have your own implementation.
+    pass 
 
 def fetch_sr_levels(symbol: str) -> Optional[List[Dict]]:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    return None # Placeholder
+    # This function is a placeholder. You should have your own implementation.
+    return None
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    return [] # Placeholder
+    """
+    Reads a list of symbols from a file (e.g., "BTC"), appends "USDT" to them,
+    validates them against Binance, and returns a list of tradable USDT symbols.
+    """
+    logger.info(f"[التحقق] بدء التحقق من الرموز من الملف: {filename}")
+    validated_symbols = []
+    
+    if not os.path.exists(filename):
+        logger.error(f"❌ [التحقق] ملف الرموز '{filename}' غير موجود. يرجى إنشاء الملف وإضافة رموز (مثل BTC).")
+        return []
+
+    if not client:
+        logger.error("❌ [التحقق] عميل Binance غير مهيأ. لا يمكن التحقق من الرموز.")
+        return []
+
+    try:
+        exchange_info = client.get_exchange_info()
+        all_symbols = {s['symbol'] for s in exchange_info['symbols']}
+        logger.info(f"✅ [Binance] تم جلب {len(all_symbols)} رمزًا من البورصة.")
+
+        with open(filename, 'r', encoding='utf-8') as f:
+            # Read base symbols from file (e.g., BTC, ETH)
+            base_symbols_from_file = [line.strip().upper() for line in f if line.strip()]
+
+        logger.info(f"🔎 [التحقق] تم العثور على {len(base_symbols_from_file)} رمزًا أساسيًا في الملف '{filename}'.")
+
+        for base_symbol in base_symbols_from_file:
+            # **MODIFIED**: Automatically append 'USDT' to the base symbol
+            symbol_to_check = f"{base_symbol}USDT"
+            
+            if symbol_to_check in all_symbols:
+                symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == symbol_to_check), None)
+                if symbol_info and symbol_info['status'] == 'TRADING':
+                    validated_symbols.append(symbol_to_check)
+                else:
+                    logger.warning(f"⚠️ [التحقق] تم تخطي الرمز '{symbol_to_check}' لأنه غير متاح للتداول.")
+            else:
+                logger.warning(f"⚠️ [التحقق] لم يتم العثور على الرمز '{symbol_to_check}' في Binance.")
+
+        logger.info(f"✅ [التحقق] اكتمل التحقق. تم العثور على {len(validated_symbols)} رمزًا صالحًا للتداول.")
+        return validated_symbols
+
+    except BinanceAPIException as e:
+        logger.error(f"❌ [API Binance] خطأ أثناء التحقق من الرموز: {e}")
+    except FileNotFoundError:
+        logger.error(f"❌ [التحقق] ملف الرموز '{filename}' غير موجود.")
+    except Exception as e:
+        logger.error(f"❌ [التحقق] حدث خطأ غير متوقع أثناء التحقق من الرموز: {e}")
+        
+    return []
+
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     """
     Fetches historical kline data from Binance and returns it as a pandas DataFrame.
-    **FIXED**: Uses timezone-aware datetime objects.
     """
     if not client: return None
     try:
-        # **FIXED**: Replaced deprecated utcnow() with now(UTC)
         start_str = (datetime.now(UTC) - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
-        
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         
@@ -152,37 +191,30 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
     return None
 
-# --- Other data and ML functions (calculate_all_features, load_ml_model_bundle_from_folder, etc.) ---
-# These functions are unchanged and are omitted for brevity.
+# --- Other data and ML functions are placeholders ---
 # ...
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    pass # Placeholder
+    # Placeholder
+    pass
 
 def run_websocket_manager() -> None:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    pass # Placeholder
+    # Placeholder
+    pass
     
 # ---------------------- Management & Alerting Functions ----------------------
-# All functions like send_telegram_message, save_or_update_recommendation_in_db,
-# insert_signal_into_db, open_trade_from_recommendation, close_signal, load_data_to_cache
-# remain here. They are unchanged and omitted for brevity.
+# Placeholders
 # ...
 
 # ---------------------- Main Loop ----------------------
 def get_btc_trend() -> Dict[str, Any]:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    return {} # Placeholder
+    # Placeholder
+    return {}
 
 def main_loop():
-    # This function remains unchanged.
-    # Omitted for brevity.
-    pass # Placeholder
+    # Placeholder
+    pass
 
 
 # ---------------------- Flask API ----------------------
@@ -190,13 +222,13 @@ app = Flask(__name__)
 CORS(app)
 
 def get_fear_and_greed_index() -> Dict[str, Any]:
-    # This function remains unchanged.
-    # Omitted for brevity.
-    return {} # Placeholder
+    # Placeholder
+    return {}
 
 @app.route('/')
 def home():
     try:
+        # It is better to have an absolute path or ensure the HTML file is in the correct directory
         return render_template_string(open('index.html', 'r', encoding='utf-8').read())
     except FileNotFoundError:
         return "<h1>ملف لوحة التحكم (index.html) غير موجود.</h1>", 404
@@ -212,7 +244,7 @@ def get_market_status():
         "fear_and_greed": fear_greed_data
     })
 
-# Other API endpoints (/api/stats, /api/data) remain unchanged and are omitted for brevity.
+# Other API endpoints are placeholders
 # ...
 
 def run_flask():
@@ -233,14 +265,18 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
         init_db()
-        # Conceptual function load_data_to_cache()
+        
+        # The core fix is here: calling the now-functional get_validated_symbols
         validated_symbols_to_scan = get_validated_symbols()
+        
         if not validated_symbols_to_scan:
-            logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ.")
-            return
+            logger.critical("❌ لا توجد رموز معتمدة للمسح. تأكد من وجود ملف 'crypto_list.txt' وأنه يحتوي على رموز صالحة. الحلقات لن تبدأ.")
+            return # Stop initialization if no symbols are found
+            
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
-        logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
+        logger.info(f"✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح لـ {len(validated_symbols_to_scan)} رمزًا.")
+        
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
 
