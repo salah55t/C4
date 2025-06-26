@@ -16,7 +16,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC # <-- تم تحديث هذه الجزئية
 from decouple import config
 from typing import List, Dict, Optional, Any, Union
 from sklearn.preprocessing import StandardScaler
@@ -52,7 +52,7 @@ HIGHER_TIMEFRAME: str = '4h'
 DATA_FETCH_LOOKBACK_DAYS: int = 15
 BTC_SYMBOL = 'BTCUSDT'
 
-# --- Indicator & Feature Parameters (Matching ml.py EXACTLY) ---
+# --- Indicator & Feature Parameters ---
 ADX_PERIOD: int = 14
 BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
@@ -68,7 +68,7 @@ REL_VOL_PERIOD: int = 30
 
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.80
-MAX_OPEN_TRADES: int = 5 # الحد الأقصى للصفقات المفتوحة فعلياً
+MAX_OPEN_TRADES: int = 5
 ATR_SL_MULTIPLIER = 2.0
 ATR_TP_MULTIPLIER = 2.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
@@ -78,7 +78,6 @@ MINIMUM_15M_VOLUME_USDT = 200_000
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 validated_symbols_to_scan: List[str] = []
-# --- فصل الذاكرة المؤقتة للصفقات ---
 open_signals_cache: Dict[str, Dict] = {}
 pending_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
@@ -158,7 +157,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
     log_methods.get(level.lower(), logger.info)(message)
     if not check_db_connection() or not conn: return
     try:
-        new_notification = {"timestamp": datetime.now().isoformat(), "type": notification_type, "message": message}
+        new_notification = {"timestamp": datetime.now(UTC).isoformat(), "type": notification_type, "message": message}
         with notifications_lock: notifications_cache.appendleft(new_notification)
         with conn.cursor() as cur:
             cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
@@ -233,7 +232,8 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
+        # --- **تم التحديث هنا** ---
+        start_str = (datetime.now(UTC) - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -310,7 +310,8 @@ def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd
         df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
         mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
         df_featured = df_calc.join(mtf_features)
-        df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+        # --- **تم التحديث هنا** ---
+        df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].ffill()
         return df_featured.dropna()
     except Exception as e:
         logger.error(f"Error calculating features: {e}")
@@ -432,7 +433,7 @@ def activate_pending_signal(signal_to_activate: Dict, activation_price: float):
     updated_signal['entry_price'] = new_entry_price
     updated_signal['target_price'] = new_target_2
     updated_signal['stop_loss'] = new_stop_loss
-    updated_signal['signal_details']['activated_at'] = datetime.now().isoformat()
+    updated_signal['signal_details']['activated_at'] = datetime.now(UTC).isoformat()
     updated_signal['signal_details']['target_1'] = new_target_1
 
     if not check_db_connection() or not conn:
@@ -562,7 +563,7 @@ def main_loop():
                         saved_signal = insert_pending_signal_into_db(pending_recommendation)
                         if saved_signal:
                             with signal_cache_lock: pending_signals_cache[saved_signal['symbol']] = saved_signal
-                            log_and_notify('info', f"توصية جديدة قيد الانتظar لـ {symbol}", "NEW_PENDING_SIGNAL")
+                            log_and_notify('info', f"توصية جديدة قيد الانتظار لـ {symbol}", "NEW_PENDING_SIGNAL")
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] {symbol}: {e}", exc_info=True)
                 finally:
