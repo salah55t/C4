@@ -72,7 +72,7 @@ BTC_SYMBOL = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 24
+BTC_TREND_EMA_PERIOD = 10
 
 # --- ML Strategy Constants ---
 USE_ML_STRATEGY = True
@@ -529,7 +529,7 @@ def generate_signal_from_sr(symbol: str, current_price: float) -> Optional[Dict[
             'symbol': symbol,
             'strategy_name': 'SR_Fib_Strategy',
             'entry_price': current_price,
-            'stop_loss': support_price * 0.998,
+            'stop_loss': support_price * 0.985, # Stop Loss 1.5% below support
             'target_price': closest_resistance['level_price'] * 0.998,
             'signal_details': {
                 'trigger_level_info': f"{closest_support.get('details', closest_support.get('level_type'))} at {support_price:.8g} (Score: {closest_support.get('score', 0):.0f})"
@@ -661,7 +661,7 @@ def main_loop():
                                             supports = [lvl for lvl in all_levels if lvl['level_price'] < current_price and ('support' in lvl.get('level_type', '') or 'confluence' in lvl.get('level_type', ''))]
                                             if supports:
                                                 strongest_support = max(supports, key=lambda x: x['score'])
-                                                new_stop_loss = strongest_support['level_price'] * 0.998
+                                                new_stop_loss = strongest_support['level_price'] * 0.985 # Stop Loss 1.5% below support
                                                 logger.info(f"✅ [ML SL] {symbol}: Stop loss set based on strongest support at {strongest_support['level_price']:.8g} (Score: {strongest_support.get('score', 0):.0f})")
                                                 ml_signal['signal_details']['StopLoss_Reason'] = f"Strongest Support (Score: {strongest_support.get('score', 0):.0f})"
 
