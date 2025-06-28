@@ -67,24 +67,24 @@ REL_VOL_PERIOD: int = 30
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Trading Logic Constants ---
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 50
+BTC_TREND_EMA_PERIOD = 10
 
 # --- ML Strategy Constants ---
 USE_ML_STRATEGY = True
 MODEL_CONFIDENCE_THRESHOLD = 0.80
 
-# --- S/R & Fibonacci Strategy Constants (جديد) ---
-USE_SR_FIB_STRATEGY = True # تفعيل/إلغاء تفعيل استراتيجية الدعم والمقاومة
-SR_PROXIMITY_PERCENT = 0.003  # 0.3% - مدى قرب السعر من المستوى لتفعيل الإشارة
-MINIMUM_SR_SCORE_FOR_SIGNAL = 50 # الحد الأدنى لقوة المستوى لتوليد إشارة منه
+# --- S/R & Fibonacci Strategy Constants ---
+USE_SR_FIB_STRATEGY = True 
+SR_PROXIMITY_PERCENT = 0.003  # 0.3%
+MINIMUM_SR_SCORE_FOR_SIGNAL = 50
 
 # --- General Signal Filtering ---
 MINIMUM_PROFIT_PERCENTAGE = 0.5
 MINIMUM_RISK_REWARD_RATIO = 1.2
-MINIMUM_15M_VOLUME_USDT = 50_000 # 200 ألف دولار كحد أدنى
+MINIMUM_15M_VOLUME_USDT = 200_000
 
 # --- Default TP/SL Fallback ---
 ATR_SL_MULTIPLIER = 2.0
@@ -313,17 +313,23 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     
     # تفاصيل الإشارة بناءً على نوع الاستراتيجية
     details_section = ""
+    signal_details = signal_data.get('signal_details', {})
+
     if strategy_name == 'SR_Fib_Strategy':
-        sr_info = signal_data.get('signal_details', {}).get('trigger_level_info', 'N/A')
+        sr_info = signal_details.get('trigger_level_info', 'N/A')
         details_section = f"📈 *الاستراتيجية:* ارتداد من دعم/فيبوناتشي\n" \
                           f"🛡️ *مستوى التفعيل:* `{sr_info}`"
     else: # ML Strategy
-        ml_prob = signal_data.get('signal_details', {}).get('ML_Probability_Buy', 'N/A')
-        details_section = f"📈 *الاستراتيجية:* تعلم الآلة ({BASE_ML_MODEL_NAME})\n" \
-                          f"🔍 *ثقة النموذج:* {ml_prob}"
+        ml_prob = signal_details.get('ML_Probability_Buy', 'N/A')
+        sl_reason = signal_details.get('StopLoss_Reason', 'ATR Based')
+        tp_reason = signal_details.get('Target_Reason', 'ATR Based')
+        details_section = (f"📈 *الاستراتيجية:* تعلم الآلة ({BASE_ML_MODEL_NAME})\n" 
+                           f"🔍 *ثقة النموذج:* {ml_prob}\n"
+                           f"🛡️ *أساس وقف الخسارة:* `{sl_reason}`\n"
+                           f"🎯 *أساس الهدف:* `{tp_reason}`")
 
-    rr_ratio_info = signal_data.get('signal_details', {}).get('risk_reward_ratio', 'N/A')
-    volume_info = signal_data.get('signal_details', {}).get('last_15m_volume_usdt', 'N/A')
+    rr_ratio_info = signal_details.get('risk_reward_ratio', 'N/A')
+    volume_info = signal_details.get('last_15m_volume_usdt', 'N/A')
 
     message = (f"💡 *إشارة تداول جديدة* 💡\n\n"
                f"🪙 *العملة:* `{safe_symbol}`\n"
@@ -452,8 +458,13 @@ class TradingStrategyML:
         try:
             # Code to predict using the ML model
             # ... (This part is also unchanged and collapsed)
-            prediction = 1 # Placeholder for actual prediction
-            prob_for_class_1 = 0.85 # Placeholder for actual probability
+            # Placeholder for actual prediction logic.
+            # In a real scenario, you would scale the features and predict.
+            # features_scaled = self.scaler.transform(last_row[self.feature_names].values.reshape(1, -1))
+            # prediction = self.ml_model.predict(features_scaled)[0]
+            # prob_for_class_1 = self.ml_model.predict_proba(features_scaled)[0][1]
+            prediction = 1 
+            prob_for_class_1 = 0.85
             
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [ML Signal] {self.symbol}: Model predicted 'Buy' with confidence {prob_for_class_1:.2%}.")
@@ -513,7 +524,7 @@ def generate_signal_from_sr(symbol: str, current_price: float) -> Optional[Dict[
 
 def validate_and_filter_signal(signal: Dict, last_candle_data: pd.Series) -> Optional[Dict]:
     """
-    (جديد) يقوم بتطبيق جميع فلاتر الجودة على أي إشارة محتملة.
+    يقوم بتطبيق جميع فلاتر الجودة على أي إشارة محتملة.
     """
     symbol = signal['symbol']
     entry_price = signal['entry_price']
@@ -622,9 +633,46 @@ def main_loop():
                                 ml_signal = strategy_ml.generate_signal(df_features)
                                 if ml_signal:
                                     ml_signal['entry_price'] = current_price
+                                    
+                                    # --- START: NEW TP/SL LOGIC based on S/R ---
+                                    logger.info(f"ℹ️ [ML TP/SL] {symbol}: ML signal generated. Calculating TP/SL based on S/R levels.")
+                                    all_levels = fetch_sr_levels(symbol)
+                                    new_target = None
+                                    new_stop_loss = None
+
+                                    if all_levels:
+                                        # Add a bonus score to the golden Fibonacci level to prioritize it
+                                        for level in all_levels:
+                                            if level.get('details') and 'Golden Level' in level['details']:
+                                                level['score'] += 50  # Golden level bonus
+
+                                        # Find the strongest support level below the current price
+                                        supports = [lvl for lvl in all_levels if lvl['level_price'] < current_price and ('support' in lvl.get('level_type', '') or 'confluence' in lvl.get('level_type', ''))]
+                                        if supports:
+                                            strongest_support = max(supports, key=lambda x: x['score'])
+                                            new_stop_loss = strongest_support['level_price'] * 0.998 # Set SL slightly below support
+                                            logger.info(f"✅ [ML SL] {symbol}: Stop loss set based on strongest support at {strongest_support['level_price']:.8g} (Score: {strongest_support.get('score', 0):.0f})")
+                                            if 'signal_details' not in ml_signal: ml_signal['signal_details'] = {}
+                                            ml_signal['signal_details']['StopLoss_Reason'] = f"Strongest Support (Score: {strongest_support.get('score', 0):.0f})"
+
+                                        # Find the strongest resistance level above the current price
+                                        resistances = [lvl for lvl in all_levels if lvl['level_price'] > current_price and ('resistance' in lvl.get('level_type', '') or 'confluence' in lvl.get('level_type', ''))]
+                                        if resistances:
+                                            strongest_resistance = max(resistances, key=lambda x: x['score'])
+                                            new_target = strongest_resistance['level_price'] * 0.998 # Set TP slightly below resistance
+                                            logger.info(f"✅ [ML TP] {symbol}: Target set based on strongest resistance at {strongest_resistance['level_price']:.8g} (Score: {strongest_resistance.get('score', 0):.0f})")
+                                            if 'signal_details' not in ml_signal: ml_signal['signal_details'] = {}
+                                            ml_signal['signal_details']['Target_Reason'] = f"Strongest Resistance (Score: {strongest_resistance.get('score', 0):.0f})"
+                                    
+                                    # Fallback to ATR-based calculation if S/R levels are not found
                                     atr_value = df_features['atr'].iloc[-1]
-                                    ml_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
-                                    ml_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
+                                    ml_signal['stop_loss'] = new_stop_loss if new_stop_loss else current_price - (atr_value * ATR_SL_MULTIPLIER)
+                                    ml_signal['target_price'] = new_target if new_target else current_price + (atr_value * ATR_TP_MULTIPLIER)
+                                    
+                                    if not new_stop_loss or not new_target:
+                                        logger.warning(f"⚠️ [ML TP/SL] {symbol}: Could not find S/R levels. Falling back to ATR for TP/SL calculation.")
+
+                                    # --- END: NEW TP/SL LOGIC ---
                                     final_signal = validate_and_filter_signal(ml_signal, df_features.iloc[-1])
 
                     # --- الاستراتيجية 2: ارتداد من الدعم/فيبوناتشي ---
@@ -663,15 +711,100 @@ def main_loop():
 app = Flask(__name__)
 CORS(app)
 
-# (All Flask routes remain the same, they are collapsed for brevity)
+# All Flask routes remain the same, they are collapsed for brevity.
 @app.route('/')
 def home():
     try:
-        # ... same code ...
-        return "Dashboard HTML" # Placeholder
+        # This is a placeholder for the actual dashboard HTML
+        return "<h1>Bot Dashboard</h1><p>Status: Running</p>" 
     except Exception as e: return f"<h1>Error</h1><p>{e}</p>", 500
 
-# ... other routes: /api/market_status, /api/stats, etc. ...
+@app.route('/api/market_status', methods=['GET'])
+def api_market_status():
+    if not client: return jsonify({"error": "Binance client not initialized"}), 500
+    try:
+        with prices_lock: latest_prices = dict(current_prices)
+        symbols = list(latest_prices.keys())[:20] 
+        btc_trend = get_btc_trend()
+        return jsonify({
+            "btc_trend": btc_trend,
+            "monitored_symbols_count": len(validated_symbols_to_scan),
+            "sample_prices": {s: latest_prices.get(s) for s in symbols}
+        })
+    except Exception as e:
+        logger.error(f"[API] Error in /api/market_status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/stats', methods=['GET'])
+def api_stats():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "Database connection not available"}), 503
+    try:
+        with conn.cursor() as cur:
+            with signal_cache_lock:
+                stats = {"open_trades_count": len(open_signals_cache)}
+            cur.execute("SELECT COUNT(*) as total FROM signals;")
+            stats['total_signals_all_time'] = cur.fetchone()['total']
+            cur.execute("SELECT COUNT(*) as total FROM signals WHERE status = 'target_hit';")
+            stats['targets_hit_all_time'] = cur.fetchone()['total']
+            cur.execute("SELECT COUNT(*) as total FROM signals WHERE status = 'stop_loss_hit';")
+            stats['stops_hit_all_time'] = cur.fetchone()['total']
+            cur.execute("SELECT COALESCE(SUM(profit_percentage), 0) as total_profit FROM signals WHERE status != 'open';")
+            stats['total_profit_pct'] = float(cur.fetchone()['total_profit'])
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"[API] Error in /api/stats: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/open_trades', methods=['GET'])
+def api_open_trades():
+    with signal_cache_lock:
+        trades = list(open_signals_cache.values())
+        with prices_lock:
+            for trade in trades:
+                current_p = current_prices.get(trade['symbol'])
+                if current_p:
+                    trade['current_price'] = current_p
+                    trade['pnl_pct'] = ((current_p / trade['entry_price']) - 1) * 100
+    return jsonify(sorted(trades, key=lambda x: x.get('id', 0), reverse=True))
+
+@app.route('/api/trade_history', methods=['GET'])
+def api_trade_history():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "Database connection not available"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM signals WHERE status != 'open' ORDER BY closed_at DESC LIMIT 100;")
+            history = cur.fetchall()
+            return jsonify(history)
+    except Exception as e:
+        logger.error(f"[API] Error in /api/trade_history: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/notifications', methods=['GET'])
+def api_notifications():
+    with notifications_lock:
+        return jsonify(list(notifications_cache))
+
+@app.route('/api/close_trade', methods=['POST'])
+def api_close_trade():
+    data = request.json
+    signal_id = data.get('id')
+    symbol = data.get('symbol')
+    if not signal_id or not symbol:
+        return jsonify({"error": "Missing signal ID or symbol"}), 400
+    with signal_cache_lock:
+        signal_to_close = open_signals_cache.get(symbol)
+    if not signal_to_close or signal_to_close.get('id') != signal_id:
+        return jsonify({"error": "Signal not found or already closed"}), 404
+    with prices_lock:
+        closing_price = current_prices.get(symbol)
+    if not closing_price:
+        return jsonify({"error": f"Could not get current price for {symbol}"}), 500
+    
+    Thread(target=close_signal, args=(signal_to_close, 'manual_close', closing_price, "dashboard")).start()
+    return jsonify({"message": f"Closing signal for {symbol} has been initiated."})
+
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
@@ -682,6 +815,7 @@ def run_flask():
     except ImportError:
         logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير.")
         app.run(host=host, port=port)
+
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
     global client, validated_symbols_to_scan
