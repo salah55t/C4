@@ -13,6 +13,7 @@ from flask import Flask
 from threading import Thread
 from datetime import datetime, timedelta, timezone
 from psycopg2.extras import RealDictCursor
+from typing import List, Dict, Optional, Any # <-- تم إضافة هذا السطر لتصحيح الخطأ
 
 # ==================================================================================================
 # -------------------------------- إعدادات الاختبار الخلفي (الإصدار السادس) --------------------------------
