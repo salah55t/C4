@@ -246,11 +246,16 @@ class MLStrategy(Strategy):
 
         # Reshape for the scaler and model
         features_df = pd.DataFrame([features])
-        features_scaled = self.scaler.transform(features_df)
         
-        # Get model prediction and probability
-        prediction = self.ml_model.predict(features_scaled)[0]
-        prediction_proba = self.ml_model.predict_proba(features_scaled)[0]
+        # --- FIX: Convert scaled numpy array back to a DataFrame with feature names ---
+        # The scaler returns a numpy array, which we need to convert back to a DataFrame
+        # with the correct column names for the model to avoid warnings.
+        features_scaled_np = self.scaler.transform(features_df)
+        features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
+        
+        # Get model prediction and probability using the DataFrame with feature names
+        prediction = self.ml_model.predict(features_scaled_df)[0]
+        prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
         
         try:
             # Find the probability of the "buy" class (1)
