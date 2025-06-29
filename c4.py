@@ -16,7 +16,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, request, Response, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # <-- تم استيراد timezone
 from decouple import config
 from typing import List, Dict, Optional, Tuple, Any, Union
 from sklearn.preprocessing import StandardScaler
@@ -50,7 +50,6 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# !!! UPDATED: Model name changed to match the new training script
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
@@ -79,11 +78,11 @@ BTC_SYMBOL = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 USE_BTC_TREND_FILTER = True
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 25
+BTC_TREND_EMA_PERIOD = 10
 
 # --- ML Strategy Constants ---
 USE_ML_STRATEGY = True
-MODEL_CONFIDENCE_THRESHOLD = 0.65 # Confidence for "Buy" prediction
+MODEL_CONFIDENCE_THRESHOLD = 0.65 
 
 # --- S/R & Fibonacci Strategy Constants ---
 USE_SR_FIB_STRATEGY = True
@@ -120,7 +119,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # Ensure all required tables exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -189,7 +187,6 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 def fetch_sr_levels(symbol: str) -> pd.DataFrame:
-    """Fetches S/R levels from DB and returns a DataFrame."""
     if not check_db_connection() or not conn:
         logger.warning(f"⚠️ [{symbol}] لا يمكن جلب مستويات الدعم والمقاومة، اتصال قاعدة البيانات غير متاح.")
         return pd.DataFrame()
@@ -233,7 +230,9 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        start_str = (datetime.utcnow() - timedelta(days=days + 1)).strftime("%Y-%m-%d %H:%M:%S")
+        # !!! FIXED DeprecationWarning
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days + 1)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -247,11 +246,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# !!! NEW: Function to load model from the database
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Loads the ML model bundle (model, scaler, feature names) from the database.
-    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not check_db_connection() or not conn:
         logger.error(f"❌ [نموذج تعلم الآلة] لا يمكن تحميل النموذج، اتصال قاعدة البيانات غير متاح.")
@@ -279,9 +274,8 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-# ---------------------- Feature Engineering Functions (Copied from ml.py) ----------------------
+# ---------------------- Feature Engineering Functions ----------------------
 def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
-    """Engineers new features based on the distance and score of nearby S/R levels."""
     if sr_levels_df.empty:
         df['dist_to_support'] = 0.0
         df['dist_to_resistance'] = 0.0
@@ -378,21 +372,13 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = calculate_candlestick_patterns(df_calc)
     return df_calc.astype('float32', errors='ignore')
 
-# !!! NEW: Function to prepare live data exactly like in training
 def prepare_live_data(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """
-    Prepares live data by calculating all required features for the V6 ML model.
-    """
     if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
         return None
 
-    # 1. Calculate base technical indicators on 15m timeframe
     df_featured = calculate_features(df_15m, btc_df)
-
-    # 2. Calculate and add S/R features
     df_featured = calculate_sr_features(df_featured, sr_levels)
 
-    # 3. Calculate multi-timeframe features from 4h timeframe
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -400,12 +386,10 @@ def prepare_live_data(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Data
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
 
-    # 4. Join MTF features to the main dataframe
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
 
-    # 5. Drop rows with any NaN values to ensure clean data for the model
     df_featured.dropna(inplace=True)
     
     return df_featured
@@ -413,7 +397,6 @@ def prepare_live_data(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Data
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    # This function remains unchanged
     global open_signals_cache, current_prices
     try:
         data = msg.get('data', msg) if isinstance(msg, dict) else msg
@@ -439,7 +422,6 @@ def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> N
 
 
 def run_websocket_manager() -> None:
-    # This function remains unchanged
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
@@ -449,7 +431,6 @@ def run_websocket_manager() -> None:
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
-    # This function remains unchanged
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
@@ -457,7 +438,6 @@ def send_telegram_message(target_chat_id: str, text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    # This function remains unchanged, it adapts to the details provided
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
@@ -470,7 +450,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
         sr_info = signal_details.get('trigger_level_info', 'N/A')
         details_section = f"📈 *الاستراتيجية:* ارتداد من دعم/فيبوناتشي\n" \
                           f"🛡️ *مستوى التفعيل:* `{sr_info}`"
-    else: # ML Strategy
+    else: 
         ml_prob = signal_details.get('ML_Probability_Buy', 'N/A')
         sl_reason = signal_details.get('StopLoss_Reason', 'ATR Based')
         tp_reason = signal_details.get('Target_Reason', 'ATR Based')
@@ -500,7 +480,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     log_and_notify('info', f"إشارة جديدة ({strategy_name}): {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # This function remains unchanged
     if not check_db_connection() or not conn: return None
     try:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
@@ -520,7 +499,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    # This function remains unchanged
     symbol = signal['symbol']
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']: return
@@ -547,7 +525,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         if conn: conn.rollback()
 
 def load_open_signals_to_cache():
-    # This function remains unchanged
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً...")
     try:
@@ -561,7 +538,6 @@ def load_open_signals_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
 def load_notifications_to_cache():
-    # This function remains unchanged
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل آخر التنبيهات...")
     try:
@@ -581,7 +557,6 @@ def load_notifications_to_cache():
 # ---------------------- دوال الاستراتيجيات والتحقق ----------------------
 
 class TradingStrategyML:
-    # !!! UPDATED: Class now loads model from DB and uses the new feature pipeline
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_db(symbol)
@@ -601,21 +576,21 @@ class TradingStrategyML:
 
         last_row = live_features_df.iloc[-1:]
 
-        # Ensure all required columns are present
         if not all(feat in last_row.columns for feat in self.feature_names):
             logger.error(f"❌ [{self.symbol}] بعض الميزات المطلوبة للنموذج غير موجودة. تخطي التنبؤ.")
             return None
 
         try:
             features_to_predict = last_row[self.feature_names]
-            features_scaled = self.scaler.transform(features_to_predict)
+            
+            # !!! FIXED UserWarning: Recreate DataFrame with feature names after scaling
+            features_scaled_np = self.scaler.transform(features_to_predict)
+            features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names, index=features_to_predict.index)
 
-            prediction = self.ml_model.predict(features_scaled)[0]
-            probabilities = self.ml_model.predict_proba(features_scaled)[0]
-
-            # We are only interested in "Buy" signals, which are class 1
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            probabilities = self.ml_model.predict_proba(features_scaled_df)[0]
+            
             if prediction == 1:
-                # Find the probability of the "Buy" (1) class
                 class_1_index = np.where(self.ml_model.classes_ == 1)[0][0]
                 prob_for_class_1 = probabilities[class_1_index]
 
@@ -634,10 +609,6 @@ class TradingStrategyML:
             return None
 
 def generate_signal_from_sr(symbol: str, current_price: float, sr_levels_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    Generates a buy signal if the price is very close to a strong support level.
-    Now takes a DataFrame as input.
-    """
     if sr_levels_df.empty: return None
 
     strong_levels = sr_levels_df[sr_levels_df['score'] >= MINIMUM_SR_SCORE_FOR_SIGNAL]
@@ -663,7 +634,7 @@ def generate_signal_from_sr(symbol: str, current_price: float, sr_levels_df: pd.
             'symbol': symbol,
             'strategy_name': 'SR_Fib_Strategy',
             'entry_price': current_price,
-            'stop_loss': support_price * 0.985, # Stop Loss 1.5% below support
+            'stop_loss': support_price * 0.985,
             'target_price': closest_resistance['level_price'] * 0.998,
             'signal_details': {
                 'trigger_level_info': f"{closest_support.get('level_type')} at {support_price:.8g} (Score: {closest_support.get('score', 0):.0f})"
@@ -674,9 +645,6 @@ def generate_signal_from_sr(symbol: str, current_price: float, sr_levels_df: pd.
     return None
 
 def validate_and_filter_signal(signal: Dict, last_candle_data: pd.Series) -> Optional[Dict]:
-    """
-    Applies all quality filters to a potential signal.
-    """
     symbol = signal['symbol']
     entry_price = signal['entry_price']
     target_price = signal['target_price']
@@ -715,7 +683,6 @@ def validate_and_filter_signal(signal: Dict, last_candle_data: pd.Series) -> Opt
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_trend() -> Dict[str, Any]:
-    # This function remains unchanged
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
@@ -771,8 +738,7 @@ def main_loop():
 
                     with prices_lock: current_price = current_prices.get(symbol)
                     if not current_price: continue
-
-                    # --- Fetch S/R levels once for both strategies ---
+                    
                     sr_levels_df = fetch_sr_levels(symbol)
 
                     # --- Strategy 1: Machine Learning (ML) ---
@@ -780,15 +746,12 @@ def main_loop():
                         strategy_ml = TradingStrategyML(symbol)
                         if strategy_ml.is_active:
                             df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
-                            # !!! UPDATED: Use the new data preparation pipeline
                             live_features_df = prepare_live_data(df_15m, df_4h, btc_data, sr_levels_df)
 
                             if live_features_df is not None and not live_features_df.empty:
                                 ml_signal = strategy_ml.generate_signal(live_features_df)
                                 if ml_signal:
                                     ml_signal['entry_price'] = current_price
-
-                                    # TP/SL logic now uses S/R levels primarily
                                     new_target, new_stop_loss = None, None
                                     if not sr_levels_df.empty:
                                         supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence') & (sr_levels_df['level_price'] < current_price)]
@@ -796,14 +759,12 @@ def main_loop():
                                             strongest_support = supports.loc[supports['score'].idxmax()]
                                             new_stop_loss = strongest_support['level_price'] * 0.985
                                             ml_signal['signal_details']['StopLoss_Reason'] = f"Strongest Support (Score: {strongest_support['score']:.0f})"
-
                                         resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence') & (sr_levels_df['level_price'] > current_price)]
                                         if not resistances.empty:
                                             closest_resistance = resistances.loc[resistances['level_price'].idxmin()]
                                             new_target = closest_resistance['level_price'] * 0.998
                                             ml_signal['signal_details']['Target_Reason'] = f"Closest Resistance (Score: {closest_resistance['score']:.0f})"
-
-                                    # Fallback to ATR if S/R levels are not found
+                                    
                                     atr_value = live_features_df['atr'].iloc[-1]
                                     ml_signal['stop_loss'] = new_stop_loss if new_stop_loss else current_price - (atr_value * ATR_SL_MULTIPLIER)
                                     ml_signal['target_price'] = new_target if new_target else current_price + (atr_value * ATR_TP_MULTIPLIER)
@@ -821,7 +782,6 @@ def main_loop():
                         if sr_signal:
                            final_signal = validate_and_filter_signal(sr_signal, df_15m.iloc[-1])
 
-                    # --- Process Final Signal ---
                     if final_signal:
                         saved_signal = insert_signal_into_db(final_signal)
                         if saved_signal:
@@ -832,7 +792,6 @@ def main_loop():
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
                 finally:
-                    # Memory cleanup
                     if 'df_15m' in locals(): del df_15m
                     if 'df_4h' in locals(): del df_4h
                     if 'live_features_df' in locals(): del live_features_df
@@ -848,9 +807,6 @@ def main_loop():
             time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
-# The Flask App and its endpoints remain largely unchanged as they fetch data from the DB
-# and caches, which are now populated by the new logic.
-
 app = Flask(__name__)
 CORS(app)
 
@@ -861,18 +817,11 @@ DASHBOARD_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>لوحة تحكم بوت التداول</title>
-    
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-
     <style>
-        :root {
-            --bs-dark-rgb: 26, 26, 26; --bs-body-bg: #1a1a1a; --bs-body-color: #f0f0f0;
-            --bs-border-color: #444; --bs-emphasis-color-rgb: 240, 240, 240;
-        }
+        :root { --bs-dark-rgb: 26, 26, 26; --bs-body-bg: #1a1a1a; --bs-body-color: #f0f0f0; --bs-border-color: #444; --bs-emphasis-color-rgb: 240, 240, 240; }
         body { font-family: 'Tajawal', sans-serif; background-color: var(--bs-body-bg); color: var(--bs-body-color); }
         .card { background-color: #2b2b2b; border: 1px solid var(--bs-border-color); border-radius: 0.5rem; transition: transform 0.2s, box-shadow 0.2s; }
         .card:hover { transform: translateY(-5px); box-shadow: 0 4px 20px rgba(0, 170, 255, 0.1); }
@@ -880,8 +829,7 @@ DASHBOARD_HTML = """
         .table { --bs-table-bg: #2b2b2b; --bs-table-striped-bg: #343a40; --bs-table-hover-bg: #3c4248; --bs-table-color: var(--bs-body-color); --bs-table-border-color: var(--bs-border-color); }
         .modal-content { background-color: #2b2b2b; border: 1px solid var(--bs-border-color); }
         .modal-header, .modal-footer { border-bottom: 1px solid var(--bs-border-color); border-top: 1px solid var(--bs-border-color); }
-        .text-success { color: #28a745 !important; } .text-danger { color: #dc3545 !important; }
-        .text-warning { color: #ffc107 !important; } .text-info { color: #0dcaf0 !important; }
+        .text-success { color: #28a745 !important; } .text-danger { color: #dc3545 !important; } .text-warning { color: #ffc107 !important; } .text-info { color: #0dcaf0 !important; }
         .pnl-positive { color: #28a745; font-weight: bold; } .pnl-negative { color: #dc3545; font-weight: bold; }
         .status-badge { font-size: 0.9em; padding: 0.4em 0.8em; border-radius: 15px; }
         .status-target_hit { background-color: rgba(40, 167, 69, 0.2); color: #28a745; border: 1px solid #28a745;}
@@ -892,79 +840,26 @@ DASHBOARD_HTML = """
     </style>
 </head>
 <body>
-    <div class="loading-spinner" id="loadingSpinner">
-        <div class="spinner-border text-info" role="status"><span class="visually-hidden">Loading...</span></div>
-    </div>
+    <div class="loading-spinner" id="loadingSpinner"><div class="spinner-border text-info" role="status"><span class="visually-hidden">Loading...</span></div></div>
     <div class="container-fluid mt-4">
-        <header class="text-center mb-4">
-            <h1><i class="fas fa-robot text-info"></i> لوحة تحكم بوت التداول</h1>
-            <p class="text-muted">مراقبة حية لأداء واستراتيجيات التداول الآلي</p>
-        </header>
+        <header class="text-center mb-4"><h1><i class="fas fa-robot text-info"></i> لوحة تحكم بوت التداول</h1><p class="text-muted">مراقبة حية لأداء واستراتيجيات التداول الآلي</p></header>
         <div class="row mb-4 g-4" id="stats-container"></div>
         <div class="row">
             <div class="col-lg-8">
-                <div class="card mb-4">
-                    <div class="card-header"><h5><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة حالياً</h5></div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover align-middle text-center">
-                                <thead>
-                                    <tr>
-                                        <th>العملة</th><th>سعر الدخول</th><th>السعر الحالي</th><th>ربح/خسارة %</th>
-                                        <th>الهدف</th><th>وقف الخسارة</th><th>الاستراتيجية</th><th>تفاصيل</th><th>إجراء</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="open-trades-table"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                <div class="card">
-                    <div class="card-header"><h5><i class="fas fa-history text-info"></i> سجل التداول</h5></div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-hover align-middle text-center">
-                                <thead>
-                                    <tr>
-                                        <th>العملة</th><th>سعر الدخول</th><th>سعر الإغلاق</th><th>ربح/خسارة %</th>
-                                        <th>الحالة</th><th>الاستراتيجية</th><th>وقت الإغلاق</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="trade-history-table"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
+                <div class="card mb-4"><div class="card-header"><h5><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة حالياً</h5></div><div class="card-body"><div class="table-responsive"><table class="table table-hover align-middle text-center"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>السعر الحالي</th><th>ربح/خسارة %</th><th>الهدف</th><th>وقف الخسارة</th><th>الاستراتيجية</th><th>تفاصيل</th><th>إجراء</th></tr></thead><tbody id="open-trades-table"></tbody></table></div></div></div>
+                <div class="card"><div class="card-header"><h5><i class="fas fa-history text-info"></i> سجل التداول</h5></div><div class="card-body"><div class="table-responsive"><table class="table table-hover align-middle text-center"><thead><tr><th>العملة</th><th>سعر الدخول</th><th>سعر الإغلاق</th><th>ربح/خسارة %</th><th>الحالة</th><th>الاستراتيجية</th><th>وقت الإغلاق</th></tr></thead><tbody id="trade-history-table"></tbody></table></div></div></div>
             </div>
             <div class="col-lg-4">
-                 <div class="card mb-4">
-                    <div class="card-header"><h5><i class="fas fa-chart-line text-success"></i> منحنى الأرباح التراكمي</h5></div>
-                    <div class="card-body"><canvas id="profitChart"></canvas></div>
-                </div>
-                <div class="card">
-                    <div class="card-header"><h5><i class="fas fa-bell text-primary"></i> مركز الإشعارات</h5></div>
-                    <div class="card-body" style="max-height: 400px; overflow-y: auto;">
-                        <ul class="list-group list-group-flush" id="notifications-list"></ul>
-                    </div>
-                </div>
+                 <div class="card mb-4"><div class="card-header"><h5><i class="fas fa-chart-line text-success"></i> منحنى الأرباح التراكمي</h5></div><div class="card-body"><canvas id="profitChart"></canvas></div></div>
+                <div class="card"><div class="card-header"><h5><i class="fas fa-bell text-primary"></i> مركز الإشعارات</h5></div><div class="card-body" style="max-height: 400px; overflow-y: auto;"><ul class="list-group list-group-flush" id="notifications-list"></ul></div></div>
             </div>
         </div>
     </div>
-    <div class="modal fade" id="closeTradeModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header"><h5 class="modal-title">تأكيد إغلاق الصفقة</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
-                <div class="modal-body">هل أنت متأكد أنك تريد إغلاق الصفقة للعملة <strong id="modal-symbol-name"></strong> يدوياً؟<p class="text-muted mt-2">سيتم إغلاق الصفقة بالسعر الحالي للسوق.</p></div>
-                <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button><button type="button" class="btn btn-danger" id="confirm-close-btn">تأكيد الإغلاق</button></div>
-            </div>
-        </div>
-    </div>
+    <div class="modal fade" id="closeTradeModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">تأكيد إغلاق الصفقة</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body">هل أنت متأكد أنك تريد إغلاق الصفقة للعملة <strong id="modal-symbol-name"></strong> يدوياً؟<p class="text-muted mt-2">سيتم إغلاق الصفقة بالسعر الحالي للسوق.</p></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">إلغاء</button><button type="button" class="btn btn-danger" id="confirm-close-btn">تأكيد الإغلاق</button></div></div></div></div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
-        const API_BASE_URL = window.location.origin;
-        const spinner = document.getElementById('loadingSpinner');
-        let profitChartInstance = null; let popoverList = [];
+        const API_BASE_URL = window.location.origin; const spinner = document.getElementById('loadingSpinner'); let profitChartInstance = null; let popoverList = [];
         function showSpinner() { spinner.style.display = 'block'; }
         function hideSpinner() { spinner.style.display = 'none'; }
         function formatNumber(num, digits = 8) { return typeof num === 'number' ? parseFloat(num.toFixed(digits)) : 'N/A'; }
@@ -973,35 +868,13 @@ DASHBOARD_HTML = """
         function formatStatusBadge(status) { const statusText = { 'target_hit': 'تحقق الهدف', 'stop_loss_hit': 'ضرب الوقف', 'manual_close': 'إغلاق يدوي' }; return `<span class="status-badge status-${status}">${statusText[status] || status}</span>`; }
         function formatDateTime(dateString) { if (!dateString) return 'N/A'; return new Date(dateString).toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
         async function fetchData(endpoint) { try { const response = await fetch(`${API_BASE_URL}${endpoint}`); return response.ok ? await response.json() : null; } catch (error) { console.error(`Network error fetching ${endpoint}:`, error); return null; } }
-        function renderStats(stats, marketStatus) {
-            const container = document.getElementById('stats-container'); if (!stats || !marketStatus) { container.innerHTML = '<p class="text-warning">لا يمكن تحميل الإحصائيات حالياً.</p>'; return; }
-            const totalTrades = stats.targets_hit_all_time + stats.stops_hit_all_time; const winRate = totalTrades > 0 ? (stats.targets_hit_all_time / totalTrades) * 100 : 0;
-            const btcTrend = marketStatus.btc_trend; const btcTrendIcon = btcTrend.is_uptrend ? 'fa-arrow-trend-up text-success' : 'fa-arrow-trend-down text-danger';
-            container.innerHTML = `<div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة</h5><p class="card-text fs-2 fw-bold">${stats.open_trades_count || 0}</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-percent text-success"></i> إجمالي الربح</h5><p class="card-text fs-2 fw-bold ${formatPnlClass(stats.total_profit_pct)}">${formatPercentage(stats.total_profit_pct)}</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-bullseye text-primary"></i> نسبة النجاح</h5><p class="card-text fs-2 fw-bold">${winRate.toFixed(1)}%</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fab fa-bitcoin text-warning"></i> اتجاه البيتكوين</h5><p class="card-text fs-2 fw-bold"><i class="fas ${btcTrendIcon}"></i> <span class="fs-5">${btcTrend.is_uptrend ? 'صاعد' : 'هابط'}</span></p></div></div></div>`;
-        }
-        function renderOpenTrades(trades) {
-            const tbody = document.getElementById('open-trades-table'); if (!trades || trades.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">لا توجد صفقات مفتوحة حالياً.</td></tr>'; return; }
-            popoverList.forEach(p => p.dispose()); popoverList = [];
-            tbody.innerHTML = trades.map(trade => { let detailsPopoverContent = '<ul>'; if(trade.signal_details){ for(const [key, value] of Object.entries(trade.signal_details)){ detailsPopoverContent += `<li><strong>${key.replace(/_/g, ' ')}:</strong> ${value}</li>`; } } detailsPopoverContent += '</ul>'; return `<tr><td><strong>${trade.symbol}</strong></td><td>${formatNumber(trade.entry_price)}</td><td>${formatNumber(trade.current_price)}</td><td class="${formatPnlClass(trade.pnl_pct)}">${formatPercentage(trade.pnl_pct)}</td><td>${formatNumber(trade.target_price)}</td><td>${formatNumber(trade.stop_loss)}</td><td><small>${trade.strategy_name || 'N/A'}</small></td><td><button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content="${detailsPopoverContent.replace(/"/g, '&quot;')}"><i class="fas fa-info-circle"></i></button></td><td><button class="btn btn-sm btn-outline-danger" onclick="openCloseModal(${trade.id}, '${trade.symbol}')">إغلاق</button></td></tr>`; }).join('');
-            const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]')); popoverList = popoverTriggerList.map(el => new bootstrap.Popover(el));
-        }
-        function renderTradeHistory(history) {
-            const tbody = document.getElementById('trade-history-table'); if (!history || history.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد سجل تداول بعد.</td></tr>'; return; }
-            tbody.innerHTML = history.map(trade => `<tr><td><strong>${trade.symbol}</strong></td><td>${formatNumber(trade.entry_price)}</td><td>${formatNumber(trade.closing_price)}</td><td class="${formatPnlClass(trade.profit_percentage)}">${formatPercentage(trade.profit_percentage)}</td><td>${formatStatusBadge(trade.status)}</td><td><small>${trade.strategy_name || 'N/A'}</small></td><td><small>${formatDateTime(trade.closed_at)}</small></td></tr>`).join('');
-        }
-        function renderNotifications(notifications) {
-            const list = document.getElementById('notifications-list'); if (!notifications || notifications.length === 0) { list.innerHTML = '<li class="list-group-item">لا توجد إشعارات جديدة.</li>'; return; }
-            const typeIcons = { 'NEW_SIGNAL': 'fa-lightbulb text-success', 'CLOSE_SIGNAL': 'fa-flag-checkered text-primary', 'SYSTEM': 'fa-cogs text-info', 'ERROR': 'fa-exclamation-triangle text-danger' };
-            list.innerHTML = notifications.map(n => `<li class="list-group-item d-flex justify-content-between align-items-start"><div class="ms-2 me-auto"><div class="fw-bold"><i class="fas ${typeIcons[n.type] || 'fa-bell'} me-2"></i>${n.message}</div><small class="text-muted">${formatDateTime(n.timestamp)}</small></div></li>`).join('');
-        }
-        function renderProfitChart(history) {
-            if (!history || history.length === 0) return; const last30Trades = history.slice(0, 30).reverse(); const labels = last30Trades.map((t, i) => `T${i + 1}`); let cumulativeProfit = 0;
-            const data = last30Trades.map(t => cumulativeProfit += t.profit_percentage); const ctx = document.getElementById('profitChart').getContext('2d');
-            if (profitChartInstance) { profitChartInstance.data.labels = labels; profitChartInstance.data.datasets[0].data = data; profitChartInstance.update(); } else { profitChartInstance = new Chart(ctx, { type: 'line', data: { labels: labels, datasets: [{ label: 'الأرباح التراكمية %', data: data, borderColor: 'rgba(0, 170, 255, 1)', backgroundColor: 'rgba(0, 170, 255, 0.1)', fill: true, tension: 0.3, }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { ticks: { color: '#f0f0f0' } }, x: { ticks: { color: '#f0f0f0' } } }, plugins: { legend: { labels: { color: '#f0f0f0' } } } } }); }
-        }
+        function renderStats(stats, marketStatus) { const container = document.getElementById('stats-container'); if (!stats || !marketStatus) { container.innerHTML = '<p class="text-warning">لا يمكن تحميل الإحصائيات حالياً.</p>'; return; } const totalTrades = stats.targets_hit_all_time + stats.stops_hit_all_time; const winRate = totalTrades > 0 ? (stats.targets_hit_all_time / totalTrades) * 100 : 0; const btcTrend = marketStatus.btc_trend; const btcTrendIcon = btcTrend.is_uptrend ? 'fa-arrow-trend-up text-success' : 'fa-arrow-trend-down text-danger'; container.innerHTML = `<div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة</h5><p class="card-text fs-2 fw-bold">${stats.open_trades_count || 0}</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-percent text-success"></i> إجمالي الربح</h5><p class="card-text fs-2 fw-bold ${formatPnlClass(stats.total_profit_pct)}">${formatPercentage(stats.total_profit_pct)}</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fas fa-bullseye text-primary"></i> نسبة النجاح</h5><p class="card-text fs-2 fw-bold">${winRate.toFixed(1)}%</p></div></div></div><div class="col-md-6 col-lg-3"><div class="card text-center"><div class="card-body"><h5 class="card-title"><i class="fab fa-bitcoin text-warning"></i> اتجاه البيتكوين</h5><p class="card-text fs-2 fw-bold"><i class="fas ${btcTrendIcon}"></i> <span class="fs-5">${btcTrend.is_uptrend ? 'صاعد' : 'هابط'}</span></p></div></div></div>`; }
+        function renderOpenTrades(trades) { const tbody = document.getElementById('open-trades-table'); if (!trades || trades.length === 0) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">لا توجد صفقات مفتوحة حالياً.</td></tr>'; return; } popoverList.forEach(p => p.dispose()); popoverList = []; tbody.innerHTML = trades.map(trade => { let detailsPopoverContent = '<ul>'; if(trade.signal_details){ for(const [key, value] of Object.entries(trade.signal_details)){ detailsPopoverContent += `<li><strong>${key.replace(/_/g, ' ')}:</strong> ${value}</li>`; } } detailsPopoverContent += '</ul>'; return `<tr><td><strong>${trade.symbol}</strong></td><td>${formatNumber(trade.entry_price)}</td><td>${formatNumber(trade.current_price)}</td><td class="${formatPnlClass(trade.pnl_pct)}">${formatPercentage(trade.pnl_pct)}</td><td>${formatNumber(trade.target_price)}</td><td>${formatNumber(trade.stop_loss)}</td><td><small>${trade.strategy_name || 'N/A'}</small></td><td><button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content="${detailsPopoverContent.replace(/"/g, '&quot;')}"><i class="fas fa-info-circle"></i></button></td><td><button class="btn btn-sm btn-outline-danger" onclick="openCloseModal(${trade.id}, '${trade.symbol}')">إغلاق</button></td></tr>`; }).join(''); const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]')); popoverList = popoverTriggerList.map(el => new bootstrap.Popover(el)); }
+        function renderTradeHistory(history) { const tbody = document.getElementById('trade-history-table'); if (!history || history.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">لا يوجد سجل تداول بعد.</td></tr>'; return; } tbody.innerHTML = history.map(trade => `<tr><td><strong>${trade.symbol}</strong></td><td>${formatNumber(trade.entry_price)}</td><td>${formatNumber(trade.closing_price)}</td><td class="${formatPnlClass(trade.profit_percentage)}">${formatPercentage(trade.profit_percentage)}</td><td>${formatStatusBadge(trade.status)}</td><td><small>${trade.strategy_name || 'N/A'}</small></td><td><small>${formatDateTime(trade.closed_at)}</small></td></tr>`).join(''); }
+        function renderNotifications(notifications) { const list = document.getElementById('notifications-list'); if (!notifications || notifications.length === 0) { list.innerHTML = '<li class="list-group-item">لا توجد إشعارات جديدة.</li>'; return; } const typeIcons = { 'NEW_SIGNAL': 'fa-lightbulb text-success', 'CLOSE_SIGNAL': 'fa-flag-checkered text-primary', 'SYSTEM': 'fa-cogs text-info', 'ERROR': 'fa-exclamation-triangle text-danger' }; list.innerHTML = notifications.map(n => `<li class="list-group-item d-flex justify-content-between align-items-start"><div class="ms-2 me-auto"><div class="fw-bold"><i class="fas ${typeIcons[n.type] || 'fa-bell'} me-2"></i>${n.message}</div><small class="text-muted">${formatDateTime(n.timestamp)}</small></div></li>`).join(''); }
+        function renderProfitChart(history) { if (!history || history.length === 0) return; const last30Trades = history.slice(0, 30).reverse(); const labels = last30Trades.map((t, i) => `T${i + 1}`); let cumulativeProfit = 0; const data = last30Trades.map(t => cumulativeProfit += t.profit_percentage); const ctx = document.getElementById('profitChart').getContext('2d'); if (profitChartInstance) { profitChartInstance.data.labels = labels; profitChartInstance.data.datasets[0].data = data; profitChartInstance.update(); } else { profitChartInstance = new Chart(ctx, { type: 'line', data: { labels: labels, datasets: [{ label: 'الأرباح التراكمية %', data: data, borderColor: 'rgba(0, 170, 255, 1)', backgroundColor: 'rgba(0, 170, 255, 0.1)', fill: true, tension: 0.3, }] }, options: { responsive: true, maintainAspectRatio: false, scales: { y: { ticks: { color: '#f0f0f0' } }, x: { ticks: { color: '#f0f0f0' } } }, plugins: { legend: { labels: { color: '#f0f0f0' } } } } }); } }
         async function updateDashboard() { const [stats, marketStatus, openTrades, tradeHistory, notifications] = await Promise.all([fetchData('/api/stats'), fetchData('/api/market_status'), fetchData('/api/open_trades'), fetchData('/api/trade_history'), fetchData('/api/notifications')]); renderStats(stats, marketStatus); renderOpenTrades(openTrades); renderTradeHistory(tradeHistory); renderNotifications(notifications); renderProfitChart(tradeHistory); }
-        let tradeToClose = { id: null, symbol: null }; const closeTradeModal = new bootstrap.Modal(document.getElementById('closeTradeModal'));
-        function openCloseModal(id, symbol) { tradeToClose = { id, symbol }; document.getElementById('modal-symbol-name').textContent = symbol; closeTradeModal.show(); }
+        let tradeToClose = { id: null, symbol: null }; const closeTradeModal = new bootstrap.Modal(document.getElementById('closeTradeModal')); function openCloseModal(id, symbol) { tradeToClose = { id, symbol }; document.getElementById('modal-symbol-name').textContent = symbol; closeTradeModal.show(); }
         document.getElementById('confirm-close-btn').addEventListener('click', async () => { if (!tradeToClose.id) return; showSpinner(); closeTradeModal.hide(); try { const response = await fetch(`${API_BASE_URL}/api/close_trade`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(tradeToClose) }); if (response.ok) { await updateDashboard(); } } catch (error) { console.error('Error sending close request:', error); } finally { hideSpinner(); tradeToClose = { id: null, symbol: null }; } });
         document.addEventListener('DOMContentLoaded', () => { updateDashboard(); setInterval(updateDashboard, 5000); });
     </script>

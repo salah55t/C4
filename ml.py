@@ -14,7 +14,7 @@ import gc
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # <-- تم استيراد timezone
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
 from sklearn.model_selection import TimeSeriesSplit
@@ -52,7 +52,7 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR' # --- تم تغيير اسم النموذج
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
@@ -162,7 +162,9 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 # --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
-        start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        # !!! FIXED DeprecationWarning
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -182,8 +184,6 @@ def fetch_and_cache_btc_data():
     if btc_data_cache is None:
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
-
-# --- START: NEW FUNCTIONS TO INTEGRATE S/R LEVELS ---
 
 def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.DataFrame:
     """
@@ -211,27 +211,21 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     Engineers new features based on the distance and score of nearby S/R levels.
     """
     if sr_levels_df.empty:
-        # If no levels are found, create empty columns to maintain data structure
         df['dist_to_support'] = 0.0
         df['dist_to_resistance'] = 0.0
         df['score_of_support'] = 0.0
         df['score_of_resistance'] = 0.0
         return df
 
-    # Separate levels into support and resistance
     supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence')]['level_price'].sort_values().to_numpy()
     resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence')]['level_price'].sort_values().to_numpy()
     
-    # Create dictionaries to map price to score
     support_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
     resistance_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
 
     def get_sr_info(price):
-        # Default values if no levels are found
-        dist_support, score_support = 1.0, 0.0 # Use a large default distance (100%)
-        dist_resistance, score_resistance = 1.0, 0.0
+        dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
 
-        # Find nearest support
         if supports.size > 0:
             idx = np.searchsorted(supports, price, side='right') - 1
             if idx >= 0:
@@ -239,7 +233,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
                 dist_support = (price - nearest_support_price) / price if price > 0 else 0
                 score_support = support_scores.get(nearest_support_price, 0)
 
-        # Find nearest resistance
         if resistances.size > 0:
             idx = np.searchsorted(resistances, price, side='left')
             if idx < len(resistances):
@@ -249,14 +242,10 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
         
         return dist_support, score_support, dist_resistance, score_resistance
 
-    # Apply the function to each row's 'close' price
     results = df['close'].apply(get_sr_info)
     df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
 
     return df
-
-# --- END: NEW FUNCTIONS TO INTEGRATE S/R LEVELS ---
-
 
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df_patterns = df.copy()
@@ -369,13 +358,10 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
-    # Calculate base technical indicators
     df_featured = calculate_features(df_15m, btc_df)
     
-    # --- NEW: Calculate and add S/R features ---
     df_featured = calculate_sr_features(df_featured, sr_levels)
     
-    # Calculate multi-timeframe features
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -387,17 +373,14 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
     
-    # Calculate target labels
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # --- UPDATED: Add new S/R features to the list ---
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
         'bb_width', 'adx', 'candlestick_pattern',
         'rsi_4h', 'price_vs_ema50_4h',
-        # New S/R Features
         'dist_to_support', 'dist_to_resistance',
         'score_of_support', 'score_of_resistance'
     ]
@@ -439,15 +422,16 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler()
-            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
-            X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+            # !!! FIXED: Pass DataFrame to scaler to retain feature names for warnings
+            X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+            X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
             
             model = lgb.LGBMClassifier(**params)
-            model.fit(X_train_scaled, y_train,
-                      eval_set=[(X_test_scaled, y_test)],
+            model.fit(X_train_scaled_df, y_train,
+                      eval_set=[(X_test_scaled_df, y_test)],
                       callbacks=[lgb.early_stopping(20, verbose=False)])
             
-            y_pred = model.predict(X_test_scaled)
+            y_pred = model.predict(X_test_scaled_df)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
 
@@ -472,12 +456,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         scaler = StandardScaler()
-        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
-        X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
+        X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+        X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
 
         model = lgb.LGBMClassifier(**final_model_params)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(X_test_scaled)
+        model.fit(X_train_scaled_df, y_train)
+        y_pred = model.predict(X_test_scaled_df)
         all_preds_final.extend(y_pred)
         all_true_final.extend(y_test)
         
@@ -556,12 +540,10 @@ def run_training_job():
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
-            # --- NEW: Fetch S/R levels for the current symbol ---
             sr_levels = fetch_sr_levels(symbol, conn)
             
-            # --- UPDATED: Pass the S/R levels to the preparation function ---
             prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, sr_levels, symbol)
-            del df_15m, df_4h; gc.collect()
+            del df_15m, df_4h, sr_levels; gc.collect()
 
             if prepared_data is None:
                 failed_models += 1; continue
