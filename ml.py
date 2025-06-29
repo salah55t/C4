@@ -24,7 +24,6 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
-# --- CORRECTED IMPORT ---
 from github import Github, GithubException, Repository
 
 # ---------------------- Ignore FutureWarnings from Pandas ----------------------
@@ -64,7 +63,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 30
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -96,7 +95,6 @@ client: Optional[Client] = None
 btc_data_cache: Optional[pd.DataFrame] = None
 
 # --- GitHub Integration Functions ---
-# --- CORRECTED TYPE HINT ---
 def get_github_repo() -> Optional[Repository]:
     """Initializes and returns a connection to the specified GitHub repository."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
@@ -111,7 +109,6 @@ def get_github_repo() -> Optional[Repository]:
         logger.error(f"❌ [GitHub] Failed to connect to GitHub repository: {e}")
         return None
 
-# --- CORRECTED TYPE HINT ---
 def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any], model_bundle: Dict[str, Any]):
     """Saves model metrics and the pickled model file to the GitHub repository."""
     if not repo:
@@ -253,7 +250,9 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
+# --- FIXED DTYPE ISSUE ---
 def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.DataFrame:
+    """Fetches S/R levels and ensures correct data types."""
     logger.info(f"🔍 [S/R Fetch] Fetching S/R levels for {symbol} from database...")
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
@@ -264,6 +263,8 @@ def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.
                 logger.warning(f"⚠️ [S/R Fetch] No S/R levels found for {symbol}.")
                 return pd.DataFrame()
             df_levels = pd.DataFrame(levels)
+            # Ensure 'score' is numeric. Psycopg2 might return Decimal, which pandas can treat as object.
+            df_levels['score'] = pd.to_numeric(df_levels['score'])
             logger.info(f"✅ [S/R Fetch] Found {len(df_levels)} levels for {symbol}.")
             return df_levels
     except Exception as e:
@@ -271,18 +272,21 @@ def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.
         if db_conn: db_conn.rollback()
         return pd.DataFrame()
 
+# --- ADDED DTYPE CASTING FOR ROBUSTNESS ---
 def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
+    """Engineers features from S/R levels and ensures final columns are float."""
     if sr_levels_df.empty:
         df['dist_to_support'] = 0.0
-        df['dist_to_resistance'] = 0.0
         df['score_of_support'] = 0.0
+        df['dist_to_resistance'] = 0.0
         df['score_of_resistance'] = 0.0
         return df
 
-    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
-    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
+    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False, na=False)]['level_price'].sort_values().to_numpy()
+    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False, na=False)]['level_price'].sort_values().to_numpy()
     
-    level_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
+    # Ensure scores are numeric before creating the dictionary
+    level_scores = pd.Series(pd.to_numeric(sr_levels_df['score']).values, index=sr_levels_df['level_price']).to_dict()
 
     def get_sr_info(price):
         dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
@@ -292,19 +296,23 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
             if idx >= 0:
                 nearest_support_price = supports[idx]
                 dist_support = (price - nearest_support_price) / price if price > 0 else 0
-                score_support = level_scores.get(nearest_support_price, 0)
+                score_support = level_scores.get(nearest_support_price, 0.0)
 
         if resistances.size > 0:
             idx = np.searchsorted(resistances, price, side='left')
             if idx < len(resistances):
                 nearest_resistance_price = resistances[idx]
                 dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
-                score_resistance = level_scores.get(nearest_resistance_price, 0)
+                score_resistance = level_scores.get(nearest_resistance_price, 0.0)
         
         return dist_support, score_support, dist_resistance, score_resistance
 
     results = df['close'].apply(get_sr_info)
-    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
+    sr_features_df = pd.DataFrame(results.tolist(), index=df.index, columns=['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance'])
+    
+    # Final explicit cast to float32 for model compatibility
+    for col in sr_features_df.columns:
+        df[col] = pd.to_numeric(sr_features_df[col], errors='coerce').fillna(0).astype('float32')
 
     return df
 
@@ -412,11 +420,15 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             'max_depth': trial.suggest_int('max_depth', 5, 8),
         }
         tscv = TimeSeriesSplit(n_splits=3)
-        X_train, X_test = list(tscv.split(X))[-1]
+        train_indices, test_indices = list(tscv.split(X))[-1]
+        
+        X_train, X_test = X.iloc[train_indices], X.iloc[test_indices]
+        y_train, y_test = y.iloc[train_indices], y.iloc[test_indices]
+
         model = lgb.LGBMClassifier(**params)
-        model.fit(X.iloc[X_train], y.iloc[X_train], eval_set=[(X.iloc[X_test], y.iloc[X_test])], callbacks=[lgb.early_stopping(15, verbose=False)])
-        preds = model.predict(X.iloc[X_test])
-        report = classification_report(y.iloc[X_test], preds, output_dict=True, zero_division=0)
+        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], callbacks=[lgb.early_stopping(15, verbose=False)])
+        preds = model.predict(X_test)
+        report = classification_report(y_test, preds, output_dict=True, zero_division=0)
         return report.get('1', {}).get('precision', 0)
 
     study = optuna.create_study(direction='maximize')
