@@ -247,9 +247,7 @@ class MLStrategy(Strategy):
         # Reshape for the scaler and model
         features_df = pd.DataFrame([features])
         
-        # --- FIX: Convert scaled numpy array back to a DataFrame with feature names ---
-        # The scaler returns a numpy array, which we need to convert back to a DataFrame
-        # with the correct column names for the model to avoid warnings.
+        # --- FIX 1: Convert scaled numpy array back to a DataFrame with feature names ---
         features_scaled_np = self.scaler.transform(features_df)
         features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
         
@@ -273,15 +271,24 @@ class MLStrategy(Strategy):
 
             current_price = self.data.Close[-1]
             
-            # Define Stop Loss and Take Profit levels
-            stop_loss_price = current_price - (current_atr * ATR_SL_MULTIPLIER)
-            take_profit_price = current_price + (current_atr * ATR_TP_MULTIPLIER)
+            # --- FIX 2: Calculate position size as a fraction of equity ---
+            # The backtesting library requires size to be either a fraction of equity (0 < size < 1)
+            # or a whole number of units (e.g., 1, 2, 3).
+            # Calculating units directly (e.g., 10 / price) can result in a fractional number
+            # greater than 1 (e.g., 1.25), which causes an assertion error.
+            # The correct approach is to calculate what fraction of our total equity
+            # the desired trade amount represents.
+            size_as_fraction = TRADE_AMOUNT_USDT / self.equity
 
-            # Calculate position size to be $10
-            size = TRADE_AMOUNT_USDT / current_price
+            # We must ensure the calculated size is a valid fraction for the `buy` method.
+            # It should be > 0 and < 1. If we don't have enough equity, it could be >= 1.
+            if size_as_fraction > 0 and size_as_fraction < 1:
+                # Define Stop Loss and Take Profit levels
+                stop_loss_price = current_price - (current_atr * ATR_SL_MULTIPLIER)
+                take_profit_price = current_price + (current_atr * ATR_TP_MULTIPLIER)
 
-            # Place the buy order with SL and TP
-            self.buy(size=size, sl=stop_loss_price, tp=take_profit_price)
+                # Place the buy order with SL and TP
+                self.buy(size=size_as_fraction, sl=stop_loss_price, tp=take_profit_price)
 
 # ---------------------- Main Execution Block ----------------------
 def run_backtest():
