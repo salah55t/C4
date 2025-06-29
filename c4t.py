@@ -13,7 +13,7 @@ from flask import Flask
 from threading import Thread
 from datetime import datetime, timedelta, timezone
 from psycopg2.extras import RealDictCursor
-from typing import List, Dict, Optional, Any # <-- تم إضافة هذا السطر لتصحيح الخطأ
+from typing import List, Dict, Optional, Any
 
 # ==================================================================================================
 # -------------------------------- إعدادات الاختبار الخلفي (الإصدار السادس) --------------------------------
@@ -308,11 +308,15 @@ def run_backtest_for_symbol(symbol: str, df_full: pd.DataFrame, sr_levels_df: pd
         model, scaler, feature_names = model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
         missing = [col for col in feature_names if col not in df_full.columns]
         if missing: logger.error(f"Missing features {missing} for {symbol}. Skipping ML."); return []
+        
         features_df = df_full[feature_names]
+        # FIX: Recreate DataFrame after scaling to prevent UserWarning
         features_scaled_np = scaler.transform(features_df)
+        features_scaled_df = pd.DataFrame(features_scaled_np, columns=feature_names, index=features_df.index)
+        
         try:
             class_1_index = list(model.classes_).index(1)
-            predictions = model.predict_proba(features_scaled_np)[:, class_1_index]
+            predictions = model.predict_proba(features_scaled_df)[:, class_1_index]
             df_full['prediction'] = predictions
         except Exception as e:
             logger.error(f"Could not get predictions for {symbol}: {e}"); df_full['prediction'] = 0
@@ -374,7 +378,10 @@ def run_backtest_for_symbol(symbol: str, df_full: pd.DataFrame, sr_levels_df: pd
             entry_price = current_candle['close']
             strong_supports = sr_levels_df[(sr_levels_df['score'] >= MINIMUM_SR_SCORE_FOR_SIGNAL) & (sr_levels_df['level_type'].str.contains('support|poc')) & (sr_levels_df['level_price'] < entry_price)]
             if not strong_supports.empty:
-                closest_support = strong_supports.iloc[strong_supports['level_price'].sub(entry_price).abs().idxmin()]
+                # FIX: Use .loc instead of .iloc with the index label from idxmin()
+                closest_support_idx = strong_supports['level_price'].sub(entry_price).abs().idxmin()
+                closest_support = strong_supports.loc[closest_support_idx]
+                
                 if (entry_price - closest_support['level_price']) / closest_support['level_price'] <= SR_PROXIMITY_PERCENT:
                     resistances_above = sr_levels_df[(sr_levels_df['level_type'].str.contains('resistance|poc')) & (sr_levels_df['level_price'] > entry_price)]
                     if not resistances_above.empty:
