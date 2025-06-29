@@ -34,11 +34,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v5.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v6.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V5')
+logger = logging.getLogger('MLTrainer_V6_With_SR')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -52,11 +52,11 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR' # --- تم تغيير اسم النموذج
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 15
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -183,6 +183,81 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
+# --- START: NEW FUNCTIONS TO INTEGRATE S/R LEVELS ---
+
+def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.DataFrame:
+    """
+    Fetches support and resistance levels for a given symbol from the database.
+    """
+    logger.info(f"🔍 [S/R Fetch] Fetching S/R levels for {symbol} from database...")
+    query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
+    try:
+        with db_conn.cursor() as cur:
+            cur.execute(query, (symbol,))
+            levels = cur.fetchall()
+            if not levels:
+                logger.warning(f"⚠️ [S/R Fetch] No S/R levels found for {symbol}.")
+                return pd.DataFrame()
+            df_levels = pd.DataFrame(levels)
+            logger.info(f"✅ [S/R Fetch] Found {len(df_levels)} levels for {symbol}.")
+            return df_levels
+    except Exception as e:
+        logger.error(f"❌ [S/R Fetch] Could not fetch S/R levels for {symbol}: {e}")
+        db_conn.rollback()
+        return pd.DataFrame()
+
+def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Engineers new features based on the distance and score of nearby S/R levels.
+    """
+    if sr_levels_df.empty:
+        # If no levels are found, create empty columns to maintain data structure
+        df['dist_to_support'] = 0.0
+        df['dist_to_resistance'] = 0.0
+        df['score_of_support'] = 0.0
+        df['score_of_resistance'] = 0.0
+        return df
+
+    # Separate levels into support and resistance
+    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence')]['level_price'].sort_values().to_numpy()
+    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence')]['level_price'].sort_values().to_numpy()
+    
+    # Create dictionaries to map price to score
+    support_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
+    resistance_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
+
+    def get_sr_info(price):
+        # Default values if no levels are found
+        dist_support, score_support = 1.0, 0.0 # Use a large default distance (100%)
+        dist_resistance, score_resistance = 1.0, 0.0
+
+        # Find nearest support
+        if supports.size > 0:
+            idx = np.searchsorted(supports, price, side='right') - 1
+            if idx >= 0:
+                nearest_support_price = supports[idx]
+                dist_support = (price - nearest_support_price) / price if price > 0 else 0
+                score_support = support_scores.get(nearest_support_price, 0)
+
+        # Find nearest resistance
+        if resistances.size > 0:
+            idx = np.searchsorted(resistances, price, side='left')
+            if idx < len(resistances):
+                nearest_resistance_price = resistances[idx]
+                dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
+                score_resistance = resistance_scores.get(nearest_resistance_price, 0)
+        
+        return dist_support, score_support, dist_resistance, score_resistance
+
+    # Apply the function to each row's 'close' price
+    results = df['close'].apply(get_sr_info)
+    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
+
+    return df
+
+# --- END: NEW FUNCTIONS TO INTEGRATE S/R LEVELS ---
+
+
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df_patterns = df.copy()
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
@@ -292,10 +367,15 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
                 labels.iloc[i] = -1; break
     return labels
 
-def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
+    # Calculate base technical indicators
     df_featured = calculate_features(df_15m, btc_df)
     
+    # --- NEW: Calculate and add S/R features ---
+    df_featured = calculate_sr_features(df_featured, sr_levels)
+    
+    # Calculate multi-timeframe features
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -306,15 +386,22 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+    
+    # Calculate target labels
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
+    # --- UPDATED: Add new S/R features to the list ---
     feature_columns = [
         'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
         'bb_width', 'adx', 'candlestick_pattern',
-        'rsi_4h', 'price_vs_ema50_4h'
+        'rsi_4h', 'price_vs_ema50_4h',
+        # New S/R Features
+        'dist_to_support', 'dist_to_resistance',
+        'score_of_support', 'score_of_resistance'
     ]
+    
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes. Skipping.")
@@ -325,12 +412,8 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     y = df_cleaned['target']
     return X, y, feature_columns
 
-# --- UPDATED --- : The entire training and tuning function is updated for robustness and to fix warnings.
+
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
-    """
-    Uses Optuna for hyperparameter tuning and then trains a final model,
-    ensuring feature names are preserved to prevent warnings.
-    """
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
 
     def objective(trial: optuna.trial.Trial) -> float:
@@ -356,7 +439,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler()
-            # --- FIX ---: Wrap scaled data in a DataFrame to preserve feature names
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
             
@@ -369,7 +451,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             all_preds.extend(y_pred)
             all_true.extend(y_test)
 
-        # Use precision for buy signals as the optimization metric
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
         return report.get('1', {}).get('precision', 0)
 
@@ -378,14 +459,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     best_params = study.best_params
     logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
     
-    # --- Retrain final model on all data with best params and get final metrics ---
     logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
     final_model_params = {
         'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
         'random_state': 42, 'verbosity': -1, **best_params
     }
     
-    # Get final metrics using walk-forward validation with the best params
     all_preds_final, all_true_final = [], []
     tscv_final = TimeSeriesSplit(n_splits=5)
     for train_index, test_index in tscv_final.split(X):
@@ -393,7 +472,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         scaler = StandardScaler()
-        # --- FIX ---: Preserve feature names
         X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), columns=X_train.columns, index=X_train.index)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns, index=X_test.index)
 
@@ -414,9 +492,7 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         'best_hyperparameters': json.dumps(best_params)
     }
     
-    # Train the final model on the entire dataset
     final_scaler = StandardScaler()
-    # --- FIX ---: Preserve feature names for the final model
     X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), columns=X.columns, index=X.index)
     
     final_model = lgb.LGBMClassifier(**final_model_params)
@@ -480,7 +556,11 @@ def run_training_job():
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
-            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
+            # --- NEW: Fetch S/R levels for the current symbol ---
+            sr_levels = fetch_sr_levels(symbol, conn)
+            
+            # --- UPDATED: Pass the S/R levels to the preparation function ---
+            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, sr_levels, symbol)
             del df_15m, df_4h; gc.collect()
 
             if prepared_data is None:
@@ -494,7 +574,6 @@ def run_training_job():
                  continue
             final_model, final_scaler, model_metrics = training_result
             
-            # We use precision on the "buy" (1) class as a quality gate
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -526,7 +605,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer service is running and healthy.", 200
+    return "ML Trainer (with S/R features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
