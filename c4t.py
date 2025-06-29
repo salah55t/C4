@@ -2,82 +2,92 @@ import os
 import logging
 import pickle
 import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
-
+import json
+import psycopg2
 import numpy as np
 import pandas as pd
-import psycopg2
 from binance.client import Client
 from decouple import config
-from psycopg2.extras import RealDictCursor
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
+from datetime import datetime, timedelta, timezone
+from psycopg2.extras import RealDictCursor
 
-# ==============================================================================
-# --------------------------- إعدادات الاختبار الخلفي (محدثة لتطابق البوت) ----------------------------
-# ==============================================================================
-# الفترة الزمنية للاختبار بالايام
-BACKTEST_PERIOD_DAYS: int = 90
-# الإطار الزمني للشموع
+# ==================================================================================================
+# -------------------------------- إعدادات الاختبار الخلفي (الإصدار السادس) --------------------------------
+# ==================================================================================================
+# الفترة الزمنية للاختبار بالأيام
+BACKTEST_PERIOD_DAYS: int = 120
+# الإطار الزمني للشموع (يجب أن يطابق إطار تدريب النموذج)
 TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-# اسم النموذج الأساسي
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V5'
-# فترة جلب البيانات (يجب أن تكون أطول لتغطية حساب المؤشرات)
-DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 90 # تم زيادة الفترة لضمان وجود بيانات كافية للمؤشرات
+# اسم النموذج الأساسي الذي سيتم اختباره
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
+# فترة جلب البيانات يجب أن تكون أطول لتغطية حساب المؤشرات
+DATA_FETCH_LOOKBACK_DAYS: int = BACKTEST_PERIOD_DAYS + 90 # (e.g., 120 + 90)
 
-# --- معلمات الاستراتيجية (مطابقة لـ c4.py) ---
-USE_ML_STRATEGY = True
-MODEL_PREDICTION_THRESHOLD: float = 0.80 
+# --- محاكاة التكاليف الواقعية ---
+COMMISSION_PERCENT: float = 0.075 # النسبة المئوية للعمولة لكل صفقة
+SLIPPAGE_PERCENT: float = 0.04 # النسبة المئوية للانزلاق السعري
+INITIAL_TRADE_AMOUNT_USDT: float = 10.0 # حجم الصفقة الأولي بالدولار
 
-USE_SR_FIB_STRATEGY = True
-SR_PROXIMITY_PERCENT = 0.003
-MINIMUM_SR_SCORE_FOR_SIGNAL = 50
+# --- معلمات استراتيجية تعلم الآلة (ML) ---
+USE_ML_STRATEGY: bool = True
+MODEL_CONFIDENCE_THRESHOLD: float = 0.65 # الحد الأدنى لثقة النموذج لتوليد إشارة
 
-# --- فلتر البيتكوين ---
-USE_BTC_TREND_FILTER = True # تفعيل فلتر اتجاه البيتكوين
-BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 10
+# --- معلمات استراتيجية الدعم والمقاومة (S/R) ---
+USE_SR_FIB_STRATEGY: bool = True
+SR_PROXIMITY_PERCENT: float = 0.003 # 0.3% - مدى القرب من مستوى الدعم لتفعيله
+MINIMUM_SR_SCORE_FOR_SIGNAL: int = 50 # الحد الأدنى لقوة المستوى لتوليد إشارة
 
-# --- Fallback Parameters ---
+# --- فلاتر الإشارات العامة ---
+MINIMUM_PROFIT_PERCENTAGE: float = 0.8 # الحد الأدنى للربح المتوقع لفتح صفقة
+MINIMUM_RISK_REWARD_RATIO: float = 1.2 # الحد الأدنى لنسبة المخاطرة إلى العائد
+MINIMUM_15M_VOLUME_USDT: float = 200_000 # الحد الأدنى لحجم التداول في شمعة 15 دقيقة
+
+# --- معلمات تحديد الهدف ووقف الخسارة (Fallback) ---
 ATR_SL_MULTIPLIER: float = 2.0
 ATR_TP_MULTIPLIER: float = 2.5
 
-# --- محاكاة التكاليف ---
-COMMISSION_PERCENT: float = 0.1 # 0.05% للدخول + 0.05% للخروج
-SLIPPAGE_PERCENT: float = 0.05
-INITIAL_TRADE_AMOUNT_USDT: float = 10.0
-
-# --- Indicator & Feature Parameters ---
+# --- معلمات المؤشرات (مطابقة لملفات c4.py و ml.py) ---
 ADX_PERIOD: int = 14
+BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+STOCH_RSI_PERIOD: int = 14
+STOCH_K: int = 3
+STOCH_D: int = 3
+REL_VOL_PERIOD: int = 30
+RSI_OVERBOUGHT: int = 70
+RSI_OVERSOLD: int = 30
+STOCH_RSI_OVERBOUGHT: int = 80
+STOCH_RSI_OVERSOLD: int = 20
 BTC_SYMBOL = 'BTCUSDT'
 
-
-# ==============================================================================
-# ---------------------------- إعدادات النظام والاتصال -------------------------
-# ==============================================================================
+# ==================================================================================================
+# --------------------------------- إعدادات النظام والاتصال -------------------------------------
+# ==================================================================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtester_v5_final.log', mode='w', encoding='utf-8'),
+        logging.FileHandler('backtester_v6_sr.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('BacktesterFinal')
+logger = logging.getLogger('BacktesterV6_SR')
 
 app = Flask(__name__)
 @app.route('/')
 def health_check():
-    return "Backtester service for Final V5 is running."
+    return "Backtester V6 service is running."
 
+# --- تحميل متغيرات البيئة ---
 try:
     API_KEY: str = config('BINANCE_API_KEY')
     API_SECRET: str = config('BINANCE_API_SECRET')
@@ -85,25 +95,30 @@ try:
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}"); exit(1)
 
+# --- تهيئة الاتصالات ---
 client: Optional[Client] = None
-try:
-    client = Client(API_KEY, API_SECRET)
-    logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
-except Exception as e:
-    logger.critical(f"❌ [Binance] فشل الاتصال: {e}"); exit(1)
-
 conn: Optional[psycopg2.extensions.connection] = None
-try:
-    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
-    logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
-except Exception as e:
-    logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
 
-# ==============================================================================
-# ------------------- دوال مساعدة (منسوخة ومعدلة من ملفاتك) --------------------
-# ==============================================================================
+def init_connections():
+    global client, conn
+    try:
+        client = Client(API_KEY, API_SECRET)
+        logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
+    except Exception as e:
+        logger.critical(f"❌ [Binance] فشل الاتصال: {e}"); exit(1)
+
+    try:
+        conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+        logger.info("✅ [PostgreSQL] تم الاتصال بقاعدة البيانات بنجاح.")
+    except Exception as e:
+        logger.critical(f"❌ [PostgreSQL] فشل الاتصال بقاعدة البيانات: {e}"); exit(1)
+
+
+# ==================================================================================================
+# --------------------------------- دوال مساعدة لجلب البيانات والمعالجة ------------------------------
+# ==================================================================================================
+
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (Same as in your bot file)
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}'...")
     if not client: logger.error("Binance client not initialized."); return []
     try:
@@ -122,364 +137,389 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] Error: {e}", exc_info=True); return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    # ... (Same as in your bot file)
     if not client: return None
     try:
-        start_str = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
-        if not klines: logger.warning(f"⚠️ No historical data found for {symbol} for the given period."); return None
+        if not klines: logger.warning(f"⚠️ No historical data for {symbol} for the period."); return None
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        df.index = df.index.tz_localize('UTC') # Make index timezone-aware
         return df[['open', 'high', 'low', 'close', 'volume']].dropna()
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-def fetch_sr_levels_from_db(symbol: str) -> Optional[List[Dict]]:
-    # This function is copied from your main bot to fetch S/R levels
+def fetch_sr_levels(symbol: str) -> pd.DataFrame:
     if not conn:
-        logger.warning(f"⚠️ [{symbol}] Cannot fetch S/R levels, DB connection not available.")
-        return None
+        logger.warning(f"⚠️ [{symbol}] Cannot fetch S/R levels, DB connection unavailable.")
+        return pd.DataFrame()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT level_price, level_type, score, details FROM support_resistance_levels WHERE symbol = %s ORDER BY level_price ASC",
-                (symbol,)
+                "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s", (symbol,)
             )
             levels = cur.fetchall()
-            if not levels: return None
-            for level in levels:
-                level['score'] = float(level.get('score', 0))
-            return levels
+            return pd.DataFrame(levels) if levels else pd.DataFrame()
     except Exception as e:
-        logger.error(f"❌ [{symbol}] Error fetching S/R levels: {e}"); return None
+        logger.error(f"❌ [{symbol}] Error fetching S/R levels: {e}"); conn.rollback(); return pd.DataFrame()
 
-# --- [تم التغيير] ---
-# تم استبدال الدالة التي تحمل النماذج من قاعدة البيانات بالدالة التي تحملها من المجلد المحلي
-def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Loads a model bundle (model, scaler, feature_names) from a .pkl file
-    in the 'Mo' directory.
-    """
+def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    model_dir = 'Mo'  # The folder should be named 'Mo'
-
-    if not os.path.isdir(model_dir):
-        logger.error(f"❌ [Model] Model directory '{model_dir}' not found. Cannot load any models.")
+    if not conn: logger.error("Cannot load model, DB connection is not available."); return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s;", (model_name,))
+            record = cur.fetchone()
+            if record and 'model_data' in record:
+                model_bundle = pickle.loads(record['model_data'])
+                if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+                    return model_bundle
+                else: logger.error(f"❌ [Model] Incomplete model bundle for '{model_name}'.")
+            else: logger.warning(f"⚠️ [Model] Model '{model_name}' not found in DB.")
         return None
+    except Exception as e:
+        logger.error(f"❌ [Model] Error loading model '{model_name}' from DB: {e}"); conn.rollback(); return None
 
-    file_path = os.path.join(model_dir, f"{model_name}.pkl")
-    
-    if os.path.exists(file_path):
-        try:
-            with open(file_path, 'rb') as f:
-                model_bundle = pickle.load(f)
-            if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                logger.info(f"✅ [Model] Successfully loaded model '{model_name}' from local file.")
-                return model_bundle
-            else:
-                logger.error(f"❌ [Model] Model bundle in file '{file_path}' is incomplete.")
-                return None
-        except Exception as e:
-            logger.error(f"❌ [Model] Error loading model file '{file_path}': {e}", exc_info=True)
-            return None
-    else:
-        # هذا ليس خطأ، بل يعني عدم وجود نموذج مدرب لهذه العملة
-        logger.warning(f"⚠️ [Model] Model file '{file_path}' not found for {symbol}. ML strategy will be disabled.")
-        return None
+# ==================================================================================================
+# ------------------------------- دوال هندسة الميزات (مطابقة للإصدار السادس) ----------------------------
+# ==================================================================================================
+def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
+    if sr_levels_df.empty:
+        df['dist_to_support'] = 0.0; df['dist_to_resistance'] = 0.0
+        df['score_of_support'] = 0.0; df['score_of_resistance'] = 0.0
+        return df
 
-def calculate_all_features(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-    """
-    Calculates all necessary features for both ML and standard strategies.
-    Also integrates the BTC trend filter.
-    """
-    if df_15m is None or df_15m.empty:
-        return None
-        
+    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence')]['level_price'].sort_values().to_numpy()
+    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence')]['level_price'].sort_values().to_numpy()
+    support_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
+    resistance_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
+
+    def get_sr_info(price):
+        dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
+        if supports.size > 0:
+            idx = np.searchsorted(supports, price, side='right') - 1
+            if idx >= 0:
+                nearest_support_price = supports[idx]
+                dist_support = (price - nearest_support_price) / price if price > 0 else 0
+                score_support = support_scores.get(nearest_support_price, 0)
+        if resistances.size > 0:
+            idx = np.searchsorted(resistances, price, side='left')
+            if idx < len(resistances):
+                nearest_resistance_price = resistances[idx]
+                dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
+                score_resistance = resistance_scores.get(nearest_resistance_price, 0)
+        return dist_support, score_support, dist_resistance, score_resistance
+
+    results = df['close'].apply(get_sr_info)
+    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
+    return df
+
+def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    op, hi, lo, cl = df['open'], df['high'], df['low'], df['close']
+    body = abs(cl - op); candle_range = hi - lo; candle_range[candle_range == 0] = 1e-9
+    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
+    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
+    df['candlestick_pattern'] = 0
+    df.loc[(body / candle_range) < 0.05, 'candlestick_pattern'] = 3
+    df.loc[(body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body), 'candlestick_pattern'] = 2
+    df.loc[(body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body), 'candlestick_pattern'] = -2
+    df.loc[(cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1)), 'candlestick_pattern'] = 1
+    df.loc[(cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1)), 'candlestick_pattern'] = -1
+    df.loc[(cl > op) & (body / candle_range > 0.95), 'candlestick_pattern'] = 4
+    df.loc[(op > cl) & (body / candle_range > 0.95), 'candlestick_pattern'] = -4
+    return df
+
+def prepare_data_for_backtest(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame) -> Optional[pd.DataFrame]:
+    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: return None
     df_calc = df_15m.copy()
-
-    # ATR (for fallback TP/SL)
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    high_low = df_calc['high'] - df_calc['low']; high_close = (df_calc['high'] - df_calc['close'].shift()).abs(); low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    up_move = df_calc['high'].diff(); down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean(); loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean(); ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+    macd_line = ema_fast - ema_slow; signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    df_calc['macd_cross'] = 0; df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1; df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean(); std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
+    upper_band = sma + (std_dev * 2); lower_band = sma - (std_dev * 2)
+    df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
+    rsi_val = df_calc['rsi']; min_rsi = rsi_val.rolling(window=STOCH_RSI_PERIOD).min(); max_rsi = rsi_val.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi_val - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100; df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['market_condition'] = 0; df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1; df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean(); ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1; df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    df_calc['hour_of_day'] = df_calc.index.hour
+    df_calc = calculate_candlestick_patterns(df_calc)
+    df_calc = calculate_sr_features(df_calc, sr_levels) # إضافة ميزات الدعم والمقاومة
+    delta_4h = df_4h['close'].diff(); gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean(); loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9)))); ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean(); df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+    mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
+    df_featured = df_calc.join(mtf_features)
+    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].ffill()
+    return df_featured.dropna()
 
-    # --- [إضافة جديدة] حساب ودمج فلتر البيتكوين ---
-    if btc_df is not None and not btc_df.empty:
-        # Calculate BTC trend (EMA on 4h timeframe)
-        btc_4h = btc_df.resample(HIGHER_TIMEFRAME).last().dropna()
-        btc_4h['ema_trend'] = btc_4h['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
-        btc_4h['is_uptrend'] = btc_4h['close'] > btc_4h['ema_trend']
-        
-        # Forward-fill the trend status to match the 15m timeframe of the asset
-        df_calc = pd.merge(df_calc, btc_4h[['is_uptrend']], left_index=True, right_index=True, how='left')
-        df_calc['is_uptrend'].fillna(method='ffill', inplace=True)
-        # Handle any initial NaNs
-        df_calc['is_uptrend'].fillna(False, inplace=True)
-
-
-    # Placeholder for other ML features if needed by the model
-    # For this backtest, 'atr' and 'is_uptrend' are the most critical features calculated here.
-    # If your model in 'Mo' requires more features, they must be calculated here.
+# ==================================================================================================
+# ----------------------------- محرك الاختبار الخلفي (مُحدَّث بالكامل) ------------------------------
+# ==================================================================================================
+def validate_and_filter_signal(signal: Dict, last_candle_data: pd.Series) -> Optional[Dict]:
+    entry_price, target_price, stop_loss = signal['entry_price'], signal['target_price'], signal['stop_loss']
     
-    return df_calc.dropna()
+    last_15m_volume_usdt = last_candle_data['volume'] * last_candle_data['close']
+    if last_15m_volume_usdt < MINIMUM_15M_VOLUME_USDT: return None # فلتر السيولة
+        
+    if not all([target_price, stop_loss]) or target_price <= entry_price or stop_loss >= entry_price: return None # فلتر منطقية الهدف والوقف
 
-# ==============================================================================
-# ----------------------------- محرك الاختبار الخلفي (مُحدَّث بالكامل) ----------------------------
-# ==============================================================================
-def run_backtest_for_symbol(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_data: pd.DataFrame, sr_levels: List[Dict], model_bundle: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    potential_profit_pct = ((target_price / entry_price) - 1) * 100
+    if potential_profit_pct < MINIMUM_PROFIT_PERCENTAGE: return None # فلتر الحد الأدنى للربح
+
+    potential_risk = entry_price - stop_loss
+    if potential_risk <= 0: return None
+    
+    risk_reward_ratio = (target_price - entry_price) / potential_risk
+    if risk_reward_ratio < MINIMUM_RISK_REWARD_RATIO: return None # فلتر نسبة المخاطرة للعائد
+    
+    signal['signal_details']['risk_reward_ratio'] = f"{risk_reward_ratio:.2f}:1"
+    signal['signal_details']['last_15m_volume_usdt'] = f"${last_15m_volume_usdt:,.0f}"
+    return signal
+
+def run_backtest_for_symbol(symbol: str, df_full: pd.DataFrame, sr_levels_df: pd.DataFrame, model_bundle: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     trades = []
     
-    # حساب المؤشرات اللازمة بما في ذلك فلتر البيتكوين
-    df_featured = calculate_all_features(df_15m, df_4h, btc_data)
-    if df_featured is None or df_featured.empty:
-        logger.warning(f"⚠️ Could not calculate features for {symbol}. Skipping.")
-        return []
-
-    # إعداد النموذج إذا كان موجودًا
-    model, scaler, feature_names = None, None, None
-    if model_bundle and USE_ML_STRATEGY:
-        model = model_bundle.get('model')
-        scaler = model_bundle.get('scaler')
-        feature_names = model_bundle.get('feature_names')
-        
-        # This part is complex. Assuming the model in 'Mo' only needs basic features.
-        # If your model needs many features, you must ensure they are all in 'df_featured'
-        # For now, we will simulate this part to avoid errors if features are missing.
-        df_featured['prediction'] = 0.5 # Default prediction
-        
-        # A simple placeholder for prediction simulation
-        # A real implementation requires calculating all 'feature_names' in 'calculate_all_features'
-        # and then running the scaler and model.
-        # This is a high-risk area for inaccurate backtests if not done perfectly.
-        # For now, we simulate a signal to test the logic flow.
-        # Example: we can generate a random high prediction to trigger the logic.
-        if 'atr' in df_featured.columns:
-             # Simulate a buy signal when ATR is low (less volatility)
-            atr_mean = df_featured['atr'].mean()
-            df_featured.loc[df_featured['atr'] < atr_mean * 0.7, 'prediction'] = 0.85
+    if USE_ML_STRATEGY and model_bundle:
+        model, scaler, feature_names = model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
+        missing = [col for col in feature_names if col not in df_full.columns]
+        if missing: logger.error(f"Missing features {missing} for {symbol}. Skipping ML."); return []
+        features_df = df_full[feature_names]
+        features_scaled_np = scaler.transform(features_df)
+        try:
+            class_1_index = list(model.classes_).index(1)
+            predictions = model.predict_proba(features_scaled_np)[:, class_1_index]
+            df_full['prediction'] = predictions
+        except Exception as e:
+            logger.error(f"Could not get predictions for {symbol}: {e}"); df_full['prediction'] = 0
+    else:
+        df_full['prediction'] = 0
 
     in_trade = False
     trade_details = {}
+    
+    for i in range(len(df_full)):
+        current_candle = df_full.iloc[i]
+        candle_time = current_candle.name
 
-    for i in range(1, len(df_featured)): # Start from 1 to avoid look-behind errors
-        current_candle = df_featured.iloc[i]
-        
-        # 1. إدارة الصفقات المفتوحة
+        # --- التحقق من إغلاق الصفقات المفتوحة ---
         if in_trade:
-            # Check for TP/SL hit on the current candle's high/low
+            exit_price, exit_reason = None, None
             if current_candle['high'] >= trade_details['tp']:
-                trade_details['exit_price'] = trade_details['tp']
-                trade_details['exit_reason'] = 'TP Hit'
+                exit_price, exit_reason = trade_details['tp'], 'TP Hit'
             elif current_candle['low'] <= trade_details['sl']:
-                trade_details['exit_price'] = trade_details['sl']
-                trade_details['exit_reason'] = 'SL Hit'
+                exit_price, exit_reason = trade_details['sl'], 'SL Hit'
             
-            if trade_details.get('exit_price'):
-                trade_details['exit_time'] = current_candle.name
+            if exit_price:
+                trade_details.update({
+                    'exit_price': exit_price, 'exit_reason': exit_reason,
+                    'exit_time': candle_time, 'duration_candles': i - trade_details['entry_index']
+                })
                 trades.append(trade_details)
-                in_trade = False
-                trade_details = {}
-            continue # Skip to the next candle
+                in_trade = False; trade_details = {}
+            continue
 
-        # 2. البحث عن إشارات دخول جديدة
-        if in_trade: continue
-
-        # --- [إضافة جديدة] تطبيق فلتر البيتكوين ---
-        if USE_BTC_TREND_FILTER:
-            if not current_candle.get('is_uptrend', False):
-                continue # تخطي البحث عن إشارة شراء إذا كان اتجاه البيتكوين هابطًا
-
-        potential_signal = None
-        current_price = current_candle['close']
-
-        # 2a. التحقق من استراتيجية تعلم الآلة أولاً
-        if model and 'prediction' in df_featured.columns and current_candle['prediction'] >= MODEL_PREDICTION_THRESHOLD:
-            potential_signal = {
-                'strategy_name': BASE_ML_MODEL_NAME,
-                'entry_price': current_price,
-            }
-
-        # 2b. التحقق من استراتيجية الارتداد من الدعم إذا لم توجد إشارة تعلم آلة
-        elif USE_SR_FIB_STRATEGY and not potential_signal and sr_levels:
-            strong_supports = [lvl for lvl in sr_levels if 'support' in lvl.get('level_type', '') and lvl['level_price'] < current_price and lvl.get('score', 0) >= MINIMUM_SR_SCORE_FOR_SIGNAL]
-            if strong_supports:
-                closest_support = max(strong_supports, key=lambda x: x['level_price'])
-                if (current_price - closest_support['level_price']) / closest_support['level_price'] <= SR_PROXIMITY_PERCENT:
-                    potential_signal = {
-                        'strategy_name': 'SR_Fib_Strategy',
-                        'entry_price': current_price,
-                        'trigger_level': closest_support
-                    }
-
-        # 3. حساب الأهداف ووقف الخسارة للإشارة المحتملة
-        if potential_signal:
-            entry_price = potential_signal['entry_price']
-            stop_loss, take_profit = None, None
-            atr_value = current_candle.get('atr', entry_price * 0.02) # Fallback ATR
-
-            # الخطة الأساسية: استخدام مستويات الدعم والمقاومة
-            if sr_levels:
-                supports = [lvl for lvl in sr_levels if lvl['level_price'] < entry_price]
-                resistances = [lvl for lvl in sr_levels if lvl['level_price'] > entry_price]
-
-                if supports:
-                    strongest_support = max(supports, key=lambda x: x.get('score', 0))
-                    stop_loss = strongest_support['level_price'] * 0.99 # Buffer
-                if resistances:
-                    closest_resistance = min(resistances, key=lambda x: x['level_price'])
-                    take_profit = closest_resistance['level_price'] * 0.998 # Buffer
+        # --- التحقق من فتح صفقات جديدة ---
+        final_signal = None
+        
+        # --- استراتيجية تعلم الآلة ---
+        if USE_ML_STRATEGY and current_candle['prediction'] >= MODEL_CONFIDENCE_THRESHOLD:
+            entry_price = current_candle['close']
+            ml_signal = {'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'entry_price': entry_price, 'signal_details': {'ML_Probability_Buy': f"{current_candle['prediction']:.2%}"}}
             
-            # الخطة الاحتياطية: استخدام ATR
-            if not stop_loss:
-                stop_loss = entry_price - (atr_value * ATR_SL_MULTIPLIER)
-            if not take_profit:
-                take_profit = entry_price + (atr_value * ATR_TP_MULTIPLIER)
+            new_target, new_stop_loss = None, None
+            if not sr_levels_df.empty:
+                supports = sr_levels_df[(sr_levels_df['level_type'].str.contains('support|poc')) & (sr_levels_df['level_price'] < entry_price)]
+                if not supports.empty:
+                    strongest_support = supports.loc[supports['score'].idxmax()]
+                    new_stop_loss = strongest_support['level_price'] * 0.99
+                    ml_signal['signal_details']['StopLoss_Reason'] = f"S/R Support (Score: {strongest_support['score']:.0f})"
+                resistances = sr_levels_df[(sr_levels_df['level_type'].str.contains('resistance|poc')) & (sr_levels_df['level_price'] > entry_price)]
+                if not resistances.empty:
+                    closest_resistance = resistances.loc[resistances['level_price'].idxmin()]
+                    new_target = closest_resistance['level_price'] * 0.998
+                    ml_signal['signal_details']['Target_Reason'] = f"S/R Resistance (Score: {closest_resistance['score']:.0f})"
 
-            # التحقق من صلاحية الصفقة (الهدف أعلى من الدخول، والوقف أدنى من الدخول)
-            if stop_loss < entry_price and take_profit > entry_price:
-                # التحقق من نسبة المخاطرة إلى العائد
-                risk = entry_price - stop_loss
-                reward = take_profit - entry_price
-                if risk > 0 and (reward / risk) >= 1.2: # Minimum R:R ratio
-                    in_trade = True
-                    trade_details = {
-                        'symbol': symbol,
-                        'strategy_name': potential_signal['strategy_name'],
-                        'entry_time': current_candle.name,
-                        'entry_price': entry_price,
-                        'tp': take_profit,
-                        'sl': stop_loss,
-                    }
+            atr_value = current_candle['atr']
+            ml_signal['stop_loss'] = new_stop_loss if new_stop_loss else entry_price - (atr_value * ATR_SL_MULTIPLIER)
+            ml_signal['target_price'] = new_target if new_target else entry_price + (atr_value * ATR_TP_MULTIPLIER)
+            final_signal = validate_and_filter_signal(ml_signal, current_candle)
+
+        # --- استراتيجية الدعم والمقاومة ---
+        if not final_signal and USE_SR_FIB_STRATEGY and not sr_levels_df.empty:
+            entry_price = current_candle['close']
+            strong_supports = sr_levels_df[(sr_levels_df['score'] >= MINIMUM_SR_SCORE_FOR_SIGNAL) & (sr_levels_df['level_type'].str.contains('support|poc')) & (sr_levels_df['level_price'] < entry_price)]
+            if not strong_supports.empty:
+                closest_support = strong_supports.iloc[strong_supports['level_price'].sub(entry_price).abs().idxmin()]
+                if (entry_price - closest_support['level_price']) / closest_support['level_price'] <= SR_PROXIMITY_PERCENT:
+                    resistances_above = sr_levels_df[(sr_levels_df['level_type'].str.contains('resistance|poc')) & (sr_levels_df['level_price'] > entry_price)]
+                    if not resistances_above.empty:
+                        closest_resistance = resistances_above.loc[resistances_above['level_price'].idxmin()]
+                        sr_signal = {
+                            'symbol': symbol, 'strategy_name': 'SR_Fib_Strategy', 'entry_price': entry_price,
+                            'stop_loss': closest_support['level_price'] * 0.99, 'target_price': closest_resistance['level_price'] * 0.998,
+                            'signal_details': {'trigger_level_info': f"Support at {closest_support['level_price']:.8g} (Score: {closest_support['score']:.0f})"}
+                        }
+                        final_signal = validate_and_filter_signal(sr_signal, current_candle)
+
+        # --- إذا تم تأكيد الإشارة، افتح الصفقة ---
+        if final_signal:
+            in_trade = True
+            trade_details = {
+                'symbol': symbol, 'entry_time': candle_time, 'entry_price': final_signal['entry_price'],
+                'entry_index': i, 'tp': final_signal['target_price'], 'sl': final_signal['stop_loss'],
+                'strategy_type': final_signal['strategy_name'], 'details': final_signal['signal_details']
+            }
 
     return trades
 
-
+# ==================================================================================================
+# ------------------------------------ التقرير والوظيفة الرئيسية -------------------------------------
+# ==================================================================================================
 def generate_report(all_trades: List[Dict[str, Any]]):
-    if not all_trades:
-        logger.warning("لم يتم تنفيذ أي صفقات خلال فترة الاختبار الخلفي."); return
+    if not all_trades: logger.warning("No trades were executed during the backtest."); return
 
     df_trades = pd.DataFrame(all_trades)
-    
-    # تطبيق الانزلاق السعري والعمولة
     df_trades['entry_price_adj'] = df_trades['entry_price'] * (1 + SLIPPAGE_PERCENT / 100)
     df_trades['exit_price_adj'] = df_trades['exit_price'] * (1 - SLIPPAGE_PERCENT / 100)
-    
-    # حساب الربح الخام قبل العمولات
     df_trades['pnl_pct_raw'] = ((df_trades['exit_price_adj'] / df_trades['entry_price_adj']) - 1) * 100
-    
-    # حساب الربح الصافي بعد العمولات
     entry_cost = INITIAL_TRADE_AMOUNT_USDT
     exit_value = entry_cost * (1 + df_trades['pnl_pct_raw'] / 100)
-    commission_entry = entry_cost * (COMMISSION_PERCENT / 100)
-    commission_exit = exit_value * (COMMISSION_PERCENT / 100)
+    commission_entry = entry_cost * (COMMISSION_PERCENT / 100); commission_exit = exit_value * (COMMISSION_PERCENT / 100)
     df_trades['commission_total'] = commission_entry + commission_exit
     df_trades['pnl_usdt_net'] = (exit_value - entry_cost) - df_trades['commission_total']
     df_trades['pnl_pct_net'] = (df_trades['pnl_usdt_net'] / INITIAL_TRADE_AMOUNT_USDT) * 100
 
-    total_trades = len(df_trades)
-    winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]
-    losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
+    total_trades = len(df_trades); winning_trades = df_trades[df_trades['pnl_usdt_net'] > 0]; losing_trades = df_trades[df_trades['pnl_usdt_net'] <= 0]
     win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
     total_net_pnl = df_trades['pnl_usdt_net'].sum()
-    gross_profit = winning_trades['pnl_usdt_net'].sum()
-    gross_loss = abs(losing_trades['pnl_usdt_net'].sum())
+    gross_profit = winning_trades['pnl_usdt_net'].sum(); gross_loss = abs(losing_trades['pnl_usdt_net'].sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
     avg_win = winning_trades['pnl_usdt_net'].mean() if len(winning_trades) > 0 else 0
     avg_loss = abs(losing_trades['pnl_usdt_net'].mean()) if len(losing_trades) > 0 else 0
     risk_reward_ratio = avg_win / avg_loss if avg_loss != 0 else float('inf')
-
+    
     report_str = f"""
 ================================================================================
-📈 BACKTESTING REPORT: {BASE_ML_MODEL_NAME} + S/R Strategy (with BTC Filter)
-Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME})
+📈 BACKTESTING REPORT: {BASE_ML_MODEL_NAME}
+Period: Last {BACKTEST_PERIOD_DAYS} days ({TIMEFRAME} + {HIGHER_TIMEFRAME} MTF)
 Costs: {COMMISSION_PERCENT}% commission/trade, {SLIPPAGE_PERCENT}% slippage
 ================================================================================
-
 --- Net Performance (After Costs) ---
-Total Net PnL (per ${INITIAL_TRADE_AMOUNT_USDT} trade): ${total_net_pnl:,.2f}
+Total Net PnL: ${total_net_pnl:,.2f}
 Total Trades: {total_trades}
 Win Rate: {win_rate:.2f}%
 Profit Factor: {profit_factor:.2f}
+Average Risk/Reward Ratio: {risk_reward_ratio:.2f}:1
 
 --- Averages (Net) ---
 Average Winning Trade: ${avg_win:,.2f}
 Average Losing Trade: -${avg_loss:,.2f}
-Realized Risk/Reward Ratio: {risk_reward_ratio:.2f}:1
 
 --- Totals (Net) ---
 Gross Profit: ${gross_profit:,.2f} ({len(winning_trades)} trades)
 Gross Loss: -${gross_loss:,.2f} ({len(losing_trades)} trades)
 Total Commissions Paid: ${df_trades['commission_total'].sum():,.2f}
+================================================================================
 """
     logger.info(report_str)
     
+    # --- إحصائيات حسب الاستراتيجية ---
+    if 'strategy_type' in df_trades.columns:
+        strategy_stats = df_trades.groupby('strategy_type')['pnl_usdt_net'].agg(['sum', 'count', lambda x: (x > 0).sum() / len(x) * 100])
+        strategy_stats.columns = ['Total PnL ($)', 'Trade Count', 'Win Rate (%)']
+        logger.info("\n--- Performance by Strategy ---\n" + strategy_stats.to_string(float_format="%.2f"))
+
     try:
         if not os.path.exists('reports'): os.makedirs('reports')
-        report_filename = os.path.join('reports', f"backtest_report_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        df_trades.to_csv(report_filename, index=False, encoding='utf-8-sig')
-        logger.info(f"\n================================================================================\n✅ Full trade log saved to: {report_filename}\n================================================================================\n")
+        report_filename = os.path.join('reports', f"backtest_report_{BASE_ML_MODEL_NAME}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        df_trades.to_csv(report_filename, index=False)
+        logger.info(f"\n✅ Full trade log saved to: {report_filename}\n================================================================================\n")
     except Exception as e:
         logger.error(f"Could not save report to CSV: {e}")
 
-# ==============================================================================
-# ---------------------------- الوظيفة الرئيسية للاختبار ------------------------
-# ==============================================================================
 def start_backtesting_job():
-    logger.info("🚀 Starting backtesting job for Final Combined Strategy...")
-    time.sleep(2) 
-    
+    logger.info("🚀 Starting V6 backtesting job...")
+    init_connections()
+    time.sleep(2)
+
     symbols_to_test = get_validated_symbols()
-    if not symbols_to_test: logger.critical("❌ No valid symbols to test. Backtesting job will not run."); return
-        
+    if not symbols_to_test: logger.critical("❌ No valid symbols. Backtesting job aborted."); return
+
     all_trades = []
-    
+
     logger.info(f"ℹ️ [BTC Data] Fetching historical data for {BTC_SYMBOL}...")
-    # Fetch data for both 15m and 4h for BTC
     btc_data = fetch_historical_data(BTC_SYMBOL, TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
     if btc_data is None: logger.critical("❌ Failed to fetch BTC data. Cannot proceed."); return
-    logger.info("✅ [BTC Data] Successfully fetched BTC data.")
+    btc_data['btc_returns'] = btc_data['close'].pct_change()
+    logger.info("✅ [BTC Data] Successfully fetched and processed BTC data.")
 
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         if symbol == BTC_SYMBOL: continue
+        
+        try:
+            model_bundle = load_ml_model_bundle_from_db(symbol) if USE_ML_STRATEGY else None
             
-        # --- [تم التغيير] ---
-        # استدعاء الدالة الجديدة لتحميل النموذج من المجلد
-        model_bundle = load_ml_model_bundle_from_folder(symbol)
-        sr_levels = fetch_sr_levels_from_db(symbol)
+            df_15m = fetch_historical_data(symbol, TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
+            df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
+            if df_15m is None or df_4h is None: continue
 
-        df_15m = fetch_historical_data(symbol, TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
-        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, DATA_FETCH_LOOKBACK_DAYS)
-        if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: 
-            logger.warning(f"Skipping {symbol} due to missing data.")
-            continue
+            sr_levels_df = fetch_sr_levels(symbol)
             
-        # قص البيانات لتقتصر على فترة الاختبار فقط
-        backtest_start_date = datetime.utcnow() - timedelta(days=BACKTEST_PERIOD_DAYS)
-        df_15m_test_period = df_15m[df_15m.index >= backtest_start_date].copy()
+            df_featured = prepare_data_for_backtest(df_15m, df_4h, btc_data, sr_levels_df)
+            if df_featured is None or df_featured.empty:
+                logger.warning(f"⚠️ Could not generate features for {symbol}. Skipping."); continue
+
+            backtest_start_date = datetime.now(timezone.utc) - timedelta(days=BACKTEST_PERIOD_DAYS)
+            df_test_period = df_featured[df_featured.index >= backtest_start_date].copy()
+
+            if df_test_period.empty: continue
+            
+            trades = run_backtest_for_symbol(symbol, df_test_period, sr_levels_df, model_bundle)
+            if trades: all_trades.extend(trades)
         
-        trades = run_backtest_for_symbol(symbol, df_15m_test_period, df_4h, btc_data, sr_levels, model_bundle)
-        if trades: all_trades.extend(trades)
-        
-        time.sleep(0.2) # To avoid hitting API rate limits
+        except Exception as e:
+            logger.error(f"❌ An unexpected error occurred while processing {symbol}: {e}", exc_info=True)
+            
+        time.sleep(0.2) # To avoid hitting API limits aggressively
 
     generate_report(all_trades)
     
-    if conn: conn.close(); logger.info("✅ Database connection closed.")
+    if conn: conn.close()
     logger.info("👋 Backtesting job finished. The web service will remain active.")
 
-# ==============================================================================
-# --------------------------------- التنفيذ -----------------------------------
-# ==============================================================================
+
+# ==================================================================================================
+# -------------------------------------------- التنفيذ ---------------------------------------------
+# ==================================================================================================
 if __name__ == "__main__":
     backtest_thread = Thread(target=start_backtesting_job)
     backtest_thread.daemon = True
     backtest_thread.start()
 
-    # We use a simple Flask app to keep the script running in some environments (like cloud services)
     port = int(os.environ.get("PORT", 10002))
-    logger.info(f"🌍 Starting dummy web server on port {port} to keep the service alive...")
+    logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
