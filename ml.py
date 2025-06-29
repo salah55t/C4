@@ -24,7 +24,8 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
-from github import Github, GithubException
+# --- CORRECTED IMPORT ---
+from github import Github, GithubException, Repository
 
 # ---------------------- Ignore FutureWarnings from Pandas ----------------------
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -63,7 +64,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 5
+HYPERPARAM_TUNING_TRIALS: int = 30
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -95,7 +96,8 @@ client: Optional[Client] = None
 btc_data_cache: Optional[pd.DataFrame] = None
 
 # --- GitHub Integration Functions ---
-def get_github_repo() -> Optional[Github.Repository]:
+# --- CORRECTED TYPE HINT ---
+def get_github_repo() -> Optional[Repository]:
     """Initializes and returns a connection to the specified GitHub repository."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         logger.warning("⚠️ [GitHub] GitHub token or repo not configured. Skipping results upload.")
@@ -109,14 +111,14 @@ def get_github_repo() -> Optional[Github.Repository]:
         logger.error(f"❌ [GitHub] Failed to connect to GitHub repository: {e}")
         return None
 
-def save_results_to_github(repo: Github.Repository, symbol: str, metrics: Dict[str, Any], model_bundle: Dict[str, Any]):
+# --- CORRECTED TYPE HINT ---
+def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any], model_bundle: Dict[str, Any]):
     """Saves model metrics and the pickled model file to the GitHub repository."""
     if not repo:
         return
 
     # 1. Save metrics as a JSON file
     try:
-        # Use a consistent filename to update results for each symbol
         metrics_filename = f"{RESULTS_FOLDER}/{symbol}_latest_metrics.json"
         metrics_content = json.dumps(metrics, indent=4)
         commit_message_metrics = f"feat: Update training metrics for {symbol} on {datetime.now(timezone.utc).date()}"
