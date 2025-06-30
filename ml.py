@@ -119,17 +119,20 @@ def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any
         # 1. Pickle the model bundle into bytes
         model_bytes = pickle.dumps(model_bundle)
         
-        # 2. --- FIX ---: Encode the bytes into a base64 string
+        # 2. Encode the bytes into a base64 string
         model_base64_content = base64.b64encode(model_bytes).decode('utf-8')
+
+        # --- FIX: Check if the content is empty before uploading to prevent empty files ---
+        if not model_base64_content:
+            logger.error(f"❌ [GitHub Save] Generated model content for {symbol} is empty. Aborting upload to prevent creating an empty file.")
+            return
 
         try:
             contents = repo.get_contents(model_filename)
-            # 3. --- FIX ---: Push the base64 encoded string
             repo.update_file(contents.path, commit_message, model_base64_content, contents.sha, branch="main")
             logger.info(f"✅ [GitHub] Updated model for {symbol}")
         except GithubException as e:
             if e.status == 404:
-                # 3. --- FIX ---: Push the base64 encoded string
                 repo.create_file(model_filename, commit_message, model_base64_content, branch="main")
                 logger.info(f"✅ [GitHub] Created model file for {symbol}")
             else: raise e
