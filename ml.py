@@ -259,7 +259,13 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     merged = df_featured.join(btc_df['close'].pct_change().rename('btc_returns')).fillna(0)
     df_featured['btc_correlation'] = merged['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged['btc_returns'])
     df_featured['rsi_4h'] = calculate_features(df_4h)['rsi']
-    df_featured = df_featured.join(df_featured['rsi_4h']).fillna(method='ffill')
+
+    # --- FIX START ---
+    # The original line caused a 'columns overlap' error by trying to join a dataframe with its own column.
+    # The correct approach is to simply forward-fill the NaN values that were introduced
+    # by aligning the 4h RSI and calculating the rolling btc_correlation.
+    df_featured.fillna(method='ffill', inplace=True)
+    # --- FIX END ---
     
     # Create target labels
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
