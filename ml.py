@@ -1,4 +1,3 @@
-
 import time
 import os
 import json
@@ -406,5 +405,3 @@ if __name__ == "__main__":
     training_thread.start()
     port = int(os.environ.get("PORT", 10001))
     app.run(host='0.0.0.0', port=port)
-```python
-

@@ -426,7 +426,7 @@ class TradingStrategy:
 # ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
@@ -442,7 +442,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
                f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
@@ -625,7 +625,7 @@ CORS(app)
 def get_fear_and_greed_index() -> Dict[str, Any]:
     classification_translation = {"Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد", "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"}
     try:
-        response = requests.get("[https://api.alternative.me/fng/?limit=1](https://api.alternative.me/fng/?limit=1)", timeout=10)
+        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]; original = data['value_classification']
         return {"value": int(data['value']), "classification": classification_translation.get(original, original)}
