@@ -128,7 +128,20 @@ def load_ml_model_from_github(symbol: str) -> Optional[Dict[str, Any]]:
 
     try:
         file_content = github_repo_obj.get_contents(model_filename)
+
+        # --- FIX: Check for empty file content before processing ---
+        # The "Ran out of input" pickle error happens when the file content is empty.
+        if not file_content.content:
+            logger.warning(f"⚠️ [GitHub Load] Model file for {symbol} at path '{model_filename}' is empty. It will be skipped.")
+            return None
+
         model_bytes = base64.b64decode(file_content.content)
+        
+        # Additional check: if decoding resulted in empty bytes, pickle will also fail.
+        if not model_bytes:
+            logger.warning(f"⚠️ [GitHub Load] Decoding the model file for {symbol} at path '{model_filename}' resulted in empty content. Skipping.")
+            return None
+
         model_bundle = pickle.loads(model_bytes)
 
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
