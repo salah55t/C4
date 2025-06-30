@@ -96,45 +96,54 @@ def get_github_repo() -> Optional[Repository]:
         return None
 
 def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any], model_bundle: Dict[str, Any]):
-    if not repo: return
+    if not repo:
+        logger.warning(f"⚠️ [GitHub Save] No repository object provided. Skipping save for {symbol}.")
+        return
+
     try:
         commit_message = f"feat: Update results for {symbol} on {datetime.now(timezone.utc).date()}"
         
-        # --- Save metrics (JSON files are fine as strings) ---
+        # --- Save metrics (JSON) ---
         metrics_filename = f"{RESULTS_FOLDER}/{symbol}_latest_metrics.json"
         metrics_content = json.dumps(metrics, indent=4)
         try:
-            contents = repo.get_contents(metrics_filename)
-            repo.update_file(contents.path, commit_message, metrics_content, contents.sha)
+            contents = repo.get_contents(metrics_filename, ref="main")
+            repo.update_file(contents.path, commit_message, metrics_content, contents.sha, branch="main")
             logger.info(f"✅ [GitHub] Updated metrics for {symbol}")
         except GithubException as e:
             if e.status == 404:
-                repo.create_file(metrics_filename, commit_message, metrics_content)
+                repo.create_file(metrics_filename, commit_message, metrics_content, branch="main")
                 logger.info(f"✅ [GitHub] Created metrics file for {symbol}")
-            else: raise e
+            else:
+                raise e
         
-        # --- Save model (Pickle file needs base64 encoding) ---
+        # --- Save model (Pickle) ---
         model_filename = f"{RESULTS_FOLDER}/{symbol}_latest_model.pkl"
         
+        # **IMPROVEMENT**: Ensure model bundle is not empty before serializing
+        if not model_bundle or 'model' not in model_bundle or 'scaler' not in model_bundle:
+            logger.error(f"❌ [GitHub Save] Model bundle for {symbol} is incomplete or empty. Aborting model upload.")
+            return
+            
         model_bytes = pickle.dumps(model_bundle)
-        model_base64_content = base64.b64encode(model_bytes).decode('utf-8')
-
-        if not model_base64_content:
-            logger.error(f"❌ [GitHub Save] Generated model content for {symbol} is empty. Aborting upload.")
+        if not model_bytes:
+            logger.error(f"❌ [GitHub Save] Pickled model for {symbol} resulted in empty bytes. Aborting upload.")
             return
 
+        # Use the raw bytes directly for the content
         try:
-            contents = repo.get_contents(model_filename)
-            repo.update_file(contents.path, commit_message, model_base64_content, contents.sha, branch="main")
+            contents = repo.get_contents(model_filename, ref="main")
+            repo.update_file(contents.path, commit_message, model_bytes, contents.sha, branch="main")
             logger.info(f"✅ [GitHub] Updated model for {symbol}")
         except GithubException as e:
             if e.status == 404:
-                repo.create_file(model_filename, commit_message, model_base64_content, branch="main")
+                repo.create_file(model_filename, commit_message, model_bytes, branch="main")
                 logger.info(f"✅ [GitHub] Created model file for {symbol}")
-            else: raise e
+            else:
+                raise e
             
     except Exception as e:
-        logger.error(f"❌ [GitHub] Failed to save results for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [GitHub Save] Failed to save results for {symbol}: {e}", exc_info=True)
 
 
 # --- DB & API Functions ---
@@ -154,7 +163,6 @@ def get_binance_client():
     except Exception as e:
         logger.critical(f"❌ [Binance] Client initialization failed: {e}"); exit(1)
 
-# --- NEW FUNCTION ---
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     """
     Reads symbols from a text file and validates them against Binance.
@@ -357,7 +365,6 @@ def run_training_job():
     get_binance_client()
     github_repo = get_github_repo()
     
-    # --- MODIFIED: Get symbols from crypto_list.txt instead of all symbols ---
     symbols_to_train = get_validated_symbols()
     if not symbols_to_train:
         logger.critical("❌ [Main] No validated symbols found from crypto_list.txt. Exiting training job.")
@@ -383,9 +390,10 @@ def run_training_job():
             X, y, feature_names = prepared_data
             training_result = tune_and_train_model(X, y)
             
-            if training_result[0]:
+            if training_result and training_result[0]:
                 final_model, final_scaler, model_metrics = training_result
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
+                # **MODIFIED**: Pass the repo object to the save function
                 save_results_to_github(github_repo, symbol, model_metrics, model_bundle)
             else:
                 logger.warning(f"⚠️ [Main] Model training failed for {symbol}.")
@@ -409,3 +417,5 @@ if __name__ == "__main__":
     training_thread.start()
     port = int(os.environ.get("PORT", 10001))
     app.run(host='0.0.0.0', port=port)
+```python
+

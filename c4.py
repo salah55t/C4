@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
-import base64 # <-- تمت الإضافة
+import base64
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
 import gc
-from github import Github, GithubException, Repository # <-- تمت الإضافة
+from github import Github, GithubException, Repository
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -50,7 +50,7 @@ try:
     
     # --- GitHub Configuration (NEW) ---
     GITHUB_TOKEN: Optional[str] = config('GITHUB_TOKEN', default=None)
-    GITHUB_REPO: str = 'hammzzaa24/V6'
+    GITHUB_REPO: str = config('GITHUB_REPO') # Make sure this is set in your .env file
     RESULTS_FOLDER: str = 'ml_results'
 
 except Exception as e:
@@ -84,7 +84,7 @@ BTC_TREND_EMA_PERIOD = 50
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
-github_repo_obj: Optional[Repository] = None # <-- متغير جديد لكائن المستودع
+github_repo_obj: Optional[Repository] = None 
 ml_models_cache: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
@@ -127,22 +127,24 @@ def load_ml_model_from_github(symbol: str) -> Optional[Dict[str, Any]]:
     logger.info(f"ℹ️ [GitHub Load] Attempting to load model for {symbol} from path: {model_filename}")
 
     try:
-        file_content = github_repo_obj.get_contents(model_filename)
-
-        # --- FIX: Check for empty file content before processing ---
-        # The "Ran out of input" pickle error happens when the file content is empty.
-        if not file_content.content:
-            logger.warning(f"⚠️ [GitHub Load] Model file for {symbol} at path '{model_filename}' is empty. It will be skipped.")
-            return None
-
-        model_bytes = base64.b64decode(file_content.content)
+        # **IMPROVEMENT**: The PyGithub library handles decoding from base64 automatically
+        # when you access the .content attribute of a ContentFile object if it's a text file.
+        # For binary files like pickles, it's better to get the raw bytes.
+        file_content_object = github_repo_obj.get_contents(model_filename, ref="main")
         
-        # Additional check: if decoding resulted in empty bytes, pickle will also fail.
+        # The 'decoded_content' attribute gives you the raw bytes of the file
+        model_bytes = file_content_object.decoded_content
+
         if not model_bytes:
-            logger.warning(f"⚠️ [GitHub Load] Decoding the model file for {symbol} at path '{model_filename}' resulted in empty content. Skipping.")
+            logger.warning(f"⚠️ [GitHub Load] Model file for {symbol} at path '{model_filename}' is empty or could not be decoded. It will be skipped.")
             return None
 
-        model_bundle = pickle.loads(model_bytes)
+        # **IMPROVEMENT**: Add a try-except block specifically for the pickle loading process
+        try:
+            model_bundle = pickle.loads(model_bytes)
+        except pickle.UnpicklingError as pickle_err:
+            logger.error(f"❌ [GitHub Load] Failed to unpickle model for {symbol}. The file may be corrupted. Error: {pickle_err}")
+            return None
 
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
             ml_models_cache[model_key] = model_bundle
@@ -161,6 +163,7 @@ def load_ml_model_from_github(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"❌ [GitHub Load] A general error occurred while loading model for {symbol}: {e}", exc_info=True)
         return None
+
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -182,7 +185,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     CREATE TABLE IF NOT EXISTS notifications ( id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
-                # The 'ml_models' table is no longer needed as we load from GitHub
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS support_resistance_levels (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
@@ -291,7 +293,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False, na=False)]
     resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False, na=False)]
     
-    # Using numpy for potentially faster calculations
     support_levels = supports['level_price'].to_numpy()
     resistance_levels = resistances['level_price'].to_numpy()
     support_scores = pd.Series(supports['score'].values, index=supports['level_price']).to_dict()
@@ -301,7 +302,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     for price in df['close']:
         dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
         
-        # Support
         if support_levels.size > 0:
             diffs = price - support_levels
             below_price = diffs[diffs >= 0]
@@ -310,7 +310,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
                 dist_support = (price - nearest_sup_price) / price if price > 0 else 0
                 score_support = support_scores.get(nearest_sup_price, 0)
         
-        # Resistance
         if resistance_levels.size > 0:
             diffs = resistance_levels - price
             above_price = diffs[diffs >= 0]
@@ -377,7 +376,6 @@ def run_websocket_manager() -> None:
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # --- MODIFIED: Load model from GitHub instead of DB ---
         model_bundle = load_ml_model_from_github(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
@@ -431,10 +429,9 @@ class TradingStrategy:
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
-# (This section remains unchanged)
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
@@ -450,7 +447,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
                f"🛑 *وقف الخسارة:* `${sl:,.8g}`\n\n"
                f"🔍 *ثقة النموذج:* {signal_data['signal_details']['ML_Probability_Buy']}")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
     try: requests.post(url, json=payload, timeout=20).raise_for_status()
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال تنبيه الإشارة الجديدة: {e}")
@@ -589,7 +586,7 @@ def main_loop():
                     sr_levels = fetch_sr_levels_from_db(symbol)
                     
                     strategy = TradingStrategy(symbol)
-                    if not strategy.ml_model: # Skip if model wasn't loaded
+                    if not strategy.ml_model:
                         logger.debug(f"[{symbol}] Skipping due to model not being loaded from GitHub.")
                         continue
                         
@@ -633,7 +630,7 @@ CORS(app)
 def get_fear_and_greed_index() -> Dict[str, Any]:
     classification_translation = {"Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد", "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"}
     try:
-        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        response = requests.get("[https://api.alternative.me/fng/?limit=1](https://api.alternative.me/fng/?limit=1)", timeout=10)
         response.raise_for_status()
         data = response.json()['data'][0]; original = data['value_classification']
         return {"value": int(data['value']), "classification": classification_translation.get(original, original)}
@@ -717,7 +714,6 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
         
-        # --- MODIFIED: Initialize GitHub repo connection ---
         init_github_repo()
         
         init_db()
