@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
+import base64 # <-- تمت الإضافة
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -22,6 +23,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
 import gc
+from github import Github, GithubException, Repository # <-- تمت الإضافة
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -45,34 +47,27 @@ try:
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
+    
+    # --- GitHub Configuration (NEW) ---
+    GITHUB_TOKEN: Optional[str] = config('GITHUB_TOKEN', default=None)
+    GITHUB_REPO: str = 'hammzzaa24/V6'
+    RESULTS_FOLDER: str = 'ml_results'
+
 except Exception as e:
      logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V6 Model Constants (MODIFIED) ---
+# --- V6 Model Constants ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 
-# --- Indicator & Feature Parameters (UPDATED to match ml.py) ---
-ADX_PERIOD: int = 14
-BBANDS_PERIOD: int = 20
+# --- Indicator & Feature Parameters ---
 RSI_PERIOD: int = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
-EMA_SLOW_PERIOD: int = 200
-EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
-STOCH_RSI_PERIOD: int = 14
-STOCH_K: int = 3
-STOCH_D: int = 3
-REL_VOL_PERIOD: int = 30
-RSI_OVERBOUGHT: int = 70
-RSI_OVERSOLD: int = 30
-STOCH_RSI_OVERBOUGHT: int = 80
-STOCH_RSI_OVERSOLD: int = 20
 
 # --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.70
@@ -89,6 +84,7 @@ BTC_TREND_EMA_PERIOD = 50
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
+github_repo_obj: Optional[Repository] = None # <-- متغير جديد لكائن المستودع
 ml_models_cache: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
@@ -97,6 +93,61 @@ current_prices: Dict[str, float] = {}
 prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
+
+# ---------------------- دوال GitHub (جديد) ----------------------
+def init_github_repo():
+    """Initializes the connection to the GitHub repository."""
+    global github_repo_obj
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        logger.warning("⚠️ [GitHub] GitHub token or repo not configured. Model loading from GitHub will be skipped.")
+        return
+    try:
+        g = Github(GITHUB_TOKEN)
+        github_repo_obj = g.get_repo(GITHUB_REPO)
+        logger.info(f"✅ [GitHub] Successfully connected to repository: {GITHUB_REPO}")
+    except Exception as e:
+        logger.error(f"❌ [GitHub] Failed to connect to GitHub repository: {e}")
+        github_repo_obj = None
+
+def load_ml_model_from_github(symbol: str) -> Optional[Dict[str, Any]]:
+    """
+    Loads a model bundle (model, scaler, features) for a symbol from GitHub.
+    Caches the model after the first successful load.
+    """
+    global ml_models_cache, github_repo_obj
+    model_key = f"{BASE_ML_MODEL_NAME}_{symbol}"
+    if model_key in ml_models_cache:
+        return ml_models_cache[model_key]
+
+    if github_repo_obj is None:
+        logger.error(f"❌ [GitHub Load] Cannot load model for {symbol} because GitHub repository object is not initialized.")
+        return None
+
+    model_filename = f"{RESULTS_FOLDER}/{symbol}_latest_model.pkl"
+    logger.info(f"ℹ️ [GitHub Load] Attempting to load model for {symbol} from path: {model_filename}")
+
+    try:
+        file_content = github_repo_obj.get_contents(model_filename)
+        model_bytes = base64.b64decode(file_content.content)
+        model_bundle = pickle.loads(model_bytes)
+
+        if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+            ml_models_cache[model_key] = model_bundle
+            logger.info(f"✅ [GitHub Load] Successfully loaded and cached model for {symbol}.")
+            return model_bundle
+        else:
+            logger.warning(f"⚠️ [GitHub Load] Model bundle for {symbol} is invalid or incomplete.")
+            return None
+
+    except GithubException as e:
+        if e.status == 404:
+            logger.warning(f"⚠️ [GitHub Load] Model file not found for {symbol} at path '{model_filename}'.")
+        else:
+            logger.error(f"❌ [GitHub Load] A GitHub error occurred while loading model for {symbol}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [GitHub Load] A general error occurred while loading model for {symbol}: {e}", exc_info=True)
+        return None
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -118,10 +169,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     CREATE TABLE IF NOT EXISTS notifications ( id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE );
                 """)
-                cur.execute("""
-                     CREATE TABLE IF NOT EXISTS ml_models ( id SERIAL PRIMARY KEY, model_name TEXT NOT NULL UNIQUE,
-                        model_data BYTEA NOT NULL, trained_at TIMESTAMP DEFAULT NOW(), metrics JSONB );
-                """)
+                # The 'ml_models' table is no longer needed as we load from GitHub
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS support_resistance_levels (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, level_price DOUBLE PRECISION NOT NULL,
@@ -207,9 +255,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
-    """
-    Fetches support and resistance levels for a given symbol from the database.
-    """
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
@@ -223,133 +268,63 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         if conn: conn.rollback()
         return pd.DataFrame()
 
-# --- START: NEW FEATURE ENGINEERING FUNCTIONS (from ml.py) ---
-def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    df_patterns = df.copy()
-    op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
-    body = abs(cl - op)
-    candle_range = hi - lo
-    candle_range[candle_range == 0] = 1e-9
-    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
-    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-    
-    df_patterns['candlestick_pattern'] = 0
-    is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-    is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-    is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
-    is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
-    is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
-    is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
-    is_doji = (body / candle_range) < 0.05
-
-    df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
-    df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
-    df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
-    df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
-    df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
-    df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
-    df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
-    return df_patterns
-
+# --- Feature Engineering Functions ---
 def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
     if sr_levels_df.empty:
-        df['dist_to_support'] = 0.0; df['dist_to_resistance'] = 0.0
-        df['score_of_support'] = 0.0; df['score_of_resistance'] = 0.0
+        for col in ['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']:
+            df[col] = 0.0
         return df
-    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
-    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
-    support_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
-    resistance_scores = pd.Series(sr_levels_df['score'].values, index=sr_levels_df['level_price']).to_dict()
-    def get_sr_info(price):
+
+    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False, na=False)]
+    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False, na=False)]
+    
+    # Using numpy for potentially faster calculations
+    support_levels = supports['level_price'].to_numpy()
+    resistance_levels = resistances['level_price'].to_numpy()
+    support_scores = pd.Series(supports['score'].values, index=supports['level_price']).to_dict()
+    resistance_scores = pd.Series(resistances['score'].values, index=resistances['level_price']).to_dict()
+
+    results = []
+    for price in df['close']:
         dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
-        if supports.size > 0:
-            idx = np.searchsorted(supports, price, side='right') - 1
-            if idx >= 0:
-                nearest_support_price = supports[idx]
-                dist_support = (price - nearest_support_price) / price if price > 0 else 0
-                score_support = support_scores.get(nearest_support_price, 0)
-        if resistances.size > 0:
-            idx = np.searchsorted(resistances, price, side='left')
-            if idx < len(resistances):
-                nearest_resistance_price = resistances[idx]
-                dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
-                score_resistance = resistance_scores.get(nearest_resistance_price, 0)
-        return dist_support, score_support, dist_resistance, score_resistance
-    results = df['close'].apply(get_sr_info)
-    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
+        
+        # Support
+        if support_levels.size > 0:
+            diffs = price - support_levels
+            below_price = diffs[diffs >= 0]
+            if below_price.size > 0:
+                nearest_sup_price = support_levels[diffs == below_price.min()][0]
+                dist_support = (price - nearest_sup_price) / price if price > 0 else 0
+                score_support = support_scores.get(nearest_sup_price, 0)
+        
+        # Resistance
+        if resistance_levels.size > 0:
+            diffs = resistance_levels - price
+            above_price = diffs[diffs >= 0]
+            if above_price.size > 0:
+                nearest_res_price = resistance_levels[diffs == above_price.min()][0]
+                dist_resistance = (nearest_res_price - price) / price if price > 0 else 0
+                score_resistance = resistance_scores.get(nearest_res_price, 0)
+                
+        results.append((dist_support, score_support, dist_resistance, score_resistance))
+
+    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = results
     return df
 
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+def calculate_base_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + gain / loss.replace(0, 1e-9)))
+    
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['high'].diff(); down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
-    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    macd_line = ema_fast - ema_slow; signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = macd_line - signal_line
-    df_calc['macd_cross'] = 0
-    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
-    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    upper_band = sma + (std_dev * 2); lower_band = sma - (std_dev * 2)
-    df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
-    rsi = df_calc['rsi']
-    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min(); max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
-    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-    df_calc['market_condition'] = 0
-    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
-    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
-    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-    df_calc['returns'] = df_calc['close'].pct_change()
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    df_calc['hour_of_day'] = df_calc.index.hour
-    df_calc = calculate_candlestick_patterns(df_calc)
+    
     return df_calc.astype('float32', errors='ignore')
-
-# --- END: NEW FEATURE ENGINEERING FUNCTIONS ---
-
-def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
-    global ml_models_cache
-    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if model_name in ml_models_cache: return ml_models_cache[model_name]
-    if not check_db_connection() or not conn: return None
-    try:
-        with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
-            result = db_cur.fetchone()
-            if result and result['model_data']:
-                model_bundle = pickle.loads(result['model_data'])
-                if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-                    ml_models_cache[model_name] = model_bundle
-                    logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من قاعدة البيانات.")
-                    return model_bundle
-            logger.warning(f"⚠️ [نموذج تعلم الآلة] لم يتم العثور على النموذج '{model_name}' للعملة {symbol} في قاعدة البيانات.")
-            return None
-    except Exception as e:
-        logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل حزمة النموذج للعملة {symbol}: {e}", exc_info=True)
-        return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
 def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
@@ -389,27 +364,22 @@ def run_websocket_manager() -> None:
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        model_bundle = load_ml_model_bundle_from_db(symbol)
+        # --- MODIFIED: Load model from GitHub instead of DB ---
+        model_bundle = load_ml_model_from_github(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        # --- NEW: Full feature engineering pipeline ---
         try:
-            df_featured = calculate_features(df_15m, btc_df)
+            df_featured = calculate_base_features(df_15m)
             df_featured = calculate_sr_features(df_featured, sr_levels_df)
             
-            delta_4h = df_4h['close'].diff()
-            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
-            ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-            df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+            df_featured['returns'] = df_featured['close'].pct_change()
+            merged = df_featured.join(btc_df['btc_returns']).fillna(0)
+            df_featured['btc_correlation'] = merged['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged['btc_returns'])
             
-            mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
-            df_featured = df_featured.join(mtf_features)
-            df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+            df_featured['rsi_4h'] = calculate_base_features(df_4h)['rsi']
+            df_featured.fillna(method='ffill', inplace=True)
             
-            # Ensure all expected columns exist, fill with 0 if missing
             for col in self.feature_names:
                 if col not in df_featured.columns: df_featured[col] = 0.0
             
@@ -419,10 +389,13 @@ class TradingStrategy:
             return None
 
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]): return None
-        if df_features.empty: return None
+        if not all([self.ml_model, self.scaler, self.feature_names]):
+            logger.debug(f"[{self.symbol}] Skipping signal generation: model/scaler/features not loaded.")
+            return None
+        if df_features.empty:
+            return None
         
-        last_row_df = df_features.iloc[[-1]] # Keep as DataFrame
+        last_row_df = df_features.iloc[[-1]]
         try:
             features_scaled = self.scaler.transform(last_row_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
@@ -430,8 +403,10 @@ class TradingStrategy:
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
             
-            try: class_1_index = list(self.ml_model.classes_).index(1)
-            except ValueError: return None
+            try:
+                class_1_index = list(self.ml_model.classes_).index(1)
+            except ValueError:
+                return None
             prob_for_class_1 = prediction_proba[class_1_index]
 
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
@@ -443,6 +418,7 @@ class TradingStrategy:
             return None
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
+# (This section remains unchanged)
 def send_telegram_message(target_chat_id: str, text: str):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -600,9 +576,13 @@ def main_loop():
                     sr_levels = fetch_sr_levels_from_db(symbol)
                     
                     strategy = TradingStrategy(symbol)
+                    if not strategy.ml_model: # Skip if model wasn't loaded
+                        logger.debug(f"[{symbol}] Skipping due to model not being loaded from GitHub.")
+                        continue
+                        
                     df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels)
                     
-                    del df_15m, df_4h, sr_levels; gc.collect() # Free memory
+                    del df_15m, df_4h, sr_levels; gc.collect()
                     
                     if df_features is None or df_features.empty: continue
                     
@@ -633,7 +613,7 @@ def main_loop():
         except Exception as main_err:
             log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask للوحة التحكم ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (بدون تغيير) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -723,6 +703,10 @@ def initialize_bot_services():
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
+        
+        # --- MODIFIED: Initialize GitHub repo connection ---
+        init_github_repo()
+        
         init_db()
         load_open_signals_to_cache(); load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
