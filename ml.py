@@ -11,7 +11,7 @@ import lightgbm as lgb
 import optuna
 import warnings
 import gc
-import base64 # <-- تأكد من استيراد المكتبة
+import base64
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -116,15 +116,11 @@ def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any
         # --- Save model (Pickle file needs base64 encoding) ---
         model_filename = f"{RESULTS_FOLDER}/{symbol}_latest_model.pkl"
         
-        # 1. Pickle the model bundle into bytes
         model_bytes = pickle.dumps(model_bundle)
-        
-        # 2. Encode the bytes into a base64 string
         model_base64_content = base64.b64encode(model_bytes).decode('utf-8')
 
-        # --- FIX: Check if the content is empty before uploading to prevent empty files ---
         if not model_base64_content:
-            logger.error(f"❌ [GitHub Save] Generated model content for {symbol} is empty. Aborting upload to prevent creating an empty file.")
+            logger.error(f"❌ [GitHub Save] Generated model content for {symbol} is empty. Aborting upload.")
             return
 
         try:
@@ -157,6 +153,45 @@ def get_binance_client():
         logger.info("✅ [Binance] Client initialized.")
     except Exception as e:
         logger.critical(f"❌ [Binance] Client initialization failed: {e}"); exit(1)
+
+# --- NEW FUNCTION ---
+def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    Reads symbols from a text file and validates them against Binance.
+    """
+    logger.info(f"ℹ️ [Symbol Validation] Reading symbols from '{filename}' and validating with Binance...")
+    if not client:
+        logger.error("❌ [Symbol Validation] Binance client is not initialized.")
+        return []
+    try:
+        # Get the absolute path to the script's directory
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            logger.error(f"❌ [Symbol Validation] The file '{filename}' was not found in the directory.")
+            return []
+
+        # Read symbols from the file
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # Read non-empty, non-comment lines and convert to uppercase
+            raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        
+        # Ensure all symbols end with USDT
+        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        
+        # Get all actively trading USDT pairs from Binance
+        exchange_info = client.get_exchange_info()
+        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+        
+        # Find the intersection of symbols from the file and active symbols on Binance
+        validated_list = sorted(list(formatted_symbols.intersection(active_symbols)))
+        
+        logger.info(f"✅ [Symbol Validation] Will train models for {len(validated_list)} validated symbols.")
+        return validated_list
+    except Exception as e:
+        logger.error(f"❌ [Symbol Validation] An error occurred while validating symbols: {e}", exc_info=True)
+        return []
         
 # --- Data Fetching & Processing ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
@@ -322,12 +357,17 @@ def run_training_job():
     get_binance_client()
     github_repo = get_github_repo()
     
-    all_symbols = [s['symbol'] for s in client.get_exchange_info()['symbols'] if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING']
+    # --- MODIFIED: Get symbols from crypto_list.txt instead of all symbols ---
+    symbols_to_train = get_validated_symbols()
+    if not symbols_to_train:
+        logger.critical("❌ [Main] No validated symbols found from crypto_list.txt. Exiting training job.")
+        return
+    
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
     if btc_data is None:
         logger.critical("❌ [Main] Could not fetch BTC data. Exiting."); return
 
-    for symbol in all_symbols:
+    for symbol in symbols_to_train:
         logger.info(f"\n--- ⏳ [Main] Processing {symbol} ---")
         try:
             df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
