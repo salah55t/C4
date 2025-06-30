@@ -11,7 +11,7 @@ import lightgbm as lgb
 import optuna
 import warnings
 import gc
-import base64
+import base64 # <-- تأكد من استيراد المكتبة
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -51,8 +51,8 @@ try:
     
     # --- GitHub Configuration ---
     GITHUB_TOKEN: Optional[str] = config('GITHUB_TOKEN', default=None)
-    GITHUB_REPO: Optional[str] = config('GITHUB_REPO', default=None) # e.g., 'your-username/your-repo-name'
-    RESULTS_FOLDER: str = config('RESULTS_FOLDER', default='ml_results_v6') # Folder within the repo to save results
+    GITHUB_REPO: Optional[str] = config('GITHUB_REPO', default=None)
+    RESULTS_FOLDER: str = config('RESULTS_FOLDER', default='ml_results')
 
 except Exception as e:
      logger.critical(f"❌ فشل في تحميل المتغيرات البيئية الأساسية: {e}")
@@ -63,28 +63,15 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 30
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
-ADX_PERIOD: int = 14
-BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
-EMA_SLOW_PERIOD: int = 200
-EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
-STOCH_RSI_PERIOD: int = 14
-STOCH_K: int = 3
-STOCH_D: int = 3
-REL_VOL_PERIOD: int = 30
-RSI_OVERBOUGHT: int = 70
-RSI_OVERSOLD: int = 30
-STOCH_RSI_OVERBOUGHT: int = 80
-STOCH_RSI_OVERSOLD: int = 20
 
-# Triple-Barrier Method Parameters
+# --- Triple-Barrier Method Parameters ---
 TP_ATR_MULTIPLIER: float = 2.0
 SL_ATR_MULTIPLIER: float = 1.5
 MAX_HOLD_PERIOD: int = 24
@@ -111,11 +98,11 @@ def get_github_repo() -> Optional[Repository]:
 def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any], model_bundle: Dict[str, Any]):
     if not repo: return
     try:
-        metrics_filename = f"{RESULTS_FOLDER}/{symbol}_latest_metrics.json"
-        metrics_content = json.dumps(metrics, indent=4)
         commit_message = f"feat: Update results for {symbol} on {datetime.now(timezone.utc).date()}"
         
-        # Save metrics
+        # --- Save metrics (JSON files are fine as strings) ---
+        metrics_filename = f"{RESULTS_FOLDER}/{symbol}_latest_metrics.json"
+        metrics_content = json.dumps(metrics, indent=4)
         try:
             contents = repo.get_contents(metrics_filename)
             repo.update_file(contents.path, commit_message, metrics_content, contents.sha)
@@ -126,20 +113,30 @@ def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any
                 logger.info(f"✅ [GitHub] Created metrics file for {symbol}")
             else: raise e
         
-        # Save model
+        # --- Save model (Pickle file needs base64 encoding) ---
         model_filename = f"{RESULTS_FOLDER}/{symbol}_latest_model.pkl"
+        
+        # 1. Pickle the model bundle into bytes
         model_bytes = pickle.dumps(model_bundle)
+        
+        # 2. --- FIX ---: Encode the bytes into a base64 string
+        model_base64_content = base64.b64encode(model_bytes).decode('utf-8')
+
         try:
             contents = repo.get_contents(model_filename)
-            repo.update_file(contents.path, commit_message, model_bytes, contents.sha)
+            # 3. --- FIX ---: Push the base64 encoded string
+            repo.update_file(contents.path, commit_message, model_base64_content, contents.sha, branch="main")
             logger.info(f"✅ [GitHub] Updated model for {symbol}")
         except GithubException as e:
             if e.status == 404:
-                repo.create_file(model_filename, commit_message, model_bytes)
+                # 3. --- FIX ---: Push the base64 encoded string
+                repo.create_file(model_filename, commit_message, model_base64_content, branch="main")
                 logger.info(f"✅ [GitHub] Created model file for {symbol}")
             else: raise e
+            
     except Exception as e:
-        logger.error(f"❌ [GitHub] Failed to save results for {symbol}: {e}")
+        logger.error(f"❌ [GitHub] Failed to save results for {symbol}: {e}", exc_info=True)
+
 
 # --- DB & API Functions ---
 def init_db():
@@ -243,51 +240,30 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
             labels.iloc[i] = -1
     return labels
 
-# --- FINAL DTYPE FIX IS APPLIED HERE ---
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     
-    # Calculate base features
     df_featured = calculate_features(df_15m)
     df_featured['atr'] = (df_15m['high'] - df_15m['low']).rolling(window=ATR_PERIOD).mean()
-    
-    # Add S/R features
     df_featured = calculate_sr_features(df_featured, sr_levels)
-    
-    # Add other features
     df_featured['returns'] = df_featured['close'].pct_change()
     merged = df_featured.join(btc_df['close'].pct_change().rename('btc_returns')).fillna(0)
     df_featured['btc_correlation'] = merged['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged['btc_returns'])
     df_featured['rsi_4h'] = calculate_features(df_4h)['rsi']
-
-    # --- FIX START ---
-    # The original line caused a 'columns overlap' error by trying to join a dataframe with its own column.
-    # The correct approach is to simply forward-fill the NaN values that were introduced
-    # by aligning the 4h RSI and calculating the rolling btc_correlation.
     df_featured.fillna(method='ffill', inplace=True)
-    # --- FIX END ---
     
-    # Create target labels
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # Define feature columns
     feature_columns = [
         'rsi', 'atr', 'dist_to_support', 'score_of_support', 'dist_to_resistance', 
         'score_of_resistance', 'btc_correlation', 'rsi_4h'
     ]
     
-    # --- ROBUST FINAL CLEANING & DTYPE ENFORCEMENT ---
-    # 1. Select only necessary columns
     df_to_clean = df_featured[feature_columns + ['target']].copy()
-
-    # 2. Force all feature columns to be numeric, coercing errors to NaN
     for col in feature_columns:
         df_to_clean[col] = pd.to_numeric(df_to_clean[col], errors='coerce')
 
-    # 3. Drop any row that has NaN in features or target
     df_cleaned = df_to_clean.dropna()
-
-    # 4. Check for sufficient data
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Not enough valid data for {symbol} after cleaning. Skipping.")
         return None
@@ -297,7 +273,6 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
     
-    # Final sanity check for dtypes
     if X.select_dtypes(include=['object']).shape[1] > 0:
         bad_cols = X.select_dtypes(include=['object']).columns.tolist()
         logger.critical(f"❌ [FATAL PREP] Object dtypes still exist in final feature matrix for {symbol}: {bad_cols}")
@@ -365,7 +340,7 @@ def run_training_job():
             X, y, feature_names = prepared_data
             training_result = tune_and_train_model(X, y)
             
-            if training_result[0]: # If model is not None
+            if training_result[0]:
                 final_model, final_scaler, model_metrics = training_result
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 save_results_to_github(github_repo, symbol, model_metrics, model_bundle)
