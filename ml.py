@@ -1,3 +1,4 @@
+
 import time
 import os
 import json
@@ -120,7 +121,6 @@ def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any
         # --- Save model (Pickle) ---
         model_filename = f"{RESULTS_FOLDER}/{symbol}_latest_model.pkl"
         
-        # **IMPROVEMENT**: Ensure model bundle is not empty before serializing
         if not model_bundle or 'model' not in model_bundle or 'scaler' not in model_bundle:
             logger.error(f"❌ [GitHub Save] Model bundle for {symbol} is incomplete or empty. Aborting model upload.")
             return
@@ -130,7 +130,6 @@ def save_results_to_github(repo: Repository, symbol: str, metrics: Dict[str, Any
             logger.error(f"❌ [GitHub Save] Pickled model for {symbol} resulted in empty bytes. Aborting upload.")
             return
 
-        # Use the raw bytes directly for the content
         try:
             contents = repo.get_contents(model_filename, ref="main")
             repo.update_file(contents.path, commit_message, model_bytes, contents.sha, branch="main")
@@ -164,15 +163,11 @@ def get_binance_client():
         logger.critical(f"❌ [Binance] Client initialization failed: {e}"); exit(1)
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    """
-    Reads symbols from a text file and validates them against Binance.
-    """
     logger.info(f"ℹ️ [Symbol Validation] Reading symbols from '{filename}' and validating with Binance...")
     if not client:
         logger.error("❌ [Symbol Validation] Binance client is not initialized.")
         return []
     try:
-        # Get the absolute path to the script's directory
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
 
@@ -180,19 +175,14 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
             logger.error(f"❌ [Symbol Validation] The file '{filename}' was not found in the directory.")
             return []
 
-        # Read symbols from the file
         with open(file_path, 'r', encoding='utf-8') as f:
-            # Read non-empty, non-comment lines and convert to uppercase
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         
-        # Ensure all symbols end with USDT
         formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         
-        # Get all actively trading USDT pairs from Binance
         exchange_info = client.get_exchange_info()
         active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
         
-        # Find the intersection of symbols from the file and active symbols on Binance
         validated_list = sorted(list(formatted_symbols.intersection(active_symbols)))
         
         logger.info(f"✅ [Symbol Validation] Will train models for {len(validated_list)} validated symbols.")
@@ -393,7 +383,6 @@ def run_training_job():
             if training_result and training_result[0]:
                 final_model, final_scaler, model_metrics = training_result
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
-                # **MODIFIED**: Pass the repo object to the save function
                 save_results_to_github(github_repo, symbol, model_metrics, model_bundle)
             else:
                 logger.warning(f"⚠️ [Main] Model training failed for {symbol}.")

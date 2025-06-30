@@ -50,7 +50,7 @@ try:
     
     # --- GitHub Configuration (NEW) ---
     GITHUB_TOKEN: Optional[str] = config('GITHUB_TOKEN', default=None)
-    GITHUB_REPO: str = config('GITHUB_REPO') # Make sure this is set in your .env file
+    GITHUB_REPO: str = config('GITHUB_REPO')
     RESULTS_FOLDER: str = 'ml_results'
 
 except Exception as e:
@@ -127,19 +127,14 @@ def load_ml_model_from_github(symbol: str) -> Optional[Dict[str, Any]]:
     logger.info(f"ℹ️ [GitHub Load] Attempting to load model for {symbol} from path: {model_filename}")
 
     try:
-        # **IMPROVEMENT**: The PyGithub library handles decoding from base64 automatically
-        # when you access the .content attribute of a ContentFile object if it's a text file.
-        # For binary files like pickles, it's better to get the raw bytes.
         file_content_object = github_repo_obj.get_contents(model_filename, ref="main")
         
-        # The 'decoded_content' attribute gives you the raw bytes of the file
         model_bytes = file_content_object.decoded_content
 
         if not model_bytes:
             logger.warning(f"⚠️ [GitHub Load] Model file for {symbol} at path '{model_filename}' is empty or could not be decoded. It will be skipped.")
             return None
 
-        # **IMPROVEMENT**: Add a try-except block specifically for the pickle loading process
         try:
             model_bundle = pickle.loads(model_bytes)
         except pickle.UnpicklingError as pickle_err:
