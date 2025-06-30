@@ -50,13 +50,10 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# --- V6 Model Constants (MODIFIED) ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V6_With_SR'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
-
-# --- Indicator & Feature Parameters (UPDATED to match ml.py) ---
 ADX_PERIOD: int = 14
 BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
@@ -73,8 +70,6 @@ RSI_OVERBOUGHT: int = 70
 RSI_OVERSOLD: int = 30
 STOCH_RSI_OVERBOUGHT: int = 80
 STOCH_RSI_OVERSOLD: int = 20
-
-# --- Trading Logic Constants ---
 MODEL_CONFIDENCE_THRESHOLD = 0.70
 MAX_OPEN_TRADES: int = 5
 TRADE_AMOUNT_USDT: float = 10.0
@@ -207,9 +202,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
-    """
-    Fetches support and resistance levels for a given symbol from the database.
-    """
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
@@ -223,7 +215,6 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         if conn: conn.rollback()
         return pd.DataFrame()
 
-# --- START: NEW FEATURE ENGINEERING FUNCTIONS (from ml.py) ---
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     df_patterns = df.copy()
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
@@ -232,7 +223,6 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     candle_range[candle_range == 0] = 1e-9
     upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
     lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-    
     df_patterns['candlestick_pattern'] = 0
     is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
     is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
@@ -241,7 +231,6 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
     is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
     is_doji = (body / candle_range) < 0.05
-
     df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
     df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
     df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
@@ -328,8 +317,6 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = calculate_candlestick_patterns(df_calc)
     return df_calc.astype('float32', errors='ignore')
 
-# --- END: NEW FEATURE ENGINEERING FUNCTIONS ---
-
 def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -352,39 +339,77 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
-def handle_ticker_message(msg: Union[List[Dict[str, Any]], Dict[str, Any]]) -> None:
-    global open_signals_cache, current_prices
+# --- تعديل: تم إعادة كتابة الدالة لتكون أكثر قوة وتمنع حالات السباق ---
+def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
+    """
+    Handles incoming ticker messages from the WebSocket.
+    This function is optimized to prevent race conditions by removing a signal
+    from the cache immediately after a closing condition is met.
+    """
     try:
-        data = msg.get('data', msg) if isinstance(msg, dict) else msg
-        if not isinstance(data, list): data = [data]
-        
-        for item in data:
-            symbol = item.get('s')
-            if not symbol: continue
-            price = float(item.get('c', 0))
-            if price == 0: continue
-            with prices_lock: current_prices[symbol] = price
-            signal_to_process, status, closing_price = None, None, None
-            
+        # The message from start_ticker_socket is a list of dictionaries
+        if not isinstance(msg, list):
+            logger.warning(f"⚠️ [WebSocket] تم استلام رسالة بتنسيق غير متوقع: {type(msg)}")
+            return
+
+        # Create a dictionary for quick price lookups from the incoming message
+        price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
+
+        # Update the global price cache
+        with prices_lock:
+            current_prices.update(price_updates)
+
+        # Get a snapshot of symbols to check to avoid holding the lock for too long
+        with signal_cache_lock:
+            symbols_to_check = list(open_signals_cache.keys())
+
+        for symbol in symbols_to_check:
+            if symbol not in price_updates:
+                continue
+
+            price = price_updates[symbol]
+            signal_to_close_now = None
+            status_to_set = None
+            closing_price_to_set = None
+
             with signal_cache_lock:
+                # Check again if the signal still exists, as it might have been closed by another process
                 if symbol in open_signals_cache:
                     signal = open_signals_cache[symbol]
-                    target_price = signal.get('target_price'); stop_loss_price = signal.get('stop_loss')
-                    if not all(isinstance(p, (int, float)) for p in [price, target_price, stop_loss_price]): continue
-                    if price >= target_price: status, closing_price, signal_to_process = 'target_hit', target_price, signal
-                    elif price <= stop_loss_price: status, closing_price, signal_to_process = 'stop_loss_hit', stop_loss_price, signal
-            
-            if signal_to_process and status:
-                logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status}' للعملة {symbol} عند سعر {price:.8f}")
-                Thread(target=close_signal, args=(signal_to_process, status, closing_price, "auto")).start()
+                    target_price = signal.get('target_price')
+                    stop_loss_price = signal.get('stop_loss')
+
+                    # Ensure all values are valid floats for comparison
+                    if not all(isinstance(p, (int, float)) and p > 0 for p in [price, target_price, stop_loss_price]):
+                        continue
+
+                    # Check for closing conditions for a LONG position
+                    if price >= target_price:
+                        status_to_set, closing_price_to_set = 'target_hit', target_price
+                    elif price <= stop_loss_price:
+                        status_to_set, closing_price_to_set = 'stop_loss_hit', stop_loss_price
+
+                    # If a condition is met, remove the signal from the cache immediately to prevent race conditions
+                    if status_to_set:
+                        signal_to_close_now = open_signals_cache.pop(symbol)
+                        logger.info(f"⚡ [المتتبع الفوري] تم تفعيل حدث '{status_to_set}' للعملة {symbol} عند سعر {price:.8f}. الإزالة من الذاكرة المؤقتة.")
+
+            # Perform the closing action (DB update, notification) outside the lock
+            if signal_to_close_now and status_to_set:
+                Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto")).start()
+
     except Exception as e:
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
+
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-    twm.start(); twm.start_ticker_socket(callback=handle_ticker_message)
-    logger.info("✅ [WebSocket] تم الاتصال والاستماع بنجاح."); twm.join()
+    twm.start()
+    # Subscribes to the stream for all tickers
+    twm.start_ticker_socket(callback=handle_ticker_message)
+    logger.info("✅ [WebSocket] تم الاتصال والاستماع بنجاح.")
+    twm.join() # Keeps the thread alive
 
 class TradingStrategy:
     def __init__(self, symbol: str):
@@ -393,26 +418,20 @@ class TradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        # --- NEW: Full feature engineering pipeline ---
         try:
             df_featured = calculate_features(df_15m, btc_df)
             df_featured = calculate_sr_features(df_featured, sr_levels_df)
-            
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
             ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
             df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
-            
             mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
             df_featured = df_featured.join(mtf_features)
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-            
-            # Ensure all expected columns exist, fill with 0 if missing
             for col in self.feature_names:
                 if col not in df_featured.columns: df_featured[col] = 0.0
-            
             return df_featured[self.feature_names].dropna()
         except Exception as e:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات: {e}", exc_info=True)
@@ -421,19 +440,15 @@ class TradingStrategy:
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]): return None
         if df_features.empty: return None
-        
-        last_row_df = df_features.iloc[[-1]] # Keep as DataFrame
+        last_row_df = df_features.iloc[[-1]]
         try:
             features_scaled = self.scaler.transform(last_row_df)
             features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-            
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
-            
             try: class_1_index = list(self.ml_model.classes_).index(1)
             except ValueError: return None
             prob_for_class_1 = prediction_proba[class_1_index]
-
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}, وهي أعلى من الحد المطلوب ({MODEL_CONFIDENCE_THRESHOLD:.0%}).")
                 return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}}
@@ -484,21 +499,31 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback(); return None
 
+# --- تعديل: تم تحديث الدالة لتعمل بشكل مستقل عن الذاكرة المؤقتة ---
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    symbol = signal['symbol']
-    with signal_cache_lock:
-        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal['id']: return
-    if not check_db_connection() or not conn: return
+    """
+    Closes a signal by updating its status in the database and sending notifications.
+    This function no longer interacts with the open_signals_cache for removal.
+    """
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [إغلاق قاعدة البيانات] لا يمكن إغلاق الإشارة {signal.get('id')} بسبب مشكلة في الاتصال.")
+        return
     try:
         db_closing_price = float(closing_price)
         db_profit_pct = float(((db_closing_price / signal['entry_price']) - 1) * 100)
         with conn.cursor() as update_cur:
+            # Add "AND status = 'open'" to prevent closing an already closed trade
             update_cur.execute(
-                "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s;",
+                "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
                 (status, db_closing_price, db_profit_pct, signal['id'])
             )
+            # Check if the update was successful
+            if update_cur.rowcount == 0:
+                logger.warning(f"⚠️ [إغلاق قاعدة البيانات] لم يتم العثور على الإشارة {signal['id']} لإغلاقها أو أنها مغلقة بالفعل.")
+                return # Exit if the signal was already closed by another process
+
         conn.commit()
-        with signal_cache_lock: del open_signals_cache[symbol]
+        
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
         safe_symbol = signal['symbol'].replace('_', '\\_')
@@ -506,6 +531,8 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         send_telegram_message(CHAT_ID, alert_msg_tg)
         alert_msg_db = f"{status_message}: {signal['symbol']} | الربح: {db_profit_pct:+.2f}%"
         log_and_notify('info', alert_msg_db, 'CLOSE_SIGNAL')
+        logger.info(f"✅ [إغلاق قاعدة البيانات] تم إغلاق الإشارة {signal['id']} لـ {signal['symbol']} بنجاح.")
+
     except Exception as e:
         logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
@@ -602,7 +629,7 @@ def main_loop():
                     strategy = TradingStrategy(symbol)
                     df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels)
                     
-                    del df_15m, df_4h, sr_levels; gc.collect() # Free memory
+                    del df_15m, df_4h, sr_levels; gc.collect()
                     
                     if df_features is None or df_features.empty: continue
                     
@@ -661,45 +688,93 @@ def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, profit_percentage FROM signals WHERE status != 'open';")
-            closed = cur.fetchall()
-        wins = sum(1 for s in closed if s.get('profit_percentage', 0) > 0); losses = len(closed) - wins
-        total_closed = len(closed); win_rate = (wins / total_closed * 100) if total_closed > 0 else 0
-        total_profit = sum(s['profit_percentage'] / 100 * TRADE_AMOUNT_USDT for s in closed if s.get('profit_percentage') is not None)
-        return jsonify({"win_rate": win_rate, "wins": wins, "losses": losses, "total_profit_usdt": total_profit, "total_closed_trades": total_closed})
+            cur.execute("SELECT status, profit_percentage FROM signals;")
+            all_signals = cur.fetchall()
+
+        open_trades = [s for s in all_signals if s.get('status') == 'open']
+        closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
+
+        open_trades_count = len(open_trades)
+        targets_hit_all_time = sum(1 for s in closed_trades if s.get('profit_percentage', 0) > 0)
+        stops_hit_all_time = len(closed_trades) - targets_hit_all_time
+        total_profit_pct = sum(s['profit_percentage'] for s in closed_trades)
+
+        return jsonify({
+            "open_trades_count": open_trades_count,
+            "total_profit_pct": total_profit_pct,
+            "targets_hit_all_time": targets_hit_all_time,
+            "stops_hit_all_time": stops_hit_all_time,
+            "total_closed_trades": len(closed_trades)
+        })
     except Exception as e:
-        logger.error(f"❌ [API إحصائيات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
+        logger.error(f"❌ [API إحصائيات] خطأ: {e}")
+        return jsonify({"error": "تعذر جلب الإحصائيات"}), 500
 
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
             all_signals = cur.fetchall()
-        for s in all_signals:
-            if s.get('closed_at'): s['closed_at'] = s['closed_at'].isoformat()
-            if s['status'] == 'open':
-                with prices_lock: s['current_price'] = current_prices.get(s['symbol'])
+        
+        with prices_lock:
+            for s in all_signals:
+                if s.get('closed_at'):
+                    s['closed_at'] = s['closed_at'].isoformat()
+                
+                if s['status'] == 'open':
+                    current_price = current_prices.get(s['symbol'])
+                    s['current_price'] = current_price
+                    if current_price and s.get('entry_price') and s['entry_price'] > 0:
+                        pnl = ((current_price / s['entry_price']) - 1) * 100
+                        s['pnl_pct'] = pnl
+                    else:
+                        s['pnl_pct'] = 0
+                        
         return jsonify(all_signals)
     except Exception as e:
-        logger.error(f"❌ [API إشارات] خطأ: {e}"); return jsonify({"error": "تعذر جلب الإشارات"}), 500
+        logger.error(f"❌ [API إشارات] خطأ: {e}")
+        return jsonify({"error": "تعذر جلب الإشارات"}), 500
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
     logger.info(f"ℹ️ [API إغلاق] تم استلام طلب إغلاق يدوي للإشارة ID: {signal_id}")
     signal_to_close = None
-    with signal_cache_lock:
-        for s in open_signals_cache.values():
-            if s['id'] == signal_id: signal_to_close = s.copy(); break
-    if not signal_to_close: return jsonify({"error": "لم يتم العثور على الإشارة."}), 404
+    
+    # We need to find the signal in the database as it might not be in the cache
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM signals WHERE id = %s AND status = 'open';", (signal_id,))
+            signal_to_close = cur.fetchone()
+    except Exception as e:
+        logger.error(f"❌ [API إغلاق] خطأ في البحث عن الإشارة {signal_id} في قاعدة البيانات: {e}")
+        return jsonify({"error": "خطأ في قاعدة البيانات"}), 500
+
+    if not signal_to_close:
+        return jsonify({"error": "لم يتم العثور على الإشارة أو أنها ليست مفتوحة."}), 404
+        
     symbol_to_close = signal_to_close['symbol']
-    with prices_lock: closing_price = current_prices.get(symbol_to_close)
-    if not closing_price: return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol_to_close}."}), 500
-    Thread(target=close_signal, args=(signal_to_close, 'manual_close', closing_price, "manual")).start()
+    with prices_lock:
+        closing_price = current_prices.get(symbol_to_close)
+        
+    if not closing_price:
+        return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol_to_close}."}), 500
+    
+    # Remove from cache if it exists
+    with signal_cache_lock:
+        open_signals_cache.pop(symbol_to_close, None)
+
+    Thread(target=close_signal, args=(dict(signal_to_close), 'manual_close', closing_price, "manual")).start()
+    
     return jsonify({"message": f"جاري إغلاق الإشارة {signal_id} لـ {symbol_to_close}."})
 
 @app.route('/api/notifications')

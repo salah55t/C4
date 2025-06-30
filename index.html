@@ -264,7 +264,8 @@
             const statusText = {
                 'target_hit': 'تحقق الهدف',
                 'stop_loss_hit': 'ضرب الوقف',
-                'manual_close': 'إغلاق يدوي'
+                'manual_close': 'إغلاق يدوي',
+                'open': 'مفتوحة'
             };
             return `<span class="status-badge status-${status}">${statusText[status] || status}</span>`;
         }
@@ -280,7 +281,8 @@
             try {
                 const response = await fetch(`${API_BASE_URL}${endpoint}`);
                 if (!response.ok) {
-                    console.error(`Error fetching ${endpoint}: ${response.statusText}`);
+                    const errorData = await response.json();
+                    console.error(`Error fetching ${endpoint}: ${response.statusText}`, errorData);
                     return null;
                 }
                 return await response.json();
@@ -298,8 +300,8 @@
                 return;
             }
 
-            const totalTrades = stats.targets_hit_all_time + stats.stops_hit_all_time;
-            const winRate = totalTrades > 0 ? (stats.targets_hit_all_time / totalTrades) * 100 : 0;
+            const totalClosedTrades = stats.targets_hit_all_time + stats.stops_hit_all_time;
+            const winRate = totalClosedTrades > 0 ? (stats.targets_hit_all_time / totalClosedTrades) * 100 : 0;
             const btcTrend = marketStatus.btc_trend;
             
             const btcTrendIcon = btcTrend.is_uptrend ? 'fa-arrow-trend-up text-success' : 'fa-arrow-trend-down text-danger';
@@ -317,7 +319,7 @@
                 <div class="col-md-6 col-lg-3">
                     <div class="card text-center">
                         <div class="card-body">
-                            <h5 class="card-title"><i class="fas fa-percent text-success"></i> إجمالي الربح</h5>
+                            <h5 class="card-title"><i class="fas fa-chart-pie text-success"></i> إجمالي الربح %</h5>
                             <p class="card-text fs-2 fw-bold ${formatPnlClass(stats.total_profit_pct)}">${formatPercentage(stats.total_profit_pct)}</p>
                         </div>
                     </div>
@@ -348,19 +350,18 @@
                 return;
             }
 
-            // Dispose of old popovers to prevent memory leaks
             popoverList.forEach(p => p.dispose());
             popoverList = [];
 
             tbody.innerHTML = trades.map(trade => {
-                 const detailsJson = trade.signal_details ? JSON.stringify(trade.signal_details, null, 2).replace(/"/g, '&quot;') : '{}';
-                 let detailsPopoverContent = '<ul>';
-                 if(trade.signal_details){
-                     for(const [key, value] of Object.entries(trade.signal_details)){
+                 let detailsPopoverContent = 'لا توجد تفاصيل إضافية';
+                 if (trade.signal_details) {
+                     detailsPopoverContent = '<ul class="list-unstyled mb-0">';
+                     for (const [key, value] of Object.entries(trade.signal_details)) {
                          detailsPopoverContent += `<li><strong>${key}:</strong> ${value}</li>`;
                      }
+                     detailsPopoverContent += '</ul>';
                  }
-                 detailsPopoverContent += '</ul>';
 
                 return `
                     <tr>
@@ -372,7 +373,7 @@
                         <td>${formatNumber(trade.stop_loss)}</td>
                         <td><small>${trade.strategy_name || 'N/A'}</small></td>
                         <td>
-                            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content="${detailsPopoverContent}">
+                            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content='${detailsPopoverContent}'>
                                 <i class="fas fa-info-circle"></i>
                             </button>
                         </td>
@@ -385,7 +386,6 @@
                 `;
             }).join('');
             
-            // Re-initialize popovers
             const popoverTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="popover"]'));
             popoverList = popoverTriggerList.map(function (popoverTriggerEl) {
               return new bootstrap.Popover(popoverTriggerEl)
@@ -414,7 +414,7 @@
         function renderNotifications(notifications) {
             const list = document.getElementById('notifications-list');
              if (!notifications || notifications.length === 0) {
-                list.innerHTML = '<li class="list-group-item">لا توجد إشعارات جديدة.</li>';
+                list.innerHTML = '<li class="list-group-item bg-transparent border-secondary text-muted">لا توجد إشعارات جديدة.</li>';
                 return;
             }
 
@@ -426,7 +426,7 @@
             };
 
             list.innerHTML = notifications.map(n => `
-                <li class="list-group-item d-flex justify-content-between align-items-start">
+                <li class="list-group-item d-flex justify-content-between align-items-start bg-transparent border-secondary">
                     <div class="ms-2 me-auto">
                         <div class="fw-bold"><i class="fas ${typeIcons[n.type] || 'fa-bell'} me-2"></i>${n.message}</div>
                         <small class="text-muted">${formatDateTime(n.timestamp)}</small>
@@ -439,7 +439,7 @@
             if (!history || history.length === 0) return;
             
             const last30Trades = history.slice(0, 30).reverse();
-            const labels = last30Trades.map(t => `${t.symbol} (${new Date(t.closed_at).toLocaleDateString('en-CA')})`);
+            const labels = last30Trades.map((t, index) => `صفقة ${index + 1}`);
             let cumulativeProfit = 0;
             const data = last30Trades.map(t => {
                 cumulativeProfit += t.profit_percentage;
@@ -481,16 +481,18 @@
             }
         }
         
-        // ----- Main Update Function -----
+        // --- تعديل: تم تحديث هذه الدالة لجلب البيانات بشكل صحيح ---
         async function updateDashboard() {
-            const [stats, marketStatus, openTrades, tradeHistory, notifications] = await Promise.all([
+            const [stats, marketStatus, allSignals, notifications] = await Promise.all([
                 fetchData('/api/stats'),
                 fetchData('/api/market_status'),
-                fetchData('/api/open_trades'),
-                fetchData('/api/trade_history'),
+                fetchData('/api/signals'),
                 fetchData('/api/notifications')
             ]);
             
+            const openTrades = allSignals ? allSignals.filter(s => s.status === 'open') : [];
+            const tradeHistory = allSignals ? allSignals.filter(s => s.status !== 'open') : [];
+
             renderStats(stats, marketStatus);
             renderOpenTrades(openTrades);
             renderTradeHistory(tradeHistory);
@@ -508,26 +510,27 @@
             closeTradeModal.show();
         }
         
+        // --- تعديل: تم إصلاح طلب الإغلاق اليدوي ---
         document.getElementById('confirm-close-btn').addEventListener('click', async () => {
             if (!tradeToClose.id) return;
             showSpinner();
             closeTradeModal.hide();
             
             try {
-                const response = await fetch(`${API_BASE_URL}/api/close_trade`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(tradeToClose)
+                const response = await fetch(`${API_BASE_URL}/api/close/${tradeToClose.id}`, {
+                    method: 'POST'
                 });
                 const result = await response.json();
                 if (response.ok) {
                     console.log('Close request successful:', result.message);
-                    await updateDashboard(); // Refresh immediately
+                    await updateDashboard();
                 } else {
                     console.error('Failed to close trade:', result.error);
+                    alert(`فشل إغلاق الصفقة: ${result.error}`);
                 }
             } catch (error) {
                 console.error('Error sending close request:', error);
+                alert('حدث خطأ في الشبكة أثناء محاولة إغلاق الصفقة.');
             } finally {
                 hideSpinner();
                 tradeToClose = { id: null, symbol: null };
