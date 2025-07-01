@@ -79,7 +79,7 @@ ATR_TP_MULTIPLIER = 2.0
 USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 50
+BTC_TREND_EMA_PERIOD = 10
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
