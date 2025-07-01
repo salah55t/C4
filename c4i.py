@@ -195,6 +195,7 @@ def save_ichimoku_to_db(symbol: str, df_ichimoku: pd.DataFrame, timeframe: str):
 # --- المهمة الرئيسية التي تعمل في الخلفية ---
 def calculator_job():
     """Main function to run the calculation and saving pipeline periodically."""
+    global conn, client  # <--- ✨ התיקון כאן (The fix is here)
     while True:
         logger.info("🚀 Starting new Ichimoku calculation cycle...")
         try:
