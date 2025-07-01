@@ -17,7 +17,7 @@ from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timedelta, timezone
 from decouple import config
-from typing import List, Dict, Optional, Tuple, Any, Union
+from typing import List, Dict, Optional, Tuple, Any, Union, Set
 from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
@@ -27,9 +27,8 @@ import gc
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
-# --- تعديل: تم تغيير مستوى التسجيل إلى DEBUG لتسهيل تتبع المشاكل ---
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO, # Use INFO for production, DEBUG for detailed diagnostics
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('crypto_bot_v6_with_sr.log', encoding='utf-8'),
@@ -93,6 +92,10 @@ current_prices: Dict[str, float] = {}
 prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
+
+# --- تعديل: إضافة آلية قوية لمنع حالات السباق أثناء الإغلاق ---
+signals_pending_closure: Set[int] = set()
+closure_lock = Lock()
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -340,10 +343,10 @@ def load_ml_model_bundle_from_db(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
+# --- تعديل: تم إعادة بناء الدالة بالكامل لتكون أكثر قوة وموثوقية ---
 def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
     try:
         if not isinstance(msg, list):
-            # The mini-ticker stream sends a list, if it's not a list, it's an unexpected format.
             logger.warning(f"⚠️ [WebSocket] تم استلام رسالة بتنسيق غير متوقع: {type(msg)}")
             return
 
@@ -353,7 +356,6 @@ def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
             current_prices.update(price_updates)
 
         with signal_cache_lock:
-            # Iterate over a copy of keys to allow modification of the cache during iteration
             symbols_to_check = list(open_signals_cache.keys())
 
         for symbol in symbols_to_check:
@@ -361,47 +363,54 @@ def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
                 continue
 
             price = price_updates[symbol]
-            signal_to_close_now = None
+            
+            with signal_cache_lock:
+                if symbol not in open_signals_cache:
+                    continue
+                signal = open_signals_cache[symbol]
+                signal_id = signal.get('id')
+
+            with closure_lock:
+                if signal_id in signals_pending_closure:
+                    continue
+
+            target_price = signal.get('target_price')
+            stop_loss_price = signal.get('stop_loss')
+
+            if not all(isinstance(p, (int, float)) and p > 0 for p in [price, target_price, stop_loss_price]):
+                continue
+            
+            logger.debug(f"[{symbol}] Checking Price: {price:.8f} | SL: {stop_loss_price:.8f} | TP: {target_price:.8f}")
+
             status_to_set = None
             closing_price_to_set = None
 
-            with signal_cache_lock:
-                if symbol in open_signals_cache:
-                    signal = open_signals_cache[symbol]
-                    target_price = signal.get('target_price')
-                    stop_loss_price = signal.get('stop_loss')
+            if price >= target_price:
+                status_to_set, closing_price_to_set = 'target_hit', target_price
+            elif price <= stop_loss_price:
+                status_to_set, closing_price_to_set = 'stop_loss_hit', stop_loss_price
 
-                    if not all(isinstance(p, (int, float)) and p > 0 for p in [price, target_price, stop_loss_price]):
+            if status_to_set:
+                with closure_lock:
+                    if signal_id in signals_pending_closure:
                         continue
-                    
-                    # --- تعديل: إضافة تسجيل مفصل لعملية التحقق ---
-                    logger.debug(f"[{symbol}] Checking Price: {price:.8f} | Stop-Loss: {stop_loss_price:.8f} | Target: {target_price:.8f}")
+                    signals_pending_closure.add(signal_id)
+                
+                with signal_cache_lock:
+                    signal_to_close_now = open_signals_cache.pop(symbol, None)
 
-                    if price >= target_price:
-                        status_to_set, closing_price_to_set = 'target_hit', target_price
-                    elif price <= stop_loss_price:
-                        status_to_set, closing_price_to_set = 'stop_loss_hit', stop_loss_price
-
-                    if status_to_set:
-                        logger.info(f"⚡ [EVENT TRIGGERED] Condition '{status_to_set}' met for {symbol} at price {price:.8f}. Removing from cache and closing.")
-                        signal_to_close_now = open_signals_cache.pop(symbol)
-            
-            if signal_to_close_now and status_to_set:
-                Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto")).start()
+                if signal_to_close_now:
+                    logger.info(f"⚡ [EVENT TRIGGERED] Condition '{status_to_set}' for {symbol} (ID: {signal_id}). Initiating close.")
+                    Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto")).start()
 
     except Exception as e:
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
 
-# --- تعديل: تم تغيير الدالة إلى start_miniticker_socket وهو الخيار الصحيح ---
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
-    
-    # This subscribes to the !miniTicker@arr stream, which provides price updates for ALL symbols.
-    # This is the correct way to monitor all market prices.
     twm.start_miniticker_socket(callback=handle_ticker_message)
-    
     logger.info("✅ [WebSocket] تم الاتصال والاستماع إلى 'All Market Mini Tickers' بنجاح.")
     twm.join()
 
@@ -493,23 +502,26 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback(); return None
 
+# --- تعديل: تم تحديث الدالة لتنظيف قائمة الانتظار بعد الإغلاق ---
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    logger.info(f"Attempting to close signal ID {signal.get('id')} for {signal.get('symbol')} with status '{status}'")
-    if not check_db_connection() or not conn:
-        logger.error(f"❌ [إغلاق قاعدة البيانات] لا يمكن إغلاق الإشارة {signal.get('id')} بسبب مشكلة في الاتصال.")
-        return
+    signal_id = signal.get('id')
+    logger.info(f"Closing process started for Signal ID {signal_id} ({signal.get('symbol')}) with status '{status}'")
     try:
+        if not check_db_connection() or not conn:
+            logger.error(f"❌ [DB Close] Cannot close signal {signal_id}, DB connection issue.")
+            return
+
         db_closing_price = float(closing_price)
         db_profit_pct = float(((db_closing_price / signal['entry_price']) - 1) * 100)
+        
         with conn.cursor() as update_cur:
             update_cur.execute(
                 "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
-                (status, db_closing_price, db_profit_pct, signal['id'])
+                (status, db_closing_price, db_profit_pct, signal_id)
             )
             if update_cur.rowcount == 0:
-                logger.warning(f"⚠️ [إغلاق قاعدة البيانات] لم يتم العثور على الإشارة {signal['id']} لإغلاقها أو أنها مغلقة بالفعل.")
+                logger.warning(f"⚠️ [DB Close] Signal {signal_id} was not found or already closed.")
                 return
-
         conn.commit()
         
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
@@ -519,11 +531,16 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         send_telegram_message(CHAT_ID, alert_msg_tg)
         alert_msg_db = f"{status_message}: {signal['symbol']} | الربح: {db_profit_pct:+.2f}%"
         log_and_notify('info', alert_msg_db, 'CLOSE_SIGNAL')
-        logger.info(f"✅ [إغلاق قاعدة البيانات] تم إغلاق الإشارة {signal['id']} لـ {signal['symbol']} بنجاح.")
+        logger.info(f"✅ [DB Close] Successfully closed signal {signal_id}.")
 
     except Exception as e:
-        logger.error(f"❌ [إغلاق قاعدة البيانات] خطأ فادح أثناء إغلاق الإشارة {signal['id']} لـ {signal['symbol']}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Close] Critical error during signal close for ID {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
+    finally:
+        # Always remove the signal from the pending set, regardless of success or failure.
+        with closure_lock:
+            signals_pending_closure.discard(signal_id)
+            logger.info(f"Signal ID {signal_id} removed from pending closure set.")
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
@@ -683,10 +700,11 @@ def get_stats():
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
 
-        open_trades = [s for s in all_signals if s.get('status') == 'open']
-        closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
+        open_trades_count = 0
+        with signal_cache_lock:
+            open_trades_count = len(open_signals_cache)
 
-        open_trades_count = len(open_trades)
+        closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
         targets_hit_all_time = sum(1 for s in closed_trades if s.get('profit_percentage', 0) > 0)
         stops_hit_all_time = len(closed_trades) - targets_hit_all_time
         total_profit_pct = sum(s['profit_percentage'] for s in closed_trades)
@@ -733,8 +751,11 @@ def get_signals():
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
     logger.info(f"ℹ️ [API إغلاق] تم استلام طلب إغلاق يدوي للإشارة ID: {signal_id}")
-    signal_to_close = None
     
+    with closure_lock:
+        if signal_id in signals_pending_closure:
+            return jsonify({"error": "الإشارة قيد الإغلاق حالياً."}), 409 # 409 Conflict
+
     if not check_db_connection() or not conn:
         return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     
@@ -756,6 +777,9 @@ def manual_close_signal(signal_id):
     if not closing_price:
         return jsonify({"error": f"تعذر الحصول على السعر الحالي لـ {symbol_to_close}."}), 500
     
+    with closure_lock:
+        signals_pending_closure.add(signal_id)
+
     with signal_cache_lock:
         open_signals_cache.pop(symbol_to_close, None)
 
