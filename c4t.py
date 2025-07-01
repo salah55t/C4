@@ -23,11 +23,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('backtester_v7_with_ichimoku.log', encoding='utf-8'), # <-- تم التحديث
+        logging.FileHandler('backtester_v7_with_ichimoku.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('Backtester_V7_With_Ichimoku') # <-- تم التحديث
+logger = logging.getLogger('Backtester_V7_With_Ichimoku')
 
 # ---------------------- إعداد متغيرات البيئة والثوابت ----------------------
 try:
@@ -45,10 +45,10 @@ FEE = 0.001
 SLIPPAGE = 0.0005
 COMMISSION = FEE + SLIPPAGE
 BACKTEST_PERIOD_DAYS = 90
-OUT_OF_SAMPLE_OFFSET_DAYS = 0 # 0 = In-sample, 90 = Out-of-sample
+OUT_OF_SAMPLE_OFFSET_DAYS = 0
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
-BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku' # <-- تم التحديث
+BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
 SIGNAL_GENERATION_TIMEFRAME = '15m'
 HIGHER_TIMEFRAME = '4h'
 BTC_SYMBOL = 'BTCUSDT'
@@ -109,10 +109,11 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         logger.error(f"❌ [S/R Levels] لا يمكن جلب مستويات الدعم والمقاومة للعملة {symbol}: {e}")
         return pd.DataFrame()
 
-# --- ✨ دالة جديدة لجلب بيانات إيشيموكو ✨ ---
+# --- ✨ دالة جلب بيانات إيشيموكو المحدثة والمصححة ✨ ---
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
     """
     Fetches pre-calculated Ichimoku features for a given symbol from the database.
+    This version is more robust against parsing issues.
     """
     if not conn: return pd.DataFrame()
     logger.info(f"🔍 [Ichimoku Fetch] Fetching Ichimoku features for {symbol} on {timeframe}...")
@@ -123,18 +124,28 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         ORDER BY timestamp;
     """
     try:
-        df_ichimoku = pd.read_sql(query, conn, params=(symbol, timeframe))
-        if df_ichimoku.empty:
-            logger.warning(f"⚠️ [Ichimoku Fetch] No Ichimoku features found for {symbol}.")
-            return pd.DataFrame()
-        
+        # Using a raw cursor to avoid issues with pd.read_sql and RealDictCursor
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol, timeframe))
+            features = cur.fetchall()
+            if not features:
+                logger.warning(f"⚠️ [Ichimoku Fetch] No Ichimoku features found for {symbol}.")
+                return pd.DataFrame()
+
+            # Manually get column names from the cursor description
+            colnames = [desc[0] for desc in cur.description]
+            df_ichimoku = pd.DataFrame(features, columns=colnames)
+
+        # Now, perform the conversion and set the index
         df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
         df_ichimoku.set_index('timestamp', inplace=True)
-        
+
         logger.info(f"✅ [Ichimoku Fetch] Found {len(df_ichimoku)} Ichimoku records for {symbol}.")
         return df_ichimoku
     except Exception as e:
         logger.error(f"❌ [Ichimoku Fetch] Could not fetch Ichimoku features for {symbol}: {e}")
+        if conn and not getattr(conn, 'autocommit', True):
+             conn.rollback()
         return pd.DataFrame()
 
 # ---------------------- جلب وإعداد البيانات ----------------------
@@ -205,7 +216,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
     return df
 
-# --- ✨ دالة جديدة لهندسة ميزات إيشيموكو ✨ ---
 def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
     df['price_vs_tenkan'] = (df['Close'] - df['tenkan_sen']) / df['tenkan_sen']
     df['price_vs_kijun'] = (df['Close'] - df['kijun_sen']) / df['kijun_sen']
@@ -358,16 +368,13 @@ def run_backtest():
             logger.warning(f"⚠️ تخطي {symbol}: بيانات تاريخية غير كافية.")
             continue
             
-        # --- ✨ جلب بيانات إضافية ✨ ---
         sr_levels = fetch_sr_levels_from_db(symbol)
         ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
 
         logger.info(f"هندسة الميزات لـ {symbol}...")
         
-        # 1. إنشاء الميزات الأساسية
         data = create_all_features(df_15m, btc_df_full)
         
-        # 2. إضافة ميزات الإطار الزمني الأعلى (MTF)
         delta_4h = df_4h['Close'].diff()
         gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
         loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -377,15 +384,12 @@ def run_backtest():
         mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
         data = data.join(mtf_features, how='left').fillna(method='ffill')
 
-        # 3. إضافة ميزات الدعم والمقاومة
         data = calculate_sr_features(data, sr_levels)
 
-        # 4. ✨ إضافة ميزات إيشيموكو ✨
         if not ichimoku_data.empty:
             data = data.join(ichimoku_data, how='left')
             data = calculate_ichimoku_based_features(data)
         
-        # 5. تنظيف نهائي
         data.replace([np.inf, -np.inf], np.nan, inplace=True)
         data.dropna(inplace=True)
         
@@ -412,8 +416,6 @@ def run_backtest():
         print(stats)
         all_stats.append(stats)
         
-        # bt.plot(filename=f"backtest_plot_{symbol}.html", open_browser=False)
-
         del data, df_15m, df_4h, sr_levels, ichimoku_data, model_bundle
         gc.collect()
 
