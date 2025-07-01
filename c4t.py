@@ -101,6 +101,8 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     if not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
+        # ملاحظة: هذا التحذير لا يزال موجودًا ولكنه لا يمنع تشغيل الكود
+        # pandas only supports SQLAlchemy connectable...
         df = pd.read_sql(query, conn, params=(symbol,))
         if not df.empty:
             logger.info(f"✅ [S/R Levels] تم جلب {len(df)} من مستويات الدعم والمقاومة للعملة {symbol} من قاعدة البيانات.")
@@ -109,7 +111,6 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         logger.error(f"❌ [S/R Levels] لا يمكن جلب مستويات الدعم والمقاومة للعملة {symbol}: {e}")
         return pd.DataFrame()
 
-# --- ✨ دالة جلب بيانات إيشيموكو المحدثة والمصححة ✨ ---
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
     """
     Fetches pre-calculated Ichimoku features for a given symbol from the database.
@@ -124,7 +125,6 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         ORDER BY timestamp;
     """
     try:
-        # Using a raw cursor to avoid issues with pd.read_sql and RealDictCursor
         with conn.cursor() as cur:
             cur.execute(query, (symbol, timeframe))
             features = cur.fetchall()
@@ -132,11 +132,9 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
                 logger.warning(f"⚠️ [Ichimoku Fetch] No Ichimoku features found for {symbol}.")
                 return pd.DataFrame()
 
-            # Manually get column names from the cursor description
             colnames = [desc[0] for desc in cur.description]
             df_ichimoku = pd.DataFrame(features, columns=colnames)
 
-        # Now, perform the conversion and set the index
         df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
         df_ichimoku.set_index('timestamp', inplace=True)
 
@@ -165,7 +163,8 @@ def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_p
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
         numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
         df = df.astype(numeric_cols)
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        # --- ✨ التصحيح هنا: تمت إضافة utc=True لجعل الفهرس مدركًا للمنطقة الزمنية ---
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
         return df.dropna()
