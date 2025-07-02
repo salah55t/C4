@@ -13,6 +13,18 @@ from datetime import datetime, timedelta, timezone
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 from tqdm import tqdm
+import threading
+from flask import Flask
+
+# --- إعداد خادم الويب ---
+# سيقوم هذا الخادم بالاستماع للطلبات لإبقاء الخدمة نشطة على Render
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    """هذه هي نقطة الوصول التي ستستدعيها خدمة cron-job."""
+    # يمكنك إضافة المزيد من المعلومات هنا إذا أردت، مثل حالة الاختبار الخلفي
+    return "Backtester service is running.", 200
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -76,7 +88,8 @@ def init_db():
         logger.info("✅ [DB] تم تهيئة الاتصال بقاعدة البيانات بنجاح.")
     except Exception as e:
         logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}")
-        exit(1)
+        # لا نستخدم exit(1) هنا للسماح لخادم الويب بالعمل حتى لو فشلت قاعدة البيانات
+        conn = None # تأكد من أن الاتصال فارغ
 
 def load_ml_model_bundle_from_db(symbol: str) -> dict | None:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -101,8 +114,6 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     if not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
-        # ملاحظة: هذا التحذير لا يزال موجودًا ولكنه لا يمنع تشغيل الكود
-        # pandas only supports SQLAlchemy connectable...
         df = pd.read_sql(query, conn, params=(symbol,))
         if not df.empty:
             logger.info(f"✅ [S/R Levels] تم جلب {len(df)} من مستويات الدعم والمقاومة للعملة {symbol} من قاعدة البيانات.")
@@ -112,10 +123,6 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
-    """
-    Fetches pre-calculated Ichimoku features for a given symbol from the database.
-    This version is more robust against parsing issues.
-    """
     if not conn: return pd.DataFrame()
     logger.info(f"🔍 [Ichimoku Fetch] Fetching Ichimoku features for {symbol} on {timeframe}...")
     query = """
@@ -148,7 +155,14 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
 
 # ---------------------- جلب وإعداد البيانات ----------------------
 def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_period_days: int = 0) -> pd.DataFrame | None:
-    if not client: return None
+    global client
+    if not client:
+        try:
+            client = Client(API_KEY, API_SECRET)
+            logger.info("✅ [Binance] تم تهيئة اتصال Binance.")
+        except Exception as e:
+            logger.error(f"❌ [Binance] فشل في تهيئة اتصال Binance: {e}")
+            return None
     try:
         now = datetime.now(timezone.utc)
         end_dt = now - timedelta(days=out_of_sample_period_days)
@@ -163,7 +177,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_p
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
         numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
         df = df.astype(numeric_cols)
-        # --- ✨ التصحيح هنا: تمت إضافة utc=True لجعل الفهرس مدركًا للمنطقة الزمنية ---
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
@@ -329,12 +342,16 @@ class MLStrategy(Strategy):
 
 # ---------------------- كتلة التنفيذ الرئيسية ----------------------
 def run_backtest():
-    global client, conn
+    """هذه هي وظيفة الاختبار الخلفي الرئيسية، وتعمل الآن في خيط منفصل."""
+    global conn
     logger.info(f"🚀 بدء الاختبار الخلفي المتقدم لاستراتيجية {BASE_ML_MODEL_NAME}...")
     
     init_db()
-    client = Client(API_KEY, API_SECRET)
-    
+    # تأكد من أن الاتصال بقاعدة البيانات متاح قبل المتابعة
+    if not conn:
+        logger.critical("❌ لا يمكن تشغيل الاختبار الخلفي بدون اتصال بقاعدة البيانات.")
+        return
+
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, 'crypto_list.txt')
@@ -443,6 +460,17 @@ def run_backtest():
         
     if conn:
         conn.close()
+    logger.info("✅ انتهى خيط الاختبار الخلفي.")
+
 
 if __name__ == "__main__":
-    run_backtest()
+    # تشغيل وظيفة الاختبار الخلفي في خيط منفصل حتى لا تمنع خادم الويب من البدء
+    backtest_thread = threading.Thread(target=run_backtest, daemon=True)
+    backtest_thread.start()
+    
+    # تشغيل خادم الويب للاستجابة لطلبات التحقق من الصحة
+    # Render سيوفر متغير البيئة PORT
+    port = int(os.environ.get("PORT", 10000))
+    # استخدم '0.0.0.0' لجعل الخادم متاحًا خارجيًا
+    app.run(host='0.0.0.0', port=port)
+
