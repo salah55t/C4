@@ -33,7 +33,7 @@ except Exception as e:
 
 # --- ثوابت وإعدادات ---
 TIMEFRAME: str = '15m'
-DATA_LOOKBACK_DAYS: int = 90
+DATA_LOOKBACK_DAYS: int = 180
 RUN_INTERVAL_HOURS: int = 4  # تشغيل المهمة كل 4 ساعات
 ICHIMOKU_TENKAN_PERIOD: int = 9
 ICHIMOKU_KIJUN_PERIOD: int = 26
