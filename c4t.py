@@ -57,7 +57,7 @@ FEE = 0.001
 SLIPPAGE = 0.0005
 COMMISSION = FEE + SLIPPAGE
 BACKTEST_PERIOD_DAYS = 90
-OUT_OF_SAMPLE_OFFSET_DAYS = 90
+OUT_OF_SAMPLE_OFFSET_DAYS = 0
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
@@ -332,10 +332,16 @@ class MLStrategy(Strategy):
             if pd.isna(current_atr) or current_atr == 0:
                 return
 
+            # --- ✨ التحسين: التحقق من وجود رصيد كافٍ قبل محاولة التداول ---
+            # نتأكد من أن الرصيد الحالي أكبر من حجم الصفقة المطلوبة
+            if self.equity < TRADE_AMOUNT_USDT:
+                return # الخروج من الدالة إذا لم يكن الرصيد كافياً
+
             current_price = self.data.Close[-1]
             size_as_fraction = TRADE_AMOUNT_USDT / self.equity
 
-            if size_as_fraction > 0 and size_as_fraction < 1:
+            # نستخدم 0.99 كهامش أمان للتأكد من أن حجم الصفقة لا يتجاوز الرصيد
+            if size_as_fraction > 0 and size_as_fraction < 0.99:
                 stop_loss_price = current_price - (current_atr * ATR_SL_MULTIPLIER)
                 take_profit_price = current_price + (current_atr * ATR_TP_MULTIPLIER)
                 self.buy(size=size_as_fraction, sl=stop_loss_price, tp=take_profit_price)
