@@ -429,10 +429,12 @@ def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
             status_to_set = None
             closing_price_to_set = None
 
+            # --- تعديل: استخدام السعر الفعلي للإغلاق بدلاً من السعر المستهدف/الوقفي المحدد مسبقاً ---
             if price >= target_price:
-                status_to_set, closing_price_to_set = 'target_hit', target_price
+                status_to_set, closing_price_to_set = 'target_hit', price
             elif price <= stop_loss_price:
-                status_to_set, closing_price_to_set = 'stop_loss_hit', stop_loss_price
+                status_to_set, closing_price_to_set = 'stop_loss_hit', price
+            # --- نهاية التعديل ---
 
             if status_to_set:
                 with closure_lock:
@@ -449,6 +451,7 @@ def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
 
     except Exception as e:
         logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
+
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
@@ -556,13 +559,16 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback(); return None
 
+# --- تعديل: دالة إغلاق الصفقة مع آلية استرداد قوية ---
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     signal_id = signal.get('id')
-    logger.info(f"Closing process started for Signal ID {signal_id} ({signal.get('symbol')}) with status '{status}'")
+    symbol = signal.get('symbol')
+    logger.info(f"Closing process started for Signal ID {signal_id} ({symbol}) with status '{status}'")
+    
     try:
         if not check_db_connection() or not conn:
-            logger.error(f"❌ [DB Close] Cannot close signal {signal_id}, DB connection issue.")
-            return
+            # إطلاق استثناء ليتم التقاطه بواسطة معالج الأخطاء الرئيسي
+            raise OperationalError(f"DB connection failed for closing signal {signal_id}.")
 
         db_closing_price = float(closing_price)
         db_profit_pct = float(((db_closing_price / signal['entry_price']) - 1) * 100)
@@ -573,10 +579,12 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
                 (status, db_closing_price, db_profit_pct, signal_id)
             )
             if update_cur.rowcount == 0:
-                logger.warning(f"⚠️ [DB Close] Signal {signal_id} was not found or already closed.")
-                return
+                logger.warning(f"⚠️ [DB Close] Signal {signal_id} was not found or already closed. No recovery needed.")
+                # لا حاجة للاسترداد، الصفقة مغلقة بالفعل
+                return 
         conn.commit()
         
+        # إرسال التنبيهات في حالة النجاح فقط
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
         safe_symbol = signal['symbol'].replace('_', '\\_')
@@ -588,11 +596,24 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
 
     except Exception as e:
         logger.error(f"❌ [DB Close] Critical error during signal close for ID {signal_id}: {e}", exc_info=True)
-        if conn: conn.rollback()
+        if conn: 
+            try:
+                conn.rollback()
+            except Exception as rb_e:
+                logger.error(f"❌ [DB Close] Error during rollback: {rb_e}")
+
+        # آلية الاسترداد: إعادة الصفقة إلى الذاكرة المؤقتة للمراقبة
+        if symbol:
+            with signal_cache_lock:
+                if symbol not in open_signals_cache:
+                    open_signals_cache[symbol] = signal
+                    logger.info(f"🔄 [Recovery] Signal {signal_id} for {symbol} has been returned to the open signals cache due to a closing error.")
     finally:
+        # إزالة الصفقة دائماً من قائمة "قيد الإغلاق" للسماح بإعادة المحاولة
         with closure_lock:
             signals_pending_closure.discard(signal_id)
             logger.info(f"Signal ID {signal_id} removed from pending closure set.")
+
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
