@@ -51,7 +51,7 @@ except Exception as e:
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
-MODEL_FOLDER: str = 'V7' # ✨ المجلد الذي يحتوي على ملفات النماذج
+MODEL_FOLDER: str = 'V7'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
@@ -81,7 +81,6 @@ USE_BTC_TREND_FILTER = True
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
-# --- ✨ ثابت جديد لفلتر الربح ✨ ---
 MIN_PROFIT_PERCENTAGE_FILTER: float = 1.0
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -354,27 +353,19 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = calculate_candlestick_patterns(df_calc)
     return df_calc.astype('float32', errors='ignore')
 
-# ✨ --- تعديل: دالة جديدة لتحميل النماذج من مجلد محلي --- ✨
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Loads a model bundle (model, scaler, feature names) from a local .pkl file.
-    """
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache:
         return ml_models_cache[model_name]
-
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
-
     if not os.path.exists(model_path):
         logger.warning(f"⚠️ [نموذج تعلم الآلة] ملف النموذج '{model_path}' غير موجود للعملة {symbol}.")
         return None
-
     try:
         with open(model_path, 'rb') as f:
             model_bundle = pickle.load(f)
-        
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
             ml_models_cache[model_name] = model_bundle
             logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح من الملف المحلي.")
@@ -387,84 +378,115 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         return None
 
 # ---------------------- دوال WebSocket والاستراتيجية ----------------------
-# --- ✨ هذه الدالة هي المسؤولة عن المراقبة اللحظية للصفقات المفتوحة ✨ ---
-def handle_ticker_message(msg: List[Dict[str, Any]]) -> None:
+
+# --- ✨ تعديل جذري: خيط مخصص لاستقبال الأسعار فقط ---
+def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
+    """
+    This function's ONLY responsibility is to receive price updates from the websocket
+    and put them into the shared 'current_prices' dictionary as quickly as possible.
+    """
     try:
         if not isinstance(msg, list):
-            logger.warning(f"⚠️ [WebSocket] تم استلام رسالة بتنسيق غير متوقع: {type(msg)}")
+            # Log a warning for unexpected message format but don't stop the process
+            logger.warning(f"⚠️ [WebSocket] Received message in unexpected format: {type(msg)}")
             return
 
+        # Efficiently create a dictionary of price updates
         price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
         
+        # Acquire lock only for the brief moment of updating the dictionary
         with prices_lock:
             current_prices.update(price_updates)
-
-        with signal_cache_lock:
-            symbols_to_check = list(open_signals_cache.keys())
-
-        for symbol in symbols_to_check:
-            if symbol not in price_updates:
-                continue
-
-            price = price_updates[symbol]
             
+    except Exception as e:
+        # Log any errors occurring within this fast-paced thread
+        logger.error(f"❌ [WebSocket Price Updater] Error processing ticker message: {e}", exc_info=True)
+
+# --- ✨ تعديل جذري: خيط مراقبة مخصص ومستمر للصفقات ---
+def trade_monitoring_loop():
+    """
+    A dedicated, high-frequency loop running in its own thread.
+    Its only job is to constantly check open trades against the latest prices.
+    This decouples trade logic from the websocket connection for maximum reliability.
+    """
+    logger.info("✅ [Trade Monitor] خيط مراقبة الصفقات المخصص بدأ بالعمل.")
+    while True:
+        try:
             with signal_cache_lock:
-                if symbol not in open_signals_cache:
-                    continue
-                signal = open_signals_cache[symbol]
-                signal_id = signal.get('id')
+                # Get a copy to iterate over without holding the lock for a long time
+                signals_to_check = dict(open_signals_cache)
 
-            with closure_lock:
-                if signal_id in signals_pending_closure:
-                    continue
-
-            target_price = signal.get('target_price')
-            stop_loss_price = signal.get('stop_loss')
-
-            if not all(isinstance(p, (int, float)) and p > 0 for p in [price, target_price, stop_loss_price]):
+            if not signals_to_check:
+                time.sleep(1) # Sleep longer if there are no open trades to check
                 continue
-            
-            logger.debug(f"[{symbol}] Checking Price: {price:.8f} | SL: {stop_loss_price:.8f} | TP: {target_price:.8f}")
 
-            status_to_set = None
-            closing_price_to_set = None
+            with prices_lock:
+                # Get a copy of prices to avoid holding the lock during the check loop
+                latest_prices = dict(current_prices)
 
-            # --- تعديل: استخدام السعر الفعلي للإغلاق بدلاً من السعر المستهدف/الوقفي المحدد مسبقاً ---
-            if price >= target_price:
-                status_to_set, closing_price_to_set = 'target_hit', price
-            elif price <= stop_loss_price:
-                status_to_set, closing_price_to_set = 'stop_loss_hit', price
-            # --- نهاية التعديل ---
+            for symbol, signal in signals_to_check.items():
+                price = latest_prices.get(symbol)
+                if not price:
+                    continue # No price update for this symbol yet, skip to the next
 
-            if status_to_set:
+                signal_id = signal.get('id')
+                
                 with closure_lock:
+                    # Check if the signal is already being processed for closure
                     if signal_id in signals_pending_closure:
                         continue
-                    signals_pending_closure.add(signal_id)
+
+                target_price = signal.get('target_price')
+                stop_loss_price = signal.get('stop_loss')
+
+                # Ensure all values are valid numbers before comparison
+                if not all(isinstance(p, (int, float)) and p > 0 for p in [price, target_price, stop_loss_price]):
+                    continue
                 
-                with signal_cache_lock:
-                    signal_to_close_now = open_signals_cache.pop(symbol, None)
+                status_to_set = None
+                closing_price_to_set = None
 
-                if signal_to_close_now:
-                    logger.info(f"⚡ [EVENT TRIGGERED] Condition '{status_to_set}' for {symbol} (ID: {signal_id}). Initiating close.")
-                    Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto")).start()
+                # Check for target hit or stop-loss hit
+                if price >= target_price:
+                    status_to_set, closing_price_to_set = 'target_hit', price
+                elif price <= stop_loss_price:
+                    status_to_set, closing_price_to_set = 'stop_loss_hit', price
 
-    except Exception as e:
-        logger.error(f"❌ [متتبع WebSocket] خطأ في معالجة رسالة السعر الفورية: {e}", exc_info=True)
+                if status_to_set:
+                    # If a condition is met, mark it for closure
+                    with closure_lock:
+                        if signal_id in signals_pending_closure:
+                            continue # Double-check to prevent race conditions
+                        signals_pending_closure.add(signal_id)
+                    
+                    # Remove the signal from the main cache to prevent re-processing
+                    with signal_cache_lock:
+                        signal_to_close_now = open_signals_cache.pop(symbol, None)
 
+                    if signal_to_close_now:
+                        logger.info(f"⚡ [MONITOR TRIGGER] Condition '{status_to_set}' for {symbol} (ID: {signal_id}). Initiating close.")
+                        # Start the closure process in a new thread to not block the monitor
+                        Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto_monitor")).start()
+
+            # The loop runs very frequently for near real-time checking
+            time.sleep(0.1) # Check 10 times per second
+
+        except Exception as e:
+            logger.error(f"❌ [Trade Monitor] خطأ فادح في حلقة المراقبة: {e}", exc_info=True)
+            time.sleep(5) # Sleep longer on error to avoid spamming logs
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
-    twm.start_miniticker_socket(callback=handle_ticker_message)
+    # Use the new, lean message handler
+    twm.start_miniticker_socket(callback=handle_price_update_message)
     logger.info("✅ [WebSocket] تم الاتصال والاستماع إلى 'All Market Mini Tickers' بنجاح.")
     twm.join()
 
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # ✨ --- تعديل: استخدام الدالة الجديدة لتحميل النموذج --- ✨
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
@@ -559,7 +581,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [إدراج في قاعدة البيانات] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback(); return None
 
-# --- تعديل: دالة إغلاق الصفقة مع آلية استرداد قوية ---
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     signal_id = signal.get('id')
     symbol = signal.get('symbol')
@@ -567,7 +588,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
     
     try:
         if not check_db_connection() or not conn:
-            # إطلاق استثناء ليتم التقاطه بواسطة معالج الأخطاء الرئيسي
             raise OperationalError(f"DB connection failed for closing signal {signal_id}.")
 
         db_closing_price = float(closing_price)
@@ -580,11 +600,9 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
             )
             if update_cur.rowcount == 0:
                 logger.warning(f"⚠️ [DB Close] Signal {signal_id} was not found or already closed. No recovery needed.")
-                # لا حاجة للاسترداد، الصفقة مغلقة بالفعل
                 return 
         conn.commit()
         
-        # إرسال التنبيهات في حالة النجاح فقط
         status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ أُغلقت يدوياً'}
         status_message = status_map.get(status, status.replace('_', ' ').title())
         safe_symbol = signal['symbol'].replace('_', '\\_')
@@ -597,10 +615,8 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
     except Exception as e:
         logger.error(f"❌ [DB Close] Critical error during signal close for ID {signal_id}: {e}", exc_info=True)
         if conn: 
-            try:
-                conn.rollback()
-            except Exception as rb_e:
-                logger.error(f"❌ [DB Close] Error during rollback: {rb_e}")
+            try: conn.rollback()
+            except Exception as rb_e: logger.error(f"❌ [DB Close] Error during rollback: {rb_e}")
 
         # آلية الاسترداد: إعادة الصفقة إلى الذاكرة المؤقتة للمراقبة
         if symbol:
@@ -726,7 +742,6 @@ def main_loop():
                         else:
                             potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
                         
-                        # --- ✨ تعديل: فلتر للتحقق من أن الربح المتوقع 1% على الأقل ✨ ---
                         entry = potential_signal.get('entry_price', 0)
                         target = potential_signal.get('target_price', 0)
 
@@ -743,7 +758,6 @@ def main_loop():
                                 logger.info(f"ℹ️ [{symbol}] تم تخطي الإشارة. الربح المتوقع {profit_percentage:.2f}% وهو أقل من الحد الأدنى المطلوب ({MIN_PROFIT_PERCENTAGE_FILTER}%).")
                         else:
                             logger.warning(f"⚠️ [{symbol}] سعر دخول أو هدف غير صالح لحساب الربح. الدخول: {entry}, الهدف: {target}. تم تخطي الإشارة.")
-                        # --- ✨ نهاية التعديل ✨ ---
 
                 except Exception as e:
                     logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
@@ -900,8 +914,13 @@ def initialize_bot_services():
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ."); return
+        
+        # --- ✨ تعديل جذري: بدء تشغيل الخيوط المخصصة ---
         Thread(target=run_websocket_manager, daemon=True).start()
+        Thread(target=trade_monitoring_loop, daemon=True).start() # بدء خيط المراقبة الجديد
         Thread(target=main_loop, daemon=True).start()
+        # --- نهاية التعديل ---
+        
         logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
