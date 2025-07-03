@@ -7,11 +7,10 @@
 # 2. حاسب مؤشر إيشيموكو (Ichimoku Calculator - من c4i.py)
 # 3. بوت التداول الرئيسي (Main Trading Bot - من c4.py)
 #
-# === V2.0 Update Notes ===
-# - تم حل مشكلة Binance API Rate Limit (Error -1003)
-# - إضافة تأخير ذكي ومُدار في دالة جلب البيانات الرئيسية (fetch_historical_data).
-# - تحسين معالجة أخطاء الضغط على الـ API.
-# - إزالة فترات الانتظار غير الضرورية لتسريع العمليات الدورية.
+# === V3.0 Update Notes ===
+# - حل مشكلة "Port scan timeout reached" على منصات الاستضافة.
+# - إعادة هيكلة عملية البدء لتشغيل خادم الويب (Flask) فوراً.
+# - نقل التحليل الأولي الطويل والخدمات الخلفية لتعمل في خيط منفصل.
 # ==============================================================================
 
 import time
@@ -102,7 +101,7 @@ MODEL_CONFIDENCE_THRESHOLD = 0.70
 
 # --- ثوابت ماسح الدعم والمقاومة (SR Scanner Constants) ---
 SR_RUN_INTERVAL_MINUTES = 15
-SR_MAX_WORKERS = 5 # ✨ تم تقليل عدد العمال لتقليل الضغط الأولي
+SR_MAX_WORKERS = 5 
 SR_API_RETRY_ATTEMPTS = 3
 SR_API_RETRY_DELAY = 5
 SR_DATA_FETCH_DAYS_1H = 30
@@ -589,7 +588,6 @@ def run_ichimoku_calculator_full_analysis():
             ichimoku_save_to_db(symbol, df_with_ichimoku, ICHIMOKU_TIMEFRAME)
         except Exception as e:
             logger.error(f"❌ [Ichimoku] خطأ حرج في معالجة {symbol}: {e}", exc_info=True)
-        # ✨ REMOVED: time.sleep(1) is no longer needed due to the delay in fetch_historical_data
     logger.info("🎉 [Ichimoku] اكتملت دورة حساب إيشيموكو.")
 
 
@@ -1115,6 +1113,38 @@ def initialize_and_load_cache():
     except Exception as e:
         logger.error(f"❌ [Cache] فشل تحميل البيانات: {e}")
 
+def start_background_services():
+    """
+    ✨ NEW: This function runs all the time-consuming initial setup and starts
+    the background threads. It's designed to be run in a separate thread
+    to not block the main Flask web server from starting.
+    """
+    logger.info("▶️ [Background] بدء التشغيل الأولي للتحليلات (قد يستغرق بعض الوقت)...")
+    run_sr_scanner_full_analysis()
+    run_ichimoku_calculator_full_analysis()
+    logger.info("✅ [Background] اكتمل التشغيل الأولي للتحليلات بنجاح.")
+
+    # تحميل البيانات المبدئية والذاكرة المؤقتة
+    initialize_and_load_cache()
+
+    # بدء الخدمات الخلفية للبوت
+    logger.info("▶️ [Background] بدء الخدمات الخلفية للبوت...")
+    Thread(target=trade_monitoring_loop, daemon=True, name="TradeMonitor").start()
+    
+    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
+    twm.start()
+    twm.start_miniticker_socket(callback=handle_price_update_message)
+    
+    Thread(target=main_scan_loop, daemon=True, name="MainScanLoop").start()
+    logger.info("✅ [Background] تم بدء خدمات البوت (WebSocket, Monitor, Main Loop).")
+
+    # بدء المهام الدورية للتحليل في الخلفية
+    logger.info("▶️ [Background] بدء المهام الدورية للتحليل في الخلفية...")
+    Thread(target=sr_scanner_scheduler, daemon=True, name="SR_Scheduler").start()
+    Thread(target=ichimoku_calculator_scheduler, daemon=True, name="Ichimoku_Scheduler").start()
+    logger.info("✅ [Background] تم بدء المهام الدورية (SR & Ichimoku).")
+
+
 if __name__ == "__main__":
     logger.info("======================================================")
     logger.info("=== 🚀 بدء تشغيل منظم بوت التداول (Orchestrator) 🚀 ===")
@@ -1124,35 +1154,15 @@ if __name__ == "__main__":
     init_db()
     init_redis()
     init_binance_client()
-    get_validated_symbols() # Load symbols into the global variable
+    get_validated_symbols()
 
-    # --- 2. التشغيل الأولي للتحليلات (لضمان وجود بيانات) ---
-    logger.info("▶️ بدء التشغيل الأولي للتحليلات (قد يستغرق بعض الوقت)...")
-    run_sr_scanner_full_analysis()
-    run_ichimoku_calculator_full_analysis()
-    logger.info("✅ اكتمل التشغيل الأولي للتحليلات بنجاح.")
+    # --- 2. ✨ NEW: بدء جميع مهام الإعداد والتحليل في خيط خلفي ---
+    # هذا يضمن أن خادم الويب يمكن أن يبدأ على الفور.
+    background_setup_thread = Thread(target=start_background_services, daemon=True, name="BackgroundSetup")
+    background_setup_thread.start()
 
-    # --- 3. تحميل البيانات المبدئية والذاكرة المؤقتة ---
-    initialize_and_load_cache()
-
-    # --- 4. بدء الخدمات الخلفية للبوت ---
-    logger.info("▶️ بدء الخدمات الخلفية للبوت...")
-    Thread(target=trade_monitoring_loop, daemon=True, name="TradeMonitor").start()
-    
-    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-    twm.start()
-    twm.start_miniticker_socket(callback=handle_price_update_message)
-    
-    Thread(target=main_scan_loop, daemon=True, name="MainScanLoop").start()
-    logger.info("✅ تم بدء خدمات البوت (WebSocket, Monitor, Main Loop).")
-
-    # --- 5. بدء المهام الدورية للتحليل في الخلفية ---
-    logger.info("▶️ بدء المهام الدورية للتحليل في الخلفية...")
-    Thread(target=sr_scanner_scheduler, daemon=True, name="SR_Scheduler").start()
-    Thread(target=ichimoku_calculator_scheduler, daemon=True, name="Ichimoku_Scheduler").start()
-    logger.info("✅ تم بدء المهام الدورية (SR & Ichimoku).")
-
-    # --- 6. تشغيل لوحة التحكم (Flask) في الخيط الرئيسي ---
+    # --- 3. تشغيل لوحة التحكم (Flask) في الخيط الرئيسي ---
+    # سيبدأ هذا على الفور، مما يحل مشكلة انتهاء الوقت.
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
     log_and_notify("info", f"بدء تشغيل لوحة التحكم على http://{host}:{port}", "SYSTEM")
     try:
