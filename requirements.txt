@@ -19,3 +19,4 @@ optuna
 scikit-learn
 backtesting
 PyGithub
+redis
