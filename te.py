@@ -378,9 +378,15 @@ class TradingStrategy:
         
         last_row_df = df_features.iloc[[-1]]
         try:
-            features_scaled = self.scaler.transform(last_row_df)
-            prediction = self.ml_model.predict(features_scaled)[0]
-            prediction_proba = self.ml_model.predict_proba(features_scaled)[0]
+            # تحويل البيانات باستخدام الـ scaler (ينتج عنه numpy array)
+            features_scaled_np = self.scaler.transform(last_row_df)
+            
+            # ✨ إصلاح: تحويل الـ numpy array مرة أخرى إلى DataFrame مع أسماء الميزات الصحيحة
+            features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
+            
+            # استخدام الـ DataFrame الجديد للتنبؤ
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
             
             try:
                 class_1_index = list(self.ml_model.classes_).index(1)
@@ -392,7 +398,8 @@ class TradingStrategy:
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 return {'signal': 'buy', 'confidence': prob_for_class_1}
             return None
-        except Exception:
+        except Exception as e:
+            print(f"   - ❌ [{self.symbol}] خطأ أثناء توليد الإشارة: {e}")
             return None
 
 def run_backtest(symbol: str, start_date: datetime, end_date: datetime):
