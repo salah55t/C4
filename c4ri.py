@@ -7,11 +7,11 @@
 # 2. حاسب مؤشر إيشيموكو (Ichimoku Calculator - من c4i.py)
 # 3. بوت التداول الرئيسي (Main Trading Bot - من c4.py)
 #
-# طريقة العمل:
-# 1. عند البدء، يتم تشغيل ماسح SR وحاسب Ichimoku لمرة واحدة لضمان وجود بيانات أولية.
-# 2. بعد ذلك، يتم تشغيل هذه المهام في خيوط خلفية لتحديث البيانات بشكل دوري.
-# 3. يتم تشغيل خدمات البوت الرئيسي (WebSocket, مراقبة الصفقات, حلقة المسح الرئيسية).
-# 4. يتم تشغيل لوحة التحكم (Flask) في الخيط الرئيسي.
+# === V2.0 Update Notes ===
+# - تم حل مشكلة Binance API Rate Limit (Error -1003)
+# - إضافة تأخير ذكي ومُدار في دالة جلب البيانات الرئيسية (fetch_historical_data).
+# - تحسين معالجة أخطاء الضغط على الـ API.
+# - إزالة فترات الانتظار غير الضرورية لتسريع العمليات الدورية.
 # ==============================================================================
 
 import time
@@ -85,7 +85,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
 MODEL_FOLDER: str = 'V7'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices"
 MODEL_BATCH_SIZE: int = 5
 MAX_OPEN_TRADES: int = 5
@@ -102,7 +102,7 @@ MODEL_CONFIDENCE_THRESHOLD = 0.70
 
 # --- ثوابت ماسح الدعم والمقاومة (SR Scanner Constants) ---
 SR_RUN_INTERVAL_MINUTES = 15
-SR_MAX_WORKERS = 10
+SR_MAX_WORKERS = 5 # ✨ تم تقليل عدد العمال لتقليل الضغط الأولي
 SR_API_RETRY_ATTEMPTS = 3
 SR_API_RETRY_DELAY = 5
 SR_DATA_FETCH_DAYS_1H = 30
@@ -125,7 +125,7 @@ SR_VOLUME_PROFILE_BINS = 100
 # --- ثوابت حاسب إيشيموكو (Ichimoku Calculator Constants) ---
 ICHIMOKU_RUN_INTERVAL_HOURS: int = 4
 ICHIMOKU_TIMEFRAME: str = '15m'
-ICHIMOKU_DATA_LOOKBACK_DAYS: int = 90
+ICHIMOKU_DATA_LOOKBACK_DAYS: int = 30
 ICHIMOKU_TENKAN_PERIOD: int = 9
 ICHIMOKU_KIJUN_PERIOD: int = 26
 ICHIMOKU_SENKOU_B_PERIOD: int = 52
@@ -290,14 +290,24 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int, retries: int = 3, delay: int = 5) -> Optional[pd.DataFrame]:
-    """Fetches historical kline data from Binance with retries."""
+    """
+    Fetches historical kline data from Binance with retries and a built-in intelligent delay
+    to respect API rate limits.
+    """
     if not client: return None
     for attempt in range(retries):
         try:
             start_dt = datetime.now(timezone.utc) - timedelta(days=days)
             start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+            # The actual API call
             klines = client.get_historical_klines(symbol, interval, start_str)
+            
+            # ✨ NEW: Add a small delay AFTER every successful API call to spread out requests
+            time.sleep(0.2) 
+            
             if not klines: return None
+            
             df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
             df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
             numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
@@ -305,13 +315,22 @@ def fetch_historical_data(symbol: str, interval: str, days: int, retries: int = 
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
             df.set_index('timestamp', inplace=True)
             return df.dropna()
+            
         except BinanceAPIException as e:
             logger.warning(f"⚠️ [API Binance] خطأ في جلب بيانات {symbol}: {e} (المحاولة {attempt + 1})")
+            # ✨ NEW: If it's a rate limit error, wait for a longer, specific period
+            if e.code == -1003:
+                logger.warning(f"🕒 [Rate Limit] تم الوصول إلى حد الطلبات. الانتظار لمدة 60 ثانية...")
+                time.sleep(60)
+            elif attempt < retries - 1:
+                time.sleep(delay)
+                
         except Exception as e:
             logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol}: {e} (المحاولة {attempt + 1})")
-        if attempt < retries - 1:
-            time.sleep(delay)
+            if attempt < retries - 1:
+                time.sleep(delay)
     return None
+
 
 # ------------------------------------------------------------------------------
 # --- 📈 3. دوال ماسح الدعم والمقاومة (SR Scanner Functions - from c4r.py) 📈 ---
@@ -570,7 +589,7 @@ def run_ichimoku_calculator_full_analysis():
             ichimoku_save_to_db(symbol, df_with_ichimoku, ICHIMOKU_TIMEFRAME)
         except Exception as e:
             logger.error(f"❌ [Ichimoku] خطأ حرج في معالجة {symbol}: {e}", exc_info=True)
-        time.sleep(1) # Small delay between symbols
+        # ✨ REMOVED: time.sleep(1) is no longer needed due to the delay in fetch_historical_data
     logger.info("🎉 [Ichimoku] اكتملت دورة حساب إيشيموكو.")
 
 
