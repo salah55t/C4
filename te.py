@@ -16,7 +16,7 @@ from decouple import config
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ---------------------- إعدادات الاختبار الخلفي ----------------------
-print("--- بدء إعدادات الاختبار الخلفي (مع اتصال قاعدة البيانات) ---")
+print("--- بدء إعدادات الاختبار الخلفي (فترة اختبار محددة) ---")
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -37,9 +37,10 @@ SLIPPAGE_PERCENT = 0.0005
 MAX_OPEN_TRADES = 5
 
 # --- إعدادات الفترة الزمنية ---
+# فترة 90 يومًا للاختبار
 BACKTEST_DAYS = 90
+# فترة 90 يومًا "لتسخين" المؤشرات قبل بدء الاختبار
 LOOKBACK_DAYS = 90
-TOTAL_DAYS_TO_FETCH = BACKTEST_DAYS + LOOKBACK_DAYS
 
 # --- إعدادات الاستراتيجية (يجب أن تتطابق مع ملف البوت) ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
@@ -71,9 +72,6 @@ REL_VOL_PERIOD = 30
 conn = None
 
 def init_db():
-    """
-    تقوم بتهيئة الاتصال بقاعدة البيانات.
-    """
     global conn
     try:
         print("   - جاري الاتصال بقاعدة البيانات...")
@@ -86,9 +84,6 @@ def init_db():
         return False
 
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
-    """
-    تجلب مستويات الدعم والمقاومة من قاعدة البيانات لعملة معينة.
-    """
     if not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
@@ -102,9 +97,6 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
-    """
-    تجلب بيانات إيشيموكو المحسوبة مسبقًا من قاعدة البيانات.
-    """
     if not conn: return pd.DataFrame()
     query = """
         SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
@@ -125,7 +117,7 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         print(f"   - ❌ [DB] لم يتمكن من جلب بيانات إيشيموكو لـ {symbol}: {e}")
         return pd.DataFrame()
 
-# ---------------------- دوال جلب البيانات وحساب المؤشرات (محدثة) ----------------------
+# ---------------------- دوال جلب البيانات وحساب المؤشرات ----------------------
 
 def fetch_historical_data(symbol: str, interval: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame | None:
     print(f"   - جاري جلب بيانات {symbol} على إطار {interval}...")
@@ -147,7 +139,6 @@ def fetch_historical_data(symbol: str, interval: str, start_dt: datetime, end_dt
         return None
 
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    # (هذه الدالة تبقى كما هي)
     df_patterns = df.copy()
     op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
     body = abs(cl - op)
@@ -173,7 +164,6 @@ def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return df_patterns
 
 def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
-    # (هذه الدالة من ملف البوت الأصلي)
     df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
     df['price_vs_kijun'] = (df['close'] - df['kijun_sen']) / df['kijun_sen']
     df['tenkan_vs_kijun'] = (df['tenkan_sen'] - df['kijun_sen']) / df['kijun_sen']
@@ -195,7 +185,6 @@ def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
-    # (هذه الدالة من ملف البوت الأصلي)
     if sr_levels_df.empty:
         df['dist_to_support'] = 0.0; df['dist_to_resistance'] = 0.0
         df['score_of_support'] = 0.0; df['score_of_resistance'] = 0.0
@@ -225,7 +214,6 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     return df
 
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    # (هذه الدالة تبقى كما هي)
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -269,7 +257,6 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     return df_calc.astype('float32', errors='ignore')
 
 def load_ml_model_bundle_from_folder(symbol: str):
-    # (هذه الدالة تبقى كما هي)
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
@@ -289,7 +276,60 @@ def load_ml_model_bundle_from_folder(symbol: str):
         print(f"   - ❌ [نموذج تعلم الآلة] خطأ في تحميل النموذج للعملة {symbol}: {e}")
         return None
 
-# ---------------------- فئة الاستراتيجية والمنطق الرئيسي للاختبار (محدثة) ----------------------
+# ---------------------- دالة جديدة لجلب العملات من ملف ----------------------
+def get_validated_symbols(filename: str = 'crypto_list.txt') -> list:
+    """
+    تقوم بقراءة قائمة رموز العملات المشفرة من ملف نصي، والتحقق من صحتها عبر Binance،
+    وإرجاع قائمة بأزواج USDT القابلة للتداول.
+    """
+    print(f"--- ℹ️  جاري قراءة والتحقق من الرموز من '{filename}' ---")
+    if not client:
+        print("❌ كائن Binance client غير مهيأ. لا يمكن التحقق من الرموز.")
+        return []
+    try:
+        # التأكد من أن مسار الملف صحيح، نسبة إلى موقع السكربت
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
+
+        if not os.path.exists(file_path):
+            print(f"❌ ملف الرموز غير موجود في '{file_path}'. الرجاء إنشاؤه.")
+            # إنشاء ملف مثال
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("# أضف رمز عملة واحد في كل سطر (مثال: BTC, ETH, SOL)\n")
+                f.write("BTC\n")
+                f.write("ETH\n")
+                f.write("BNB\n")
+                f.write("SOL\n")
+                f.write("XRP\n")
+                f.write("ADA\n")
+            print(f"✅ تم إنشاء ملف مثال '{filename}' برموز افتراضية.")
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            # قراءة الرموز، تجاهل الأسطر الفارغة والتعليقات
+            raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+
+        # التأكد من أن جميع الرموز هي أزواج USDT
+        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+
+        # الحصول على جميع الرموز القابلة للتداول من Binance
+        exchange_info = client.get_exchange_info()
+        active_symbols = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+
+        # إيجاد التقاطع بين الرموز من الملف والرموز النشطة على Binance
+        validated = sorted(list(formatted_symbols.intersection(active_symbols)))
+
+        if not validated:
+            print(f"⚠️ لم يتم العثور على رموز صالحة وقابلة للتداول من '{filename}'.")
+            return []
+
+        print(f"✅ تم العثور على {len(validated)} عملة للاختبار الخلفي.")
+        return validated
+    except Exception as e:
+        print(f"❌ حدث خطأ أثناء التحقق من الرموز: {e}")
+        return []
+
+
+# ---------------------- فئة الاستراتيجية والمنطق الرئيسي للاختبار ----------------------
 
 class TradingStrategy:
     def __init__(self, symbol: str):
@@ -304,18 +344,13 @@ class TradingStrategy:
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame) -> pd.DataFrame | None:
         try:
-            # حساب المؤشرات الأساسية
             df_featured = calculate_features(df_15m, btc_df)
-            
-            # **تحديث:** إضافة ميزات الدعم والمقاومة من قاعدة البيانات
             df_featured = calculate_sr_features(df_featured, sr_levels_df)
             
-            # **تحديث:** إضافة ميزات إيشيموكو من قاعدة البيانات
             if not ichimoku_df.empty:
                 df_featured = df_featured.join(ichimoku_df, how='left')
                 df_featured = calculate_ichimoku_based_features(df_featured)
             
-            # دمج بيانات الإطار الزمني الأعلى
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -326,7 +361,6 @@ class TradingStrategy:
             df_featured = df_featured.join(mtf_features)
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
             
-            # التأكد من وجود جميع الأعمدة المطلوبة للنموذج
             for col in self.feature_names:
                 if col not in df_featured.columns:
                     df_featured[col] = 0.0
@@ -339,7 +373,6 @@ class TradingStrategy:
             return None
 
     def generate_signal(self, df_features: pd.DataFrame) -> dict | None:
-        # (هذه الدالة تبقى كما هي)
         if not all([self.ml_model, self.scaler, self.feature_names]): return None
         if df_features.empty: return None
         
@@ -359,19 +392,20 @@ class TradingStrategy:
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 return {'signal': 'buy', 'confidence': prob_for_class_1}
             return None
-        except Exception as e:
+        except Exception:
             return None
 
 def run_backtest(symbol: str, start_date: datetime, end_date: datetime):
     print(f"\n{'='*20} بدء الاختبار الخلفي لـ {symbol} {'='*20}")
     
-    # 1. جلب البيانات
+    # تاريخ بدء جلب البيانات = تاريخ بدء الاختبار - فترة الإحماء
     data_fetch_start = start_date - timedelta(days=LOOKBACK_DAYS)
+    
+    # 1. جلب البيانات
     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, data_fetch_start, end_date)
     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, data_fetch_start, end_date)
     btc_df = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, data_fetch_start, end_date)
     
-    # **تحديث:** جلب البيانات من قاعدة البيانات
     print("   - جاري جلب بيانات الدعم/المقاومة و إيشيموكو من قاعدة البيانات...")
     sr_levels = fetch_sr_levels_from_db(symbol)
     ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
@@ -397,6 +431,8 @@ def run_backtest(symbol: str, start_date: datetime, end_date: datetime):
     print("   - ✅ تم حساب المؤشرات بنجاح.")
 
     df_main = df_15m.join(df_features, how='inner')
+    
+    # فلترة البيانات لتبدأ من تاريخ الاختبار الفعلي (بعد فترة الإحماء)
     df_main = df_main[df_main.index >= start_date]
     
     # 3. إعداد متغيرات المحاكاة
@@ -413,7 +449,6 @@ def run_backtest(symbol: str, start_date: datetime, end_date: datetime):
         current_low = current_candle['low']
         current_time = current_candle.name
 
-        # (منطق إغلاق وفتح الصفقات يبقى كما هو)
         trades_to_close_indices = []
         for j, trade in enumerate(open_trades):
             if current_high >= trade['target_price']:
@@ -442,7 +477,7 @@ def run_backtest(symbol: str, start_date: datetime, end_date: datetime):
         open_trades = [trade for j, trade in enumerate(open_trades) if j not in trades_to_close_indices]
 
         if len(open_trades) < MAX_OPEN_TRADES:
-            signal = strategy.generate_signal(df_features.iloc[[i]])
+            signal = strategy.generate_signal(df_features.loc[[current_time]])
             
             if signal and signal['signal'] == 'buy':
                 entry_price = current_price
@@ -498,12 +533,20 @@ if __name__ == "__main__":
     if not init_db():
         exit()
 
-    symbols_to_test = [
-        'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'ADAUSDT'
-    ]
+    # جلب الرموز من الملف المحلي بدلاً من قائمة ثابتة
+    symbols_to_test = get_validated_symbols()
 
+    if not symbols_to_test:
+        print("❌ لا توجد عملات للاختبار. سيتم إنهاء الاختبار الخلفي.")
+        exit()
+
+    # --- تحديد التواريخ بدقة حسب طلبك ---
+    # نهاية فترة الاختبار: قبل 90 يومًا من الآن
     end_date = datetime.now(timezone.utc) - timedelta(days=90)
-    start_date = end_date - timedelta(days=BACKTEST_DAYS)
+    # بداية فترة الاختبار: قبل 180 يومًا من الآن
+    start_date = datetime.now(timezone.utc) - timedelta(days=180)
+    
+    print(f"*** سيتم إجراء الاختبار على الفترة من {start_date.strftime('%Y-%m-%d')} إلى {end_date.strftime('%Y-%m-%d')} ***")
     
     all_results = {}
     for symbol in symbols_to_test:
