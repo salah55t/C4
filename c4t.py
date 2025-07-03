@@ -57,7 +57,7 @@ FEE = 0.001
 SLIPPAGE = 0.0005
 COMMISSION = FEE + SLIPPAGE
 BACKTEST_PERIOD_DAYS = 90
-OUT_OF_SAMPLE_OFFSET_DAYS = 0
+OUT_OF_SAMPLE_OFFSET_DAYS = 90
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
@@ -450,17 +450,28 @@ def run_backtest():
             'Profit Factor', 'Sharpe Ratio', 'Sortino Ratio', '# Trades'
         ]])
         
-        total_trades = summary_df['# Trades'].sum()
-        total_profit = summary_df['Equity Final [$]'].sum() - summary_df['Equity Start [$]'].sum()
-        avg_win_rate = summary_df['Win Rate [%]'].mean()
-        avg_profit_factor = summary_df['Profit Factor'].mean()
-        
-        print("\n--- المقاييس المجمعة ---")
-        print(f"إجمالي الرموز المختبرة: {len(summary_df)}")
-        print(f"إجمالي عدد الصفقات: {total_trades}")
-        print(f"إجمالي صافي الربح/الخسارة: ${total_profit:,.2f}")
-        print(f"متوسط نسبة الربح: {avg_win_rate:.2f}%")
-        print(f"متوسط عامل الربح: {avg_profit_factor:.2f}")
+        # --- START: التعديل ---
+        # التحقق من وجود الأعمدة المطلوبة قبل استخدامها لتجنب الأخطاء
+        required_cols = ['Equity Final [$]', 'Start Equity [$]', '# Trades', 'Win Rate [%]', 'Profit Factor']
+        if all(col in summary_df.columns for col in required_cols):
+            total_trades = summary_df['# Trades'].sum()
+            # تصحيح اسم العمود من 'Equity Start [$]' إلى 'Start Equity [$]'
+            total_profit = summary_df['Equity Final [$]'].sum() - summary_df['Start Equity [$]'].sum()
+            avg_win_rate = summary_df['Win Rate [%]'].mean()
+            avg_profit_factor = summary_df['Profit Factor'].mean()
+            
+            print("\n--- المقاييس المجمعة ---")
+            print(f"إجمالي الرموز المختبرة: {len(summary_df)}")
+            print(f"إجمالي عدد الصفقات: {total_trades}")
+            print(f"إجمالي صافي الربح/الخسارة: ${total_profit:,.2f}")
+            print(f"متوسط نسبة الربح: {avg_win_rate:.2f}%")
+            print(f"متوسط عامل الربح: {avg_profit_factor:.2f}")
+        else:
+            logger.warning("\n--- ⚠️ تعذر حساب المقاييس المجمعة ---")
+            logger.warning("واحد أو أكثر من الأعمدة المطلوبة ('Equity Final [$]', 'Start Equity [$]') غير موجود في ملخص النتائج.")
+            logger.warning(f"الأعمدة المتاحة هي: {list(summary_df.columns)}")
+        # --- END: التعديل ---
+            
     else:
         print("لم يتم إكمال أي اختبار خلفي بنجاح.")
         
@@ -471,7 +482,7 @@ def run_backtest():
 
 if __name__ == "__main__":
     # تشغيل وظيفة الاختبار الخلفي في خيط منفصل حتى لا تمنع خادم الويب من البدء
-    backtest_thread = threading.Thread(target=run_backtest, daemon=True)
+    backtest_thread = threading.Thread(target=run_backtest, name="run_backtest", daemon=True)
     backtest_thread.start()
     
     # تشغيل خادم الويب للاستجابة لطلبات التحقق من الصحة
@@ -479,4 +490,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     # استخدم '0.0.0.0' لجعل الخادم متاحًا خارجيًا
     app.run(host='0.0.0.0', port=port)
-
