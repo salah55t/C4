@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
-import redis # <-- إضافة Redis
-from urllib.parse import urlparse # <-- لإدارة عنوان URL الخاص بـ Redis
+import redis 
+from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -47,7 +47,6 @@ try:
     CHAT_ID: str = config('TELEGRAM_CHAT_ID')
     DB_URL: str = config('DATABASE_URL')
     WEBHOOK_URL: Optional[str] = config('WEBHOOK_URL', default=None)
-    # --- ✨ إضافة متغير بيئة جديد لـ Redis ✨ ---
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
 
 except Exception as e:
@@ -62,7 +61,9 @@ HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices"
 
-# ... (بقية الثوابت كما هي) ...
+# --- ✨ ثابت جديد لإدارة الذاكرة ✨ ---
+MODEL_BATCH_SIZE: int = 5 # حجم دفعة النماذج التي يتم تحميلها في الذاكرة في كل مرة
+
 ADX_PERIOD: int = 14
 BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
@@ -95,14 +96,11 @@ MIN_PROFIT_PERCENTAGE_FILTER: float = 1.0
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
-redis_client: Optional[redis.Redis] = None # <-- ✨ كائن الاتصال بـ Redis
+redis_client: Optional[redis.Redis] = None
 ml_models_cache: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
-# --- تم الاستغناء عن المتغيرات التالية واستبدالها بـ Redis ---
-# current_prices: Dict[str, float] = {}
-# prices_lock = Lock()
 notifications_cache = deque(maxlen=50)
 notifications_lock = Lock()
 signals_pending_closure: Set[int] = set()
@@ -167,14 +165,12 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 
-# --- ✨ دالة جديدة لتهيئة الاتصال بـ Redis ✨ ---
+# --- دالة جديدة لتهيئة الاتصال بـ Redis ---
 def init_redis() -> None:
     global redis_client
     logger.info("[Redis] بدء تهيئة الاتصال...")
     try:
-        # استخدام from_url للتعامل مع صيغ URL المختلفة بسهولة
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        # التحقق من أن الاتصال يعمل
         redis_client.ping()
         logger.info("✅ [Redis] تم الاتصال بنجاح بخادم Redis.")
     except redis.exceptions.ConnectionError as e:
@@ -184,9 +180,8 @@ def init_redis() -> None:
         logger.critical(f"❌ [Redis] حدث خطأ غير متوقع أثناء تهيئة Redis: {e}")
         exit(1)
 
-# ---------------------- دوال Binance والبيانات (معظمها يبقى كما هو) ----------------------
+# ---------------------- دوال Binance والبيانات (تبقى كما هي) ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    # ... (الكود كما هو) ...
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client: logger.error("❌ [التحقق] كائن Binance client غير مهيأ."); return []
     try:
@@ -204,7 +199,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [التحقق] حدث خطأ أثناء التحقق من الرموز: {e}", exc_info=True); return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    # ... (الكود كما هو) ...
     if not client: return None
     try:
         start_dt = datetime.now(timezone.utc) - timedelta(days=days)
@@ -224,7 +218,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
-# ... (بقية دوال جلب البيانات وحساب المؤشرات تبقى كما هي) ...
+
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
@@ -409,11 +403,9 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل حزمة النموذج من الملف للعملة {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- دوال WebSocket والاستراتيجية (مُعاد هيكلتها بالكامل) ----------------------
+# ---------------------- دوال WebSocket والاستراتيجية ----------------------
 
-# --- ✨ خيط مخصص لاستقبال الأسعار وتخزينها في Redis ---
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
-    """هذه الدالة وظيفتها الوحيدة هي استقبال الأسعار من WebSocket وتخزينها في Redis بأسرع ما يمكن."""
     global redis_client
     try:
         if not isinstance(msg, list):
@@ -423,41 +415,34 @@ def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
             logger.error("❌ [WebSocket] كائن Redis غير مهيأ. لا يمكن حفظ الأسعار.")
             return
 
-        # تحويل الرسالة إلى قاموس من الرموز والأسعار
         price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
         
         if price_updates:
-            # استخدام hset لتحديث كل الأسعار في عملية واحدة (أكثر كفاءة)
             redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
             
     except Exception as e:
         logger.error(f"❌ [WebSocket Price Updater] خطأ في معالجة رسالة السعر: {e}", exc_info=True)
 
-# --- ✨ خيط مراقبة مخصص ومستمر للصفقات يقرأ من Redis ---
 def trade_monitoring_loop():
-    """حلقة مخصصة عالية التردد تعمل في خيط منفصل. وظيفتها الوحيدة هي التحقق باستمرار من الصفقات المفتوحة مقابل أحدث الأسعار في Redis."""
     logger.info("✅ [Trade Monitor] خيط مراقبة الصفقات المخصص بدأ بالعمل.")
     while True:
         try:
             with signal_cache_lock:
-                # الحصول على نسخة لتجنب إبقاء القفل لفترة طويلة
                 signals_to_check = dict(open_signals_cache)
 
             if not signals_to_check or not redis_client:
-                time.sleep(1) # نوم أطول إذا لم تكن هناك صفقات مفتوحة
+                time.sleep(1)
                 continue
 
             symbols_to_fetch = list(signals_to_check.keys())
-            # جلب أسعار كل الرموز المطلوبة في استدعاء واحد من Redis
             latest_prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols_to_fetch)
             
-            # تحويل القائمة المسترجعة إلى قاموس
             latest_prices = {symbol: float(price) if price else None for symbol, price in zip(symbols_to_fetch, latest_prices_list)}
 
             for symbol, signal in signals_to_check.items():
                 price = latest_prices.get(symbol)
                 if not price:
-                    continue # لا يوجد تحديث سعر لهذا الرمز بعد، انتقل إلى التالي
+                    continue
 
                 signal_id = signal.get('id')
                 
@@ -492,12 +477,11 @@ def trade_monitoring_loop():
                         logger.info(f"⚡ [MONITOR TRIGGER] Condition '{status_to_set}' for {symbol} (ID: {signal_id}). Initiating close.")
                         Thread(target=close_signal, args=(signal_to_close_now, status_to_set, closing_price_to_set, "auto_monitor")).start()
 
-            # تعمل الحلقة بتردد عالٍ جداً لتحقيق مراقبة شبه لحظية
-            time.sleep(0.1) # تحقق 10 مرات في الثانية
+            time.sleep(0.1)
 
         except Exception as e:
             logger.error(f"❌ [Trade Monitor] خطأ فادح في حلقة المراقبة: {e}", exc_info=True)
-            time.sleep(5) # نوم أطول عند حدوث خطأ لتجنب إغراق السجلات
+            time.sleep(5)
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
@@ -508,7 +492,6 @@ def run_websocket_manager() -> None:
     twm.join()
 
 class TradingStrategy:
-    # ... (الكود كما هو) ...
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_folder(symbol)
@@ -562,9 +545,9 @@ class TradingStrategy:
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
             return None
-# ---------------------- دوال التنبيهات والإدارة (معظمها يبقى كما هو) ----------------------
+
+# ---------------------- دوال التنبيهات والإدارة ----------------------
 def send_telegram_message(target_chat_id: str, text: str):
-    # ... (الكود كما هو) ...
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
@@ -572,7 +555,6 @@ def send_telegram_message(target_chat_id: str, text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
-    # ... (الكود كما هو) ...
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
     entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
     profit_pct = ((target / entry) - 1) * 100
@@ -590,7 +572,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]) -> None:
     log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']} بسعر دخول ${entry:,.8g}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # ... (الكود كما هو) ...
     if not check_db_connection() or not conn: return None
     try:
         entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
@@ -608,7 +589,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if conn: conn.rollback(); return None
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    # ... (الكود كما هو مع آلية الاسترداد) ...
     signal_id = signal.get('id')
     symbol = signal.get('symbol')
     logger.info(f"Closing process started for Signal ID {signal_id} ({symbol}) with status '{status}'")
@@ -656,7 +636,6 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
             logger.info(f"Signal ID {signal_id} removed from pending closure set.")
 
 def load_open_signals_to_cache():
-    # ... (الكود كما هو) ...
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل الإشارات المفتوحة سابقاً...")
     try:
@@ -670,7 +649,6 @@ def load_open_signals_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل الإشارات المفتوحة: {e}")
 
 def load_notifications_to_cache():
-    # ... (الكود كما هو) ...
     if not check_db_connection() or not conn: return
     logger.info("ℹ️ [تحميل الذاكرة المؤقتة] جاري تحميل آخر التنبيهات...")
     try:
@@ -682,9 +660,9 @@ def load_notifications_to_cache():
                 for n in reversed(recent): n['timestamp'] = n['timestamp'].isoformat(); notifications_cache.appendleft(dict(n))
             logger.info(f"✅ [تحميل الذاكرة المؤقتة] تم تحميل {len(notifications_cache)} تنبيه.")
     except Exception as e: logger.error(f"❌ [تحميل الذاكرة المؤقتة] فشل تحميل التنبيهات: {e}")
-# ---------------------- حلقة العمل الرئيسية (مع تعديل لجلب السعر من Redis) ----------------------
+
+# ---------------------- حلقة العمل الرئيسية (مُعدّلة لإدارة الذاكرة) ----------------------
 def get_btc_trend() -> Dict[str, Any]:
-    # ... (الكود كما هو) ...
     if not client: return {"status": "error", "message": "Binance client not initialized", "is_uptrend": False}
     try:
         klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
@@ -699,7 +677,6 @@ def get_btc_trend() -> Dict[str, Any]:
         return {"status": "Error", "message": str(e), "is_uptrend": False}
 
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
-    # ... (الكود كما هو) ...
     logger.info("ℹ️ [بيانات BTC] جاري جلب بيانات البيتكوين لحساب المؤشرات...")
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is None:
@@ -715,94 +692,121 @@ def main_loop():
         log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM"); return
     log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
     
+    all_symbols = list(validated_symbols_to_scan)
+
     while True:
         try:
-            if USE_BTC_TREND_FILTER:
-                trend_data = get_btc_trend()
-                if not trend_data.get("is_uptrend"):
-                    logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث عن إشارات شراء بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
-                    time.sleep(300); continue
-
-            with signal_cache_lock: open_count = len(open_signals_cache)
-            if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات ({open_count}/{MAX_OPEN_TRADES}).")
-                time.sleep(60); continue
-            
-            slots_available = MAX_OPEN_TRADES - open_count
-            logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح جديدة. المراكز المتاحة: {slots_available}")
-            
-            btc_data = get_btc_data_for_bot()
-            if btc_data is None:
-                logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه."); time.sleep(120); continue
-            
-            for symbol in validated_symbols_to_scan:
-                if slots_available <= 0: break
-                with signal_cache_lock:
-                    if symbol in open_signals_cache: continue
+            # ✨ --- حلقة جديدة لمعالجة الرموز على دفعات لإدارة الذاكرة --- ✨
+            for i in range(0, len(all_symbols), MODEL_BATCH_SIZE):
+                symbol_batch = all_symbols[i:i + MODEL_BATCH_SIZE]
                 
-                try:
-                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: continue
-                    
-                    sr_levels = fetch_sr_levels_from_db(symbol)
-                    ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
-                    
-                    strategy = TradingStrategy(symbol)
-                    df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels, ichimoku_data)
-                    
-                    del df_15m, df_4h, sr_levels, ichimoku_data; gc.collect()
-                    
-                    if df_features is None or df_features.empty: continue
-                    
-                    potential_signal = strategy.generate_signal(df_features)
-                    if potential_signal and redis_client:
-                        # --- ✨ تعديل: جلب السعر الحالي من Redis ---
-                        current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                        if not current_price_str:
-                             logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي من Redis. سيتم التخطي."); continue
-                        current_price = float(current_price_str)
-                        # --- نهاية التعديل ---
-                        
-                        potential_signal['entry_price'] = current_price
-                        if USE_DYNAMIC_SL_TP:
-                            atr_value = df_features['atr'].iloc[-1]
-                            potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
-                            potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
-                        else:
-                            potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
-                        
-                        entry = potential_signal.get('entry_price', 0)
-                        target = potential_signal.get('target_price', 0)
+                num_batches = -(-len(all_symbols) // MODEL_BATCH_SIZE)
+                logger.info(f"🧠 [إدارة الذاكرة] بدء معالجة الدفعة ({i // MODEL_BATCH_SIZE + 1}/{num_batches}).")
+                logger.info("🧠 [إدارة الذاكرة] مسح ذاكرة التخزين المؤقت للنماذج السابقة...")
+                
+                # إفراغ ذاكرة التخزين المؤقت للنماذج وتحرير الذاكرة
+                ml_models_cache.clear()
+                gc.collect() # استدعاء جامع القمامة بشكل صريح
+                
+                logger.info(f"🧠 [إدارة الذاكرة] تم مسح الذاكرة المؤقتة. الرموز في هذه الدفعة: {symbol_batch}")
 
-                        if entry > 0 and target > entry:
-                            profit_percentage = ((target / entry) - 1) * 100
-                            if profit_percentage >= MIN_PROFIT_PERCENTAGE_FILTER:
-                                logger.info(f"✅ [{symbol}] الإشارة مرت من فلتر الربح بنسبة {profit_percentage:.2f}%. جاري الحفظ...")
-                                saved_signal = insert_signal_into_db(potential_signal)
-                                if saved_signal:
-                                    with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                                    send_new_signal_alert(saved_signal)
-                                    slots_available -= 1
+                # التحقق من الشروط العامة قبل معالجة كل دفعة
+                if USE_BTC_TREND_FILTER:
+                    trend_data = get_btc_trend()
+                    if not trend_data.get("is_uptrend"):
+                        logger.warning(f"⚠️ [إيقاف المسح] تم إيقاف البحث بسبب الاتجاه الهابط للبيتكوين. {trend_data.get('message')}")
+                        time.sleep(300)
+                        break # الخروج من حلقة الدفعات والانتقال للدورة التالية من while
+
+                with signal_cache_lock: open_count = len(open_signals_cache)
+                if open_count >= MAX_OPEN_TRADES:
+                    logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات ({open_count}/{MAX_OPEN_TRADES}).")
+                    time.sleep(60)
+                    break 
+
+                slots_available = MAX_OPEN_TRADES - open_count
+                if slots_available <= 0:
+                    break
+
+                logger.info(f"ℹ️ [بدء المسح] بدء دورة مسح للدفعة الحالية. المراكز المتاحة: {slots_available}")
+                
+                btc_data = get_btc_data_for_bot()
+                if btc_data is None:
+                    logger.error("❌ فشل حاسم في جلب بيانات BTC. سيتم تخطي دورة المسح هذه."); 
+                    time.sleep(120)
+                    continue
+                
+                # --- حلقة معالجة الرموز داخل الدفعة الواحدة ---
+                for symbol in symbol_batch:
+                    if slots_available <= 0: break
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache: continue
+                    
+                    try:
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty: continue
+                        
+                        sr_levels = fetch_sr_levels_from_db(symbol)
+                        ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
+                        
+                        strategy = TradingStrategy(symbol)
+                        df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels, ichimoku_data)
+                        
+                        del df_15m, df_4h, sr_levels, ichimoku_data; gc.collect()
+                        
+                        if df_features is None or df_features.empty: continue
+                        
+                        potential_signal = strategy.generate_signal(df_features)
+                        if potential_signal and redis_client:
+                            current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
+                            if not current_price_str:
+                                 logger.warning(f"⚠️ {symbol}: لا يمكن الحصول على السعر الحالي من Redis. سيتم التخطي."); continue
+                            current_price = float(current_price_str)
+                            
+                            potential_signal['entry_price'] = current_price
+                            if USE_DYNAMIC_SL_TP:
+                                atr_value = df_features['atr'].iloc[-1]
+                                potential_signal['stop_loss'] = current_price - (atr_value * ATR_SL_MULTIPLIER)
+                                potential_signal['target_price'] = current_price + (atr_value * ATR_TP_MULTIPLIER)
                             else:
-                                logger.info(f"ℹ️ [{symbol}] تم تخطي الإشارة. الربح المتوقع {profit_percentage:.2f}% وهو أقل من الحد الأدنى المطلوب ({MIN_PROFIT_PERCENTAGE_FILTER}%).")
-                        else:
-                            logger.warning(f"⚠️ [{symbol}] سعر دخول أو هدف غير صالح لحساب الربح. الدخول: {entry}, الهدف: {target}. تم تخطي الإشارة.")
+                                potential_signal['target_price'] = current_price * 1.02; potential_signal['stop_loss'] = current_price * 0.985
+                            
+                            entry = potential_signal.get('entry_price', 0)
+                            target = potential_signal.get('target_price', 0)
 
-                except Exception as e:
-                    logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
+                            if entry > 0 and target > entry:
+                                profit_percentage = ((target / entry) - 1) * 100
+                                if profit_percentage >= MIN_PROFIT_PERCENTAGE_FILTER:
+                                    logger.info(f"✅ [{symbol}] الإشارة مرت من فلتر الربح بنسبة {profit_percentage:.2f}%. جاري الحفظ...")
+                                    saved_signal = insert_signal_into_db(potential_signal)
+                                    if saved_signal:
+                                        with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
+                                        send_new_signal_alert(saved_signal)
+                                        slots_available -= 1
+                                else:
+                                    logger.info(f"ℹ️ [{symbol}] تم تخطي الإشارة. الربح المتوقع {profit_percentage:.2f}% وهو أقل من الحد الأدنى المطلوب ({MIN_PROFIT_PERCENTAGE_FILTER}%).")
+                            else:
+                                logger.warning(f"⚠️ [{symbol}] سعر دخول أو هدف غير صالح لحساب الربح. الدخول: {entry}, الهدف: {target}. تم تخطي الإشارة.")
 
-            logger.info("ℹ️ [نهاية المسح] انتهت دورة المسح. في انتظار الدورة التالية..."); time.sleep(60)
+                    except Exception as e:
+                        logger.error(f"❌ [خطأ في المعالجة] حدث خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=True)
+
+                logger.info(f"✅ [نهاية الدفعة] انتهت معالجة الدفعة. انتظار قصير قبل الدفعة التالية...")
+                time.sleep(10)
+
+            logger.info("ℹ️ [نهاية الدورة] انتهت دورة المسح الكاملة لجميع الدفعات. في انتظار الدورة التالية..."); 
+            time.sleep(60)
+
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
             log_and_notify("error", f"خطأ غير متوقع في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (مُعدّلة لتستخدم Redis) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask ----------------------
 app = Flask(__name__)
 CORS(app)
 
 def get_fear_and_greed_index() -> Dict[str, Any]:
-    # ... (الكود كما هو) ...
     classification_translation = {"Extreme Fear": "خوف شديد", "Fear": "خوف", "Neutral": "محايد", "Greed": "طمع", "Extreme Greed": "طمع شديد", "Error": "خطأ"}
     try:
         response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
@@ -826,7 +830,6 @@ def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and
 
 @app.route('/api/stats')
 def get_stats():
-    # ... (الكود كما هو) ...
     if not check_db_connection() or not conn:
         return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
     try:
@@ -864,12 +867,10 @@ def get_signals():
         
         open_symbols = [s['symbol'] for s in all_signals if s['status'] == 'open']
         
-        # --- ✨ تعديل: جلب الأسعار الحالية من Redis ---
         current_prices = {}
         if open_symbols:
             prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_symbols)
             current_prices = {symbol: float(price) if price else None for symbol, price in zip(open_symbols, prices_list)}
-        # --- نهاية التعديل ---
 
         for s in all_signals:
             if s.get('closed_at'):
@@ -891,7 +892,6 @@ def get_signals():
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
-    # --- ✨ تعديل: جلب السعر الحالي من Redis ---
     if not redis_client:
         return jsonify({"error": "خدمة Redis غير متاحة"}), 500
     
@@ -954,16 +954,14 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
         
-        # --- ✨ تهيئة الخدمات بالترتيب ---
         init_db()
-        init_redis() # <-- تهيئة Redis
+        init_redis()
         
         load_open_signals_to_cache(); load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ."); return
         
-        # --- بدء تشغيل الخيوط المخصصة ---
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
@@ -974,7 +972,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 بدء تشغيل بوت التداول - إصدار {BASE_ML_MODEL_NAME} (مع دعم Redis)...")
+    logger.info(f"🚀 بدء تشغيل بوت التداول - إصدار {BASE_ML_MODEL_NAME} (مع دعم Redis وإدارة الذاكرة)...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
