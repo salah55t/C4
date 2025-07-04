@@ -267,7 +267,7 @@
                 'manual_close': 'إغلاق يدوي',
                 'open': 'مفتوحة'
             };
-            return `<span class="status-badge status-${status}">${statusText[status] || status}</span>`;
+            return `<span class="status-badge status-${status.replace('_', '-')}">${statusText[status] || status}</span>`;
         }
 
         function formatDateTime(dateString) {
@@ -373,7 +373,7 @@
                         <td>${formatNumber(trade.stop_loss)}</td>
                         <td><small>${trade.strategy_name || 'N/A'}</small></td>
                         <td>
-                            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content='${detailsPopoverContent}'>
+                            <button type="button" class="btn btn-sm btn-outline-info" data-bs-toggle="popover" data-bs-trigger="hover" data-bs-html="true" title="تفاصيل الإشارة" data-bs-content='${detailsPopoverContent.replace(/'/g, "&apos;")}'>
                                 <i class="fas fa-info-circle"></i>
                             </button>
                         </td>
@@ -418,30 +418,36 @@
                 return;
             }
 
-            const typeIcons = {
-                'NEW_SIGNAL': 'fa-lightbulb text-success',
-                'CLOSE_SIGNAL': 'fa-flag-checkered text-primary',
-                'SYSTEM': 'fa-cogs text-info',
-                'ERROR': 'fa-exclamation-triangle text-danger'
+            const severityIcons = {
+                'info': 'fa-info-circle text-info',
+                'warning': 'fa-exclamation-triangle text-warning',
+                'error': 'fa-times-circle text-danger',
+                'critical': 'fa-skull-crossbones text-danger',
+                'default': 'fa-bell text-primary'
             };
 
-            list.innerHTML = notifications.map(n => `
-                <li class="list-group-item d-flex justify-content-between align-items-start bg-transparent border-secondary">
-                    <div class="ms-2 me-auto">
-                        <div class="fw-bold"><i class="fas ${typeIcons[n.type] || 'fa-bell'} me-2"></i>${n.message}</div>
-                        <small class="text-muted">${formatDateTime(n.timestamp)}</small>
-                    </div>
-                </li>
-            `).join('');
+            list.innerHTML = notifications.map(n => {
+                const iconClass = severityIcons[n.severity] || severityIcons['default'];
+                return `
+                    <li class="list-group-item d-flex justify-content-between align-items-start bg-transparent border-secondary">
+                        <div class="ms-2 me-auto">
+                            <div class="fw-bold"><i class="fas ${iconClass} me-2"></i>${n.message}</div>
+                            <small class="text-muted">${formatDateTime(n.timestamp)}</small>
+                        </div>
+                    </li>
+                `
+            }).join('');
         }
         
         function renderProfitChart(history) {
             if (!history || history.length === 0) return;
             
-            const last30Trades = history.slice(0, 30).reverse();
-            const labels = last30Trades.map((t, index) => `صفقة ${index + 1}`);
+            const closedTrades = history.filter(t => t.status !== 'open').sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
+            if (closedTrades.length === 0) return;
+
+            const labels = closedTrades.map((t, index) => `صفقة ${index + 1}`);
             let cumulativeProfit = 0;
-            const data = last30Trades.map(t => {
+            const data = closedTrades.map(t => {
                 cumulativeProfit += t.profit_percentage;
                 return cumulativeProfit;
             });
@@ -481,23 +487,27 @@
             }
         }
         
-        // --- تعديل: تم تحديث هذه الدالة لجلب البيانات بشكل صحيح ---
         async function updateDashboard() {
             const [stats, marketStatus, allSignals, notifications] = await Promise.all([
                 fetchData('/api/stats'),
                 fetchData('/api/market_status'),
                 fetchData('/api/signals'),
-                fetchData('/api/notifications')
+                fetchData('/api/notifications?limit=50')
             ]);
             
-            const openTrades = allSignals ? allSignals.filter(s => s.status === 'open') : [];
-            const tradeHistory = allSignals ? allSignals.filter(s => s.status !== 'open') : [];
+            if (!allSignals) {
+                console.error("Failed to fetch signals, dashboard update aborted.");
+                return;
+            }
+
+            const openTrades = allSignals.filter(s => s.status === 'open');
+            const tradeHistory = allSignals.filter(s => s.status !== 'open');
 
             renderStats(stats, marketStatus);
             renderOpenTrades(openTrades);
             renderTradeHistory(tradeHistory);
             renderNotifications(notifications);
-            renderProfitChart(tradeHistory);
+            renderProfitChart(allSignals);
         }
 
         // ----- Interactivity -----
@@ -510,7 +520,6 @@
             closeTradeModal.show();
         }
         
-        // --- تعديل: تم إصلاح طلب الإغلاق اليدوي ---
         document.getElementById('confirm-close-btn').addEventListener('click', async () => {
             if (!tradeToClose.id) return;
             showSpinner();
@@ -523,7 +532,8 @@
                 const result = await response.json();
                 if (response.ok) {
                     console.log('Close request successful:', result.message);
-                    await updateDashboard();
+                    // Give backend a moment to process before refreshing
+                    setTimeout(updateDashboard, 1000);
                 } else {
                     console.error('Failed to close trade:', result.error);
                     alert(`فشل إغلاق الصفقة: ${result.error}`);
