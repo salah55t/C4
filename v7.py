@@ -1,6 +1,7 @@
 # --- الاستيرادات والإعداد الأساسي ---
 import time
 import os
+import sys
 import json
 import logging
 import requests
@@ -9,6 +10,7 @@ import pandas as pd
 import psycopg2
 import pickle
 import redis
+import psutil
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -114,6 +116,7 @@ signals_pending_closure: Set[int] = set()
 closure_lock = Lock()
 last_api_check_time = time.time()
 last_memory_cleanup = time.time()
+
 # --- دوال قاعدة البيانات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
@@ -236,11 +239,13 @@ def recover_cache_state():
     """استرداد حالة الذاكرة المؤقتة في حالة الأخطاء"""
     logger.info("🔄 [استرداد] بدء استرداد حالة الذاكرة المؤقتة...")
     try:
+        # TODO: Define load_open_signals_to_cache function
         # استرداد الإشارات المفتوحة
-        load_open_signals_to_cache()
+        # load_open_signals_to_cache()
         
+        # TODO: Define load_notifications_to_cache function
         # استرداد التنبيهات
-        load_notifications_to_cache()
+        # load_notifications_to_cache()
         
         # تنظيف الإشارات العالقة
         with closure_lock:
@@ -272,7 +277,8 @@ def cleanup_memory():
         
         last_memory_cleanup = current_time
         logger.info("✅ [تنظيف الذاكرة] اكتمل التنظيف الدوري")
-        # --- دوال Binance والبيانات ---
+
+# --- دوال Binance والبيانات ---
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
     if not client: 
@@ -407,7 +413,8 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         return pd.DataFrame()
     finally:
         gc.collect()
-        def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
+
+def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
     try:
         # حساب المؤشرات النسبية
         df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
@@ -538,7 +545,8 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
         return df
     finally:
         gc.collect()
-        def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     try:
         df_calc = df.copy()
         
@@ -624,7 +632,8 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
         return df_calc
     finally:
         gc.collect()
-        def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
+
+def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -707,7 +716,8 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             
         if signal_data:
             logger.info(f"⚡ [CLOSURE] تم إزالة الإشارة {signal_id} من الذاكرة المؤقتة. بدء عملية الإغلاق...")
-            Thread(target=close_signal, args=(signal_data, status, closing_price, "auto_monitor")).start()
+            # TODO: Define close_signal function
+            # Thread(target=close_signal, args=(signal_data, status, closing_price, "auto_monitor")).start()
         else:
             logger.warning(f"⚠️ [CLOSURE] لم يتم العثور على الإشارة {signal_id} في الذاكرة المؤقتة")
             with closure_lock:
@@ -719,7 +729,8 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             signals_pending_closure.discard(signal_id)
     finally:
         gc.collect()
-        def trade_monitoring_loop():
+
+def trade_monitoring_loop():
     global last_api_check_time
     
     # إضافة مؤقت للتحكم في عدد محاولات إعادة الاتصال
@@ -727,7 +738,7 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
     reconnect_attempts = 0
     
     # إضافة مؤقت للتحكم في عمليات تنظيف الذاكرة
-    last_memory_cleanup = time.time()
+    last_memory_cleanup_monitor = time.time()
     
     logger.info("✅ [Trade Monitor] بدء خيط المراقبة")
     
@@ -735,10 +746,10 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
         try:
             # تنظيف دوري للذاكرة
             current_time = time.time()
-            if current_time - last_memory_cleanup > MEMORY_CLEANUP_INTERVAL:
+            if current_time - last_memory_cleanup_monitor > MEMORY_CLEANUP_INTERVAL:
                 logger.info("🧹 [Trade Monitor] تنظيف الذاكرة...")
                 gc.collect()
-                last_memory_cleanup = current_time
+                last_memory_cleanup_monitor = current_time
 
             with signal_cache_lock:
                 signals_to_check = dict(open_signals_cache)
@@ -817,7 +828,8 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             time.sleep(5)
         finally:
             gc.collect()
-            def run_websocket_manager() -> None:
+
+def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
     
     MAX_RECONNECT_ATTEMPTS = 5
@@ -884,14 +896,15 @@ class TradingStrategy:
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
             
             # التأكد من وجود جميع الخصائص المطلوبة
-            for col in self.feature_names:
-                if col not in df_featured.columns:
-                    df_featured[col] = 0.0
+            if self.feature_names:
+                for col in self.feature_names:
+                    if col not in df_featured.columns:
+                        df_featured[col] = 0.0
             
             # معالجة القيم غير المحدودة
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             
-            return df_featured[self.feature_names].dropna()
+            return df_featured[self.feature_names].dropna() if self.feature_names else df_featured.dropna()
             
         except Exception as e:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات: {e}", exc_info=True)
@@ -939,13 +952,13 @@ class TradingStrategy:
             return None
         finally:
             gc.collect()
-            def main_loop():
+
+def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
     time.sleep(15)
     
     # إضافة مؤقت لتتبع آخر مرة تم فيها تنظيف الذاكرة
-    last_memory_cleanup = time.time()
-    MEMORY_CLEANUP_INTERVAL = 3600  # تنظيف كل ساعة
+    last_memory_cleanup_main = time.time()
     
     if not validated_symbols_to_scan:
         log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
@@ -962,11 +975,11 @@ class TradingStrategy:
             start_time = time.time()
             
             # تنظيف دوري للذاكرة
-            if start_time - last_memory_cleanup > MEMORY_CLEANUP_INTERVAL:
+            if start_time - last_memory_cleanup_main > MEMORY_CLEANUP_INTERVAL:
                 logger.info("🧹 [تنظيف الذاكرة] بدء التنظيف الدوري...")
                 ml_models_cache.clear()
                 gc.collect()
-                last_memory_cleanup = start_time
+                last_memory_cleanup_main = start_time
                 logger.info("✅ [تنظيف الذاكرة] اكتمل التنظيف الدوري")
 
             for symbol_batch in symbol_chunks:
@@ -1040,7 +1053,8 @@ class TradingStrategy:
             time.sleep(60)
         finally:
             gc.collect()
-            # --- تهيئة Flask وتعريف المسارات ---
+
+# --- تهيئة Flask وتعريف المسارات ---
 app = Flask(__name__)
 CORS(app)
 
