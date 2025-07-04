@@ -802,6 +802,33 @@ def manual_close_signal(signal_id):
         logger.error(f"❌ [API] خطأ في الإغلاق اليدوي للإشارة {signal_id}: {e}")
         return jsonify({'error': str(e)}), 500
 
+# --- مسار الواجهة الأمامية ---
+@app.route('/')
+def serve_dashboard():
+    """يقرأ ويخدم ملف index.html كواجهة رئيسية."""
+    try:
+        # تحديد المسار بناءً على مكان تنفيذ السكربت
+        if getattr(sys, 'frozen', False):
+            # إذا كان السكربت مجمداً (e.g., via PyInstaller)
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            # الوضع العادي
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        index_path = os.path.join(script_dir, 'index.html')
+
+        if not os.path.exists(index_path):
+            logger.error("❌ [Frontend] ملف 'index.html' غير موجود في نفس مجلد السكربت.")
+            return "Error: index.html not found.", 404
+            
+        with open(index_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return render_template_string(content)
+        
+    except Exception as e:
+        logger.error(f"❌ [Frontend] فشل في خدمة لوحة التحكم: {e}", exc_info=True)
+        return "An internal error occurred while loading the dashboard.", 500
+
 # --- دوال التهيئة والتشغيل ---
 def init_services():
     global client, validated_symbols_to_scan
