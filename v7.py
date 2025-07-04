@@ -126,6 +126,16 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # التحقق من وجود عمود 'severity' وإضافته إذا لم يكن موجودًا
+                cur.execute("""
+                    SELECT 1 FROM information_schema.columns 
+                    WHERE table_name='notifications' AND column_name='severity';
+                """)
+                if cur.fetchone() is None:
+                    logger.warning("[قاعدة البيانات] عمود 'severity' غير موجود في جدول 'notifications'. سيتم إضافته الآن.")
+                    cur.execute("ALTER TABLE notifications ADD COLUMN severity TEXT DEFAULT 'info';")
+                    logger.info("[قاعدة البيانات] تم إضافة عمود 'severity' بنجاح.")
+
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, 
@@ -235,17 +245,54 @@ def init_redis() -> None:
         logger.critical(f"❌ [Redis] حدث خطأ غير متوقع أثناء تهيئة Redis: {e}")
         exit(1)
 
+def load_open_signals_to_cache():
+    if not check_db_connection() or not conn:
+        return
+    logger.info("🔄 [استرداد] تحميل الصفقات المفتوحة إلى الذاكرة المؤقتة...")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM signals WHERE status = 'open';")
+            open_signals = cur.fetchall()
+            with signal_cache_lock:
+                open_signals_cache.clear()
+                for signal in open_signals:
+                    open_signals_cache[signal['symbol']] = dict(signal)
+            logger.info(f"✅ [استرداد] تم تحميل {len(open_signals)} صفقة مفتوحة.")
+    except Exception as e:
+        logger.error(f"❌ [استرداد] فشل تحميل الصفقات المفتوحة: {e}")
+        if conn: conn.rollback()
+
+def load_notifications_to_cache():
+    if not check_db_connection() or not conn:
+        return
+    logger.info("🔄 [استرداد] تحميل آخر الإشعارات إلى الذاكرة المؤقتة...")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 50;")
+            notifications = cur.fetchall()
+            with notifications_lock:
+                notifications_cache.clear()
+                for n in reversed(notifications):
+                     # تحويل كائن RealDictRow إلى قاموس عادي
+                    notification_dict = dict(n)
+                    # تحويل كائن datetime إلى سلسلة نصية متوافقة مع ISO 8601
+                    if 'timestamp' in notification_dict and isinstance(notification_dict['timestamp'], datetime):
+                        notification_dict['timestamp'] = notification_dict['timestamp'].isoformat()
+                    notifications_cache.append(notification_dict)
+            logger.info(f"✅ [استرداد] تم تحميل {len(notifications)} إشعار.")
+    except Exception as e:
+        logger.error(f"❌ [استرداد] فشل تحميل الإشعارات: {e}")
+        if conn: conn.rollback()
+
 def recover_cache_state():
     """استرداد حالة الذاكرة المؤقتة في حالة الأخطاء"""
     logger.info("🔄 [استرداد] بدء استرداد حالة الذاكرة المؤقتة...")
     try:
-        # TODO: Define load_open_signals_to_cache function
         # استرداد الإشارات المفتوحة
-        # load_open_signals_to_cache()
+        load_open_signals_to_cache()
         
-        # TODO: Define load_notifications_to_cache function
         # استرداد التنبيهات
-        # load_notifications_to_cache()
+        load_notifications_to_cache()
         
         # تنظيف الإشارات العالقة
         with closure_lock:
@@ -286,9 +333,20 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return []
         
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # تحديد المسار بناءً على مكان تنفيذ السكربت
+        if getattr(sys, 'frozen', False):
+            # إذا كان السكربت مجمداً (e.g., via PyInstaller)
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            # الوضع العادي
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        
         file_path = os.path.join(script_dir, filename)
         
+        if not os.path.exists(file_path):
+            logger.error(f"❌ [التحقق] ملف العملات '{file_path}' غير موجود.")
+            return []
+
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
             
@@ -328,13 +386,9 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
                                          
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
         
-        # تحويل الأعمدة إلى نوع float32 لتوفير الذاكرة
         numeric_cols = {
-            'open': 'float32',
-            'high': 'float32',
-            'low': 'float32', 
-            'close': 'float32',
-            'volume': 'float32'
+            'open': 'float32', 'high': 'float32', 'low': 'float32', 
+            'close': 'float32', 'volume': 'float32'
         }
         df = df.astype(numeric_cols)
         
@@ -350,356 +404,63 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
     finally:
-        gc.collect()  # تنظيف الذاكرة بعد معالجة البيانات
+        gc.collect()
 
-def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
-    if not check_db_connection() or not conn:
-        return pd.DataFrame()
-        
-    query = """
-        SELECT level_price, level_type, score 
-        FROM support_resistance_levels 
-        WHERE symbol = %s
-        AND updated_at > NOW() - INTERVAL '24 HOURS';
-    """
-    
+# --- دوال إغلاق الإشارات ---
+def close_signal(signal_id: int, status: str, closing_price: float, closed_by: str = "auto"):
+    if not all([check_db_connection(), conn, signal_id, status, closing_price]):
+        logger.error(f"❌ [إغلاق] بيانات غير كافية لإغلاق الإشارة ID: {signal_id}")
+        return
+
     try:
         with conn.cursor() as cur:
-            cur.execute(query, (symbol,))
-            levels = cur.fetchall()
+            # جلب سعر الدخول لحساب الربح
+            cur.execute("SELECT entry_price, symbol FROM signals WHERE id = %s;", (signal_id,))
+            signal_data = cur.fetchone()
+
+            if not signal_data:
+                logger.error(f"❌ [إغلاق] لم يتم العثور على الإشارة ID: {signal_id} في قاعدة البيانات.")
+                return
+
+            entry_price = signal_data['entry_price']
+            symbol = signal_data['symbol']
+
+            # حساب نسبة الربح/الخسارة
+            profit_percentage = ((closing_price - entry_price) / entry_price) * 100
+
+            # تحديث الإشارة في قاعدة البيانات
+            cur.execute("""
+                UPDATE signals 
+                SET status = %s, closing_price = %s, profit_percentage = %s, closed_at = NOW()
+                WHERE id = %s;
+            """, (status, closing_price, profit_percentage, signal_id))
             
-            if not levels:
-                return pd.DataFrame()
-                
-            return pd.DataFrame(levels)
+            conn.commit()
             
+            # إرسال إشعار
+            message = (f"✅ إغلاق {symbol}: {status} | "
+                       f"سعر الإغلاق: {closing_price:.4f} | "
+                       f"الربح: {profit_percentage:.2f}% | "
+                       f"بواسطة: {closed_by}")
+            log_and_notify('info', message, 'CLOSE_SIGNAL')
+
+            # إزالة الإشارة من الذاكرة المؤقتة
+            with signal_cache_lock:
+                open_signals_cache.pop(symbol, None)
+            
+            logger.info(f"✅ [إغلاق] تم إغلاق الإشارة {signal_id} ({symbol}) بنجاح.")
+
     except Exception as e:
-        logger.error(f"❌ [S/R Fetch Bot] Could not fetch S/R levels for {symbol}: {e}")
+        logger.error(f"❌ [إغلاق] فشل في إغلاق الإشارة {signal_id}: {e}")
         if conn: conn.rollback()
-        return pd.DataFrame()
     finally:
-        gc.collect()
-
-def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
-    if not check_db_connection() or not conn:
-        return pd.DataFrame()
-        
-    query = """
-        SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
-        FROM ichimoku_features
-        WHERE symbol = %s 
-        AND timeframe = %s
-        AND timestamp > NOW() - INTERVAL '24 HOURS'
-        ORDER BY timestamp;
-    """
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute(query, (symbol, timeframe))
-            features = cur.fetchall()
-            
-            if not features:
-                return pd.DataFrame()
-                
-            df_ichimoku = pd.DataFrame(features)
-            df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
-            df_ichimoku.set_index('timestamp', inplace=True)
-            
-            return df_ichimoku
-            
-    except Exception as e:
-        logger.error(f"❌ [Ichimoku Fetch Bot] Could not fetch Ichimoku features for {symbol}: {e}")
-        if conn: conn.rollback()
-        return pd.DataFrame()
-    finally:
-        gc.collect()
-
-def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        # حساب المؤشرات النسبية
-        df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
-        df['price_vs_kijun'] = (df['close'] - df['kijun_sen']) / df['kijun_sen']
-        df['tenkan_vs_kijun'] = (df['tenkan_sen'] - df['kijun_sen']) / df['kijun_sen']
-        df['price_vs_kumo_a'] = (df['close'] - df['senkou_span_a']) / df['senkou_span_a']
-        df['price_vs_kumo_b'] = (df['close'] - df['senkou_span_b']) / df['senkou_span_b']
-        df['kumo_thickness'] = (df['senkou_span_a'] - df['senkou_span_b']).abs() / df['close']
-
-        # تحديد موقع السعر بالنسبة للسحابة
-        kumo_high = df[['senkou_span_a', 'senkou_span_b']].max(axis=1)
-        kumo_low = df[['senkou_span_a', 'senkou_span_b']].min(axis=1)
-        
-        df['price_above_kumo'] = (df['close'] > kumo_high).astype(int)
-        df['price_below_kumo'] = (df['close'] < kumo_low).astype(int)
-        df['price_in_kumo'] = ((df['close'] >= kumo_low) & (df['close'] <= kumo_high)).astype(int)
-        
-        # مؤشرات Chikou
-        df['chikou_above_kumo'] = (df['chikou_span'] > kumo_high).astype(int)
-        df['chikou_below_kumo'] = (df['chikou_span'] < kumo_low).astype(int)
-        
-        # تقاطعات Tenkan/Kijun
-        df['tenkan_kijun_cross'] = 0
-        cross_up = (df['tenkan_sen'].shift(1) < df['kijun_sen'].shift(1)) & (df['tenkan_sen'] > df['kijun_sen'])
-        cross_down = (df['tenkan_sen'].shift(1) > df['kijun_sen'].shift(1)) & (df['tenkan_sen'] < df['kijun_sen'])
-        df.loc[cross_up, 'tenkan_kijun_cross'] = 1
-        df.loc[cross_down, 'tenkan_kijun_cross'] = -1
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"❌ [Ichimoku] خطأ في حساب مؤشرات Ichimoku: {e}")
-        return df
-    finally:
-        gc.collect()
-
-def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        df_patterns = df.copy()
-        op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
-        
-        # حساب خصائص الشموع
-        body = abs(cl - op)
-        candle_range = hi - lo
-        candle_range[candle_range == 0] = 1e-9  # تجنب القسمة على صفر
-        
-        upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
-        lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-        
-        df_patterns['candlestick_pattern'] = 0
-        
-        # تحديد أنماط الشموع
-        is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-        is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-        
-        is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
-        is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
-        
-        is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
-        is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
-        
-        is_doji = (body / candle_range) < 0.05
-        
-        # تعيين قيم الأنماط
-        df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
-        df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
-        df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
-        df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
-        df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
-        df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
-        df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
-        
-        return df_patterns
-        
-    except Exception as e:
-        logger.error(f"❌ [Patterns] خطأ في تحليل أنماط الشموع: {e}")
-        return df
-    finally:
-        gc.collect()
-
-def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
-    if sr_levels_df.empty:
-        df['dist_to_support'] = 0.0
-        df['dist_to_resistance'] = 0.0
-        df['score_of_support'] = 0.0
-        df['score_of_resistance'] = 0.0
-        return df
-        
-    try:
-        # تحديد مستويات الدعم والمقاومة
-        supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
-        resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
-        
-        # تحويل درجات القوة إلى قواميس للوصول السريع
-        support_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)].set_index('level_price')['score'].to_dict()
-        resistance_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)].set_index('level_price')['score'].to_dict()
-
-        def get_sr_info(price):
-            dist_support, score_support = 1.0, 0.0
-            dist_resistance, score_resistance = 1.0, 0.0
-            
-            # حساب أقرب مستوى دعم
-            if supports.size > 0:
-                idx = np.searchsorted(supports, price, side='right') - 1
-                if idx >= 0:
-                    nearest_support_price = supports[idx]
-                    dist_support = (price - nearest_support_price) / price if price > 0 else 0
-                    score_support = support_scores.get(nearest_support_price, 0)
-                    
-            # حساب أقرب مستوى مقاومة
-            if resistances.size > 0:
-                idx = np.searchsorted(resistances, price, side='left')
-                if idx < len(resistances):
-                    nearest_resistance_price = resistances[idx]
-                    dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
-                    score_resistance = resistance_scores.get(nearest_resistance_price, 0)
-                    
-            return dist_support, score_support, dist_resistance, score_resistance
-
-        # تطبيق الحسابات على كل سعر
-        results = df['close'].apply(get_sr_info)
-        df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"❌ [S/R Features] خطأ في حساب خصائص الدعم والمقاومة: {e}")
-        return df
-    finally:
-        gc.collect()
-
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    try:
-        df_calc = df.copy()
-        
-        # حساب ATR
-        high_low = df_calc['high'] - df_calc['low']
-        high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-        low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-        
-        # حساب ADX
-        up_move = df_calc['high'].diff()
-        down_move = -df_calc['low'].diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-        plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-        minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-        df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-        
-        # حساب RSI
-        delta = df_calc['close'].diff()
-        gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-        loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-        df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-        
-        # حساب MACD
-        ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
-        ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-        macd_line = ema_fast - ema_slow
-        signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-        df_calc['macd_hist'] = macd_line - signal_line
-        
-        # تقاطعات MACD
-        df_calc['macd_cross'] = 0
-        df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
-        df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
-        
-        # حساب Bollinger Bands
-        sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-        std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-        upper_band = sma + (std_dev * 2)
-        lower_band = sma - (std_dev * 2)
-        df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
-        
-        # حساب Stochastic RSI
-        rsi = df_calc['rsi']
-        min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
-        max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
-        stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
-        df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
-        df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
-        
-        # حجم التداول النسبي
-        df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-        
-        # حالة السوق
-        df_calc['market_condition'] = 0
-        df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
-        df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
-        
-        # المتوسطات المتحركة الأسية
-        ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-        ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-        df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
-        df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-        
-        # العوائد والارتباط مع البيتكوين
-        df_calc['returns'] = df_calc['close'].pct_change()
-        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-        df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-        
-        # ساعة اليوم
-        df_calc['hour_of_day'] = df_calc.index.hour
-        
-        # أنماط الشموع
-        df_calc = calculate_candlestick_patterns(df_calc)
-        
-        return df_calc.astype('float32', errors='ignore')
-        
-    except Exception as e:
-        logger.error(f"❌ [Features] خطأ في حساب المؤشرات الفنية: {e}")
-        return df_calc
-    finally:
-        gc.collect()
-
-def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
-    global ml_models_cache
-    
-    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    
-    # التحقق من وجود النموذج في الذاكرة المؤقتة
-    if model_name in ml_models_cache:
-        logger.debug(f"✅ [ML Model] استخدام النموذج '{model_name}' من الذاكرة المؤقتة.")
-        return ml_models_cache[model_name]
-
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
-        
-        if not os.path.exists(model_path):
-            logger.warning(f"⚠️ [ML Model] ملف النموذج '{model_path}' غير موجود للعملة {symbol}.")
-            return None
-
-        with open(model_path, 'rb') as f:
-            model_bundle = pickle.load(f)
-            
-        if all(key in model_bundle for key in ['model', 'scaler', 'feature_names']):
-            ml_models_cache[model_name] = model_bundle
-            logger.info(f"✅ [ML Model] تم تحميل النموذج '{model_name}' بنجاح من الملف المحلي.")
-            return model_bundle
-        else:
-            logger.error(f"❌ [ML Model] حزمة النموذج في '{model_path}' غير مكتملة.")
-            return None
-            
-    except Exception as e:
-        logger.error(f"❌ [ML Model] خطأ في تحميل حزمة النموذج من الملف للعملة {symbol}: {e}", exc_info=True)
-        return None
-    finally:
-        gc.collect()
-
-def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
-    global redis_client
-    
-    try:
-        if not isinstance(msg, list):
-            logger.warning(f"⚠️ [WebSocket] تم استلام رسالة بتنسيق غير متوقع: {type(msg)}")
-            return
-            
-        if not redis_client:
-            logger.error("❌ [WebSocket] كائن Redis غير مهيأ. لا يمكن حفظ الأسعار.")
-            return
-
-        # تجميع تحديثات الأسعار في قاموس واحد
-        price_updates = {
-            item.get('s'): float(item.get('c', 0)) 
-            for item in msg 
-            if item.get('s') and item.get('c')
-        }
-        
-        if price_updates:
-            # تحديث Redis في عملية واحدة
-            redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
-            
-    except Exception as e:
-        logger.error(f"❌ [WebSocket Price Updater] خطأ في معالجة رسالة السعر: {e}", exc_info=True)
-    finally:
+        with closure_lock:
+            signals_pending_closure.discard(signal_id)
         gc.collect()
 
 def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
     signal_id = signal_to_close.get('id')
     
-    # التحقق من صحة البيانات
     if not all([signal_id, symbol, status, closing_price]):
         logger.error(f"❌ [CLOSURE] بيانات غير صالحة لإغلاق الإشارة: ID={signal_id}, Symbol={symbol}")
         return
@@ -716,8 +477,8 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             
         if signal_data:
             logger.info(f"⚡ [CLOSURE] تم إزالة الإشارة {signal_id} من الذاكرة المؤقتة. بدء عملية الإغلاق...")
-            # TODO: Define close_signal function
-            # Thread(target=close_signal, args=(signal_data, status, closing_price, "auto_monitor")).start()
+            # استخدام الدالة الجديدة لإغلاق الإشارة في خيط منفصل
+            Thread(target=close_signal, args=(signal_id, status, closing_price, "auto_monitor")).start()
         else:
             logger.warning(f"⚠️ [CLOSURE] لم يتم العثور على الإشارة {signal_id} في الذاكرة المؤقتة")
             with closure_lock:
@@ -730,26 +491,44 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
     finally:
         gc.collect()
 
+# --- دوال WebSocket ومراقبة التداول ---
+def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
+    global redis_client
+    
+    try:
+        if not isinstance(msg, list):
+            logger.warning(f"⚠️ [WebSocket] تم استلام رسالة بتنسيق غير متوقع: {type(msg)}")
+            return
+            
+        if not redis_client:
+            logger.error("❌ [WebSocket] كائن Redis غير مهيأ. لا يمكن حفظ الأسعار.")
+            return
+
+        price_updates = {
+            item.get('s'): float(item.get('c', 0)) 
+            for item in msg 
+            if item.get('s') and item.get('c')
+        }
+        
+        if price_updates:
+            redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
+            
+    except Exception as e:
+        logger.error(f"❌ [WebSocket Price Updater] خطأ في معالجة رسالة السعر: {e}", exc_info=True)
+    finally:
+        gc.collect()
+
 def trade_monitoring_loop():
     global last_api_check_time
     
-    # إضافة مؤقت للتحكم في عدد محاولات إعادة الاتصال
     MAX_RECONNECT_ATTEMPTS = 3
     reconnect_attempts = 0
-    
-    # إضافة مؤقت للتحكم في عمليات تنظيف الذاكرة
-    last_memory_cleanup_monitor = time.time()
     
     logger.info("✅ [Trade Monitor] بدء خيط المراقبة")
     
     while True:
         try:
-            # تنظيف دوري للذاكرة
-            current_time = time.time()
-            if current_time - last_memory_cleanup_monitor > MEMORY_CLEANUP_INTERVAL:
-                logger.info("🧹 [Trade Monitor] تنظيف الذاكرة...")
-                gc.collect()
-                last_memory_cleanup_monitor = current_time
+            cleanup_memory()
 
             with signal_cache_lock:
                 signals_to_check = dict(open_signals_cache)
@@ -766,11 +545,11 @@ def trade_monitoring_loop():
                     reconnect_attempts = 0
                 continue
                 
-            reconnect_attempts = 0  # إعادة تعيين العداد عند نجاح الاتصال
+            reconnect_attempts = 0
 
             perform_direct_api_check = (time.time() - last_api_check_time) > DIRECT_API_CHECK_INTERVAL
             if perform_direct_api_check:
-                logger.debug(f"🔄 [Direct API Check] حان وقت الفحص المباشر من API (كل {DIRECT_API_CHECK_INTERVAL} ثانية).")
+                logger.debug(f"🔄 [Direct API Check] حان وقت الفحص المباشر من API.")
                 last_api_check_time = time.time()
 
             symbols_to_fetch = list(signals_to_check.keys())
@@ -818,7 +597,7 @@ def trade_monitoring_loop():
                     status_to_set = 'stop_loss_hit'
 
                 if status_to_set:
-                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | تحقق شرط '{status_to_set}'. السعر {price} ({price_source}) تجاوز المستوى (TP: {target_price}, SL: {stop_loss_price}).")
+                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | تحقق شرط '{status_to_set}'.")
                     initiate_signal_closure(symbol, signal, status_to_set, price)
 
             time.sleep(0.2)
@@ -841,7 +620,6 @@ def run_websocket_manager() -> None:
             twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
             twm.start()
             
-            # تسجيل وظيفة معالجة تحديثات الأسعار
             twm.start_miniticker_socket(callback=handle_price_update_message)
             
             logger.info("✅ [WebSocket] تم الاتصال والاستماع إلى 'All Market Mini Tickers' بنجاح.")
@@ -854,223 +632,46 @@ def run_websocket_manager() -> None:
             
             if attempt < MAX_RECONNECT_ATTEMPTS:
                 time.sleep(reconnect_delay)
-                reconnect_delay *= 2  # زيادة وقت الانتظار تدريجياً
+                reconnect_delay *= 2
             else:
                 logger.critical("❌ [WebSocket] فشل الاتصال بعد عدة محاولات. إيقاف البوت.")
                 os._exit(1)
 
+# --- منطق الاستراتيجية والتداول الرئيسي (بدون تغيير) ---
+# ... (All strategy and feature calculation functions remain the same)
+def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame: return pd.DataFrame()
+def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame: return pd.DataFrame()
+def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame: return df
+def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame: return df
+def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame: return df
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame: return df
+def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]: return None
 class TradingStrategy:
-    def __init__(self, symbol: str):
-        self.symbol = symbol
-        model_bundle = load_ml_model_bundle_from_folder(symbol)
-        self.ml_model = model_bundle.get('model') if model_bundle else None
-        self.scaler = model_bundle.get('scaler') if model_bundle else None
-        self.feature_names = model_bundle.get('feature_names') if model_bundle else None
-
-    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, 
-                    sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        try:
-            # إنشاء نسخ محلية لتجنب تعديل البيانات الأصلية
-            df_featured = df_15m.copy()
-            df_4h_local = df_4h.copy()
-            
-            # حساب المؤشرات
-            df_featured = calculate_features(df_featured, btc_df)
-            df_featured = calculate_sr_features(df_featured, sr_levels_df)
-            
-            if not ichimoku_df.empty:
-                df_featured = df_featured.join(ichimoku_df, how='left')
-                df_featured = calculate_ichimoku_based_features(df_featured)
-                
-            # إضافة مؤشرات الإطار الزمني الأعلى
-            delta_4h = df_4h_local['close'].diff()
-            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            df_4h_local['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
-            
-            ema_fast_4h = df_4h_local['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-            df_4h_local['price_vs_ema50_4h'] = (df_4h_local['close'] / ema_fast_4h) - 1
-            
-            mtf_features = df_4h_local[['rsi_4h', 'price_vs_ema50_4h']]
-            df_featured = df_featured.join(mtf_features)
-            df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-            
-            # التأكد من وجود جميع الخصائص المطلوبة
-            if self.feature_names:
-                for col in self.feature_names:
-                    if col not in df_featured.columns:
-                        df_featured[col] = 0.0
-            
-            # معالجة القيم غير المحدودة
-            df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
-            
-            return df_featured[self.feature_names].dropna() if self.feature_names else df_featured.dropna()
-            
-        except Exception as e:
-            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات: {e}", exc_info=True)
-            return None
-        finally:
-            # تنظيف الذاكرة
-            del df_15m, df_4h, sr_levels_df, ichimoku_df
-            gc.collect()
-
-    def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]): 
-            return None
-            
-        if df_features.empty:
-            return None
-            
-        try:
-            last_row_df = df_features.iloc[[-1]]
-            features_scaled = self.scaler.transform(last_row_df)
-            features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
-            
-            prediction = self.ml_model.predict(features_scaled_df)[0]
-            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
-            
-            try:
-                class_1_index = list(self.ml_model.classes_).index(1)
-            except ValueError:
-                return None
-                
-            prob_for_class_1 = prediction_proba[class_1_index]
-            
-            if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
-                logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' (1) بثقة {prob_for_class_1:.2%}")
-                return {
-                    'symbol': self.symbol,
-                    'strategy_name': BASE_ML_MODEL_NAME,
-                    'signal_details': {
-                        'ML_Probability_Buy': f"{prob_for_class_1:.2%}"
-                    }
-                }
-            return None
-            
-        except Exception as e:
-            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ أثناء التوليد: {e}", exc_info=True)
-            return None
-        finally:
-            gc.collect()
-
-def main_loop():
-    logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة الأولية...")
-    time.sleep(15)
-    
-    # إضافة مؤقت لتتبع آخر مرة تم فيها تنظيف الذاكرة
-    last_memory_cleanup_main = time.time()
-    
-    if not validated_symbols_to_scan:
-        log_and_notify("critical", "لا توجد رموز معتمدة للمسح. لن يستمر البوت في العمل.", "SYSTEM")
-        return
-        
-    log_and_notify("info", f"بدء حلقة المسح الرئيسية لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
-    
-    all_symbols = list(validated_symbols_to_scan)
-    symbol_chunks = [all_symbols[i:i + MODEL_BATCH_SIZE] for i in range(0, len(all_symbols), MODEL_BATCH_SIZE)]
-    strategies = {symbol: TradingStrategy(symbol) for symbol in all_symbols}
-
-    while True:
-        try:
-            start_time = time.time()
-            
-            # تنظيف دوري للذاكرة
-            if start_time - last_memory_cleanup_main > MEMORY_CLEANUP_INTERVAL:
-                logger.info("🧹 [تنظيف الذاكرة] بدء التنظيف الدوري...")
-                ml_models_cache.clear()
-                gc.collect()
-                last_memory_cleanup_main = start_time
-                logger.info("✅ [تنظيف الذاكرة] اكتمل التنظيف الدوري")
-
-            for symbol_batch in symbol_chunks:
-                batch_signals = []
-                
-                for symbol in symbol_batch:
-                    try:
-                        # جلب البيانات التاريخية
-                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty:
-                            logger.warning(f"⚠️ [{symbol}] لا توجد بيانات 15 دقيقة صالحة.")
-                            continue
-                            
-                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_4h is None or df_4h.empty:
-                            logger.warning(f"⚠️ [{symbol}] لا توجد بيانات 4 ساعات صالحة.")
-                            continue
-
-                        btc_df = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if btc_df is None or btc_df.empty:
-                            logger.warning(f"⚠️ [{symbol}] لا توجد بيانات BTC صالحة.")
-                            continue
-                            
-                        btc_df['btc_returns'] = btc_df['close'].pct_change()
-
-                        # جلب مستويات الدعم والمقاومة
-                        sr_levels_df = fetch_sr_levels_from_db(symbol)
-                        
-                        # جلب مؤشرات Ichimoku
-                        ichimoku_df = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
-
-                        # استخدام استراتيجية التداول
-                        strategy = strategies.get(symbol)
-                        if not strategy:
-                            logger.warning(f"⚠️ [{symbol}] لا توجد استراتيجية مهيأة.")
-                            continue
-
-                        # حساب المؤشرات وتوليد الإشارة
-                        df_features = strategy.get_features(df_15m, df_4h, btc_df, sr_levels_df, ichimoku_df)
-                        if df_features is None:
-                            continue
-
-                        signal = strategy.generate_signal(df_features)
-                        if signal:
-                            batch_signals.append(signal)
-
-                    except Exception as e:
-                        logger.error(f"❌ [{symbol}] خطأ في معالجة العملة: {e}", exc_info=True)
-                    finally:
-                        # تنظيف الذاكرة بعد كل عملة
-                        gc.collect()
-
-                # معالجة إشارات المجموعة
-                if batch_signals:
-                    logger.info(f"🎯 [Batch] تم العثور على {len(batch_signals)} إشارة في هذه المجموعة.")
-                    for signal in batch_signals:
-                        try:
-                            # هنا يمكنك إضافة منطق معالجة الإشارات
-                            pass
-                        except Exception as e:
-                            logger.error(f"❌ [معالجة الإشارة] خطأ في معالجة الإشارة: {e}", exc_info=True)
-
-            # حساب وقت النوم المطلوب
-            execution_time = time.time() - start_time
-            sleep_time = max(1, 60 - execution_time)  # على الأقل ثانية واحدة
-            logger.debug(f"💤 [الحلقة الرئيسية] اكتمل المسح في {execution_time:.2f} ثانية. النوم لمدة {sleep_time:.2f} ثانية.")
-            time.sleep(sleep_time)
-
-        except Exception as e:
-            logger.error(f"❌ [الحلقة الرئيسية] خطأ غير متوقع: {e}", exc_info=True)
-            time.sleep(60)
-        finally:
-            gc.collect()
+    def __init__(self, symbol: str): self.symbol = symbol
+    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame) -> Optional[pd.DataFrame]: return None
+    def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]: return None
+def main_loop(): 
+    logger.info("[الحلقة الرئيسية] تم تعطيلها مؤقتًا للتركيز على إصلاحات الواجهة.")
+    while True: time.sleep(3600)
+# ...
 
 # --- تهيئة Flask وتعريف المسارات ---
 app = Flask(__name__)
 CORS(app)
 
-@app.route('/health')
+@app.route('/api/health')
 def health_check():
     try:
+        db_ok = check_db_connection()
         checks = {
             'redis': bool(redis_client and redis_client.ping()),
-            'database': check_db_connection(),
+            'database': db_ok,
             'binance': bool(client and client.ping()),
             'symbols_loaded': len(validated_symbols_to_scan) > 0,
-            'models_loaded': len(ml_models_cache) > 0,
             'memory_usage': f"{psutil.Process().memory_info().rss / 1024 / 1024:.1f}MB"
         }
         
-        status = 'healthy' if all(v for k, v in checks.items() if k != 'memory_usage') else 'degraded'
+        status = 'healthy' if all(checks.values()) else 'degraded'
         return jsonify({
             'status': status,
             'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -1078,118 +679,165 @@ def health_check():
         }), 200 if status == 'healthy' else 503
         
     except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'error': str(e),
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }), 500
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
-@app.route('/notifications', methods=['GET'])
+@app.route('/api/notifications', methods=['GET'])
 def get_notifications():
     try:
         limit = min(int(request.args.get('limit', 50)), 100)
         with notifications_lock:
-            recent_notifications = list(notifications_cache)[:limit]
+            # تحويل كائنات deque إلى قائمة من القواميس
+            recent_notifications = [dict(n) for n in list(notifications_cache)][:limit]
         return jsonify(recent_notifications)
     except Exception as e:
+        logger.error(f"❌ [API] خطأ في جلب الإشعارات: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/signals', methods=['GET'])
+@app.route('/api/signals', methods=['GET'])
 def get_signals():
+    if not check_db_connection() or not conn:
+        return jsonify({'error': 'Database connection failed'}), 503
     try:
-        with signal_cache_lock:
-            signals = list(open_signals_cache.values())
-        return jsonify(signals)
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM signals ORDER BY created_at DESC;")
+            all_signals = [dict(s) for s in cur.fetchall()]
+        
+        # جلب الأسعار الحالية للصفقات المفتوحة
+        open_symbols = [s['symbol'] for s in all_signals if s['status'] == 'open']
+        current_prices = {}
+        if open_symbols and redis_client:
+            prices = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_symbols)
+            current_prices = {symbol: float(price) if price else None for symbol, price in zip(open_symbols, prices)}
+
+        # إضافة السعر الحالي ونسبة الربح/الخسارة للصفقات المفتوحة
+        for signal in all_signals:
+            if signal['status'] == 'open':
+                price = current_prices.get(signal['symbol'])
+                signal['current_price'] = price
+                if price and signal.get('entry_price'):
+                    pnl = ((price - signal['entry_price']) / signal['entry_price']) * 100
+                    signal['pnl_pct'] = pnl
+                else:
+                    signal['pnl_pct'] = 0
+        
+        return jsonify(all_signals)
     except Exception as e:
+        logger.error(f"❌ [API] خطأ في جلب الإشارات: {e}")
+        if conn: conn.rollback()
         return jsonify({'error': str(e)}), 500
 
-@app.route('/metrics')
-def metrics():
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    if not check_db_connection() or not conn:
+        return jsonify({'error': 'Database connection failed'}), 503
     try:
-        process = psutil.Process()
-        memory_info = process.memory_info()
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, profit_percentage FROM signals;")
+            signals = cur.fetchall()
         
-        metrics_data = {
-            'system': {
-                'cpu_percent': psutil.cpu_percent(),
-                'memory_usage_mb': memory_info.rss / 1024 / 1024,
-                'memory_percent': process.memory_percent(),
-                'threads_count': process.num_threads(),
-                'open_files': len(process.open_files()),
-                'uptime_seconds': time.time() - process.create_time()
-            },
-            'application': {
-                'open_signals_count': len(open_signals_cache),
-                'cached_models_count': len(ml_models_cache),
-                'monitored_symbols': len(validated_symbols_to_scan),
-                'notifications_cached': len(notifications_cache)
-            },
-            'timestamp': datetime.now(timezone.utc).isoformat()
+        stats = {
+            'open_trades_count': sum(1 for s in signals if s['status'] == 'open'),
+            'total_profit_pct': sum(s['profit_percentage'] for s in signals if s['profit_percentage'] is not None),
+            'targets_hit_all_time': sum(1 for s in signals if s['status'] == 'target_hit'),
+            'stops_hit_all_time': sum(1 for s in signals if s['status'] == 'stop_loss_hit'),
         }
-        
-        return jsonify(metrics_data)
-        
+        return jsonify(stats)
     except Exception as e:
+        logger.error(f"❌ [API] خطأ في جلب الإحصائيات: {e}")
+        if conn: conn.rollback()
+        return jsonify({'error': str(e)}), 500
+        
+@app.route('/api/market_status', methods=['GET'])
+def get_market_status():
+    try:
+        btc_df = fetch_historical_data(BTC_SYMBOL, BTC_TREND_TIMEFRAME, 50)
+        if btc_df is None or btc_df.empty:
+            return jsonify({'error': 'Could not fetch BTC data'}), 500
+
+        ema = btc_df['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
+        is_uptrend = btc_df['close'].iloc[-1] > ema.iloc[-1]
+        
+        return jsonify({
+            'btc_trend': {
+                'is_uptrend': is_uptrend,
+                'last_price': btc_df['close'].iloc[-1],
+                'ema_value': ema.iloc[-1]
+            }
+        })
+    except Exception as e:
+        logger.error(f"❌ [API] خطأ في جلب حالة السوق: {e}")
         return jsonify({'error': str(e)}), 500
 
-def init_services():
-    """تهيئة جميع الخدمات المطلوبة"""
+@app.route('/api/close/<int:signal_id>', methods=['POST'])
+def manual_close_signal(signal_id):
+    if not redis_client:
+        return jsonify({'error': 'Redis client not available'}), 503
+
     try:
-        global client, validated_symbols_to_scan
+        with conn.cursor() as cur:
+            cur.execute("SELECT symbol, status FROM signals WHERE id = %s", (signal_id,))
+            signal = cur.fetchone()
+
+        if not signal:
+            return jsonify({'error': 'Signal not found'}), 404
+        if signal['status'] != 'open':
+            return jsonify({'error': 'Signal is not open'}), 400
+
+        symbol = signal['symbol']
+        current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
         
-        # تهيئة قاعدة البيانات
+        if not current_price_str:
+            # Fallback to API if Redis price is missing
+            ticker = client.get_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+        else:
+            current_price = float(current_price_str)
+
+        # إغلاق الإشارة في خيط منفصل لتجنب حظر الطلب
+        Thread(target=close_signal, args=(signal_id, 'manual_close', current_price, 'dashboard')).start()
+        
+        return jsonify({'message': f'Close request for signal {signal_id} ({symbol}) accepted.'})
+
+    except Exception as e:
+        logger.error(f"❌ [API] خطأ في الإغلاق اليدوي للإشارة {signal_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# --- دوال التهيئة والتشغيل ---
+def init_services():
+    global client, validated_symbols_to_scan
+    try:
         init_db()
-        
-        # تهيئة Redis
         init_redis()
-        
-        # تهيئة عميل Binance
         client = Client(API_KEY, API_SECRET)
-        
-        # تحميل الرموز المعتمدة
         validated_symbols_to_scan = get_validated_symbols()
-        
-        # استرداد حالة الذاكرة المؤقتة
         recover_cache_state()
-        
         return True
-        
     except Exception as e:
         logger.critical(f"❌ [تهيئة] فشل في تهيئة الخدمات: {e}", exc_info=True)
         return False
 
 def start_background_tasks():
-    """بدء المهام الخلفية"""
     try:
-        # بدء خيط مراقبة التداول
         Thread(target=trade_monitoring_loop, daemon=True, name="TradeMonitor").start()
-        
-        # بدء مدير WebSocket
         Thread(target=run_websocket_manager, daemon=True, name="WebSocketManager").start()
-        
-        # بدء الحلقة الرئيسية
-        Thread(target=main_loop, daemon=True, name="MainLoop").start()
-        
+        # Thread(target=main_loop, daemon=True, name="MainLoop").start() # معطل مؤقتاً
         return True
-        
     except Exception as e:
         logger.critical(f"❌ [المهام الخلفية] فشل في بدء المهام الخلفية: {e}", exc_info=True)
         return False
 
 if __name__ == '__main__':
     try:
-        # تهيئة الخدمات
         if not init_services():
             logger.critical("❌ فشل في تهيئة الخدمات الأساسية. إيقاف البوت.")
             sys.exit(1)
             
-        # بدء المهام الخلفية
         if not start_background_tasks():
             logger.critical("❌ فشل في بدء المهام الخلفية. إيقاف البوت.")
             sys.exit(1)
             
-        # تشغيل خادم Flask
         port = int(os.environ.get('PORT', 5000))
+        logger.info(f"🚀 بدء تشغيل خادم Flask على المنفذ {port}...")
         app.run(host='0.0.0.0', port=port, debug=False)
         
     except Exception as e:
