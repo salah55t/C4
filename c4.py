@@ -85,7 +85,7 @@ TRADE_AMOUNT_USDT: float = 10.0
 USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
-USE_BTC_TREND_FILTER = True
+USE_BTC_TREND_FILTER = False
 BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
@@ -93,7 +93,7 @@ MIN_PROFIT_PERCENTAGE_FILTER: float = 1.0
 
 # --- ✨ جديد: ثوابت فلتر السرعة والتوقيت ---
 # هذا الفلتر يهدف إلى اختيار الإشارات ذات الزخم الأعلى لضمان وصول أسرع للهدف
-USE_SPEED_FILTER: bool = True  # تفعيل أو تعطيل الفلتر
+USE_SPEED_FILTER: bool = False  # تفعيل أو تعطيل الفلتر
 SPEED_FILTER_ADX_THRESHOLD: float = 20.0  # الحد الأدنى لمؤشر ADX للدلالة على وجود اتجاه قوي
 SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.2  # الحد الأدنى لحجم التداول النسبي للدلالة على اهتمام المتداولين
 SPEED_FILTER_RSI_MIN: float = 45.0  # الحد الأدنى لمؤشر RSI (يجب أن يكون في منطقة الزخم الصاعد)
