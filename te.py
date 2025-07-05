@@ -18,6 +18,8 @@ import gc
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
+
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
@@ -41,41 +43,20 @@ except Exception:
     TELEGRAM_BOT_TOKEN = "PLEASE_FILL_YOUR_TELEGRAM_BOT_TOKEN"
     TELEGRAM_CHAT_ID = "PLEASE_FILL_YOUR_TELEGRAM_CHAT_ID"
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة (مطابقة لـ c4.py) ----------------------
-# --- إعدادات التداول والمحاكاة ---
+# ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
 COMMISSION_RATE = 0.001
 SLIPPAGE_PERCENT = 0.0005
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
 TIMEFRAME = '15m'
+HIGHER_TIMEFRAME = '4h'
 MAX_OPEN_TRADES = 10
 MODEL_CONFIDENCE_THRESHOLD = 0.70
-
-# --- إعدادات النموذج والميزات ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
 MODEL_FOLDER = 'V7'
 BTC_SYMBOL = 'BTCUSDT'
 
-# --- إعدادات الفلاتر (جديد) ---
-USE_BTC_TREND_FILTER = True
-BTC_TREND_TIMEFRAME = '4h'
-BTC_TREND_EMA_PERIOD = 50
-
-USE_SPEED_FILTER = True
-SPEED_FILTER_ADX_THRESHOLD = 20.0
-SPEED_FILTER_REL_VOL_THRESHOLD = 1.2
-SPEED_FILTER_RSI_MIN = 45.0
-SPEED_FILTER_RSI_MAX = 70.0
-
-# --- إعدادات المؤشرات الفنية ---
-ADX_PERIOD, RSI_PERIOD, ATR_PERIOD = 14, 14, 14
-BBANDS_PERIOD, REL_VOL_PERIOD, BTC_CORR_PERIOD = 20, 30, 30
-STOCH_RSI_PERIOD, STOCH_K, STOCH_D = 14, 3, 3
-ICHIMOKU_TENKAN_PERIOD, ICHIMOKU_KIJUN_PERIOD, ICHIMOKU_SENKOU_B_PERIOD = 9, 26, 52
-ICHIMOKU_CHIKOU_SHIFT, ICHIMOKU_SENKOU_SHIFT = -26, 26
-SR_PEAK_WIDTH, SR_PEAK_PROMINENCE_MULTIPLIER = 5, 0.6
-
-# ---------------------- دوال مساعدة ومنطق c4.py ----------------------
+# ---------------------- دوال مساعدة ----------------------
 
 def send_telegram_report(report_text: str):
     """يرسل التقرير النهائي إلى تيليجرام."""
@@ -98,7 +79,7 @@ def get_validated_symbols(client: Client, filename: str = 'crypto_list.txt') -> 
     logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}'...")
     try:
         if not os.path.exists(filename):
-            logger.error(f"❌ ملف العملات '{filename}' غير موجود. يرجى إنشاء الملف ووضع الرموز فيه.")
+            logger.error(f"❌ ملف العملات '{filename}' غير موجود.")
             return []
         with open(filename, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
@@ -125,8 +106,11 @@ def get_historical_data(client: Client, symbol: str, interval: str, start_date: 
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         return df
+    except BinanceAPIException as e:
+        logger.error(f"❌ خطأ API من Binance أثناء جلب بيانات {symbol}: {e}")
+        return pd.DataFrame()
     except Exception as e:
-        logger.error(f"❌ خطأ أثناء جلب بيانات {symbol}: {e}")
+        logger.error(f"❌ خطأ عام أثناء جلب بيانات {symbol}: {e}")
         return pd.DataFrame()
 
 def load_ml_model_bundle_from_folder(symbol: str) -> dict | None:
@@ -142,185 +126,193 @@ def load_ml_model_bundle_from_folder(symbol: str) -> dict | None:
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
             logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح.")
             return model_bundle
-        return None
+        else:
+            logger.error(f"❌ حزمة النموذج {model_name} غير مكتملة.")
+            return None
     except Exception as e:
         logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل النموذج للعملة {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- دوال حساب المؤشرات والميزات (منطق c4 مدمج) ----------------------
-
-def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """يحسب جميع المؤشرات والميزات المطلوبة للنموذج والفلاتر."""
+# ---------------------- دالة حساب الميزات الكاملة ----------------------
+def calculate_all_features(df: pd.DataFrame, df_4h: pd.DataFrame) -> pd.DataFrame:
+    """يحسب جميع المؤشرات والميزات المطلوبة للنموذج."""
+    if df.empty:
+        return df
+        
     df_calc = df.copy()
-    
-    # ATR, ADX
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['high'].diff(); down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
 
-    # RSI
+    # --- المؤشرات الأساسية ---
+    df_calc['atr'] = (df_calc['high'] - df_calc['low']).rolling(window=14).mean() # ATR
     delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    gain = delta.clip(lower=0).ewm(com=14 - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=14 - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # BBands Width
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    df_calc['bb_width'] = ( (sma + std_dev * 2) - (sma - std_dev * 2) ) / sma.replace(0, 1e-9)
+    # --- MACD ---
+    ema12 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    df_calc['macd'] = ema12 - ema26
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    df_calc['macd_cross'] = np.where(df_calc['macd'] > df_calc['macd_signal'], 1, -1)
 
-    # Stochastic RSI
+    # --- Stochastic RSI ---
     rsi_val = df_calc['rsi']
-    min_rsi = rsi_val.rolling(window=STOCH_RSI_PERIOD).min()
-    max_rsi = rsi_val.rolling(window=STOCH_RSI_PERIOD).max()
+    min_rsi = rsi_val.rolling(window=14).min()
+    max_rsi = rsi_val.rolling(window=14).max()
     stoch_rsi_val = (rsi_val - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=3).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=3).mean()
     
-    # Relative Volume
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    # --- EMAs ---
+    df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
+    df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema50']) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema200']) - 1
 
-    # BTC Correlation
-    df_calc['returns'] = df_calc['close'].pct_change()
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
-    # Ichimoku
-    high, low, close = df_calc['high'], df_calc['low'], df_calc['close']
-    df_calc['tenkan_sen'] = (high.rolling(window=ICHIMOKU_TENKAN_PERIOD).max() + low.rolling(window=ICHIMOKU_TENKAN_PERIOD).min()) / 2
-    df_calc['kijun_sen'] = (high.rolling(window=ICHIMOKU_KIJUN_PERIOD).max() + low.rolling(window=ICHIMOKU_KIJUN_PERIOD).min()) / 2
-    df_calc['senkou_span_a'] = ((df_calc['tenkan_sen'] + df_calc['kijun_sen']) / 2).shift(ICHIMOKU_SENKOU_SHIFT)
-    df_calc['senkou_span_b'] = ((high.rolling(window=ICHIMOKU_SENKOU_B_PERIOD).max() + low.rolling(window=ICHIMOKU_SENKOU_B_PERIOD).min()) / 2).shift(ICHIMOKU_SENKOU_SHIFT)
-    
-    # S/R features
+    # --- Ichimoku Cloud ---
+    high9 = df_calc['high'].rolling(window=9).max()
+    low9 = df_calc['low'].rolling(window=9).min()
+    df_calc['tenkan_sen'] = (high9 + low9) / 2
+    high26 = df_calc['high'].rolling(window=26).max()
+    low26 = df_calc['low'].rolling(window=26).min()
+    df_calc['kijun_sen'] = (high26 + low26) / 2
+    df_calc['senkou_span_a'] = ((df_calc['tenkan_sen'] + df_calc['kijun_sen']) / 2).shift(26)
+    high52 = df_calc['high'].rolling(window=52).max()
+    low52 = df_calc['low'].rolling(window=52).min()
+    df_calc['senkou_span_b'] = ((high52 + low52) / 2).shift(26)
+    df_calc['chikou_span'] = df_calc['close'].shift(-26)
+
+    # --- ميزات إضافية من Ichimoku ---
+    df_calc['price_vs_tenkan'] = (df_calc['close'] / df_calc['tenkan_sen']) - 1
+    df_calc['price_vs_kijun'] = (df_calc['close'] / df_calc['kijun_sen']) - 1
+    df_calc['tenkan_vs_kijun'] = (df_calc['tenkan_sen'] / df_calc['kijun_sen']) - 1
+    df_calc['tenkan_kijun_cross'] = np.where(df_calc['tenkan_sen'] > df_calc['kijun_sen'], 1, -1)
+    df_calc['price_vs_kumo_a'] = (df_calc['close'] / df_calc['senkou_span_a']) - 1
+    df_calc['price_vs_kumo_b'] = (df_calc['close'] / df_calc['senkou_span_b']) - 1
+    df_calc['price_above_kumo'] = np.where((df_calc['close'] > df_calc['senkou_span_a']) & (df_calc['close'] > df_calc['senkou_span_b']), 1, 0)
+    df_calc['price_below_kumo'] = np.where((df_calc['close'] < df_calc['senkou_span_a']) & (df_calc['close'] < df_calc['senkou_span_b']), 1, 0)
+    df_calc['price_in_kumo'] = np.where(
+        ((df_calc['close'] > df_calc['senkou_span_a']) & (df_calc['close'] < df_calc['senkou_span_b'])) |
+        ((df_calc['close'] < df_calc['senkou_span_a']) & (df_calc['close'] > df_calc['senkou_span_b'])), 1, 0)
+    df_calc['kumo_thickness'] = np.abs(df_calc['senkou_span_a'] - df_calc['senkou_span_b']) / df_calc['close']
+    df_calc['chikou_above_kumo'] = np.where((df_calc['chikou_span'] > df_calc['senkou_span_a'].shift(-26)) & (df_calc['chikou_span'] > df_calc['senkou_span_b'].shift(-26)), 1, 0)
+    df_calc['chikou_below_kumo'] = np.where((df_calc['chikou_span'] < df_calc['senkou_span_a'].shift(-26)) & (df_calc['chikou_span'] < df_calc['senkou_span_b'].shift(-26)), 1, 0)
+
+    # --- ميزات الدعم والمقاومة ---
     avg_atr = df_calc['atr'].mean()
-    prominence = avg_atr * SR_PEAK_PROMINENCE_MULTIPLIER
-    supports = pd.Series(dtype=float)
-    resistances = pd.Series(dtype=float)
+    prominence = avg_atr * 0.6
     if prominence > 0:
-        support_indices, _ = find_peaks(-df_calc['low'], prominence=prominence, width=SR_PEAK_WIDTH)
-        resistance_indices, _ = find_peaks(df_calc['high'], prominence=prominence, width=SR_PEAK_WIDTH)
-        if len(support_indices) > 0: supports = df_calc['low'].iloc[support_indices]
-        if len(resistance_indices) > 0: resistances = df_calc['high'].iloc[resistance_indices]
+        support_indices, _ = find_peaks(-df_calc['low'], prominence=prominence, width=5)
+        resistance_indices, _ = find_peaks(df_calc['high'], prominence=prominence, width=5)
+        supports = df_calc['low'].iloc[support_indices]
+        resistances = df_calc['high'].iloc[resistance_indices]
+        
+        df_calc['dist_to_support'] = df_calc.apply(lambda row: (np.abs(supports[supports.index < row.name] - row['close']) / row['close']).min() if not supports[supports.index < row.name].empty else 1.0, axis=1)
+        df_calc['dist_to_resistance'] = df_calc.apply(lambda row: (np.abs(resistances[resistances.index < row.name] - row['close']) / row['close']).min() if not resistances[resistances.index < row.name].empty else 1.0, axis=1)
+        df_calc['score_of_support'] = 1 / (1 + df_calc['dist_to_support'] * 100)
+        df_calc['score_of_resistance'] = 1 / (1 + df_calc['dist_to_resistance'] * 100)
+    else:
+        df_calc[['dist_to_support', 'dist_to_resistance', 'score_of_support', 'score_of_resistance']] = 1.0
 
-    df_calc['dist_to_support'] = df_calc['close'].apply(lambda p: (np.abs(supports - p) / p).min() if not supports.empty else 1.0)
-    df_calc['dist_to_resistance'] = df_calc['close'].apply(lambda p: (np.abs(resistances - p) / p).min() if not resistances.empty else 1.0)
+    # --- ميزات أخرى ---
+    df_calc['hour_of_day'] = df_calc.index.hour
+    body_size = abs(df_calc['close'] - df_calc['open'])
+    df_calc['candlestick_pattern'] = np.select(
+        [body_size / (df_calc['high'] - df_calc['low']).replace(0, 1) < 0.1,  # Doji
+         (df_calc['close'] > df_calc['open']) & (body_size / (df_calc['high'] - df_calc['low']).replace(0, 1) > 0.8), # Marubozu Bullish
+         (df_calc['close'] < df_calc['open']) & (body_size / (df_calc['high'] - df_calc['low']).replace(0, 1) > 0.8)], # Marubozu Bearish
+        [0, 1, -1], default=0.5) # Neutral
+
+    # --- دمج ميزات الإطار الزمني الأعلى (4 ساعات) ---
+    if not df_4h.empty:
+        df_4h_calc = df_4h.copy()
+        delta_4h = df_4h_calc['close'].diff()
+        gain_4h = delta_4h.clip(lower=0).ewm(com=14 - 1, adjust=False).mean()
+        loss_4h = -delta_4h.clip(upper=0).ewm(com=14 - 1, adjust=False).mean()
+        df_4h_calc['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+        df_4h_calc['ema50_4h'] = df_4h_calc['close'].ewm(span=50, adjust=False).mean()
+        
+        # دمج باستخدام merge_asof
+        df_calc = pd.merge_asof(df_calc.sort_index(), df_4h_calc[['rsi_4h', 'ema50_4h']].sort_index(), 
+                                left_index=True, right_index=True, direction='backward')
+        df_calc['price_vs_ema50_4h'] = (df_calc['close'] / df_calc['ema50_4h']) - 1
+    else:
+        df_calc[['rsi_4h', 'ema50_4h', 'price_vs_ema50_4h']] = np.nan
+
+    # --- تحديد حالة السوق ---
+    df_calc['market_condition'] = np.select(
+        [df_calc['close'] > df_calc['ema200'],
+         df_calc['close'] < df_calc['ema200']],
+        [1, -1], default=0) # 1: Uptrend, -1: Downtrend, 0: Sideways
 
     return df_calc
 
-# ---------------------- محرك الاختبار الخلفي النهائي ----------------------
-
+# ---------------------- محرك الاختبار الخلفي ----------------------
 def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_usdt: float):
-    """الدالة الرئيسية لتشغيل الاختبار الخلفي المتقدم مع الفلاتر."""
-    
-    # --- 1. التحضير والتهيئة ---
+    """الدالة الرئيسية لتشغيل الاختبار الخلفي."""
     symbols = get_validated_symbols(client)
     if not symbols: return
 
     models = {}
     data_frames = {}
 
-    # تحميل بيانات البيتكوين للمؤشرات والفلتر
-    btc_df = get_historical_data(client, BTC_SYMBOL, TIMEFRAME, start_date, end_date)
-    if btc_df.empty:
-        logger.critical("❌ لا يمكن المتابعة بدون بيانات البيتكوين."); return
-    btc_df['btc_returns'] = btc_df['close'].pct_change()
-
-    btc_trend_df = get_historical_data(client, BTC_SYMBOL, BTC_TREND_TIMEFRAME, start_date, end_date)
-    use_btc_filter = USE_BTC_TREND_FILTER
-    if btc_trend_df.empty:
-        logger.warning(f"⚠️ لا يمكن تحميل بيانات اتجاه البيتكوين ({BTC_TREND_TIMEFRAME})، سيتم تعطيل الفلتر.");
-        use_btc_filter = False
-    else:
-        btc_trend_df['ema_trend'] = btc_trend_df['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean()
-
-    # تحميل النماذج والبيانات لكل عملة
     for symbol in symbols:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         if not model_bundle: continue
         
         df = get_historical_data(client, symbol, TIMEFRAME, start_date, end_date)
+        df_4h = get_historical_data(client, symbol, HIGHER_TIMEFRAME, start_date, end_date)
         if df.empty: continue
             
-        logger.info(f"جاري حساب الميزات للعملة {symbol}...")
-        df_featured = calculate_all_features(df, btc_df)
+        logger.info(f"⚙️ جاري حساب الميزات للعملة {symbol}...")
+        df_featured = calculate_all_features(df, df_4h)
         
-        # دمج بيانات فلتر الاتجاه
-        if use_btc_filter:
-            # نستخدم merge_asof لدمج الإطار الزمني الأعلى مع الأقل
-            df_featured = pd.merge_asof(df_featured.sort_index(), btc_trend_df[['close', 'ema_trend']].sort_index(), 
-                                        left_index=True, right_index=True, direction='forward', 
-                                        suffixes=('', '_trend'))
-            df_featured['btc_is_uptrend'] = df_featured['close_trend'] > df_featured['ema_trend']
-        else:
-            df_featured['btc_is_uptrend'] = True # تعطيل الفلتر
-
-        # الاحتفاظ بالقيم غير المحجمة للفلاتر
-        df_featured['adx_unscaled'] = df_featured['adx']
-        df_featured['rsi_unscaled'] = df_featured['rsi']
-        df_featured['relative_volume_unscaled'] = df_featured['relative_volume']
-        
-        # التأكد من وجود جميع الميزات المطلوبة للنموذج
         feature_names = model_bundle['feature_names']
         missing_features = set(feature_names) - set(df_featured.columns)
         if missing_features:
-            logger.warning(f"ميزات ناقصة لـ {symbol}: {missing_features}. سيتم تخطي العملة.")
+            logger.warning(f"❌ ميزات ناقصة لـ {symbol} بعد الحساب: {missing_features}. سيتم تخطي العملة.")
             continue
         
-        # تحجيم الميزات المطلوبة للنموذج فقط
         df_featured.dropna(inplace=True)
-        if df_featured.empty: continue
+        if df_featured.empty:
+            logger.warning(f"⚠️ لا توجد بيانات متبقية لـ {symbol} بعد إزالة القيم الفارغة.")
+            continue
         
-        features_to_scale = df_featured[feature_names]
-        df_featured.loc[:, feature_names] = model_bundle['scaler'].transform(features_to_scale)
+        try:
+            features_to_scale = df_featured[feature_names]
+            df_featured.loc[:, feature_names] = model_bundle['scaler'].transform(features_to_scale)
+        except Exception as e:
+            logger.error(f"❌ خطأ في تحجيم الميزات لـ {symbol}: {e}. سيتم تخطي العملة.")
+            continue
 
         models[symbol] = model_bundle['model']
         data_frames[symbol] = df_featured
         gc.collect()
 
     if not data_frames:
-        logger.critical("❌ لا توجد بيانات أو نماذج صالحة لإجراء الاختبار."); return
+        logger.critical("❌ لا توجد بيانات أو نماذج صالحة لإجراء الاختبار بعد معالجة جميع العملات."); return
 
-    # --- 2. إعداد متغيرات وحلقة التداول ---
-    logger.info("🚀 بدء محاكاة التداول المتزامنة لجميع العملات مع الفلاتر...")
+    logger.info("🚀 بدء محاكاة التداول...")
     balance = trade_amount_usdt
     open_trades = []
     all_closed_trades = []
     
-    # Create a unified index for the backtest loop
-    # This ensures we iterate through timestamps that exist for all symbols
-    # We use an outer join and then find the intersection to be safe
-    all_indices = [df.index for df in data_frames.values()]
-    if not all_indices:
-        logger.critical("❌ No data available to form a common index."); return
-        
-    common_index = all_indices[0]
-    for i in range(1, len(all_indices)):
-        common_index = common_index.intersection(all_indices[i])
-    
-    common_index = common_index.sort_values()
+    # توحيد المؤشر الزمني لجميع البيانات
+    common_index = None
+    for df in data_frames.values():
+        common_index = df.index if common_index is None else common_index.intersection(df.index)
+    common_index = sorted(list(common_index))
 
+    if not common_index:
+        logger.critical("❌ لا يمكن إنشاء مؤشر زمني مشترك بين العملات."); return
 
-    # --- 3. حلقة التداول الرئيسية ---
     for timestamp in common_index:
         # إغلاق الصفقات
         for trade in open_trades[:]:
             symbol = trade['symbol']
-            # Ensure the current timestamp exists for the specific symbol's dataframe
-            if timestamp not in data_frames[symbol].index:
-                continue
+            current_price = data_frames[symbol].loc[timestamp]['close']
             
-            # Use .loc to get current price, ensuring the column exists
-            current_price = data_frames[symbol].loc[timestamp].get('close_unscaled', data_frames[symbol].loc[timestamp]['close'])
-
             if current_price <= trade['stop_loss'] or current_price >= trade['target_price']:
                 exit_price = trade['stop_loss'] if current_price <= trade['stop_loss'] else trade['target_price']
                 exit_price_with_slippage = exit_price * (1 - SLIPPAGE_PERCENT)
@@ -343,23 +335,12 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
 
                 current_data = data_frames[symbol].loc[timestamp]
                 
-                # --- تطبيق الفلاتر قبل التنبؤ ---
-                if use_btc_filter and not current_data['btc_is_uptrend']:
-                    continue
-
-                if USE_SPEED_FILTER:
-                    if not (current_data['adx_unscaled'] >= SPEED_FILTER_ADX_THRESHOLD and
-                            current_data['relative_volume_unscaled'] >= SPEED_FILTER_REL_VOL_THRESHOLD and
-                            SPEED_FILTER_RSI_MIN <= current_data['rsi_unscaled'] < SPEED_FILTER_RSI_MAX):
-                        continue
-                
-                # --- التنبؤ باستخدام النموذج ---
                 features_scaled = current_data[model.feature_name_].to_frame().T
                 prediction = model.predict(features_scaled)[0]
                 prob_for_class_1 = model.predict_proba(features_scaled)[0][list(model.classes_).index(1)]
 
                 if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
-                    entry_price = current_data.get('close_unscaled', current_data['close'])
+                    entry_price = current_data['close']
                     entry_price_with_slippage = entry_price * (1 + SLIPPAGE_PERCENT)
                     quantity = (trade_amount_usdt / entry_price_with_slippage) * (1 - COMMISSION_RATE)
                     
@@ -373,7 +354,7 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
                         'stop_loss': stop_loss, 'target_price': target_price
                     })
 
-    # --- 4. حساب الإحصائيات النهائية وإنشاء التقرير ---
+    # --- حساب الإحصائيات النهائية وإنشاء التقرير ---
     logger.info("✅ اكتملت المحاكاة. جاري حساب الإحصائيات النهائية...")
     total_trades = len(all_closed_trades)
     if total_trades == 0:
@@ -390,15 +371,12 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
     total_loss = abs(sum(t['pnl'] for t in losing_trades))
     profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
 
-
     report = f"""
-*📊 تقرير الاختبار الخلفي (محاكاة نهائية مع الفلاتر)*
+*📊 تقرير الاختبار الخلفي (محاكاة نهائية)*
 --------------------------------------
 *الفترة:* من `{start_date}` إلى `{end_date}`
 *قائمة العملات:* `crypto_list.txt`
 *المبلغ لكل صفقة:* `${trade_amount_usdt:,.2f}`
-*الحد الأقصى للصفقات:* `{MAX_OPEN_TRADES}`
-*الفلاتر المفعلة:* `اتجاه BTC`, `السرعة`
 --------------------------------------
 *📈 ملخص الأداء الإجمالي:*
 *إجمالي الربح/الخسارة (PnL):* `${total_pnl:,.2f}`
@@ -416,7 +394,7 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
 
 def main():
     """Main function to run the script."""
-    logger.info("🚀 بدء تشغيل سكريبت الاختبار الخلفي النهائي...")
+    logger.info("🚀 بدء تشغيل سكريبت الاختبار الخلفي...")
     try:
         client = Client(API_KEY, API_SECRET)
         client.ping()
@@ -425,38 +403,31 @@ def main():
         logger.critical(f"❌ فشل الاتصال بـ Binance. يرجى التحقق من مفاتيح API. الخطأ: {e}")
         exit(1)
 
-    # --- Setup argument parser instead of input() ---
     parser = argparse.ArgumentParser(description="Run a crypto backtesting strategy.")
-    
     end_date_dt = datetime.now()
     start_date_dt = end_date_dt - timedelta(days=30)
     start_date_default = start_date_dt.strftime("%Y-%m-%d")
     end_date_default = end_date_dt.strftime("%Y-%m-%d")
 
-    parser.add_argument('--start-date', type=str, default=start_date_default,
-                        help=f'The start date for the backtest in YYYY-MM-DD format. Default: {start_date_default}')
-    parser.add_argument('--end-date', type=str, default=end_date_default,
-                        help=f'The end date for the backtest in YYYY-MM-DD format. Default: {end_date_default}')
-    parser.add_argument('--amount', type=float, default=100.0,
-                        help='The initial amount per trade in USDT. Default: 100.0')
+    parser.add_argument('--start-date', type=str, default=start_date_default, help=f'Start date (YYYY-MM-DD). Default: {start_date_default}')
+    parser.add_argument('--end-date', type=str, default=end_date_default, help=f'End date (YYYY-MM-DD). Default: {end_date_default}')
+    parser.add_argument('--amount', type=float, default=100.0, help='Amount per trade in USDT. Default: 100.0')
 
     args = parser.parse_args()
 
     try:
-        # Validate date formats
         datetime.strptime(args.start_date, "%Y-%m-%d")
         datetime.strptime(args.end_date, "%Y-%m-%d")
         
-        logger.info(f"🗓️ Running backtest from {args.start_date} to {args.end_date} with ${args.amount} per trade.")
+        logger.info(f"🗓️ تشغيل الاختبار من {args.start_date} إلى {args.end_date} بمبلغ ${args.amount} لكل صفقة.")
         run_backtest(client, args.start_date, args.end_date, args.amount)
 
     except ValueError:
-        logger.error("❌ Invalid date format. Please use YYYY-MM-DD.")
+        logger.error("❌ صيغة التاريخ غير صحيحة. يرجى استخدام YYYY-MM-DD.")
     except Exception as e:
-        logger.error(f"❌ An unexpected error occurred: {e}", exc_info=True)
+        logger.error(f"❌ حدث خطأ غير متوقع: {e}", exc_info=True)
 
-    logger.info("👋 Script finished. Goodbye!")
-
+    logger.info("👋 انتهى عمل السكريبت. وداعاً!")
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
