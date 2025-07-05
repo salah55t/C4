@@ -6,7 +6,6 @@ import requests
 import numpy as np
 import pandas as pd
 import pickle
-import argparse
 from datetime import datetime, timedelta
 from decouple import config
 from binance.client import Client
@@ -15,10 +14,14 @@ from scipy.signal import find_peaks
 from sklearn.preprocessing import StandardScaler
 import warnings
 import gc
+from flask import Flask, request, jsonify
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
+
+# ---------------------- إعداد تطبيق Flask ----------------------
+app = Flask(__name__)
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
@@ -289,7 +292,9 @@ def calculate_all_features(df: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Dat
 def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_usdt: float):
     """الدالة الرئيسية لتشغيل الاختبار الخلفي."""
     symbols = get_validated_symbols(client)
-    if not symbols: return
+    if not symbols: 
+        logger.warning("⚠️ لم يتم العثور على عملات صالحة.")
+        return "لم يتم العثور على عملات صالحة."
 
     # جلب بيانات البيتكوين مرة واحدة
     btc_df = get_historical_data(client, BTC_SYMBOL, TIMEFRAME, start_date, end_date)
@@ -341,7 +346,8 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
         gc.collect()
 
     if not data_frames:
-        logger.critical("❌ لا توجد بيانات أو نماذج صالحة لإجراء الاختبار بعد معالجة جميع العملات."); return
+        logger.critical("❌ لا توجد بيانات أو نماذج صالحة لإجراء الاختبار بعد معالجة جميع العملات.")
+        return "لا توجد بيانات أو نماذج صالحة لإجراء الاختبار."
 
     logger.info("🚀 بدء محاكاة التداول...")
     balance = trade_amount_usdt
@@ -352,7 +358,8 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
     common_index = pd.concat([df.index for df in data_frames.values()]).unique().sort_values()
 
     if len(common_index) == 0:
-        logger.critical("❌ لا يمكن إنشاء مؤشر زمني مشترك بين العملات."); return
+        logger.critical("❌ لا يمكن إنشاء مؤشر زمني مشترك بين العملات.")
+        return "لا يمكن إنشاء مؤشر زمني مشترك."
 
     for timestamp in common_index:
         # إغلاق الصفقات
@@ -408,7 +415,7 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
     if total_trades == 0:
         report = "*📊 تقرير الاختبار الخلفي*\n\n*📉 النتائج:*\nلم يتم تنفيذ أي صفقات."
         send_telegram_report(report)
-        return
+        return report
 
     winning_trades = [t for t in all_closed_trades if t['pnl'] > 0]
     losing_trades = [t for t in all_closed_trades if t['pnl'] < 0]
@@ -439,44 +446,56 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
 *ملاحظة: النتائج لا تضمن الأداء المستقبلي.*
 """
     send_telegram_report(report)
+    return report
 
-def main():
-    """Main function to run the script."""
-    logger.info("🚀 بدء تشغيل سكريبت الاختبار الخلفي...")
+# ---------------------- نقاط نهاية Flask API ----------------------
+@app.route('/')
+def index():
+    """نقطة نهاية أساسية للتأكد من أن الخادم يعمل."""
+    return "<h1>Backtester Web Service is running</h1><p>Use the /run endpoint to start the backtest.</p>"
+
+@app.route('/run', methods=['GET'])
+def run_backtest_endpoint():
+    """نقطة النهاية لتشغيل الاختبار الخلفي."""
+    logger.info("🚀 بدء تشغيل سكريبت الاختبار الخلفي عبر طلب ويب...")
     try:
         client = Client(API_KEY, API_SECRET)
         client.ping()
         logger.info("✅ تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
     except Exception as e:
         logger.critical(f"❌ فشل الاتصال بـ Binance. يرجى التحقق من مفاتيح API. الخطأ: {e}")
-        exit(1)
+        return jsonify({"error": "Failed to connect to Binance API"}), 500
 
-    parser = argparse.ArgumentParser(description="Run a crypto backtesting strategy.")
+    # --- الحصول على المعلمات من رابط الويب ---
     end_date_dt = datetime.now()
     start_date_dt = end_date_dt - timedelta(days=30)
+    
+    # القيم الافتراضية
     start_date_default = start_date_dt.strftime("%Y-%m-%d")
     end_date_default = end_date_dt.strftime("%Y-%m-%d")
 
-    parser.add_argument('--start-date', type=str, default=start_date_default, help=f'Start date (YYYY-MM-DD). Default: {start_date_default}')
-    parser.add_argument('--end-date', type=str, default=end_date_default, help=f'End date (YYYY-MM-DD). Default: {end_date_default}')
-    parser.add_argument('--amount', type=float, default=100.0, help='Amount per trade in USDT. Default: 100.0')
-
-    args = parser.parse_args()
+    start_date = request.args.get('start-date', start_date_default)
+    end_date = request.args.get('end-date', end_date_default)
+    amount = request.args.get('amount', 100.0, type=float)
 
     try:
-        datetime.strptime(args.start_date, "%Y-%m-%d")
-        datetime.strptime(args.end_date, "%Y-%m-%d")
+        datetime.strptime(start_date, "%Y-%m-%d")
+        datetime.strptime(end_date, "%Y-%m-%d")
         
-        logger.info(f"🗓️ تشغيل الاختبار من {args.start_date} إلى {args.end_date} بمبلغ ${args.amount} لكل صفقة.")
-        run_backtest(client, args.start_date, args.end_date, args.amount)
+        logger.info(f"🗓️ تشغيل الاختبار من {start_date} إلى {end_date} بمبلغ ${amount} لكل صفقة.")
+        result_report = run_backtest(client, start_date, end_date, amount)
+        return jsonify({"status": "Backtest completed", "report": result_report})
 
     except ValueError:
         logger.error("❌ صيغة التاريخ غير صحيحة. يرجى استخدام YYYY-MM-DD.")
+        return jsonify({"error": "Invalid date format. Please use YYYY-MM-DD."}), 400
     except Exception as e:
         logger.error(f"❌ حدث خطأ غير متوقع: {e}", exc_info=True)
-
-    logger.info("👋 انتهى عمل السكريبت. وداعاً!")
+        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 if __name__ == "__main__":
-    main()
+    # Render.com توفر متغير البيئة PORT.
+    # يتم استخدام 0.0.0.0 للتأكد من أن الخادم يمكن الوصول إليه من خارج الحاوية.
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
