@@ -6,6 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import pickle
+import argparse
 from datetime import datetime, timedelta
 from decouple import config
 from binance.client import Client
@@ -294,17 +295,32 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
     open_trades = []
     all_closed_trades = []
     
-    common_index = None
-    for df in data_frames.values():
-        common_index = df.index if common_index is None else common_index.intersection(df.index)
+    # Create a unified index for the backtest loop
+    # This ensures we iterate through timestamps that exist for all symbols
+    # We use an outer join and then find the intersection to be safe
+    all_indices = [df.index for df in data_frames.values()]
+    if not all_indices:
+        logger.critical("❌ No data available to form a common index."); return
+        
+    common_index = all_indices[0]
+    for i in range(1, len(all_indices)):
+        common_index = common_index.intersection(all_indices[i])
     
+    common_index = common_index.sort_values()
+
+
     # --- 3. حلقة التداول الرئيسية ---
     for timestamp in common_index:
         # إغلاق الصفقات
         for trade in open_trades[:]:
             symbol = trade['symbol']
-            current_price = data_frames[symbol].loc[timestamp]['close_unscaled'] if 'close_unscaled' in data_frames[symbol].columns else data_frames[symbol].loc[timestamp]['close']
+            # Ensure the current timestamp exists for the specific symbol's dataframe
+            if timestamp not in data_frames[symbol].index:
+                continue
             
+            # Use .loc to get current price, ensuring the column exists
+            current_price = data_frames[symbol].loc[timestamp].get('close_unscaled', data_frames[symbol].loc[timestamp]['close'])
+
             if current_price <= trade['stop_loss'] or current_price >= trade['target_price']:
                 exit_price = trade['stop_loss'] if current_price <= trade['stop_loss'] else trade['target_price']
                 exit_price_with_slippage = exit_price * (1 - SLIPPAGE_PERCENT)
@@ -338,12 +354,12 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
                         continue
                 
                 # --- التنبؤ باستخدام النموذج ---
-                features_scaled = current_data[model.feature_names_].to_frame().T
+                features_scaled = current_data[model.feature_name_].to_frame().T
                 prediction = model.predict(features_scaled)[0]
                 prob_for_class_1 = model.predict_proba(features_scaled)[0][list(model.classes_).index(1)]
 
                 if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
-                    entry_price = current_data['close_unscaled'] if 'close_unscaled' in current_data else current_data['close']
+                    entry_price = current_data.get('close_unscaled', current_data['close'])
                     entry_price_with_slippage = entry_price * (1 + SLIPPAGE_PERCENT)
                     quantity = (trade_amount_usdt / entry_price_with_slippage) * (1 - COMMISSION_RATE)
                     
@@ -366,9 +382,14 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
         return
 
     winning_trades = [t for t in all_closed_trades if t['pnl'] > 0]
-    win_rate = (len(winning_trades) / total_trades) * 100
+    losing_trades = [t for t in all_closed_trades if t['pnl'] < 0]
+    win_rate = (len(winning_trades) / total_trades) * 100 if total_trades > 0 else 0
     total_pnl = sum(t['pnl'] for t in all_closed_trades)
-    profit_factor = abs(sum(t['pnl'] for t in winning_trades) / sum(t['pnl'] for t in (t for t in all_closed_trades if t['pnl'] < 0))) if any(t['pnl'] < 0 for t in all_closed_trades) else float('inf')
+    
+    total_profit = sum(t['pnl'] for t in winning_trades)
+    total_loss = abs(sum(t['pnl'] for t in losing_trades))
+    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+
 
     report = f"""
 *📊 تقرير الاختبار الخلفي (محاكاة نهائية مع الفلاتر)*
@@ -386,15 +407,15 @@ def run_backtest(client: Client, start_date: str, end_date: str, trade_amount_us
 *⚙️ إحصائيات الصفقات:*
 *إجمالي عدد الصفقات:* `{total_trades}`
 *الصفقات الرابحة:* `{len(winning_trades)}`
-*الصفقات الخاسرة:* `{len(all_closed_trades) - len(winning_trades)}`
+*الصفقات الخاسرة:* `{len(losing_trades)}`
 *نسبة النجاح (Win Rate):* `{win_rate:.2f}%`
 --------------------------------------
 *ملاحظة: النتائج لا تضمن الأداء المستقبلي.*
 """
     send_telegram_report(report)
 
-# ---------------------- نقطة انطلاق البرنامج ----------------------
-if __name__ == "__main__":
+def main():
+    """Main function to run the script."""
     logger.info("🚀 بدء تشغيل سكريبت الاختبار الخلفي النهائي...")
     try:
         client = Client(API_KEY, API_SECRET)
@@ -404,23 +425,39 @@ if __name__ == "__main__":
         logger.critical(f"❌ فشل الاتصال بـ Binance. يرجى التحقق من مفاتيح API. الخطأ: {e}")
         exit(1)
 
+    # --- Setup argument parser instead of input() ---
+    parser = argparse.ArgumentParser(description="Run a crypto backtesting strategy.")
+    
+    end_date_dt = datetime.now()
+    start_date_dt = end_date_dt - timedelta(days=30)
+    start_date_default = start_date_dt.strftime("%Y-%m-%d")
+    end_date_default = end_date_dt.strftime("%Y-%m-%d")
+
+    parser.add_argument('--start-date', type=str, default=start_date_default,
+                        help=f'The start date for the backtest in YYYY-MM-DD format. Default: {start_date_default}')
+    parser.add_argument('--end-date', type=str, default=end_date_default,
+                        help=f'The end date for the backtest in YYYY-MM-DD format. Default: {end_date_default}')
+    parser.add_argument('--amount', type=float, default=100.0,
+                        help='The initial amount per trade in USDT. Default: 100.0')
+
+    args = parser.parse_args()
+
     try:
-        end_date_dt = datetime.now()
-        start_date_dt = end_date_dt - timedelta(days=30)
-        start_date_default = start_date_dt.strftime("%Y-%m-%d")
-        end_date_default = end_date_dt.strftime("%Y-%m-%d")
-
-        start_date_input = input(f"Enter start date (YYYY-MM-DD) [Default: {start_date_default}]: ") or start_date_default
-        end_date_input = input(f"Enter end date (YYYY-MM-DD) [Default: {end_date_default}]: ") or end_date_default
-        datetime.strptime(start_date_input, "%Y-%m-%d")
-        datetime.strptime(end_date_input, "%Y-%m-%d")
-        trade_amount_input = float(input("Enter initial amount per trade in USDT [Default: 100]: ") or 100)
-
-        run_backtest(client, start_date_input, end_date_input, trade_amount_input)
+        # Validate date formats
+        datetime.strptime(args.start_date, "%Y-%m-%d")
+        datetime.strptime(args.end_date, "%Y-%m-%d")
+        
+        logger.info(f"🗓️ Running backtest from {args.start_date} to {args.end_date} with ${args.amount} per trade.")
+        run_backtest(client, args.start_date, args.end_date, args.amount)
 
     except ValueError:
-        logger.error("❌ خطأ في الإدخال. يرجى التأكد من إدخال مبلغ صحيح وتنسيق التاريخ (YYYY-MM-DD).")
+        logger.error("❌ Invalid date format. Please use YYYY-MM-DD.")
     except Exception as e:
-        logger.error(f"❌ حدث خطأ غير متوقع: {e}", exc_info=True)
+        logger.error(f"❌ An unexpected error occurred: {e}", exc_info=True)
 
-    logger.info("👋 انتهى عمل السكريبت. وداعاً!")
+    logger.info("👋 Script finished. Goodbye!")
+
+
+# ---------------------- نقطة انطلاق البرنامج ----------------------
+if __name__ == "__main__":
+    main()
