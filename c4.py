@@ -29,7 +29,6 @@ import gc
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
-# ✨ تعديل: تحديث اسم ملف السجل واسم المسجل ليعكس الاستراتيجية الجديدة
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,7 +53,6 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# ✨ تعديل: تحديث اسم النموذج الأساسي
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
 MODEL_FOLDER: str = 'V7'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -140,7 +138,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # ✨ تعديل: إضافة حقل للوقف المتحرك
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -268,7 +265,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# ---------------------- ✨ جديد: دوال جلب الميزات المتقدمة من قاعدة البيانات ----------------------
+# ---------------------- دوال جلب الميزات المتقدمة من قاعدة البيانات ----------------------
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
@@ -305,7 +302,7 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         if conn: conn.rollback()
         return pd.DataFrame()
 
-# ---------------------- ✨ جديد: دوال حساب الميزات المتقدمة ----------------------
+# ---------------------- دوال حساب الميزات المتقدمة ----------------------
 def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
     df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
     df['price_vs_kijun'] = (df['close'] - df['kijun_sen']) / df['kijun_sen']
@@ -381,7 +378,7 @@ def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.Da
     df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
     return df
 
-# ---------------------- ✨ تعديل: دالة حساب الميزات الرئيسية المدمجة ----------------------
+# ---------------------- دالة حساب الميزات الرئيسية المدمجة ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     # ATR, ADX
@@ -579,7 +576,6 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    # ✨ تعديل: تحديث الدالة لتشمل الميزات المتقدمة
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None:
             return None
@@ -812,6 +808,7 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل] فشل تحميل التنبيهات: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
+# ✨ إصلاح: تحويل القيمة المنطقية من نوع NumPy إلى نوع Python الأصلي لمنع خطأ JSON
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "is_uptrend": False}
     try:
@@ -820,7 +817,7 @@ def get_btc_trend() -> Dict[str, Any]:
         df['close'] = pd.to_numeric(df['close'])
         ema = df['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean().iloc[-1]
         current_price = df['close'].iloc[-1]
-        is_uptrend = current_price > ema
+        is_uptrend = bool(current_price > ema)
         return {"status": "Uptrend" if is_uptrend else "Downtrend", "is_uptrend": is_uptrend}
     except Exception as e:
         logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
@@ -834,7 +831,6 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
-# ✨ تعديل: تحديث الحلقة الرئيسية لاستخدام الميزات الجديدة
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
     time.sleep(15) 
@@ -881,12 +877,10 @@ def main_loop():
                         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_4h is None: continue
 
-                        # جلب الميزات المتقدمة
                         sr_levels = fetch_sr_levels_from_db(symbol)
                         ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
                         
                         strategy = TradingStrategy(symbol)
-                        # تمرير الميزات المتقدمة إلى الدالة
                         df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels, ichimoku_data)
                         del df_15m, df_4h, sr_levels, ichimoku_data; gc.collect()
                         
@@ -894,8 +888,9 @@ def main_loop():
                         
                         potential_signal = strategy.generate_signal(df_features)
                         if potential_signal and redis_client:
-                            current_price = float(redis_client.hget(REDIS_PRICES_HASH_NAME, symbol))
-                            if not current_price: continue
+                            current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
+                            if not current_price_str: continue
+                            current_price = float(current_price_str)
 
                             last_features = df_features.iloc[-1]
                             last_features.name = symbol
