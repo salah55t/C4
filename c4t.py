@@ -115,22 +115,43 @@ def create_backtest_results_table():
         logger.error(f"❌ [DB] فشل في إنشاء جدول 'backtest_results': {e}")
         conn.rollback()
 
+# --- ✨ جديد: دالة مساعدة لتنظيف قيم NaN ---
+def replace_nan_with_none(obj):
+    """
+    Recursively traverses a dictionary or list and replaces float NaN with None.
+    """
+    if isinstance(obj, dict):
+        return {k: replace_nan_with_none(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [replace_nan_with_none(elem) for elem in obj]
+    # Check for float NaN values
+    elif isinstance(obj, float) and np.isnan(obj):
+        return None
+    return obj
+
 def save_backtest_results(symbol, strategy_name, run_timestamp, stats):
     if not conn:
         logger.error("❌ [DB Save] لا يمكن حفظ النتائج، لا يوجد اتصال بقاعدة البيانات.")
         return
 
-    # --- ✨ تصحيح: معالجة كائن Timedelta بشكل صحيح ---
-    # The 'Duration' from backtesting.py is a Timedelta object. We get the days directly.
-    duration_obj = stats.get('Duration')
-    duration_days = duration_obj.days if pd.notna(duration_obj) else 0
-    
-    return_pct = stats.get('Return [%]', 0.0)
-    win_rate_pct = stats.get('Win Rate [%]', 0.0)
-    profit_factor = stats.get('Profit Factor', 0.0)
-    num_trades = stats.get('# Trades', 0)
+    # --- ✨ تصحيح: تنظيف قيم NaN قبل تحويلها إلى JSON ---
+    cleaned_stats = replace_nan_with_none(stats)
 
-    stats_json = json.dumps(stats, default=str)
+    duration_obj = cleaned_stats.get('Duration')
+    duration_days = duration_obj.days if pd.notna(duration_obj) and duration_obj is not None else 0
+    
+    return_pct = cleaned_stats.get('Return [%]') or 0.0
+    win_rate_pct = cleaned_stats.get('Win Rate [%]') or 0.0
+    
+    profit_factor = cleaned_stats.get('Profit Factor')
+    # If profit_factor is None (was NaN) or inf, set to 0 for DB
+    if profit_factor is None or (isinstance(profit_factor, float) and np.isinf(profit_factor)):
+        profit_factor = 0.0
+
+    num_trades = cleaned_stats.get('# Trades') or 0
+
+    # Use the cleaned dictionary for JSON conversion
+    stats_json = json.dumps(cleaned_stats, default=str)
 
     try:
         with conn.cursor() as cur:
@@ -146,9 +167,6 @@ def save_backtest_results(symbol, strategy_name, run_timestamp, stats):
         conn.rollback()
 
 def load_ml_model_bundle_from_folder(symbol: str) -> dict | None:
-    """
-    Loads the ML model bundle (model, scaler, feature names) from a local .pkl file.
-    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -211,7 +229,6 @@ def create_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    # Add other feature calculations here if needed
     return df_calc
 
 def send_telegram_message(text: str):
@@ -241,7 +258,6 @@ class MLStrategy(Strategy):
 
         try:
             current_index = self.data.index[-1]
-            # Ensure all required feature columns exist before trying to access them
             if not all(feature in self.data.df.columns for feature in self.feature_names):
                 logger.warning(f"Missing one or more feature columns at index {current_index}. Skipping.")
                 return
@@ -365,7 +381,6 @@ def run_backtest():
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         logger.info(f"\n--- ⏳ Processing symbol: {symbol} ---")
         
-        # --- ✨ تعديل: تحميل النموذج مباشرة من الملف المحلي مثل البوت ---
         model_bundle = load_ml_model_bundle_from_folder(symbol)
 
         if not model_bundle:
@@ -383,10 +398,9 @@ def run_backtest():
             logger.warning(f"⚠️ Skipping {symbol}: DataFrame is empty after feature engineering."); continue
 
         try:
-            # Ensure all required features are present in the final dataframe
             for feature in model_bundle['feature_names']:
                 if feature not in data.columns:
-                    data[feature] = 0 # Or some other default value
+                    data[feature] = 0
             
             bt = Backtest(data, MLStrategy, cash=INITIAL_CASH, commission=COMMISSION, exclusive_orders=True)
             stats = bt.run(
