@@ -29,15 +29,16 @@ import gc
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
+# ✨ تعديل: تحديث اسم ملف السجل واسم المسجل ليعكس الاستراتيجية الجديدة
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v8_dynamic.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v7_with_ichimoku.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV8_Dynamic')
+logger = logging.getLogger('CryptoBotV7_With_Ichimoku')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -53,7 +54,8 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_Dynamic'
+# ✨ تعديل: تحديث اسم النموذج الأساسي
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
 MODEL_FOLDER: str = 'V7'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
@@ -90,7 +92,7 @@ USE_DYNAMIC_SL_TP = True
 ATR_SL_MULTIPLIER = 1.5
 ATR_TP_MULTIPLIER = 2.0
 
-# --- ✨ جديد: إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
+# --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
@@ -101,15 +103,14 @@ BTC_SYMBOL = 'BTCUSDT'
 BTC_TREND_TIMEFRAME = '4h'
 BTC_TREND_EMA_PERIOD = 10
 
-# --- ✨ جديد: إعدادات فلتر تسارع الزخم ---
+# --- إعدادات فلتر تسارع الزخم ---
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
 ACCELERATION_LOOKBACK_PERIOD: int = 3
 ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
-# --- ✨ جديد: إعدادات الفلاتر الديناميكية (سيتم تحديثها تلقائياً) ---
+# --- إعدادات الفلاتر الديناميكية (سيتم تحديثها تلقائياً) ---
 DYNAMIC_FILTERS_ENABLED: bool = True
-# القيم الابتدائية
 SPEED_FILTER_ADX_THRESHOLD: float = 20.0
 SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.2
 SPEED_FILTER_RSI_MIN: float = 45.0
@@ -267,8 +268,123 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
+# ---------------------- ✨ جديد: دوال جلب الميزات المتقدمة من قاعدة البيانات ----------------------
+def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
+    if not check_db_connection() or not conn: return pd.DataFrame()
+    query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol,))
+            levels = cur.fetchall()
+            if not levels: return pd.DataFrame()
+            return pd.DataFrame(levels)
+    except Exception as e:
+        logger.error(f"❌ [S/R Fetch Bot] Could not fetch S/R levels for {symbol}: {e}")
+        if conn: conn.rollback()
+        return pd.DataFrame()
+
+def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
+    if not check_db_connection() or not conn: return pd.DataFrame()
+    query = """
+        SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
+        FROM ichimoku_features
+        WHERE symbol = %s AND timeframe = %s
+        ORDER BY timestamp;
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol, timeframe))
+            features = cur.fetchall()
+            if not features: return pd.DataFrame()
+            df_ichimoku = pd.DataFrame(features)
+            df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
+            df_ichimoku.set_index('timestamp', inplace=True)
+            return df_ichimoku
+    except Exception as e:
+        logger.error(f"❌ [Ichimoku Fetch Bot] Could not fetch Ichimoku features for {symbol}: {e}")
+        if conn: conn.rollback()
+        return pd.DataFrame()
+
+# ---------------------- ✨ جديد: دوال حساب الميزات المتقدمة ----------------------
+def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
+    df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
+    df['price_vs_kijun'] = (df['close'] - df['kijun_sen']) / df['kijun_sen']
+    df['tenkan_vs_kijun'] = (df['tenkan_sen'] - df['kijun_sen']) / df['kijun_sen']
+    df['price_vs_kumo_a'] = (df['close'] - df['senkou_span_a']) / df['senkou_span_a']
+    df['price_vs_kumo_b'] = (df['close'] - df['senkou_span_b']) / df['senkou_span_b']
+    df['kumo_thickness'] = (df['senkou_span_a'] - df['senkou_span_b']).abs() / df['close']
+    kumo_high = df[['senkou_span_a', 'senkou_span_b']].max(axis=1)
+    kumo_low = df[['senkou_span_a', 'senkou_span_b']].min(axis=1)
+    df['price_above_kumo'] = (df['close'] > kumo_high).astype(int)
+    df['price_below_kumo'] = (df['close'] < kumo_low).astype(int)
+    df['price_in_kumo'] = ((df['close'] >= kumo_low) & (df['close'] <= kumo_high)).astype(int)
+    df['chikou_above_kumo'] = (df['chikou_span'] > kumo_high).astype(int)
+    df['chikou_below_kumo'] = (df['chikou_span'] < kumo_low).astype(int)
+    df['tenkan_kijun_cross'] = 0
+    cross_up = (df['tenkan_sen'].shift(1) < df['kijun_sen'].shift(1)) & (df['tenkan_sen'] > df['kijun_sen'])
+    cross_down = (df['tenkan_sen'].shift(1) > df['kijun_sen'].shift(1)) & (df['tenkan_sen'] < df['kijun_sen'])
+    df.loc[cross_up, 'tenkan_kijun_cross'] = 1
+    df.loc[cross_down, 'tenkan_kijun_cross'] = -1
+    return df
+
+def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
+    df_patterns = df.copy()
+    op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
+    body = abs(cl - op)
+    candle_range = hi - lo
+    candle_range[candle_range == 0] = 1e-9
+    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
+    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
+    df_patterns['candlestick_pattern'] = 0
+    is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
+    is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
+    is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
+    is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
+    is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
+    is_doji = (body / candle_range) < 0.05
+    df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
+    df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
+    df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
+    df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
+    df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
+    df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
+    df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
+    return df_patterns
+
+def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
+    if sr_levels_df.empty:
+        df['dist_to_support'] = 0.0; df['dist_to_resistance'] = 0.0
+        df['score_of_support'] = 0.0; df['score_of_resistance'] = 0.0
+        return df
+    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
+    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)]['level_price'].sort_values().to_numpy()
+    support_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence', case=False)].set_index('level_price')['score'].to_dict()
+    resistance_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence', case=False)].set_index('level_price')['score'].to_dict()
+
+    def get_sr_info(price):
+        dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
+        if supports.size > 0:
+            idx = np.searchsorted(supports, price, side='right') - 1
+            if idx >= 0:
+                nearest_support_price = supports[idx]
+                dist_support = (price - nearest_support_price) / price if price > 0 else 0
+                score_support = support_scores.get(nearest_support_price, 0)
+        if resistances.size > 0:
+            idx = np.searchsorted(resistances, price, side='left')
+            if idx < len(resistances):
+                nearest_resistance_price = resistances[idx]
+                dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
+                score_resistance = resistance_scores.get(nearest_resistance_price, 0)
+        return dist_support, score_support, dist_resistance, score_resistance
+    results = df['close'].apply(get_sr_info)
+    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
+    return df
+
+# ---------------------- ✨ تعديل: دالة حساب الميزات الرئيسية المدمجة ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+    # ATR, ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -277,23 +393,51 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     up_move = df_calc['high'].diff(); down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    # MACD
     ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    df_calc['macd_hist'] = ema_fast - ema_slow
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    df_calc['macd_hist'] = macd_line - signal_line
+    df_calc['macd_cross'] = 0
+    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
+    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
+    # Bollinger Bands
     sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
     std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    upper_band = sma + (std_dev * 2); lower_band = sma - (std_dev * 2)
+    upper_band = sma + (std_dev * 2)
+    lower_band = sma - (std_dev * 2)
     df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
+    # Stochastic RSI
+    rsi = df_calc['rsi']
+    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
+    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
+    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
+    # Other features
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['market_condition'] = 0
+    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
+    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
+    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
+    df_calc['returns'] = df_calc['close'].pct_change()
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     df_calc['hour_of_day'] = df_calc.index.hour
+    df_calc = calculate_candlestick_patterns(df_calc)
     return df_calc.astype('float32', errors='ignore')
 
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
@@ -320,7 +464,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل النموذج للعملة {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- ✨ جديد: دوال الفلاتر المحسّنة ----------------------
+# ---------------------- دوال الفلاتر المحسّنة ----------------------
 def update_dynamic_filters():
     global SPEED_FILTER_ADX_THRESHOLD, SPEED_FILTER_REL_VOL_THRESHOLD, SPEED_FILTER_RSI_MIN, SPEED_FILTER_RSI_MAX, last_dynamic_filter_update
 
@@ -435,17 +579,26 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    # ✨ تعديل: تحديث الدالة لتشمل الميزات المتقدمة
+    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        if self.feature_names is None:
+            return None
         try:
             df_featured = calculate_features(df_15m, btc_df)
+            df_featured = calculate_sr_features(df_featured, sr_levels_df)
+            if not ichimoku_df.empty:
+                df_featured = df_featured.join(ichimoku_df, how='left')
+                df_featured = calculate_ichimoku_based_features(df_featured)
             
-            # Add MTF features
-            df_4h_rsi = df_4h['close'].diff().clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean() / \
-                        -df_4h['close'].diff().clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            df_4h['rsi_4h'] = 100 - (100 / (1 + df_4h_rsi))
-            mtf_features = df_4h[['rsi_4h']]
+            delta_4h = df_4h['close'].diff()
+            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+            df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+            ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+            df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+            mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
             df_featured = df_featured.join(mtf_features)
-            df_featured[['rsi_4h']] = df_featured[['rsi_4h']].fillna(method='ffill')
+            df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
             
             for col in self.feature_names:
                 if col not in df_featured.columns:
@@ -453,6 +606,7 @@ class TradingStrategy:
             
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured[self.feature_names].dropna()
+
         except Exception as e:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات: {e}", exc_info=True)
             return None
@@ -462,8 +616,15 @@ class TradingStrategy:
         last_row_df = df_features.iloc[[-1]]
         try:
             features_scaled = self.scaler.transform(last_row_df)
-            prob_for_class_1 = self.ml_model.predict_proba(features_scaled)[:, 1][0]
-            if prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
+            features_scaled_df = pd.DataFrame(features_scaled, columns=self.feature_names)
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
+            try:
+                class_1_index = list(self.ml_model.classes_).index(1)
+            except ValueError:
+                return None
+            prob_for_class_1 = prediction_proba[class_1_index]
+            if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' بثقة {prob_for_class_1:.2%}.")
                 return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}}
             return None
@@ -471,7 +632,7 @@ class TradingStrategy:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ: {e}")
             return None
 
-# ---------------------- ✨ معدّل: حلقة مراقبة الصفقات مع الوقف المتحرك ----------------------
+# ---------------------- حلقة مراقبة الصفقات مع الوقف المتحرك ----------------------
 def trade_monitoring_loop():
     global last_api_check_time
     logger.info("✅ [Trade Monitor] بدء مراقبة الصفقات (مع دعم الوقف المتحرك).")
@@ -540,10 +701,12 @@ def trade_monitoring_loop():
             time.sleep(5)
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
-def send_telegram_message(target_chat_id: str, text: str):
+def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None):
     if not TELEGRAM_TOKEN or not target_chat_id: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
     try: requests.post(url, json=payload, timeout=10)
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
@@ -557,7 +720,8 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
                f"🎯 *الهدف:* `${target:,.8g}` (`{profit_pct:+.2f}%`)\n"
                f"🛑 *الوقف:* `${sl:,.8g}`\n\n"
                f"🔍 *الثقة:* {signal_data['signal_details']['ML_Probability_Buy']}")
-    send_telegram_message(CHAT_ID, message)
+    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
+    send_telegram_message(CHAT_ID, message, reply_markup)
     log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -670,6 +834,7 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
+# ✨ تعديل: تحديث الحلقة الرئيسية لاستخدام الميزات الجديدة
 def main_loop():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
     time.sleep(15) 
@@ -715,10 +880,15 @@ def main_loop():
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_4h is None: continue
+
+                        # جلب الميزات المتقدمة
+                        sr_levels = fetch_sr_levels_from_db(symbol)
+                        ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
                         
                         strategy = TradingStrategy(symbol)
-                        df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                        del df_15m, df_4h; gc.collect()
+                        # تمرير الميزات المتقدمة إلى الدالة
+                        df_features = strategy.get_features(df_15m, df_4h, btc_data, sr_levels, ichimoku_data)
+                        del df_15m, df_4h, sr_levels, ichimoku_data; gc.collect()
                         
                         if df_features is None or df_features.empty: continue
                         
