@@ -56,7 +56,7 @@ TRADE_AMOUNT_USDT = 10.0
 FEE = 0.001
 SLIPPAGE = 0.0005
 COMMISSION = FEE + SLIPPAGE
-BACKTEST_PERIOD_DAYS = 90
+BACKTEST_PERIOD_DAYS = 30
 OUT_OF_SAMPLE_OFFSET_DAYS = 90
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
