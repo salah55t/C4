@@ -93,11 +93,11 @@ MIN_PROFIT_PERCENTAGE_FILTER: float = 1.0
 
 # --- ✨ جديد: ثوابت فلتر السرعة والتوقيت ---
 # هذا الفلتر يهدف إلى اختيار الإشارات ذات الزخم الأعلى لضمان وصول أسرع للهدف
-USE_SPEED_FILTER: bool = False  # تفعيل أو تعطيل الفلتر
+USE_SPEED_FILTER: bool = True  # تفعيل أو تعطيل الفلتر
 SPEED_FILTER_ADX_THRESHOLD: float = 20.0  # الحد الأدنى لمؤشر ADX للدلالة على وجود اتجاه قوي
-SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.2  # الحد الأدنى لحجم التداول النسبي للدلالة على اهتمام المتداولين
-SPEED_FILTER_RSI_MIN: float = 45.0  # الحد الأدنى لمؤشر RSI (يجب أن يكون في منطقة الزخم الصاعد)
-SPEED_FILTER_RSI_MAX: float = 70.0  # الحد الأقصى لمؤشر RSI (لتجنب مناطق التشبع الشرائي الشديد)
+SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.3  # الحد الأدنى لحجم التداول النسبي للدلالة على اهتمام المتداولين
+SPEED_FILTER_RSI_MIN: float = 55.0  # الحد الأدنى لمؤشر RSI (يجب أن يكون في منطقة الزخم الصاعد)
+SPEED_FILTER_RSI_MAX: float = 75.0  # الحد الأقصى لمؤشر RSI (لتجنب مناطق التشبع الشرائي الشديد)
 
 
 # --- المتغيرات العامة وقفل العمليات ---
