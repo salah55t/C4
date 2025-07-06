@@ -86,12 +86,11 @@ def init_db():
         conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
         conn.autocommit = False
         logger.info("✅ [DB] تم تهيئة الاتصال بقاعدة البيانات بنجاح.")
-        create_backtest_results_table() # <-- ✨ جديد: التأكد من وجود جدول النتائج
+        create_backtest_results_table()
     except Exception as e:
         logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}")
         conn = None
 
-# --- ✨ جديد: دالة لإنشاء جدول نتائج الاختبار الخلفي ---
 def create_backtest_results_table():
     if not conn: return
     try:
@@ -116,23 +115,22 @@ def create_backtest_results_table():
         logger.error(f"❌ [DB] فشل في إنشاء جدول 'backtest_results': {e}")
         conn.rollback()
 
-# --- ✨ جديد: دالة لحفظ نتيجة اختبار فردي في قاعدة البيانات ---
 def save_backtest_results(symbol, strategy_name, run_timestamp, stats):
     if not conn:
         logger.error("❌ [DB Save] لا يمكن حفظ النتائج، لا يوجد اتصال بقاعدة البيانات.")
         return
 
-    # استخراج القيم الرئيسية لتسهيل الاستعلامات
-    # استخدام .get() مع قيمة افتراضية لتجنب الأخطاء إذا كانت الإحصائيات غير موجودة
-    duration_str = stats.get('Duration', '0 days').split()[0]
-    duration_days = int(duration_str) if duration_str.isdigit() else 0
+    # --- ✨ تصحيح: معالجة كائن Timedelta بشكل صحيح ---
+    # The 'Duration' from backtesting.py is a Timedelta object. We get the days directly.
+    duration_obj = stats.get('Duration')
+    duration_days = duration_obj.days if pd.notna(duration_obj) else 0
+    
     return_pct = stats.get('Return [%]', 0.0)
     win_rate_pct = stats.get('Win Rate [%]', 0.0)
     profit_factor = stats.get('Profit Factor', 0.0)
     num_trades = stats.get('# Trades', 0)
 
-    # تحويل كائن الإحصائيات إلى سلسلة JSON
-    stats_json = json.dumps(stats, default=str) # استخدام default=str لمعالجة أي أنواع بيانات غير قابلة للتحويل
+    stats_json = json.dumps(stats, default=str)
 
     try:
         with conn.cursor() as cur:
@@ -147,46 +145,36 @@ def save_backtest_results(symbol, strategy_name, run_timestamp, stats):
         logger.error(f"❌ [DB Save] فشل في حفظ نتائج {symbol}: {e}")
         conn.rollback()
 
-
-def load_ml_model_bundle_from_db(symbol: str) -> dict | None:
-    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    if not conn: return None
-    try:
-        with conn.cursor() as db_cur:
-            db_cur.execute("SELECT model_data FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;", (model_name,))
-            result = db_cur.fetchone()
-            if result and result['model_data']:
-                model_bundle = pickle.loads(result['model_data'])
-                conn.commit()
-                return model_bundle
-        conn.commit()
-        return None
-    except Exception as e:
-        logger.error(f"❌ [ML Model DB] خطأ في تحميل حزمة النموذج للعملة {symbol}: {e}")
-        if conn: conn.rollback()
-        return None
-
 def load_ml_model_bundle_from_folder(symbol: str) -> dict | None:
+    """
+    Loads the ML model bundle (model, scaler, feature names) from a local .pkl file.
+    """
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
-        if not os.path.exists(model_path): return None
+        if not os.path.exists(model_path):
+            logger.warning(f"⚠️ [ML Model File] Model file not found for {symbol} at {model_path}")
+            return None
         with open(model_path, 'rb') as f:
             model_bundle = pickle.load(f)
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+            logger.info(f"✅ [ML Model File] Successfully loaded model bundle for {symbol} from local file.")
             return model_bundle
+        logger.error(f"❌ [ML Model File] Model bundle for {symbol} is incomplete.")
         return None
     except Exception as e:
-        logger.error(f"❌ [ML Model File] خطأ في تحميل حزمة النموذج من الملف للعملة {symbol}: {e}")
+        logger.error(f"❌ [ML Model File] Error loading model bundle from file for {symbol}: {e}")
         return None
 
-# ... (بقية دوال جلب البيانات وهندسة الميزات تبقى كما هي) ...
 def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_period_days: int = 0) -> pd.DataFrame | None:
     global client
     if not client:
-        try: client = Client(API_KEY, API_SECRET)
-        except Exception as e: logger.error(f"❌ [Binance] فشل في تهيئة اتصال Binance: {e}"); return None
+        try:
+            client = Client(API_KEY, API_SECRET)
+        except Exception as e:
+            logger.error(f"❌ [Binance] Failed to initialize Binance client: {e}")
+            return None
     try:
         now = datetime.now(timezone.utc)
         end_dt = now - timedelta(days=out_of_sample_period_days)
@@ -201,15 +189,18 @@ def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_p
         df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
         return df.dropna()
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية للعملة {symbol}: {e}")
+        logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}")
         return None
 
 def create_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    high_low = df_calc['High'] - df_calc['Low']; high_close = (df_calc['High'] - df_calc['Close'].shift()).abs(); low_close = (df_calc['Low'] - df_calc['Close'].shift()).abs()
+    high_low = df_calc['High'] - df_calc['Low']
+    high_close = (df_calc['High'] - df_calc['Close'].shift()).abs()
+    low_close = (df_calc['Low'] - df_calc['Close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['High'].diff(); down_move = -df_calc['Low'].diff()
+    up_move = df_calc['High'].diff()
+    down_move = -df_calc['Low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
     plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
@@ -220,20 +211,21 @@ def create_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    # Add other feature calculations here if needed
     return df_calc
 
 def send_telegram_message(text: str):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.warning("⚠️ [Telegram] Token أو Chat ID غير معرف. تم تخطي إرسال الرسالة.")
+        logger.warning("⚠️ [Telegram] Token or Chat ID not configured. Skipping message.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(CHAT_ID), 'text': text, 'parse_mode': 'Markdown'}
     try:
         response = requests.post(url, json=payload, timeout=20)
         response.raise_for_status()
-        logger.info("✅ [Telegram] تم إرسال تقرير الملخص بنجاح.")
+        logger.info("✅ [Telegram] Summary report sent successfully.")
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+        logger.error(f"❌ [Telegram] Failed to send message: {e}")
 
 # ---------------------- فئة استراتيجية Backtesting.py ----------------------
 class MLStrategy(Strategy):
@@ -248,9 +240,16 @@ class MLStrategy(Strategy):
         if self.position: return
 
         try:
-            features = self.data.df.loc[self.data.index[-1], self.feature_names]
+            current_index = self.data.index[-1]
+            # Ensure all required feature columns exist before trying to access them
+            if not all(feature in self.data.df.columns for feature in self.feature_names):
+                logger.warning(f"Missing one or more feature columns at index {current_index}. Skipping.")
+                return
+            
+            features = self.data.df.loc[current_index, self.feature_names]
             if features.isnull().any(): return
-        except (KeyError, IndexError): return
+        except (KeyError, IndexError):
+            return
 
         features_df = pd.DataFrame([features])
         features_scaled_np = self.scaler.transform(features_df)
@@ -262,7 +261,8 @@ class MLStrategy(Strategy):
         try:
             class_1_index = list(self.ml_model.classes_).index(1)
             prob_for_class_1 = prediction_proba[class_1_index]
-        except ValueError: return
+        except ValueError:
+            return
 
         if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
             current_atr = self.data.atr[-1]
@@ -279,15 +279,13 @@ class MLStrategy(Strategy):
                 take_profit_price = current_price + (current_atr * ATR_TP_MULTIPLIER)
                 self.buy(size=size_as_fraction, sl=stop_loss_price, tp=take_profit_price)
 
-# --- ✨ جديد: دالة لتوليد التقرير النهائي من قاعدة البيانات ---
 def generate_report_from_db(run_timestamp):
     if not conn:
-        logger.error("❌ [Report] لا يمكن إنشاء التقرير، لا يوجد اتصال بقاعدة البيانات.")
+        logger.error("❌ [Report] Cannot generate report, no database connection.")
         return
 
-    logger.info("📊 [Report] جاري إنشاء التقرير النهائي من النتائج المحفوظة...")
+    logger.info("📊 [Report] Generating final report from saved results...")
     try:
-        # استخدام SQL لتجميع البيانات مباشرة من قاعدة البيانات
         query = """
             SELECT
                 COUNT(*) AS total_symbols,
@@ -306,8 +304,8 @@ def generate_report_from_db(run_timestamp):
         conn.commit()
 
         if not summary or summary['total_symbols'] == 0:
-            logger.warning("⚠️ [Report] لم يتم العثور على نتائج للاختبار الحالي.")
-            send_telegram_message("🏁 انتهى الاختبار الخلفي ولكن لم يتم العثور على نتائج صالحة لإنشاء تقرير.")
+            logger.warning("⚠️ [Report] No results found for the current backtest run.")
+            send_telegram_message("🏁 Backtest finished but no valid results were found to generate a report.")
             return
 
         report_title = f"📊 *ملخص الاختبار الخلفي - {BASE_ML_MODEL_NAME}*"
@@ -334,22 +332,21 @@ def generate_report_from_db(run_timestamp):
         send_telegram_message(final_report)
 
     except Exception as e:
-        logger.error(f"❌ [Report] فشل في إنشاء التقرير من قاعدة البيانات: {e}")
+        logger.error(f"❌ [Report] Failed to generate report from database: {e}")
         if conn: conn.rollback()
-        send_telegram_message("❌ حدث خطأ أثناء إنشاء تقرير الاختبار الخلفي.")
+        send_telegram_message("❌ An error occurred while generating the backtest report.")
 
 # ---------------------- كتلة التنفيذ الرئيسية ----------------------
 def run_backtest():
     global conn
-    logger.info(f"🚀 بدء الاختبار الخلفي المتقدم لاستراتيجية {BASE_ML_MODEL_NAME}...")
+    logger.info(f"🚀 Starting advanced backtest for strategy {BASE_ML_MODEL_NAME}...")
     
     init_db()
     if not conn:
-        logger.critical("❌ لا يمكن تشغيل الاختبار الخلفي بدون اتصال بقاعدة البيانات.")
-        send_telegram_message("❌ فشل الاختبار الخلفي: لم يتمكن من الاتصال بقاعدة البيانات.")
+        logger.critical("❌ Cannot run backtest without a database connection.")
+        send_telegram_message("❌ Backtest failed: Could not connect to the database.")
         return
 
-    # --- ✨ جديد: تحديد وقت بدء فريد لهذه الجولة من الاختبار ---
     run_timestamp = datetime.now(timezone.utc)
 
     try:
@@ -358,35 +355,39 @@ def run_backtest():
         with open(file_path, 'r', encoding='utf-8') as f:
             symbols_to_test = [line.strip().upper() + "USDT" for line in f if line.strip() and not line.startswith('#')]
     except FileNotFoundError:
-        logger.error("❌ ملف 'crypto_list.txt' غير موجود."); return
+        logger.error("❌ 'crypto_list.txt' file not found."); return
 
     btc_df_full = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, BACKTEST_PERIOD_DAYS + 10, out_of_sample_period_days=OUT_OF_SAMPLE_OFFSET_DAYS)
     if btc_df_full is None:
-        logger.critical("❌ فشل جلب بيانات BTC. لا يمكن المتابعة."); return
+        logger.critical("❌ Failed to fetch BTC data. Cannot proceed."); return
     btc_df_full['btc_returns'] = btc_df_full['Close'].pct_change()
     
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
-        logger.info(f"\n--- ⏳ جاري معالجة الرمز: {symbol} ---")
+        logger.info(f"\n--- ⏳ Processing symbol: {symbol} ---")
         
-        model_bundle = load_ml_model_bundle_from_db(symbol)
-        if not model_bundle:
-            model_bundle = load_ml_model_bundle_from_folder(symbol)
+        # --- ✨ تعديل: تحميل النموذج مباشرة من الملف المحلي مثل البوت ---
+        model_bundle = load_ml_model_bundle_from_folder(symbol)
 
         if not model_bundle:
-            logger.warning(f"⚠️ تخطي {symbol}: لم يتم العثور على نموذج."); continue
+            logger.warning(f"⚠️ Skipping {symbol}: Model not found."); continue
         
         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, BACKTEST_PERIOD_DAYS, out_of_sample_period_days=OUT_OF_SAMPLE_OFFSET_DAYS)
         if df_15m is None or df_15m.empty:
-            logger.warning(f"⚠️ تخطي {symbol}: بيانات تاريخية غير كافية."); continue
+            logger.warning(f"⚠️ Skipping {symbol}: Insufficient historical data."); continue
             
         data = create_all_features(df_15m, btc_df_full)
         data.replace([np.inf, -np.inf], np.nan, inplace=True)
         data.dropna(inplace=True)
         
         if data.empty:
-            logger.warning(f"⚠️ تخطي {symbol}: DataFrame فارغ بعد هندسة الميزات."); continue
+            logger.warning(f"⚠️ Skipping {symbol}: DataFrame is empty after feature engineering."); continue
 
         try:
+            # Ensure all required features are present in the final dataframe
+            for feature in model_bundle['feature_names']:
+                if feature not in data.columns:
+                    data[feature] = 0 # Or some other default value
+            
             bt = Backtest(data, MLStrategy, cash=INITIAL_CASH, commission=COMMISSION, exclusive_orders=True)
             stats = bt.run(
                 ml_model=model_bundle['model'],
@@ -394,23 +395,20 @@ def run_backtest():
                 feature_names=model_bundle['feature_names']
             )
             
-            # --- ✨ تعديل: حفظ النتيجة مباشرة في قاعدة البيانات ---
             save_backtest_results(symbol, BASE_ML_MODEL_NAME, run_timestamp, stats.to_dict())
 
         except Exception as e:
-            logger.error(f"❌ [Backtest Run] فشل الاختبار الخلفي للعملة {symbol}: {e}")
+            logger.error(f"❌ [Backtest Run] Backtest failed for symbol {symbol}: {e}", exc_info=True)
         
-        # --- ✨ جديد: تحرير الذاكرة بعد كل عملة ---
         del data, df_15m, model_bundle
         gc.collect()
-        logger.info(f"🧠 [Memory] تم تحرير الذاكرة بعد معالجة {symbol}.")
+        logger.info(f"🧠 [Memory] Memory freed after processing {symbol}.")
 
-    # --- ✨ تعديل: توليد التقرير النهائي بعد الانتهاء من جميع العملات ---
     generate_report_from_db(run_timestamp)
         
     if conn:
         conn.close()
-    logger.info("✅ انتهى خيط الاختبار الخلفي.")
+    logger.info("✅ Backtest thread finished.")
 
 
 if __name__ == "__main__":
