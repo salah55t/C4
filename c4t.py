@@ -57,7 +57,7 @@ FEE = 0.001
 SLIPPAGE = 0.0005
 COMMISSION = FEE + SLIPPAGE
 BACKTEST_PERIOD_DAYS = 30
-OUT_OF_SAMPLE_OFFSET_DAYS = 90
+OUT_OF_SAMPLE_OFFSET_DAYS = 126
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
