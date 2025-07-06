@@ -6,6 +6,7 @@ import warnings
 import pandas as pd
 import numpy as np
 import psycopg2
+import requests # <-- إضافة مكتبة الطلبات لإرسال رسائل تلغرام
 from decouple import config
 from binance.client import Client
 from psycopg2.extras import RealDictCursor
@@ -23,7 +24,6 @@ app = Flask(__name__)
 @app.route('/')
 def health_check():
     """هذه هي نقطة الوصول التي ستستدعيها خدمة cron-job."""
-    # يمكنك إضافة المزيد من المعلومات هنا إذا أردت، مثل حالة الاختبار الخلفي
     return "Backtester service is running.", 200
 
 # --- تجاهل التحذيرات غير الهامة ---
@@ -46,6 +46,9 @@ try:
     API_KEY = config('BINANCE_API_KEY')
     API_SECRET = config('BINANCE_API_SECRET')
     DB_URL = config('DATABASE_URL')
+    # --- ✨ جديد: تحميل متغيرات تلغرام ---
+    TELEGRAM_TOKEN = config('TELEGRAM_BOT_TOKEN', default=None)
+    CHAT_ID = config('TELEGRAM_CHAT_ID', default=None)
 except Exception as e:
     logger.critical(f"❌ فشل حرج في تحميل متغيرات البيئة: {e}")
     exit(1)
@@ -61,6 +64,7 @@ OUT_OF_SAMPLE_OFFSET_DAYS = 126
 
 # --- ثوابت الاستراتيجية والنموذج (يجب أن تتطابق مع البوت والمدرب) ---
 BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V7_With_Ichimoku'
+MODEL_FOLDER = 'V7' # <-- ✨ جديد: مجلد النماذج المحلية
 SIGNAL_GENERATION_TIMEFRAME = '15m'
 HIGHER_TIMEFRAME = '4h'
 BTC_SYMBOL = 'BTCUSDT'
@@ -85,12 +89,13 @@ def init_db():
     global conn
     try:
         conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+        conn.autocommit = False # <-- مهم للمعاملات
         logger.info("✅ [DB] تم تهيئة الاتصال بقاعدة البيانات بنجاح.")
     except Exception as e:
         logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}")
-        # لا نستخدم exit(1) هنا للسماح لخادم الويب بالعمل حتى لو فشلت قاعدة البيانات
-        conn = None # تأكد من أن الاتصال فارغ
+        conn = None
 
+# --- ✨ تعديل: إصلاح معالجة الأخطاء في دوال قاعدة البيانات ---
 def load_ml_model_bundle_from_db(symbol: str) -> dict | None:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if not conn:
@@ -102,12 +107,46 @@ def load_ml_model_bundle_from_db(symbol: str) -> dict | None:
             result = db_cur.fetchone()
             if result and result['model_data']:
                 model_bundle = pickle.loads(result['model_data'])
-                logger.info(f"✅ [ML Model] تم تحميل النموذج '{model_name}' للعملة {symbol} من قاعدة البيانات.")
+                logger.info(f"✅ [ML Model DB] تم تحميل النموذج '{model_name}' من قاعدة البيانات.")
+                conn.commit() # تأكيد المعاملة الناجحة
                 return model_bundle
-        logger.warning(f"⚠️ [ML Model] النموذج '{model_name}' غير موجود في قاعدة البيانات للعملة {symbol}.")
+        # إذا لم يتم العثور على النموذج، فهذا ليس خطأ، فقط لا يوجد نموذج
+        conn.commit()
         return None
     except Exception as e:
-        logger.error(f"❌ [ML Model] خطأ في تحميل حزمة النموذج للعملة {symbol}: {e}")
+        logger.error(f"❌ [ML Model DB] خطأ في تحميل حزمة النموذج للعملة {symbol}: {e}")
+        if conn:
+            try:
+                # --- الإصلاح الرئيسي: التراجع عن المعاملة الفاشلة ---
+                conn.rollback()
+                logger.info(f"🔄 [DB] تم التراجع عن المعاملة للعملة {symbol}.")
+            except psycopg2.Error as rb_e:
+                logger.error(f"❌ [DB] خطأ أثناء التراجع عن المعاملة: {rb_e}")
+        return None
+
+# --- ✨ جديد: دالة تحميل النماذج من الملفات المحلية (مثل البوت الرئيسي) ---
+def load_ml_model_bundle_from_folder(symbol: str) -> dict | None:
+    """
+    تحميل حزمة النموذج (النموذج + المحول + أسماء الميزات) من ملف .pkl محلي.
+    """
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
+        if not os.path.exists(model_path):
+            return None # الملف غير موجود، وهذا متوقع
+
+        with open(model_path, 'rb') as f:
+            model_bundle = pickle.load(f)
+
+        if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+            logger.info(f"✅ [ML Model File] تم تحميل النموذج '{model_name}' بنجاح من الملف المحلي.")
+            return model_bundle
+        else:
+            logger.error(f"❌ [ML Model File] حزمة النموذج في '{model_path}' غير مكتملة.")
+            return None
+    except Exception as e:
+        logger.error(f"❌ [ML Model File] خطأ في تحميل حزمة النموذج من الملف للعملة {symbol}: {e}")
         return None
 
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
@@ -115,51 +154,58 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
     try:
         df = pd.read_sql(query, conn, params=(symbol,))
-        if not df.empty:
-            logger.info(f"✅ [S/R Levels] تم جلب {len(df)} من مستويات الدعم والمقاومة للعملة {symbol} من قاعدة البيانات.")
+        conn.commit()
         return df
     except Exception as e:
         logger.error(f"❌ [S/R Levels] لا يمكن جلب مستويات الدعم والمقاومة للعملة {symbol}: {e}")
+        if conn: conn.rollback()
         return pd.DataFrame()
 
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
     if not conn: return pd.DataFrame()
-    logger.info(f"🔍 [Ichimoku Fetch] Fetching Ichimoku features for {symbol} on {timeframe}...")
     query = """
         SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
-        FROM ichimoku_features
-        WHERE symbol = %s AND timeframe = %s
-        ORDER BY timestamp;
+        FROM ichimoku_features WHERE symbol = %s AND timeframe = %s ORDER BY timestamp;
     """
     try:
         with conn.cursor() as cur:
             cur.execute(query, (symbol, timeframe))
             features = cur.fetchall()
-            if not features:
-                logger.warning(f"⚠️ [Ichimoku Fetch] No Ichimoku features found for {symbol}.")
-                return pd.DataFrame()
-
+            if not features: return pd.DataFrame()
             colnames = [desc[0] for desc in cur.description]
             df_ichimoku = pd.DataFrame(features, columns=colnames)
-
         df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
         df_ichimoku.set_index('timestamp', inplace=True)
-
-        logger.info(f"✅ [Ichimoku Fetch] Found {len(df_ichimoku)} Ichimoku records for {symbol}.")
+        conn.commit()
         return df_ichimoku
     except Exception as e:
         logger.error(f"❌ [Ichimoku Fetch] Could not fetch Ichimoku features for {symbol}: {e}")
-        if conn and not getattr(conn, 'autocommit', True):
-             conn.rollback()
+        if conn: conn.rollback()
         return pd.DataFrame()
 
-# ---------------------- جلب وإعداد البيانات ----------------------
+# --- ✨ جديد: دالة إرسال رسائل تلغرام ---
+def send_telegram_message(text: str):
+    """
+    ترسل رسالة نصية إلى قناة التلغرام المحددة.
+    """
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.warning("⚠️ [Telegram] Token أو Chat ID غير معرف. تم تخطي إرسال الرسالة.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {'chat_id': str(CHAT_ID), 'text': text, 'parse_mode': 'Markdown'}
+    try:
+        response = requests.post(url, json=payload, timeout=20)
+        response.raise_for_status()
+        logger.info("✅ [Telegram] تم إرسال تقرير الملخص بنجاح.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+
+# ---------------------- دوال جلب البيانات وهندسة الميزات (تبقى كما هي) ----------------------
 def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_period_days: int = 0) -> pd.DataFrame | None:
     global client
     if not client:
         try:
             client = Client(API_KEY, API_SECRET)
-            logger.info("✅ [Binance] تم تهيئة اتصال Binance.")
         except Exception as e:
             logger.error(f"❌ [Binance] فشل في تهيئة اتصال Binance: {e}")
             return None
@@ -170,9 +216,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_p
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str, end_str)
-        
         if not klines: return None
-        
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
         numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
@@ -185,7 +229,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int, out_of_sample_p
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية للعملة {symbol}: {e}")
         return None
 
-# ---------------------- دوال هندسة الميزات (منسوخة من البوت/المدرب) ----------------------
 def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     op, hi, lo, cl = df['Open'], df['High'], df['Low'], df['Close']
     body = abs(cl - op); candle_range = hi - lo
@@ -294,7 +337,7 @@ def create_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = calculate_candlestick_patterns(df_calc)
     return df_calc
 
-# ---------------------- فئة استراتيجية Backtesting.py ----------------------
+# ---------------------- فئة استراتيجية Backtesting.py (تبقى كما هي) ----------------------
 class MLStrategy(Strategy):
     ml_model = None
     scaler = None
@@ -332,15 +375,12 @@ class MLStrategy(Strategy):
             if pd.isna(current_atr) or current_atr == 0:
                 return
 
-            # --- ✨ التحسين: التحقق من وجود رصيد كافٍ قبل محاولة التداول ---
-            # نتأكد من أن الرصيد الحالي أكبر من حجم الصفقة المطلوبة
             if self.equity < TRADE_AMOUNT_USDT:
-                return # الخروج من الدالة إذا لم يكن الرصيد كافياً
+                return
 
             current_price = self.data.Close[-1]
             size_as_fraction = TRADE_AMOUNT_USDT / self.equity
 
-            # نستخدم 0.99 كهامش أمان للتأكد من أن حجم الصفقة لا يتجاوز الرصيد
             if size_as_fraction > 0 and size_as_fraction < 0.99:
                 stop_loss_price = current_price - (current_atr * ATR_SL_MULTIPLIER)
                 take_profit_price = current_price + (current_atr * ATR_TP_MULTIPLIER)
@@ -353,9 +393,9 @@ def run_backtest():
     logger.info(f"🚀 بدء الاختبار الخلفي المتقدم لاستراتيجية {BASE_ML_MODEL_NAME}...")
     
     init_db()
-    # تأكد من أن الاتصال بقاعدة البيانات متاح قبل المتابعة
     if not conn:
         logger.critical("❌ لا يمكن تشغيل الاختبار الخلفي بدون اتصال بقاعدة البيانات.")
+        send_telegram_message("❌ فشل الاختبار الخلفي: لم يتمكن من الاتصال بقاعدة البيانات.")
         return
 
     try:
@@ -365,12 +405,15 @@ def run_backtest():
             symbols_to_test = [line.strip().upper() + "USDT" for line in f if line.strip() and not line.startswith('#')]
     except FileNotFoundError:
         logger.error("❌ ملف 'crypto_list.txt' غير موجود. سيتم الخروج.")
+        send_telegram_message("❌ فشل الاختبار الخلفي: ملف `crypto_list.txt` غير موجود.")
         return
 
-    logger.info(f"ℹ️ جاري جلب بيانات BTC العالمية لفترة الاختبار الخلفي (Out-of-Sample: {OUT_OF_SAMPLE_OFFSET_DAYS} days)...")
+    logger.info(f"ℹ️ جاري جلب بيانات BTC العالمية...")
     btc_df_full = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, BACKTEST_PERIOD_DAYS + 10, out_of_sample_period_days=OUT_OF_SAMPLE_OFFSET_DAYS)
     if btc_df_full is None:
-        logger.critical("❌ فشل جلب بيانات BTC. لا يمكن المتابعة."); return
+        logger.critical("❌ فشل جلب بيانات BTC. لا يمكن المتابعة.");
+        send_telegram_message("❌ فشل الاختبار الخلفي: لم يتمكن من جلب بيانات BTC.")
+        return
     btc_df_full['btc_returns'] = btc_df_full['Close'].pct_change()
 
     all_stats = []
@@ -378,9 +421,14 @@ def run_backtest():
     for symbol in tqdm(symbols_to_test, desc="Backtesting Symbols"):
         logger.info(f"\n--- ⏳ جاري معالجة الرمز: {symbol} ---")
         
+        # --- ✨ تعديل: محاولة تحميل النموذج من قاعدة البيانات أولاً، ثم من الملف المحلي ---
         model_bundle = load_ml_model_bundle_from_db(symbol)
         if not model_bundle:
-            logger.warning(f"⚠️ تخطي {symbol}: لم يتم العثور على نموذج.")
+            logger.info(f"ℹ️ [ML Model] لم يتم العثور على النموذج في قاعدة البيانات، جاري البحث في الملفات المحلية...")
+            model_bundle = load_ml_model_bundle_from_folder(symbol)
+
+        if not model_bundle:
+            logger.warning(f"⚠️ تخطي {symbol}: لم يتم العثور على نموذج لا في قاعدة البيانات ولا في الملفات المحلية.")
             continue
         
         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, BACKTEST_PERIOD_DAYS, out_of_sample_period_days=OUT_OF_SAMPLE_OFFSET_DAYS)
@@ -393,8 +441,6 @@ def run_backtest():
         sr_levels = fetch_sr_levels_from_db(symbol)
         ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
 
-        logger.info(f"هندسة الميزات لـ {symbol}...")
-        
         data = create_all_features(df_15m, btc_df_full)
         
         delta_4h = df_4h['Close'].diff()
@@ -419,14 +465,7 @@ def run_backtest():
             logger.warning(f"⚠️ تخطي {symbol}: DataFrame فارغ بعد هندسة الميزات.")
             continue
 
-        logger.info(f"جاري تشغيل الاختبار الخلفي لـ {symbol}...")
-        bt = Backtest(
-            data,
-            MLStrategy,
-            cash=INITIAL_CASH,
-            commission=COMMISSION,
-            exclusive_orders=True
-        )
+        bt = Backtest(data, MLStrategy, cash=INITIAL_CASH, commission=COMMISSION, exclusive_orders=True)
         
         stats = bt.run(
             ml_model=model_bundle['model'],
@@ -450,30 +489,43 @@ def run_backtest():
             'Profit Factor', 'Sharpe Ratio', 'Sortino Ratio', '# Trades'
         ]])
         
-        # --- START: التعديل ---
-        # التحقق من وجود الأعمدة المطلوبة قبل استخدامها لتجنب الأخطاء
-        required_cols = ['Equity Final [$]', 'Start Equity [$]', '# Trades', 'Win Rate [%]', 'Profit Factor']
-        if all(col in summary_df.columns for col in required_cols):
-            total_trades = summary_df['# Trades'].sum()
-            # تصحيح اسم العمود من 'Equity Start [$]' إلى 'Start Equity [$]'
-            total_profit = summary_df['Equity Final [$]'].sum() - summary_df['Start Equity [$]'].sum()
-            avg_win_rate = summary_df['Win Rate [%]'].mean()
-            avg_profit_factor = summary_df['Profit Factor'].mean()
+        # --- ✨ جديد: إنشاء وإرسال تقرير التلغرام ---
+        report_title = f"📊 *ملخص الاختبار الخلفي - {BASE_ML_MODEL_NAME}*"
+        report_date = f"*{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S %Z')}*"
+        
+        if not summary_df.empty:
+            total_symbols = len(summary_df)
+            profitable_symbols = len(summary_df[summary_df['Return [%]'] > 0])
             
-            print("\n--- المقاييس المجمعة ---")
-            print(f"إجمالي الرموز المختبرة: {len(summary_df)}")
-            print(f"إجمالي عدد الصفقات: {total_trades}")
-            print(f"إجمالي صافي الربح/الخسارة: ${total_profit:,.2f}")
-            print(f"متوسط نسبة الربح: {avg_win_rate:.2f}%")
-            print(f"متوسط عامل الربح: {avg_profit_factor:.2f}")
+            total_trades = summary_df.get('# Trades', pd.Series([0])).sum()
+            avg_win_rate = summary_df.get('Win Rate [%]', pd.Series([0])).mean()
+            # تجاهل قيم inf في profit factor لحساب المتوسط بشكل صحيح
+            avg_profit_factor = summary_df.get('Profit Factor', pd.Series([np.nan])).replace([np.inf, -np.inf], np.nan).mean()
+            total_return_pct = summary_df.get('Return [%]', pd.Series([0])).sum()
+            avg_return_pct = summary_df.get('Return [%]', pd.Series([0])).mean()
+
+            report_body = (
+                f"----------------------------------------\n"
+                f"▫️ *إجمالي الرموز المختبرة:* `{total_symbols}`\n"
+                f"📈 *رموز رابحة:* `{profitable_symbols}`\n"
+                f"📉 *رموز خاسرة:* `{total_symbols - profitable_symbols}`\n"
+                f"🔄 *إجمالي الصفقات:* `{int(total_trades)}`\n"
+                f"----------------------------------------\n"
+                f"🎯 *متوسط نسبة الربح:* `{avg_win_rate:.2f}%`\n"
+                f"💰 *متوسط عامل الربح:* `{avg_profit_factor:.2f}`\n"
+                f"📈 *متوسط العائد لكل رمز:* `{avg_return_pct:.2f}%`\n"
+                f"📊 *إجمالي العائد (مجموع):* `{total_return_pct:.2f}%`\n"
+                f"----------------------------------------"
+            )
+            
+            final_report = f"{report_title}\n{report_date}\n\n{report_body}"
+            send_telegram_message(final_report)
         else:
-            logger.warning("\n--- ⚠️ تعذر حساب المقاييس المجمعة ---")
-            logger.warning("واحد أو أكثر من الأعمدة المطلوبة ('Equity Final [$]', 'Start Equity [$]') غير موجود في ملخص النتائج.")
-            logger.warning(f"الأعمدة المتاحة هي: {list(summary_df.columns)}")
-        # --- END: التعديل ---
+            send_telegram_message(f"{report_title}\n{report_date}\n\nلم يتم إكمال أي اختبار خلفي بنجاح.")
             
     else:
         print("لم يتم إكمال أي اختبار خلفي بنجاح.")
+        send_telegram_message("🏁 انتهى الاختبار الخلفي ولكن لم يتم إكمال أي اختبار بنجاح لأي من الرموز.")
         
     if conn:
         conn.close()
@@ -481,12 +533,8 @@ def run_backtest():
 
 
 if __name__ == "__main__":
-    # تشغيل وظيفة الاختبار الخلفي في خيط منفصل حتى لا تمنع خادم الويب من البدء
     backtest_thread = threading.Thread(target=run_backtest, name="run_backtest", daemon=True)
     backtest_thread.start()
     
-    # تشغيل خادم الويب للاستجابة لطلبات التحقق من الصحة
-    # Render سيوفر متغير البيئة PORT
     port = int(os.environ.get("PORT", 10000))
-    # استخدم '0.0.0.0' لجعل الخادم متاحًا خارجيًا
     app.run(host='0.0.0.0', port=port)
