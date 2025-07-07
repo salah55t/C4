@@ -71,8 +71,7 @@ EMA_SLOW_PERIOD: int = 200
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
-# --- ✨ تعديل: تم تخفيف شرط الثقة للسماح بمرور إشارات أكثر ---
-MODEL_CONFIDENCE_THRESHOLD = 0.75 # القيمة السابقة كانت 0.70
+MODEL_CONFIDENCE_THRESHOLD = 0.65 
 
 # --- إعدادات الهدف ووقف الخسارة ---
 USE_DATABASE_SL_TP: bool = True
@@ -98,16 +97,13 @@ ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
 USE_RRR_FILTER: bool = True
-# --- ✨ تعديل: تم تخفيض الحد الأدنى لنسبة المخاطرة للعائد ---
-MIN_RISK_REWARD_RATIO: float = 1.1 # القيمة السابقة كانت 1.2
+MIN_RISK_REWARD_RATIO: float = 1.1
 
 USE_BTC_CORRELATION_FILTER: bool = True
-# --- ✨ تعديل: تم تخفيض الحد الأدنى للارتباط مع البيتكوين للسماح بعملات أكثر تنوعًا ---
-MIN_BTC_CORRELATION: float = 0.1 # القيمة السابقة كانت 0.2
+MIN_BTC_CORRELATION: float = 0.1
 
 USE_MIN_VOLATILITY_FILTER: bool = True
-# --- ✨ تعديل: تم تخفيض الحد الأدنى للتقلب للسماح للعملات الأقل حركة بالمرور ---
-MIN_VOLATILITY_PERCENT: float = 0.3 # القيمة السابقة كانت 0.4
+MIN_VOLATILITY_PERCENT: float = 0.3
 
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -398,9 +394,7 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
         logger.info(f"ℹ️ [{symbol}] تم تعطيل فلتر السرعة بسبب السوق الهابط (DOWNTREND).")
         return True
     
-    # --- ✨ تعديل: تم تخفيف شروط فلتر السرعة في حالة السوق الصاعد (UPTREND) ---
     adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "صارمة (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "مخففة (RANGING)")
-    # القيم السابقة لـ UPTREND كانت: adx_threshold=25.0, rel_vol_threshold=1.0
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
@@ -812,6 +806,7 @@ def home():
 @app.route('/api/market_status')
 def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index(), "market_regime": current_market_regime})
 
+# --- ✨ تعديل: تم تطوير هذه الدالة لإرجاع إحصائيات أكثر تفصيلاً ---
 @app.route('/api/stats')
 def get_stats():
     if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
@@ -819,11 +814,46 @@ def get_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
-        with signal_cache_lock: open_trades_count = len(open_signals_cache)
+        
+        with signal_cache_lock:
+            open_trades_count = len(open_signals_cache)
+
         closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
+        
+        wins = [s for s in closed_trades if s['status'] == 'target_hit']
+        losses = [s for s in closed_trades if s['status'] == 'stop_loss_hit']
+        
         total_profit_pct = sum(s['profit_percentage'] for s in closed_trades)
-        return jsonify({"open_trades_count": open_trades_count, "total_profit_pct": total_profit_pct, "total_closed_trades": len(closed_trades)})
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        
+        win_count = len(wins)
+        loss_count = len(losses)
+        total_closed = win_count + loss_count
+        
+        win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+        
+        total_profit_from_wins = sum(s['profit_percentage'] for s in wins)
+        total_loss_from_losses = abs(sum(s['profit_percentage'] for s in losses))
+        
+        profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else 0
+        
+        avg_win_pct = (total_profit_from_wins / win_count) if win_count > 0 else 0
+        avg_loss_pct = (total_loss_from_losses / loss_count) if loss_count > 0 else 0
+
+
+        return jsonify({
+            "open_trades_count": open_trades_count,
+            "total_profit_pct": total_profit_pct,
+            "total_closed_trades": len(closed_trades),
+            "wins": win_count,
+            "losses": loss_count,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "avg_win_pct": avg_win_pct,
+            "avg_loss_pct": -avg_loss_pct # Return as negative percentage
+        })
+    except Exception as e:
+        logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/signals')
 def get_signals():
