@@ -11,24 +11,26 @@
     <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     
-    <!-- Google Fonts: Tajawal for Arabic -->
+    <!-- ✨ تعديل: تم تغيير الخط إلى Cairo لتحسين الوضوح -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;700&display=swap" rel="stylesheet">
 
     <style>
         :root {
             --bs-dark-rgb: 26, 26, 26;
-            --bs-body-bg: #121212; /* A darker background */
+            --bs-body-bg: #121212; 
             --bs-body-color: #e0e0e0;
             --bs-border-color: #3a3a3a;
-            --bs-emphasis-color-rgb: 240, 240, 240;
             --card-bg: #1e1e1e;
             --card-header-bg: #2a2a2a;
+            /* ✨ تعديل: تعريف لون مخصص للنص الثانوي لزيادة الوضوح */
+            --text-muted-custom: #a0a0a0; 
         }
 
         body {
-            font-family: 'Tajawal', sans-serif;
+            /* ✨ تعديل: تطبيق الخط الجديد */
+            font-family: 'Cairo', sans-serif;
             background-color: var(--bs-body-bg);
             color: var(--bs-body-color);
         }
@@ -75,6 +77,17 @@
         .modal-header, .modal-footer {
              border-bottom: 1px solid var(--bs-border-color);
              border-top: 1px solid var(--bs-border-color);
+        }
+
+        /* ✨ تعديل: جعل النص الثانوي أكثر وضوحًا بشكل عام */
+        .text-muted {
+            color: var(--text-muted-custom) !important;
+        }
+        .card .card-body small.text-muted {
+            color: #888 !important;
+        }
+        header .text-muted {
+            color: #b0b0b0 !important; /* لون أوضح للعنوان الفرعي */
         }
 
         .text-success { color: #28a745 !important; }
@@ -338,40 +351,41 @@
 
             const fngColor = fng.value <= 30 ? 'text-danger' : fng.value >= 70 ? 'text-success' : 'text-warning';
 
+            // ✨ تعديل: تم استبدال h5 بـ div مع فئة مخصصة للتحكم بشكل أفضل
             container.innerHTML = `
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة</h5>
+                    <div class="card-title text-muted"><i class="fas fa-folder-open text-warning"></i> الصفقات المفتوحة</div>
                     <p class="card-text fs-1 fw-bold">${stats.open_trades_count || 0}</p>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-chart-pie text-success"></i> إجمالي الربح %</h5>
+                    <div class="card-title text-muted"><i class="fas fa-chart-pie text-success"></i> إجمالي الربح %</div>
                     <p class="card-text fs-1 fw-bold ${formatPnlClass(stats.total_profit_pct)}">${formatPercentage(stats.total_profit_pct)}</p>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-bullseye text-primary"></i> نسبة النجاح</h5>
+                    <div class="card-title text-muted"><i class="fas fa-bullseye text-primary"></i> نسبة النجاح</div>
                     <p class="card-text fs-1 fw-bold">${(stats.win_rate || 0).toFixed(1)}%</p>
                     <small class="text-muted">(${stats.wins || 0} فوز / ${stats.losses || 0} خسارة)</small>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-balance-scale text-info"></i> معامل الربح</h5>
+                    <div class="card-title text-muted"><i class="fas fa-balance-scale text-info"></i> معامل الربح</div>
                     <p class="card-text fs-1 fw-bold">${(stats.profit_factor || 0).toFixed(2)}</p>
                     <small class="text-muted">مجموع الربح / مجموع الخسارة</small>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fab fa-bitcoin text-warning"></i> اتجاه البيتكوين</h5>
+                    <div class="card-title text-muted"><i class="fab fa-bitcoin text-warning"></i> اتجاه البيتكوين</div>
                     <p class="card-text fs-2 fw-bold"><i class="fas ${btcTrendIcon}"></i> <span class="fs-5">${btcTrendText}</span></p>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-brain text-secondary"></i> حالة السوق</h5>
+                    <div class="card-title text-muted"><i class="fas fa-brain text-secondary"></i> حالة السوق</div>
                     <p class="card-text fs-2 fw-bold">${regime}</p>
                 </div></div></div>
                 <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-tachometer-alt text-secondary"></i> الخوف والطمع</h5>
+                    <div class="card-title text-muted"><i class="fas fa-tachometer-alt text-secondary"></i> الخوف والطمع</div>
                     <p class="card-text fs-2 fw-bold ${fngColor}">${fng.value || 'N/A'}</p>
                     <small class="text-muted">${fng.classification || 'N/A'}</small>
                 </div></div></div>
                  <div class="col-md-6 col-lg-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-center">
-                    <h5 class="card-title text-muted"><i class="fas fa-plus-minus text-secondary"></i> متوسط الربح/الخسارة</h5>
+                    <div class="card-title text-muted"><i class="fas fa-plus-minus text-secondary"></i> متوسط الربح/الخسارة</div>
                     <p class="card-text fs-5">
                         <span class="text-success">${formatPercentage(stats.avg_win_pct)}</span> / 
                         <span class="text-danger">${formatPercentage(stats.avg_loss_pct)}</span>
