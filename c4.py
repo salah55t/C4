@@ -71,7 +71,8 @@ EMA_SLOW_PERIOD: int = 200
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
-MODEL_CONFIDENCE_THRESHOLD = 0.70
+# --- ✨ تعديل: تم تخفيف شرط الثقة للسماح بمرور إشارات أكثر ---
+MODEL_CONFIDENCE_THRESHOLD = 0.65 # القيمة السابقة كانت 0.70
 
 # --- إعدادات الهدف ووقف الخسارة ---
 USE_DATABASE_SL_TP: bool = True
@@ -88,7 +89,7 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
-BTC_TREND_EMA_PERIOD: int = 50
+BTC_TREND_EMA_PERIOD: int = 10
 
 USE_SPEED_FILTER: bool = True
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
@@ -97,13 +98,17 @@ ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
 USE_RRR_FILTER: bool = True
-MIN_RISK_REWARD_RATIO: float = 1.2
+# --- ✨ تعديل: تم تخفيض الحد الأدنى لنسبة المخاطرة للعائد ---
+MIN_RISK_REWARD_RATIO: float = 1.1 # القيمة السابقة كانت 1.2
 
 USE_BTC_CORRELATION_FILTER: bool = True
-MIN_BTC_CORRELATION: float = 0.2
+# --- ✨ تعديل: تم تخفيض الحد الأدنى للارتباط مع البيتكوين للسماح بعملات أكثر تنوعًا ---
+MIN_BTC_CORRELATION: float = 0.1 # القيمة السابقة كانت 0.2
 
 USE_MIN_VOLATILITY_FILTER: bool = True
-MIN_VOLATILITY_PERCENT: float = 0.4
+# --- ✨ تعديل: تم تخفيض الحد الأدنى للتقلب للسماح للعملات الأقل حركة بالمرور ---
+MIN_VOLATILITY_PERCENT: float = 0.3 # القيمة السابقة كانت 0.4
+
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -392,7 +397,11 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime == "DOWNTREND":
         logger.info(f"ℹ️ [{symbol}] تم تعطيل فلتر السرعة بسبب السوق الهابط (DOWNTREND).")
         return True
-    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (25.0, 1.0, 40.0, 90.0, "صارمة (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "مخففة (RANGING)")
+    
+    # --- ✨ تعديل: تم تخفيف شروط فلتر السرعة في حالة السوق الصاعد (UPTREND) ---
+    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "صارمة (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "مخففة (RANGING)")
+    # القيم السابقة لـ UPTREND كانت: adx_threshold=25.0, rel_vol_threshold=1.0
+
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
         logger.info(f"✅ [{symbol}] الإشارة مرت من فلتر السرعة الديناميكي ({log_msg}).")
@@ -490,18 +499,11 @@ class TradingStrategy:
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty: return None
         
-        # ✨ إصلاح: ضمان أن DataFrame يحتفظ بأسماء الأعمدة بعد التحجيم
         try:
-            # 1. تحديد الصف الأخير والتأكد من ترتيب الأعمدة الصحيح
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
-            
-            # 2. تحجيم البيانات (الناتج هو مصفوفة numpy)
             features_scaled_np = self.scaler.transform(last_row_ordered_df)
-            
-            # 3. إعادة بناء DataFrame مع أسماء الأعمدة الصحيحة
             features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
 
-            # 4. التنبؤ باستخدام DataFrame الجديد (هذا يمنع التحذير)
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
             
