@@ -72,7 +72,7 @@ EMA_SLOW_PERIOD: int = 200
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
 # --- ✨ تعديل: تم تخفيف شرط الثقة للسماح بمرور إشارات أكثر ---
-MODEL_CONFIDENCE_THRESHOLD = 0.65 # القيمة السابقة كانت 0.70
+MODEL_CONFIDENCE_THRESHOLD = 0.75 # القيمة السابقة كانت 0.70
 
 # --- إعدادات الهدف ووقف الخسارة ---
 USE_DATABASE_SL_TP: bool = True
@@ -89,7 +89,7 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
-BTC_TREND_EMA_PERIOD: int = 10
+BTC_TREND_EMA_PERIOD: int = 50
 
 USE_SPEED_FILTER: bool = True
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
