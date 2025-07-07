@@ -104,8 +104,8 @@ BTC_TREND_EMA_PERIOD = 10
 # --- إعدادات فلتر تسارع الزخم ---
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
 ACCELERATION_LOOKBACK_PERIOD: int = 3
-ACCELERATION_MIN_RSI_INCREASE: float = 2.0
-ACCELERATION_MIN_ADX_INCREASE: float = 1.0
+ACCELERATION_MIN_RSI_INCREASE: float = 1.0
+ACCELERATION_MIN_ADX_INCREASE: float = 0.5
 
 # --- ✨ تعديل: جعل قيم الفلتر الديناميكي الافتراضية أقل صرامة ---
 DYNAMIC_FILTERS_ENABLED: bool = True
