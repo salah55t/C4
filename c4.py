@@ -107,12 +107,12 @@ ACCELERATION_LOOKBACK_PERIOD: int = 3
 ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
-# --- إعدادات الفلاتر الديناميكية (سيتم تحديثها تلقائياً) ---
+# --- ✨ تعديل: جعل قيم الفلتر الديناميكي الافتراضية أقل صرامة ---
 DYNAMIC_FILTERS_ENABLED: bool = True
-SPEED_FILTER_ADX_THRESHOLD: float = 20.0
-SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.2
-SPEED_FILTER_RSI_MIN: float = 45.0
-SPEED_FILTER_RSI_MAX: float = 70.0
+SPEED_FILTER_ADX_THRESHOLD: float = 18.0      # كان 20.0
+SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.1   # كان 1.2
+SPEED_FILTER_RSI_MIN: float = 40.0          # كان 45.0
+SPEED_FILTER_RSI_MAX: float = 75.0          # كان 70.0
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -479,7 +479,8 @@ def update_dynamic_filters():
         bbw = ((sma + 2 * std_dev) - (sma - 2 * std_dev)) / sma
         current_bbw = bbw.iloc[-1]
 
-        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 20.0, 1.2, 45.0, 70.0
+        # ✨ تعديل: جعل قيم الفلتر الأساسية أقل صرامة
+        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 18.0, 1.1, 40.0, 75.0
 
         if current_bbw > 0.04:
             market_state = "تقلب عالٍ جداً"
@@ -808,7 +809,6 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [تحميل] فشل تحميل التنبيهات: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
-# ✨ إصلاح: تحويل القيمة المنطقية من نوع NumPy إلى نوع Python الأصلي لمنع خطأ JSON
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "is_uptrend": False}
     try:
