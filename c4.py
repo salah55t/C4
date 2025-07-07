@@ -53,8 +53,8 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_DB_SLTP'
-MODEL_FOLDER: str = 'V7' # يمكن استخدام نفس مجلد النماذج
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
+MODEL_FOLDER: str = 'V7' 
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
@@ -121,6 +121,11 @@ closure_lock = Lock()
 last_api_check_time = time.time()
 last_market_regime_check = 0
 current_market_regime = "RANGING"
+
+# --- ✨ إضافة: ذاكرة مؤقتة لتخزين سجلات الرفض ---
+rejection_logs_cache = deque(maxlen=100)
+rejection_logs_lock = Lock()
+
 
 # ---------------------- دوال قاعدة البيانات (تبقى كما هي) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -200,6 +205,21 @@ def log_and_notify(level: str, message: str, notification_type: str):
     except Exception as e:
         logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}")
         if conn: conn.rollback()
+
+# --- ✨ إضافة: دالة لتسجيل سبب الرفض في الذاكرة المؤقتة والملف ---
+def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
+    """Logs a signal rejection to the console, file, and a deque for the API."""
+    details_str = f" | {details}" if details else ""
+    logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة. السبب: {reason}{details_str}")
+    
+    with rejection_logs_lock:
+        log_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "reason": reason,
+            "details": details or {}
+        }
+        rejection_logs_cache.appendleft(log_entry)
 
 def init_redis() -> None:
     global redis_client
@@ -334,7 +354,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
     if not os.path.exists(model_path):
-        # logger.warning(f"⚠️ [نموذج تعلم الآلة] ملف النموذج '{model_path}' غير موجود للعملة {symbol}.")
         return None
     try:
         with open(model_path, 'rb') as f:
@@ -391,16 +410,20 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     regime = determine_market_regime()
     if regime == "DOWNTREND":
-        logger.info(f"ℹ️ [{symbol}] تم تعطيل فلتر السرعة بسبب السوق الهابط (DOWNTREND).")
+        log_rejection(symbol, "فلتر السرعة", {"detail": "تم التعطيل بسبب السوق الهابط"})
         return True
     
     adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "صارمة (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "مخففة (RANGING)")
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
-        logger.info(f"✅ [{symbol}] الإشارة مرت من فلتر السرعة الديناميكي ({log_msg}).")
         return True
-    logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بواسطة فلتر السرعة الديناميكي ({log_msg}).")
+    
+    log_rejection(symbol, "فلتر السرعة", {
+        "ADX": f"{adx:.2f} (Req: >{adx_threshold})",
+        "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})",
+        "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
+    })
     return False
 
 def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame, last_atr: float) -> Optional[Dict[str, float]]:
@@ -423,13 +446,12 @@ def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.
     stop_loss_price = potential_sls[0] if potential_sls else None
 
     if target_price is None or stop_loss_price is None:
-        logger.warning(f"⚠️ [{symbol}] لم يتم العثور على مستويات S/R كافية من DB. العودة إلى طريقة ATR.")
+        log_rejection(symbol, "عدم وجود مستويات دعم/مقاومة", {"detail": "العودة إلى طريقة ATR"})
         fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
         fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
         return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
     
     final_stop_loss = stop_loss_price - (last_atr * SL_BUFFER_ATR_PERCENT)
-    logger.info(f"✅ [{symbol}] تم حساب TP/SL من DB: TP={target_price:.4f}, SL={final_stop_loss:.4f}.")
     return {'target_price': target_price, 'stop_loss': final_stop_loss, 'source': 'Database'}
 
 # ---------------------- WebSocket و TradingStrategy ----------------------
@@ -511,6 +533,13 @@ class TradingStrategy:
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' بثقة {prob_for_class_1:.2%}.")
                 return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}}
+            
+            # ✨ تعديل: تسجيل الرفض إذا لم تتحقق الشروط
+            if prediction != 1:
+                log_rejection(self.symbol, "تنبؤ النموذج ليس 'شراء'", {"prediction": prediction})
+            elif prob_for_class_1 < MODEL_CONFIDENCE_THRESHOLD:
+                log_rejection(self.symbol, "ثقة النموذج منخفضة", {"confidence": f"{prob_for_class_1:.2%}", "threshold": f"{MODEL_CONFIDENCE_THRESHOLD:.2%}"})
+
             return None
         except Exception as e:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ: {e}")
@@ -699,7 +728,9 @@ def main_loop():
                 
                 btc_trend_info = get_btc_trend()
                 if USE_BTC_TREND_FILTER and not btc_trend_info.get("is_uptrend"):
-                    logger.warning("⚠️ [إيقاف المسح] تم الإيقاف بسبب اتجاه BTC الهابط العام."); time.sleep(300); break
+                    log_rejection("ALL", "فلتر اتجاه BTC", {"detail": "تم إيقاف المسح بسبب اتجاه BTC الهابط"})
+                    time.sleep(300)
+                    break
                 
                 with signal_cache_lock: open_count = len(open_signals_cache)
                 if open_count >= MAX_OPEN_TRADES:
@@ -721,6 +752,10 @@ def main_loop():
                         if df_15m is None or df_4h is None: continue
                         
                         strategy = TradingStrategy(symbol)
+                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                            # log_rejection(symbol, "نموذج التعلم الآلي غير موجود") # This can be noisy
+                            continue
+
                         df_features = strategy.get_features(df_15m, df_4h, btc_data)
                         if df_features is None or df_features.empty: continue
                         
@@ -736,14 +771,15 @@ def main_loop():
                         if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                         
                         last_atr = last_features.get('atr', 0)
-                        if USE_MIN_VOLATILITY_FILTER and (last_atr / current_price * 100) < MIN_VOLATILITY_PERCENT:
-                            logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر التقلب المنخفض.")
+                        volatility = (last_atr / current_price * 100)
+                        if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
+                            log_rejection(symbol, "فلتر التقلب المنخفض", {"volatility": f"{volatility:.2f}%", "min_required": f"{MIN_VOLATILITY_PERCENT}%"})
                             continue
 
                         if USE_BTC_CORRELATION_FILTER and btc_trend_info.get("is_uptrend"):
                             correlation = last_features.get('btc_correlation', 0)
                             if correlation < MIN_BTC_CORRELATION:
-                                logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر الارتباط السلبي مع BTC ({correlation:.2f}).")
+                                log_rejection(symbol, "فلتر الارتباط مع BTC", {"correlation": f"{correlation:.2f}", "min_required": f"{MIN_BTC_CORRELATION}"})
                                 continue
                         
                         sr_levels = fetch_sr_levels_from_db(symbol)
@@ -762,7 +798,7 @@ def main_loop():
                             if risk <= 0 or reward <= 0: continue
                             rrr = reward / risk
                             if rrr < MIN_RISK_REWARD_RATIO:
-                                logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر المخاطرة/العائد. RRR: {rrr:.2f}")
+                                log_rejection(symbol, "فلتر المخاطرة/العائد", {"RRR": f"{rrr:.2f}", "min_required": f"{MIN_RISK_REWARD_RATIO}"})
                                 continue
 
                         logger.info(f"✅ [{symbol}] الإشارة مرت من جميع الفلاتر. جاري الحفظ...")
@@ -806,7 +842,6 @@ def home():
 @app.route('/api/market_status')
 def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index(), "market_regime": current_market_regime})
 
-# --- ✨ تعديل: تم تطوير هذه الدالة لإرجاع إحصائيات أكثر تفصيلاً ---
 @app.route('/api/stats')
 def get_stats():
     if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
@@ -849,7 +884,7 @@ def get_stats():
             "win_rate": win_rate,
             "profit_factor": profit_factor,
             "avg_win_pct": avg_win_pct,
-            "avg_loss_pct": -avg_loss_pct # Return as negative percentage
+            "avg_loss_pct": -avg_loss_pct 
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
@@ -896,6 +931,12 @@ def manual_close_signal(signal_id):
 @app.route('/api/notifications')
 def get_notifications():
     with notifications_lock: return jsonify(list(notifications_cache))
+
+# --- ✨ إضافة: نقطة نهاية جديدة لجلب سجلات الرفض ---
+@app.route('/api/rejection_logs')
+def get_rejection_logs():
+    with rejection_logs_lock:
+        return jsonify(list(rejection_logs_cache))
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
