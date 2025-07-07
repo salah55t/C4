@@ -107,12 +107,12 @@ ACCELERATION_LOOKBACK_PERIOD: int = 3
 ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
-# --- ✨ تعديل: تخفيف إضافي لقيم الفلتر الديناميكي لجعلها أقل صرامة ---
+# --- ✨ تعديل: تخفيف الفلاتر بشكل كبير للسماح بمزيد من الإشارات ---
 DYNAMIC_FILTERS_ENABLED: bool = True
-SPEED_FILTER_ADX_THRESHOLD: float = 15.0      # كان 18.0
-SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.0   # كان 1.1
-SPEED_FILTER_RSI_MIN: float = 35.0          # كان 40.0
-SPEED_FILTER_RSI_MAX: float = 80.0          # كان 75.0
+SPEED_FILTER_ADX_THRESHOLD: float = 12.0      # كان 15.0
+SPEED_FILTER_REL_VOL_THRESHOLD: float = 0.9   # كان 1.0
+SPEED_FILTER_RSI_MIN: float = 30.0          # كان 35.0
+SPEED_FILTER_RSI_MAX: float = 80.0          # لم يتغير
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -479,8 +479,8 @@ def update_dynamic_filters():
         bbw = ((sma + 2 * std_dev) - (sma - 2 * std_dev)) / sma
         current_bbw = bbw.iloc[-1]
 
-        # ✨ تعديل: جعل قيم الفلتر الأساسية أقل صرامة لتتوافق مع الإعدادات العامة
-        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 15.0, 1.0, 35.0, 80.0
+        # ✨ تعديل: جعل قيم الفلتر الأساسية أقل صرامة بشكل كبير
+        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 12.0, 0.9, 30.0, 80.0
 
         if current_bbw > 0.04:
             market_state = "تقلب عالٍ جداً"
