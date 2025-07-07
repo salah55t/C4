@@ -53,7 +53,7 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_DB_SLTP'
 MODEL_FOLDER: str = 'V7' # يمكن استخدام نفس مجلد النماذج
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
@@ -73,40 +73,37 @@ EMA_SLOW_PERIOD: int = 200
 MAX_OPEN_TRADES: int = 10
 MODEL_CONFIDENCE_THRESHOLD = 0.70
 
-# --- ✨ تعديل: إعدادات الهدف ووقف الخسارة الجديدة ---
-USE_DATABASE_SL_TP: bool = True # ✨ المفتاح الرئيسي: True لاستخدام مستويات DB، و False للعودة لطريقة ATR
-ATR_FALLBACK_SL_MULTIPLIER: float = 1.5 # يستخدم في حال فشل إيجاد مستويات من DB
-ATR_FALLBACK_TP_MULTIPLIER: float = 2.0 # يستخدم في حال فشل إيجاد مستويات من DB
-SL_BUFFER_ATR_PERCENT: float = 0.25 # نسبة من ATR كهامش أمان لوقف الخسارة تحت الدعم
+# --- إعدادات الهدف ووقف الخسارة ---
+USE_DATABASE_SL_TP: bool = True
+ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
+ATR_FALLBACK_TP_MULTIPLIER: float = 2.0
+SL_BUFFER_ATR_PERCENT: float = 0.25
 
 # --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 
-# --- ✨ تعديل: إعدادات الفلاتر المحسّنة ---
+# --- إعدادات الفلاتر المحسّنة ---
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
-BTC_TREND_EMA_PERIOD: int = 50
+BTC_TREND_EMA_PERIOD: int = 10
 
-USE_SPEED_FILTER: bool = True # فلتر السرعة الديناميكي
+USE_SPEED_FILTER: bool = True
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
 ACCELERATION_LOOKBACK_PERIOD: int = 3
 ACCELERATION_MIN_RSI_INCREASE: float = 2.0
 ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
-# ✨ جديد: فلتر نسبة المخاطرة إلى العائد
 USE_RRR_FILTER: bool = True
-MIN_RISK_REWARD_RATIO: float = 1.2 # الهدف يجب أن يكون على الأقل 1.2 ضعف المخاطرة
+MIN_RISK_REWARD_RATIO: float = 1.2
 
-# ✨ جديد: فلتر الارتباط بالبيتكوين
 USE_BTC_CORRELATION_FILTER: bool = True
-MIN_BTC_CORRELATION: float = 0.2 # يجب أن يكون الارتباط إيجابياً
+MIN_BTC_CORRELATION: float = 0.2
 
-# ✨ جديد: فلتر الحد الأدنى للتقلب
 USE_MIN_VOLATILITY_FILTER: bool = True
-MIN_VOLATILITY_PERCENT: float = 0.4 # يجب أن يكون ATR كنسبة من السعر أكبر من 0.4%
+MIN_VOLATILITY_PERCENT: float = 0.4
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -285,7 +282,8 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
     """
     try:
         df_ichimoku = pd.read_sql(query, conn, params=(symbol, timeframe), index_col='timestamp', parse_dates=['timestamp'])
-        df_ichimoku.index = df_ichimoku.index.tz_localize('UTC')
+        if not df_ichimoku.index.tz:
+             df_ichimoku.index = df_ichimoku.index.tz_localize('UTC')
         return df_ichimoku
     except Exception as e:
         logger.error(f"❌ [Ichimoku Fetch Bot] Could not fetch Ichimoku features for {symbol}: {e}")
@@ -335,7 +333,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_path = os.path.join(script_dir, MODEL_FOLDER, f"{model_name}.pkl")
     if not os.path.exists(model_path):
-        logger.warning(f"⚠️ [نموذج تعلم الآلة] ملف النموذج '{model_path}' غير موجود للعملة {symbol}.")
+        # logger.warning(f"⚠️ [نموذج تعلم الآلة] ملف النموذج '{model_path}' غير موجود للعملة {symbol}.")
         return None
     try:
         with open(model_path, 'rb') as f:
@@ -351,7 +349,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل النموذج للعملة {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- ✨ دوال الفلاتر وحساب الأهداف الجديدة ✨ ----------------------
+# ---------------------- دوال الفلاتر وحساب الأهداف (تبقى كما هي) ----------------------
 
 def determine_market_regime():
     global current_market_regime, last_market_regime_check
@@ -364,7 +362,6 @@ def determine_market_regime():
             return current_market_regime
         ema_fast = btc_data['close'].ewm(span=12, adjust=False).mean()
         ema_slow = btc_data['close'].ewm(span=26, adjust=False).mean()
-        # ADX calculation
         high_low = btc_data['high'] - btc_data['low']
         high_close = (btc_data['high'] - btc_data['close'].shift()).abs()
         low_close = (btc_data['low'] - btc_data['close'].shift()).abs()
@@ -404,53 +401,35 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     return False
 
 def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame, last_atr: float) -> Optional[Dict[str, float]]:
-    """
-    ✨ دالة جديدة لحساب الهدف ووقف الخسارة بناءً على مستويات الدعم والمقاومة من قاعدة البيانات.
-    """
-    # 1. تجميع كل مستويات الدعم والمقاومة المحتملة
-    resistances = []
-    supports = []
-
-    # من جدول S/R والفيبوناتشي
+    resistances, supports = [], []
     if not sr_levels_df.empty:
         for _, row in sr_levels_df.iterrows():
             level_price = row['level_price']
-            if 'resist' in row['level_type'].lower() or 'poc' in row['level_type'].lower():
-                resistances.append(level_price)
-            if 'supp' in row['level_type'].lower() or 'poc' in row['level_type'].lower():
-                supports.append(level_price)
-
-    # من مؤشر إيشيموكو
+            if 'resist' in row['level_type'].lower() or 'poc' in row['level_type'].lower(): resistances.append(level_price)
+            if 'supp' in row['level_type'].lower() or 'poc' in row['level_type'].lower(): supports.append(level_price)
     if not ichimoku_df.empty:
         last_ichi = ichimoku_df.iloc[-1]
-        ichi_levels = [last_ichi.get('kijun_sen'), last_ichi.get('senkou_span_a'), last_ichi.get('senkou_span_b')]
-        for level in ichi_levels:
+        for level in [last_ichi.get('kijun_sen'), last_ichi.get('senkou_span_a'), last_ichi.get('senkou_span_b')]:
             if pd.notna(level):
                 if level > entry_price: resistances.append(level)
                 else: supports.append(level)
-
-    # 2. تحديد الهدف (أقرب مقاومة)
+    
     potential_tps = sorted([r for r in resistances if r > entry_price])
     target_price = potential_tps[0] if potential_tps else None
-
-    # 3. تحديد وقف الخسارة (أقرب دعم)
     potential_sls = sorted([s for s in supports if s < entry_price], reverse=True)
     stop_loss_price = potential_sls[0] if potential_sls else None
 
-    # 4. آلية احتياطية (Fallback) في حال عدم وجود مستويات
     if target_price is None or stop_loss_price is None:
         logger.warning(f"⚠️ [{symbol}] لم يتم العثور على مستويات S/R كافية من DB. العودة إلى طريقة ATR.")
         fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
         fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
         return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
     
-    # 5. تطبيق هامش أمان لوقف الخسارة
     final_stop_loss = stop_loss_price - (last_atr * SL_BUFFER_ATR_PERCENT)
-
-    logger.info(f"✅ [{symbol}] تم حساب TP/SL من DB: TP={target_price:.4f} (أقرب مقاومة), SL={final_stop_loss:.4f} (أقرب دعم مع هامش أمان).")
+    logger.info(f"✅ [{symbol}] تم حساب TP/SL من DB: TP={target_price:.4f}, SL={final_stop_loss:.4f}.")
     return {'target_price': target_price, 'stop_loss': final_stop_loss, 'source': 'Database'}
 
-# ---------------------- دوال WebSocket والاستراتيجية (تبقى كما هي) ----------------------
+# ---------------------- WebSocket و TradingStrategy ----------------------
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
     try:
@@ -491,8 +470,6 @@ class TradingStrategy:
         if self.feature_names is None: return None
         try:
             df_featured = calculate_features(df_15m, btc_df)
-            
-            # Add MTF features
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -502,11 +479,8 @@ class TradingStrategy:
             mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
             df_featured = df_featured.join(mtf_features)
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-
-            # Ensure all required columns exist
             for col in self.feature_names:
                 if col not in df_featured.columns: df_featured[col] = 0.0
-            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna()
         except Exception as e:
@@ -515,14 +489,29 @@ class TradingStrategy:
 
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty: return None
-        last_row_df = df_features.iloc[[-1]][self.feature_names]
+        
+        # ✨ إصلاح: ضمان أن DataFrame يحتفظ بأسماء الأعمدة بعد التحجيم
         try:
-            features_scaled = self.scaler.transform(last_row_df)
-            prediction = self.ml_model.predict(features_scaled)[0]
-            prediction_proba = self.ml_model.predict_proba(features_scaled)[0]
-            try: class_1_index = list(self.ml_model.classes_).index(1)
-            except ValueError: return None
+            # 1. تحديد الصف الأخير والتأكد من ترتيب الأعمدة الصحيح
+            last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
+            
+            # 2. تحجيم البيانات (الناتج هو مصفوفة numpy)
+            features_scaled_np = self.scaler.transform(last_row_ordered_df)
+            
+            # 3. إعادة بناء DataFrame مع أسماء الأعمدة الصحيحة
+            features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
+
+            # 4. التنبؤ باستخدام DataFrame الجديد (هذا يمنع التحذير)
+            prediction = self.ml_model.predict(features_scaled_df)[0]
+            prediction_proba = self.ml_model.predict_proba(features_scaled_df)[0]
+            
+            try:
+                class_1_index = list(self.ml_model.classes_).index(1)
+            except ValueError:
+                return None
+            
             prob_for_class_1 = prediction_proba[class_1_index]
+            
             if prediction == 1 and prob_for_class_1 >= MODEL_CONFIDENCE_THRESHOLD:
                 logger.info(f"✅ [العثور على إشارة] {self.symbol}: تنبأ النموذج 'شراء' بثقة {prob_for_class_1:.2%}.")
                 return {'symbol': self.symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Probability_Buy': f"{prob_for_class_1:.2%}"}}
@@ -531,7 +520,7 @@ class TradingStrategy:
             logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ: {e}")
             return None
 
-# ---------------------- حلقة مراقبة الصفقات مع الوقف المتحرك (تبقى كما هي) ----------------------
+# ---------------------- حلقة مراقبة الصفقات (تبقى كما هي) ----------------------
 def trade_monitoring_loop():
     global last_api_check_time
     logger.info("✅ [Trade Monitor] بدء مراقبة الصفقات (مع دعم الوقف المتحرك).")
@@ -677,7 +666,7 @@ def load_notifications_to_cache():
             logger.info(f"✅ [تحميل] تم تحميل {len(notifications_cache)} تنبيه.")
     except Exception as e: logger.error(f"❌ [تحميل] فشل تحميل التنبيهات: {e}")
 
-# ---------------------- ✨ حلقة العمل الرئيسية المعدلة ✨ ----------------------
+# ---------------------- حلقة العمل الرئيسية (تبقى كما هي) ----------------------
 def get_btc_trend() -> Dict[str, Any]:
     if not client: return {"status": "error", "is_uptrend": False}
     try:
@@ -748,7 +737,6 @@ def main_loop():
                         
                         last_features = df_features.iloc[-1]; last_features.name = symbol
                         
-                        # --- تطبيق سلسلة الفلاتر الجديدة ---
                         if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                         
                         last_atr = last_features.get('atr', 0)
@@ -762,7 +750,6 @@ def main_loop():
                                 logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر الارتباط السلبي مع BTC ({correlation:.2f}).")
                                 continue
                         
-                        # --- حساب الهدف ووقف الخسارة ---
                         sr_levels = fetch_sr_levels_from_db(symbol)
                         ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
                         
@@ -773,19 +760,15 @@ def main_loop():
                         potential_signal['entry_price'] = current_price
                         potential_signal['signal_details']['TP_SL_Source'] = tp_sl_data['source']
 
-                        # --- فلتر نسبة المخاطرة إلى العائد ---
                         if USE_RRR_FILTER:
-                            tp = potential_signal['target_price']
-                            sl = potential_signal['stop_loss']
-                            risk = current_price - sl
-                            reward = tp - current_price
-                            if risk <= 0 or reward <= 0: continue # تجنب القسمة على صفر أو الصفقات الخاسرة منطقياً
+                            tp, sl = potential_signal['target_price'], potential_signal['stop_loss']
+                            risk, reward = current_price - sl, tp - current_price
+                            if risk <= 0 or reward <= 0: continue
                             rrr = reward / risk
                             if rrr < MIN_RISK_REWARD_RATIO:
-                                logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر المخاطرة/العائد. RRR: {rrr:.2f} (الحد الأدنى: {MIN_RISK_REWARD_RATIO})")
+                                logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة بسبب فلتر المخاطرة/العائد. RRR: {rrr:.2f}")
                                 continue
 
-                        # --- الحفظ النهائي للإشارة ---
                         logger.info(f"✅ [{symbol}] الإشارة مرت من جميع الفلاتر. جاري الحفظ...")
                         saved_signal = insert_signal_into_db(potential_signal)
                         if saved_signal:
