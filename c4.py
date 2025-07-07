@@ -104,15 +104,15 @@ BTC_TREND_EMA_PERIOD = 10
 # --- إعدادات فلتر تسارع الزخم ---
 USE_MOMENTUM_ACCELERATION_FILTER: bool = True
 ACCELERATION_LOOKBACK_PERIOD: int = 3
-ACCELERATION_MIN_RSI_INCREASE: float = 1.0
-ACCELERATION_MIN_ADX_INCREASE: float = 0.5
+ACCELERATION_MIN_RSI_INCREASE: float = 2.0
+ACCELERATION_MIN_ADX_INCREASE: float = 1.0
 
-# --- ✨ تعديل: جعل قيم الفلتر الديناميكي الافتراضية أقل صرامة ---
+# --- ✨ تعديل: تخفيف إضافي لقيم الفلتر الديناميكي لجعلها أقل صرامة ---
 DYNAMIC_FILTERS_ENABLED: bool = True
-SPEED_FILTER_ADX_THRESHOLD: float = 18.0      # كان 20.0
-SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.1   # كان 1.2
-SPEED_FILTER_RSI_MIN: float = 40.0          # كان 45.0
-SPEED_FILTER_RSI_MAX: float = 75.0          # كان 70.0
+SPEED_FILTER_ADX_THRESHOLD: float = 15.0      # كان 18.0
+SPEED_FILTER_REL_VOL_THRESHOLD: float = 1.0   # كان 1.1
+SPEED_FILTER_RSI_MIN: float = 35.0          # كان 40.0
+SPEED_FILTER_RSI_MAX: float = 80.0          # كان 75.0
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -479,8 +479,8 @@ def update_dynamic_filters():
         bbw = ((sma + 2 * std_dev) - (sma - 2 * std_dev)) / sma
         current_bbw = bbw.iloc[-1]
 
-        # ✨ تعديل: جعل قيم الفلتر الأساسية أقل صرامة
-        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 18.0, 1.1, 40.0, 75.0
+        # ✨ تعديل: جعل قيم الفلتر الأساسية أقل صرامة لتتوافق مع الإعدادات العامة
+        base_adx, base_rel_vol, base_rsi_min, base_rsi_max = 15.0, 1.0, 35.0, 80.0
 
         if current_bbw > 0.04:
             market_state = "تقلب عالٍ جداً"
