@@ -127,8 +127,9 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
-            conn.autocommit = False
+            conn.autocommit = False  # Important to manage transactions
             with conn.cursor() as cur:
+                # Create the signals table if it doesn't exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -141,10 +142,24 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION,
                         strategy_name TEXT,
-                        signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION
+                        signal_details JSONB
                     );
                 """)
+                
+                # ✨ FIX: Add the current_peak_price column if it doesn't exist to avoid errors
+                try:
+                    cur.execute("""
+                        ALTER TABLE signals ADD COLUMN current_peak_price DOUBLE PRECISION;
+                    """)
+                    logger.info("✅ [قاعدة البيانات] تم إضافة عمود 'current_peak_price' إلى جدول 'signals'.")
+                except psycopg2.errors.DuplicateColumn:
+                    # Column already exists, which is fine. Pass silently.
+                    conn.rollback() # Rollback the failed ALTER TABLE transaction
+                except Exception as alter_e:
+                    logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع عند تعديل الجدول: {alter_e}")
+                    conn.rollback()
+
+                # Create notifications table
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY,
@@ -154,7 +169,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-            conn.commit()
+            conn.commit()  # Commit all schema changes
             logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
             return
         except Exception as e:
@@ -422,12 +437,10 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
 
 def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame, last_atr: float) -> Optional[Dict[str, float]]:
     resistances, supports = [], []
-    # ✨ FIX: Ensure entry_price is a float for comparison
     entry_price = float(entry_price)
 
     if not sr_levels_df.empty:
         for _, row in sr_levels_df.iterrows():
-            # ✨ FIX: Ensure level_price is float
             level_price = float(row['level_price'])
             if 'resist' in row['level_type'].lower() or 'poc' in row['level_type'].lower():
                 if level_price > entry_price: resistances.append(level_price)
@@ -438,7 +451,6 @@ def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.
         last_ichi = ichimoku_df.iloc[-1]
         for level_val in [last_ichi.get('kijun_sen'), last_ichi.get('senkou_span_a'), last_ichi.get('senkou_span_b')]:
             if pd.notna(level_val):
-                # ✨ FIX: Ensure ichimoku level is float
                 level = float(level_val)
                 if level > entry_price:
                     resistances.append(level)
@@ -531,7 +543,6 @@ class TradingStrategy:
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)
             confidence = float(np.max(prediction_proba[0]))
 
-            # ✨ NEW: Return both buy (1) and sell (-1) predictions if confidence is met
             log_message = f"تنبأ النموذج '{'شراء' if prediction == 1 else 'بيع'}' بثقة {confidence:.2%}."
             logger.info(f"✅ [العثور على إشارة] {self.symbol}: {log_message}")
 
@@ -638,7 +649,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if conn: conn.rollback()
         return None
 
-# ✨ NEW: Function to update an existing signal's target and stop-loss
 def update_signal_target_in_db(signal_id: int, new_target: float, new_stop_loss: float) -> bool:
     if not check_db_connection() or not conn: return False
     try:
@@ -789,7 +799,6 @@ def main_loop():
                         prediction = signal_info['prediction']
                         confidence = signal_info['confidence']
 
-                        # --- ✨ NEW LOGIC: Handle signals for open and new trades ---
                         with signal_cache_lock:
                             is_trade_open = symbol in open_signals_cache
 
@@ -820,7 +829,6 @@ def main_loop():
                                     logger.info(f"INFO: New BUY signal for {symbol} did not result in a higher target. No action taken.")
                                 continue
                         
-                        # --- Original Logic: Handle new BUY signals if no trade is open ---
                         elif not is_trade_open and prediction == 1:
                             if slots_available <= 0: continue
 
