@@ -127,9 +127,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
-            conn.autocommit = False  # Important to manage transactions
+            conn.autocommit = False
             with conn.cursor() as cur:
-                # Create the signals table if it doesn't exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -146,20 +145,15 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 
-                # ✨ FIX: Add the current_peak_price column if it doesn't exist to avoid errors
                 try:
-                    cur.execute("""
-                        ALTER TABLE signals ADD COLUMN current_peak_price DOUBLE PRECISION;
-                    """)
+                    cur.execute("ALTER TABLE signals ADD COLUMN current_peak_price DOUBLE PRECISION;")
                     logger.info("✅ [قاعدة البيانات] تم إضافة عمود 'current_peak_price' إلى جدول 'signals'.")
                 except psycopg2.errors.DuplicateColumn:
-                    # Column already exists, which is fine. Pass silently.
-                    conn.rollback() # Rollback the failed ALTER TABLE transaction
+                    conn.rollback()
                 except Exception as alter_e:
                     logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع عند تعديل الجدول: {alter_e}")
                     conn.rollback()
 
-                # Create notifications table
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY,
@@ -169,7 +163,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-            conn.commit()  # Commit all schema changes
+            conn.commit()
             logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
             return
         except Exception as e:
@@ -310,7 +304,6 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         df_ichimoku = pd.read_sql(query, conn, params=(symbol, timeframe), index_col='timestamp', parse_dates=['timestamp'])
         if not df_ichimoku.index.tz:
              df_ichimoku.index = df_ichimoku.index.tz_localize('UTC')
-        # Ensure all feature columns are numeric
         for col in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b']:
             if col in df_ichimoku.columns:
                 df_ichimoku[col] = pd.to_numeric(df_ichimoku[col], errors='coerce')
@@ -323,7 +316,6 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
 # ---------------------- دوال حساب الميزات ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    # ATR, ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -336,12 +328,10 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    # Other simple features
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
     ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
@@ -580,15 +570,20 @@ def trade_monitoring_loop():
                     except Exception: pass
                 if not price and redis_prices.get(symbol): price = float(redis_prices[symbol])
                 if not price: continue
+                
+                # ✨ FIX: Ensure all prices from signal dict are floats for calculation
                 target_price = float(signal.get('target_price', 0))
                 original_stop_loss = float(signal.get('stop_loss', 0))
                 effective_stop_loss = original_stop_loss
+                
                 if USE_TRAILING_STOP_LOSS:
                     entry_price = float(signal.get('entry_price', 0))
                     activation_price = entry_price * (1 + TRAILING_ACTIVATION_PROFIT_PERCENT / 100)
                     if price > activation_price:
                         current_peak = float(signal.get('current_peak_price', entry_price))
-                        if price > current_peak: signal['current_peak_price'] = price; current_peak = price
+                        if price > current_peak: 
+                            signal['current_peak_price'] = price
+                            current_peak = price
                         trailing_stop_price = current_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
                         effective_stop_loss = max(original_stop_loss, trailing_stop_price)
                 
@@ -609,12 +604,17 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
-    try: requests.post(url, json=payload, timeout=10)
-    except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+    try: 
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status() # Will raise an exception for 4xx/5xx errors
+    except requests.exceptions.RequestException as e: 
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def send_new_signal_alert(signal_data: Dict[str, Any]):
     safe_symbol = signal_data['symbol'].replace('_', '\\_')
-    entry, target, sl = signal_data['entry_price'], signal_data['target_price'], signal_data['stop_loss']
+    entry = float(signal_data['entry_price'])
+    target = float(signal_data['target_price'])
+    sl = float(signal_data['stop_loss'])
     profit_pct = ((target / entry) - 1) * 100
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
@@ -633,7 +633,11 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
-        entry, target, sl = float(signal['entry_price']), float(signal['target_price']), float(signal['stop_loss'])
+        # ✨ FIX: Ensure all numeric values are standard Python floats
+        entry = float(signal['entry_price'])
+        target = float(signal['target_price'])
+        sl = float(signal['stop_loss'])
+        
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price)
@@ -652,10 +656,14 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def update_signal_target_in_db(signal_id: int, new_target: float, new_stop_loss: float) -> bool:
     if not check_db_connection() or not conn: return False
     try:
+        # ✨ FIX: Ensure values are standard Python floats before DB operation
+        db_new_target = float(new_target)
+        db_new_stop_loss = float(new_stop_loss)
+        
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE signals SET target_price = %s, stop_loss = %s WHERE id = %s;",
-                (new_target, new_stop_loss, signal_id)
+                (db_new_target, db_new_stop_loss, signal_id)
             )
         conn.commit()
         logger.info(f"✅ [DB Update] تم تحديث الهدف/الوقف للإشارة {signal_id}.")
@@ -670,11 +678,16 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
     logger.info(f"بدء عملية إغلاق الإشارة {signal_id} ({symbol}) بحالة '{status}'")
     try:
         if not check_db_connection() or not conn: raise OperationalError("فشل الاتصال بقاعدة البيانات عند إغلاق الإشارة.")
-        profit_pct = ((closing_price / signal['entry_price']) - 1) * 100
+        
+        # ✨ FIX: Ensure all values are standard Python floats for calculation and DB
+        db_closing_price = float(closing_price)
+        entry_price = float(signal['entry_price'])
+        profit_pct = ((db_closing_price / entry_price) - 1) * 100
+        
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
-                (status, closing_price, profit_pct, signal_id)
+                (status, db_closing_price, profit_pct, signal_id)
             )
             if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] الإشارة {signal_id} مغلقة بالفعل أو غير موجودة."); return
         conn.commit()
@@ -804,22 +817,22 @@ def main_loop():
 
                         if is_trade_open:
                             open_signal = open_signals_cache[symbol]
-                            if prediction == -1: # Sell signal on an open trade
+                            if prediction == -1:
                                 logger.info(f"ACTION: Closing open trade for {symbol} due to new SELL signal.")
                                 initiate_signal_closure(symbol, open_signal, 'closed_by_sell_signal', current_price)
                                 send_telegram_message(CHAT_ID, f"🔴 *إغلاق بإشارة بيع*\n`{symbol}`\nتم إغلاق الصفقة المفتوحة بسعر السوق بسبب إشارة بيع جديدة من النموذج.")
                                 continue
 
-                            elif prediction == 1: # Buy signal on an open trade (update target)
+                            elif prediction == 1:
                                 logger.info(f"ACTION: Checking for target update for {symbol} due to new BUY signal.")
                                 last_atr = df_features.iloc[-1].get('atr', 0)
                                 sr_levels = fetch_sr_levels_from_db(symbol)
                                 ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
                                 tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, sr_levels, ichimoku_data, last_atr)
 
-                                if tp_sl_data and tp_sl_data['target_price'] > open_signal['target_price']:
-                                    new_tp = tp_sl_data['target_price']
-                                    new_sl = tp_sl_data['stop_loss'] # Update SL as well
+                                if tp_sl_data and float(tp_sl_data['target_price']) > float(open_signal['target_price']):
+                                    new_tp = float(tp_sl_data['target_price'])
+                                    new_sl = float(tp_sl_data['stop_loss'])
                                     
                                     if update_signal_target_in_db(open_signal['id'], new_tp, new_sl):
                                         open_signals_cache[symbol]['target_price'] = new_tp
@@ -862,8 +875,10 @@ def main_loop():
                             }
 
                             if USE_RRR_FILTER:
-                                tp, sl = new_signal['target_price'], new_signal['stop_loss']
-                                risk, reward = current_price - sl, tp - current_price
+                                tp = float(new_signal['target_price'])
+                                sl = float(new_signal['stop_loss'])
+                                risk = current_price - sl
+                                reward = tp - current_price
                                 if risk <= 0 or reward <= 0: continue
                                 rrr = reward / risk
                                 if rrr < MIN_RISK_REWARD_RATIO:
@@ -927,7 +942,7 @@ def get_stats():
         wins = [s for s in closed_trades if s['status'] == 'target_hit']
         losses = [s for s in closed_trades if s['status'] == 'stop_loss_hit']
         
-        total_profit_pct = sum(s['profit_percentage'] for s in closed_trades)
+        total_profit_pct = sum(float(s['profit_percentage']) for s in closed_trades)
         
         win_count = len(wins)
         loss_count = len(losses)
@@ -935,8 +950,8 @@ def get_stats():
         
         win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
         
-        total_profit_from_wins = sum(s['profit_percentage'] for s in wins)
-        total_loss_from_losses = abs(sum(s['profit_percentage'] for s in losses))
+        total_profit_from_wins = sum(float(s['profit_percentage']) for s in wins)
+        total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in losses))
         
         profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else 0
         
@@ -976,7 +991,8 @@ def get_signals():
             if s['status'] == 'open':
                 price = current_prices.get(s['symbol'])
                 s['current_price'] = price
-                if price and s.get('entry_price') > 0: s['pnl_pct'] = ((price / s['entry_price']) - 1) * 100
+                if price and s.get('entry_price') and float(s.get('entry_price')) > 0: 
+                    s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
         return jsonify(all_signals)
     except Exception as e: return jsonify({"error": str(e)}), 500
 
