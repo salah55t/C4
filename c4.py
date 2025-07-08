@@ -89,7 +89,7 @@ TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 
 # --- إعدادات الفلاتر المحسّنة ---
-USE_BTC_TREND_FILTER: bool = True
+USE_BTC_TREND_FILTER: bool = False
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 50
