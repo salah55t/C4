@@ -123,13 +123,32 @@ rejection_logs_lock = Lock()
 
 
 # ---------------------- دوال قاعدة البيانات ----------------------
+# ==============================================================================
+# --- ✨ IMPROVED: دالة الاتصال بقاعدة البيانات مع دعم SSL التلقائي ✨ ---
+# ==============================================================================
 def init_db(retries: int = 5, delay: int = 5) -> None:
+    """
+    Initializes the database connection.
+    Automatically adds 'sslmode=require' to the DB_URL if it's a postgres URL
+    and sslmode is not already present, which is a common requirement for cloud platforms.
+    """
     global conn
     logger.info("[DB] Initializing database connection...")
+    
+    db_url_to_use = DB_URL
+    # This check adds sslmode=require if it's missing from the connection string.
+    if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
+        separator = '&' if '?' in db_url_to_use else '?'
+        db_url_to_use += f"{separator}sslmode=require"
+        logger.info("[DB] 'sslmode=require' was automatically added to the database URL for cloud compatibility.")
+
     for attempt in range(retries):
         try:
-            conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
+            # Use the potentially modified URL
+            conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
+            
+            # Database schema setup
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
@@ -143,19 +162,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION,
                         strategy_name TEXT,
-                        signal_details JSONB
+                        signal_details JSONB,
+                        current_peak_price DOUBLE PRECISION
                     );
                 """)
-                
-                try:
-                    cur.execute("ALTER TABLE signals ADD COLUMN current_peak_price DOUBLE PRECISION;")
-                    logger.info("✅ [DB] 'current_peak_price' column added to 'signals' table.")
-                except psycopg2.errors.DuplicateColumn:
-                    conn.rollback()
-                except Exception as alter_e:
-                    logger.error(f"❌ [DB] Unexpected error altering table: {alter_e}")
-                    conn.rollback()
-
+                # Backward compatibility check for the column can be done here if needed
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY,
@@ -166,13 +177,17 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
             conn.commit()
-            logger.info("✅ [DB] Database tables initialized successfully.")
+            logger.info("✅ [DB] Database connection successful and tables initialized.")
             return
         except Exception as e:
-            logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}): {e}")
+            logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}/{retries}): {e}")
             if conn: conn.rollback()
-            if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [DB] Failed to connect after multiple retries."); exit(1)
+            if attempt < retries - 1:
+                time.sleep(delay)
+            else:
+                logger.critical("❌ [DB] Failed to connect to the database after multiple retries.")
+                # We don't exit here anymore, to allow the web server to run
+                # The bot loops will handle the lack of connection.
 
 def check_db_connection() -> bool:
     global conn
@@ -180,7 +195,7 @@ def check_db_connection() -> bool:
         logger.warning("[DB] Connection is closed, attempting to reconnect...")
         init_db()
     try:
-        if conn:
+        if conn and conn.closed == 0:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
             return True
@@ -427,36 +442,17 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     })
     return False
 
-# ==============================================================================
-# --- ✨ NEW & IMPROVED: دالة تحديد الهدف ووقف الخسارة من قاعدة البيانات ✨ ---
-# ==============================================================================
 def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
-    """
-    Calculates Take Profit (TP) and Stop Loss (SL) based on S/R, Fibonacci, and Ichimoku levels
-    fetched from the database, which are populated by the sca.py script.
-    
-    Args:
-        symbol (str): The crypto symbol (e.g., 'BTCUSDT').
-        entry_price (float): The current price at which the trade would be entered.
-        last_atr (float): The last calculated ATR value, used for fallback and SL buffer.
-
-    Returns:
-        Optional[Dict[str, Any]]: A dictionary with 'target_price', 'stop_loss', and 'source',
-                                  or None if calculation is not possible.
-    """
     logger.info(f"[{symbol}] 🧠 Calculating TP/SL from Database for entry price: {entry_price:.4f}")
     
-    # --- 1. جلب جميع المستويات من قاعدة البيانات ---
     sr_levels_df = fetch_sr_levels_from_db(symbol)
     ichimoku_df = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
     
     all_levels = []
-    # إضافة مستويات الدعم والمقاومة والفيبوناتشي
     if not sr_levels_df.empty:
         all_levels.extend(sr_levels_df['level_price'].astype(float).tolist())
         logger.info(f"[{symbol}] Found {len(sr_levels_df)} S/R & Fibonacci levels in DB.")
 
-    # إضافة مستويات إيشيموكو
     if not ichimoku_df.empty:
         last_ichi = ichimoku_df.iloc[-1]
         ichi_levels = [
@@ -471,9 +467,8 @@ def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) 
 
     if not all_levels:
         log_rejection(symbol, "No DB Levels", {"detail": "No S/R or Ichimoku levels found in the database."})
-        return None # Return None to indicate failure in finding DB levels
+        return None
 
-    # --- 2. فصل المستويات إلى دعم ومقاومة ---
     unique_levels = sorted(list(set(all_levels)))
     resistances = [lvl for lvl in unique_levels if lvl > entry_price]
     supports = [lvl for lvl in unique_levels if lvl < entry_price]
@@ -481,14 +476,9 @@ def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) 
     logger.info(f"[{symbol}] Potential Resistances (> {entry_price:.4f}): {resistances}")
     logger.info(f"[{symbol}] Potential Supports (< {entry_price:.4f}): {supports}")
 
-    # --- 3. تحديد الهدف ووقف الخسارة ---
-    # الهدف هو أقرب مستوى مقاومة
     target_price = min(resistances) if resistances else None
-    
-    # وقف الخسارة هو أقرب مستوى دعم
     stop_loss_price = max(supports) if supports else None
 
-    # --- 4. التحقق والعودة إلى الطريقة الاحتياطية عند الحاجة ---
     if target_price is None or stop_loss_price is None:
         logger.warning(f"[{symbol}] ⚠️ Could not determine a clear TP or SL from DB levels. Using ATR fallback.")
         log_rejection(symbol, "Insufficient DB Levels", {"detail": "Not enough support/resistance found around entry price."})
@@ -499,8 +489,6 @@ def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) 
         logger.info(f"[{symbol}] ATR Fallback: TP={fallback_tp:.4f}, SL={fallback_sl:.4f}")
         return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
     
-    # --- 5. تطبيق هامش الأمان على وقف الخسارة والعودة ---
-    # نطرح جزءًا من ATR من وقف الخسارة لجعله أكثر أمانًا
     final_stop_loss = stop_loss_price - (last_atr * SL_BUFFER_ATR_PERCENT)
     
     logger.info(f"✅ [{symbol}] DB-driven levels determined:")
@@ -985,8 +973,12 @@ def home():
     try:
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, 'index.html')
+        if not os.path.exists(file_path):
+            return "<h1>Dashboard HTML file not found.</h1>", 404
         with open(file_path, 'r', encoding='utf-8') as f: return render_template_string(f.read())
-    except FileNotFoundError: return "<h1>index.html file not found.</h1>", 404
+    except Exception as e:
+        logger.error(f"Error rendering homepage: {e}")
+        return "<h1>An error occurred.</h1>", 500
 
 @app.route('/api/market_status')
 def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index(), "market_regime": current_market_regime})
@@ -1098,7 +1090,8 @@ def get_rejection_logs():
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    log_and_notify("info", f"Starting dashboard on {host}:{port}", "SYSTEM")
+    # This log_and_notify might fail if DB is not ready, but it's not critical
+    logger.info(f"Attempting to start dashboard on {host}:{port}")
     try:
         from waitress import serve
         serve(app, host=host, port=port, threads=8)
@@ -1119,15 +1112,24 @@ def initialize_bot_services():
     try:
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] Connected to Binance API successfully.")
+        
+        # Initialize DB and Redis
         init_db()
         init_redis()
-        load_open_signals_to_cache(); load_notifications_to_cache()
+        
+        # Load initial data from DB
+        load_open_signals_to_cache()
+        load_notifications_to_cache()
+        
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Loops will not start."); return
+            
+        # Start core bot threads
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
+        
         logger.info("✅ [Bot Services] All background services started successfully.")
     except Exception as e:
         log_and_notify("critical", f"A critical error occurred during initialization: {e}", "SYSTEM")
@@ -1135,7 +1137,14 @@ def initialize_bot_services():
 
 if __name__ == "__main__":
     logger.info(f"🚀 Starting Trading Bot - Version {BASE_ML_MODEL_NAME}...")
+    
+    # Start the bot services in a background thread.
+    # This allows the web server (Flask) to start immediately in the main thread.
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
+    
+    # Start the Flask web server in the main thread.
+    # This will bind to the port and satisfy the hosting platform's health checks.
     run_flask()
+    
     logger.info("👋 [Shutdown] Bot has been shut down."); os._exit(0)
