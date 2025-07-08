@@ -35,11 +35,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v8_db_sl_tp.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v9_improved.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV8_DB_SL_TP')
+logger = logging.getLogger('CryptoBotV9_Improved')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -91,7 +91,7 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 # --- إعدادات الفلاتر المحسّنة ---
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
-BTC_TREND_TIMEFRAME: str = '4h'
+BTC_TREND_TIMEFRAME: str = '4h' # This is now a base, but the new logic uses multiple TFs
 BTC_TREND_EMA_PERIOD: int = 50
 
 USE_SPEED_FILTER: bool = True
@@ -116,39 +116,338 @@ notifications_lock = Lock()
 signals_pending_closure: Set[int] = set()
 closure_lock = Lock()
 last_api_check_time = time.time()
-last_market_regime_check = 0
-current_market_regime = "RANGING"
 rejection_logs_cache = deque(maxlen=100)
 rejection_logs_lock = Lock()
 
+# --- ✨ IMPROVED: متغيرات حالة السوق المحسّنة ---
+last_market_state_check = 0
+current_market_state: Dict[str, Any] = {
+    "overall_regime": "INITIALIZING",
+    "details": {},
+    "last_updated": None
+}
+market_state_lock = Lock()
+
+
+# ---------------------- دوال HTML للوحة التحكم ----------------------
+def get_dashboard_html():
+    return """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم بوت التداول</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Cairo', sans-serif; }
+        .dark {
+            --bg-color: #111827;
+            --card-color: #1f2937;
+            --text-color: #d1d5db;
+            --header-color: #9ca3af;
+            --border-color: #374151;
+            --green-bg: #052e16;
+            --red-bg: #450a0a;
+            --yellow-bg: #422006;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+        }
+        .card {
+            background-color: var(--card-color);
+            border: 1px solid var(--border-color);
+        }
+        .header { color: var(--header-color); }
+        .bg-custom-green { background-color: var(--green-bg); }
+        .bg-custom-red { background-color: var(--red-bg); }
+        .bg-custom-yellow { background-color: var(--yellow-bg); }
+        .blinking { animation: blinker 1.5s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body class="dark p-4 md:p-6">
+    <div class="container mx-auto">
+        <header class="mb-6 flex justify-between items-center">
+            <h1 class="text-2xl md:text-3xl font-bold text-white">لوحة تحكم بوت التداول</h1>
+            <button id="testTelegram" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                اختبار تليجرام
+            </button>
+        </header>
+
+        <!-- Market Status Section -->
+        <section id="market-status" class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <!-- Overall Regime -->
+            <div id="overall-regime-card" class="card rounded-xl p-4 flex flex-col justify-center items-center">
+                <h3 class="header text-lg font-semibold mb-2">حالة السوق العامة</h3>
+                <div id="overall-regime" class="text-2xl font-bold">جاري التحميل...</div>
+            </div>
+            <!-- Fear & Greed -->
+            <div class="card rounded-xl p-4 flex flex-col justify-center items-center">
+                <h3 class="header text-lg font-semibold mb-2">مؤشر الخوف والطمع</h3>
+                <div id="fear-greed" class="text-2xl font-bold">...</div>
+            </div>
+            <!-- Timeframe 1H -->
+            <div id="tf-1h-card" class="card rounded-xl p-4">
+                <h3 class="header text-center font-semibold mb-2">اتجاه (1 ساعة)</h3>
+                <div id="tf-1h-status" class="text-xl font-bold text-center">...</div>
+                <div id="tf-1h-details" class="text-sm text-center mt-1">...</div>
+            </div>
+            <!-- Timeframe 4H -->
+            <div id="tf-4h-card" class="card rounded-xl p-4">
+                <h3 class="header text-center font-semibold mb-2">اتجاه (4 ساعات)</h3>
+                <div id="tf-4h-status" class="text-xl font-bold text-center">...</div>
+                <div id="tf-4h-details" class="text-sm text-center mt-1">...</div>
+            </div>
+        </section>
+
+        <!-- Stats Section -->
+        <section id="stats" class="mb-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-4">
+            <!-- Cards will be injected here -->
+        </section>
+
+        <!-- Tabs -->
+        <div class="mb-4 border-b border-gray-700">
+            <nav class="flex space-x-4" aria-label="Tabs">
+                <button onclick="showTab('signals')" class="tab-btn active text-white py-2 px-4">التوصيات</button>
+                <button onclick="showTab('notifications')" class="tab-btn text-gray-400 py-2 px-4">الإشعارات</button>
+                <button onclick="showTab('rejections')" class="tab-btn text-gray-400 py-2 px-4">التوصيات المرفوضة</button>
+            </nav>
+        </div>
+
+        <!-- Signals Table -->
+        <div id="signals-tab" class="tab-content">
+            <div class="overflow-x-auto card rounded-lg">
+                <table class="min-w-full text-sm text-right">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="p-3">العملة</th>
+                            <th class="p-3">الحالة</th>
+                            <th class="p-3">الربح/الخسارة (%)</th>
+                            <th class="p-3">سعر الدخول</th>
+                            <th class="p-3">السعر الحالي</th>
+                            <th class="p-3">الهدف</th>
+                            <th class="p-3">وقف الخسارة</th>
+                            <th class="p-3">إجراء</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signals-table">
+                        <!-- Rows will be injected here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- Notifications -->
+        <div id="notifications-tab" class="tab-content hidden">
+            <div class="card rounded-lg p-4 max-h-96 overflow-y-auto">
+                <ul id="notifications-list" class="space-y-2"></ul>
+            </div>
+        </div>
+
+        <!-- Rejection Logs -->
+        <div id="rejections-tab" class="tab-content hidden">
+            <div class="card rounded-lg p-4 max-h-96 overflow-y-auto">
+                <ul id="rejections-list" class="space-y-2"></ul>
+            </div>
+        </div>
+    </div>
+
+<script>
+const REGIME_STYLES = {
+    "STRONG UPTREND": { text: "اتجاه صاعد قوي", color: "text-green-400", bg: "bg-custom-green" },
+    "UPTREND": { text: "اتجاه صاعد", color: "text-green-500", bg: "bg-custom-green" },
+    "RANGING": { text: "عرضي", color: "text-yellow-400", bg: "bg-custom-yellow" },
+    "DOWNTREND": { text: "اتجاه هابط", color: "text-red-500", bg: "bg-custom-red" },
+    "STRONG DOWNTREND": { text: "اتجاه هابط قوي", color: "text-red-400", bg: "bg-custom-red" },
+    "UNCERTAIN": { text: "غير واضح", color: "text-gray-400", bg: "bg-gray-700" },
+    "INITIALIZING": { text: "جاري التهيئة...", color: "text-blue-400", bg: "bg-blue-900" }
+};
+
+const TF_STATUS_STYLES = {
+    "Uptrend": { text: "صاعد", icon: "▲", color: "text-green-400" },
+    "Downtrend": { text: "هابط", icon: "▼", color: "text-red-400" },
+    "Ranging": { text: "عرضي", icon: " sideways", color: "text-yellow-400" },
+};
+
+function updateMarketStatus() {
+    fetch('/api/market_status')
+        .then(response => response.json())
+        .then(data => {
+            // Fear & Greed
+            const fg = data.fear_and_greed;
+            document.getElementById('fear-greed').textContent = `${fg.value} (${fg.classification})`;
+
+            // Overall Market Regime
+            const state = data.market_state;
+            const overallRegime = state.overall_regime || "UNCERTAIN";
+            const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
+            
+            const overallDiv = document.getElementById('overall-regime');
+            overallDiv.textContent = regimeStyle.text;
+            overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
+
+            const overallCard = document.getElementById('overall-regime-card');
+            overallCard.className = `card rounded-xl p-4 flex flex-col justify-center items-center ${regimeStyle.bg}`;
+
+            // Timeframe Details
+            updateTimeframeCard('1h', state.details['1h']);
+            updateTimeframeCard('4h', state.details['4h']);
+        });
+}
+
+function updateTimeframeCard(tf, data) {
+    const card = document.getElementById(`tf-${tf}-card`);
+    const statusDiv = document.getElementById(`tf-${tf}-status`);
+    const detailsDiv = document.getElementById(`tf-${tf}-details`);
+
+    if (!data) {
+        statusDiv.textContent = 'N/A';
+        detailsDiv.textContent = '';
+        return;
+    }
+
+    const style = TF_STATUS_STYLES[data.trend] || { text: 'N/A', icon: '', color: 'text-gray-400' };
+    statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
+    detailsDiv.textContent = `RSI: ${data.rsi.toFixed(1)} | ADX: ${data.adx.toFixed(1)}`;
+    
+    let bgColor = 'bg-gray-800';
+    if (data.trend === 'Uptrend') bgColor = 'bg-custom-green';
+    else if (data.trend === 'Downtrend') bgColor = 'bg-custom-red';
+    else if (data.trend === 'Ranging') bgColor = 'bg-custom-yellow';
+    card.className = `card rounded-xl p-4 ${bgColor}`;
+}
+
+function updateStats() {
+    fetch('/api/stats')
+        .then(response => response.json())
+        .then(data => {
+            const statsContainer = document.getElementById('stats');
+            statsContainer.innerHTML = `
+                <div class="card p-4 rounded-lg text-center"><div class="header">صفقات مفتوحة</div><div class="text-2xl font-bold">${data.open_trades_count}</div></div>
+                <div class="card p-4 rounded-lg text-center"><div class="header">إجمالي الربح</div><div class="text-2xl font-bold ${data.total_profit_pct >= 0 ? 'text-green-400' : 'text-red-400'}">${data.total_profit_pct.toFixed(2)}%</div></div>
+                <div class="card p-4 rounded-lg text-center"><div class="header">نسبة النجاح</div><div class="text-2xl font-bold">${data.win_rate.toFixed(2)}%</div></div>
+                <div class="card p-4 rounded-lg text-center"><div class="header">عامل الربح</div><div class="text-2xl font-bold">${data.profit_factor.toFixed(2)}</div></div>
+            `;
+        });
+}
+
+function updateSignals() {
+    fetch('/api/signals')
+        .then(response => response.json())
+        .then(data => {
+            const tableBody = document.getElementById('signals-table');
+            tableBody.innerHTML = '';
+            if (!data || data.error) {
+                tableBody.innerHTML = '<tr><td colspan="8" class="text-center p-4">فشل في تحميل البيانات.</td></tr>';
+                return;
+            }
+            data.forEach(signal => {
+                const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
+                const pnlClass = pnlPct >= 0 ? 'text-green-400' : 'text-red-400';
+                const statusClass = signal.status === 'open' ? 'text-yellow-400 blinking' : 'text-gray-400';
+                
+                const row = `
+                    <tr class="border-b border-gray-700 hover:bg-gray-800">
+                        <td class="p-3 font-mono">${signal.symbol}</td>
+                        <td class="p-3 ${statusClass}">${signal.status}</td>
+                        <td class="p-3 font-mono ${pnlClass}">${pnlPct.toFixed(2)}%</td>
+                        <td class="p-3 font-mono">${signal.entry_price.toFixed(4)}</td>
+                        <td class="p-3 font-mono">${signal.current_price ? signal.current_price.toFixed(4) : 'N/A'}</td>
+                        <td class="p-3 font-mono">${signal.target_price.toFixed(4)}</td>
+                        <td class="p-3 font-mono">${signal.stop_loss.toFixed(4)}</td>
+                        <td class="p-3">
+                            ${signal.status === 'open' ? `<button onclick="closeSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-2 rounded">إغلاق</button>` : ''}
+                        </td>
+                    </tr>
+                `;
+                tableBody.innerHTML += row;
+            });
+        });
+}
+
+function updateNotifications() {
+    fetch('/api/notifications')
+        .then(response => response.json())
+        .then(data => {
+            const list = document.getElementById('notifications-list');
+            list.innerHTML = '';
+            data.forEach(n => {
+                const item = `<li class="p-2 rounded-md bg-gray-800 text-sm">[${new Date(n.timestamp).toLocaleString('ar-EG')}] ${n.message}</li>`;
+                list.innerHTML += item;
+            });
+        });
+}
+
+function updateRejectionLogs() {
+    fetch('/api/rejection_logs')
+        .then(response => response.json())
+        .then(data => {
+            const list = document.getElementById('rejections-list');
+            list.innerHTML = '';
+            data.forEach(log => {
+                const details = JSON.stringify(log.details);
+                const item = `<li class="p-2 rounded-md bg-gray-800 text-sm">[${new Date(log.timestamp).toLocaleString('ar-EG')}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs">${details}</span></li>`;
+                list.innerHTML += item;
+            });
+        });
+}
+
+function closeSignal(id) {
+    if (!confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟')) return;
+    fetch(`/api/close/${id}`, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            alert(data.message || data.error);
+            updateSignals();
+        });
+}
+
+function showTab(tabName) {
+    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+    document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('text-white');
+        btn.classList.add('text-gray-400');
+    });
+    event.target.classList.add('text-white');
+    event.target.classList.remove('text-gray-400');
+}
+
+document.getElementById('testTelegram').addEventListener('click', () => {
+    fetch('/api/test_telegram').then(res => res.text()).then(alert);
+});
+
+function refreshData() {
+    updateMarketStatus();
+    updateStats();
+    updateSignals();
+    updateNotifications();
+    updateRejectionLogs();
+}
+
+setInterval(refreshData, 5000); // Refresh every 5 seconds
+window.onload = refreshData;
+</script>
+</body>
+</html>
+    """
 
 # ---------------------- دوال قاعدة البيانات ----------------------
-# ==============================================================================
-# --- ✨ IMPROVED: دالة الاتصال بقاعدة البيانات مع دعم SSL التلقائي ✨ ---
-# ==============================================================================
 def init_db(retries: int = 5, delay: int = 5) -> None:
-    """
-    Initializes the database connection.
-    Automatically adds 'sslmode=require' to the DB_URL if it's a postgres URL
-    and sslmode is not already present, which is a common requirement for cloud platforms.
-    """
     global conn
     logger.info("[DB] Initializing database connection...")
-    
     db_url_to_use = DB_URL
-    # This check adds sslmode=require if it's missing from the connection string.
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         separator = '&' if '?' in db_url_to_use else '?'
         db_url_to_use += f"{separator}sslmode=require"
         logger.info("[DB] 'sslmode=require' was automatically added to the database URL for cloud compatibility.")
-
     for attempt in range(retries):
         try:
-            # Use the potentially modified URL
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
-            
-            # Database schema setup
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
@@ -166,7 +465,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         current_peak_price DOUBLE PRECISION
                     );
                 """)
-                # Backward compatibility check for the column can be done here if needed
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY,
@@ -186,8 +484,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 time.sleep(delay)
             else:
                 logger.critical("❌ [DB] Failed to connect to the database after multiple retries.")
-                # We don't exit here anymore, to allow the web server to run
-                # The bot loops will handle the lack of connection.
+
 
 def check_db_connection() -> bool:
     global conn
@@ -275,9 +572,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        klines = client.get_historical_klines(symbol, interval, start_str)
+        limit = int((days * 24 * 60) / int(interval[:-1])) if 'm' in interval else int((days * 24) / int(interval[:-1]))
+        limit = min(limit, 1000) # Binance limit is 1000 klines per request
+        
+        klines = client.get_historical_klines(symbol, interval, limit=limit)
         if not klines: return None
         
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
@@ -385,57 +683,150 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
+# ---------------------- ✨ IMPROVED: دوال تحديد اتجاه السوق المحسّنة ----------------------
 
-def determine_market_regime():
-    global current_market_regime, last_market_regime_check
-    if time.time() - last_market_regime_check < 300: return current_market_regime
-    logger.info("ℹ️ [Market Regime] Updating market state (BTC)...")
-    try:
-        btc_data = fetch_historical_data(BTC_SYMBOL, '4h', 10)
-        if btc_data is None or len(btc_data) < 50:
-            logger.warning("⚠️ [Market Regime] Insufficient BTC data, using previous regime.")
-            return current_market_regime
-        ema_fast = btc_data['close'].ewm(span=12, adjust=False).mean()
-        ema_slow = btc_data['close'].ewm(span=26, adjust=False).mean()
-        high_low = btc_data['high'] - btc_data['low']
-        high_close = (btc_data['high'] - btc_data['close'].shift()).abs()
-        low_close = (btc_data['low'] - btc_data['close'].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = tr.ewm(span=14, adjust=False).mean()
-        up_move = btc_data['high'].diff(); down_move = -btc_data['low'].diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=btc_data.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=btc_data.index)
-        plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
-        minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
-        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-        adx = dx.ewm(span=14, adjust=False).mean()
+def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
+    """Calculates trend indicators for a single timeframe."""
+    if df is None or len(df) < 26:
+        return {"trend": "Uncertain", "rsi": -1, "adx": -1}
 
-        if adx.iloc[-1] > 25:
-            current_market_regime = "UPTREND" if ema_fast.iloc[-1] > ema_slow.iloc[-1] else "DOWNTREND"
+    # RSI
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=13, adjust=False).mean()
+    rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # ADX
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.ewm(span=14, adjust=False).mean()
+    up_move = df['high'].diff()
+    down_move = -df['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    adx = dx.ewm(span=14, adjust=False).mean()
+
+    # Trend Determination
+    ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
+    ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
+    
+    trend = "Uncertain"
+    if adx.iloc[-1] > 20:
+        if ema_fast > ema_slow and rsi.iloc[-1] > 50:
+            trend = "Uptrend"
+        elif ema_fast < ema_slow and rsi.iloc[-1] < 50:
+            trend = "Downtrend"
         else:
-            current_market_regime = "RANGING"
-        last_market_regime_check = time.time()
-        logger.info(f"✅ [Market Regime] State determined: {current_market_regime} (ADX: {adx.iloc[-1]:.2f})")
-        return current_market_regime
+            trend = "Ranging"
+    else:
+        trend = "Ranging"
+
+    return {
+        "trend": trend,
+        "rsi": rsi.iloc[-1],
+        "adx": adx.iloc[-1]
+    }
+
+def determine_market_state():
+    """
+    Determines the overall market state by analyzing multiple timeframes of BTC.
+    This is a more robust approach than the single timeframe analysis.
+    """
+    global current_market_state, last_market_state_check
+    
+    # --- Cache check to avoid excessive API calls ---
+    with market_state_lock:
+        if time.time() - last_market_state_check < 300: # 5 minutes
+            return current_market_state
+
+    logger.info("🧠 [Market State] Updating market state using Multi-Timeframe Analysis (MTA)...")
+    
+    try:
+        # --- Fetch data for all required timeframes ---
+        df_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
+        df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
+        
+        if df_1h is None or df_4h is None:
+            logger.warning("⚠️ [Market State] Could not fetch all required BTC data. Using previous state.")
+            return current_market_state
+
+        # --- Analyze each timeframe ---
+        state_1h = get_trend_for_timeframe(df_1h)
+        state_4h = get_trend_for_timeframe(df_4h)
+        
+        trends = [state_1h['trend'], state_4h['trend']]
+        
+        # --- Combine results to determine overall regime ---
+        overall_regime = "UNCERTAIN"
+        uptrends = trends.count("Uptrend")
+        downtrends = trends.count("Downtrend")
+
+        if uptrends == 2:
+            overall_regime = "STRONG UPTREND"
+        elif uptrends == 1 and downtrends == 0:
+            overall_regime = "UPTREND"
+        elif downtrends == 2:
+            overall_regime = "STRONG DOWNTREND"
+        elif downtrends == 1 and uptrends == 0:
+            overall_regime = "DOWNTREND"
+        elif "Ranging" in trends:
+            overall_regime = "RANGING"
+
+        # --- Update the global state variable ---
+        with market_state_lock:
+            current_market_state = {
+                "overall_regime": overall_regime,
+                "details": {
+                    "1h": state_1h,
+                    "4h": state_4h,
+                },
+                "last_updated": datetime.now(timezone.utc).isoformat()
+            }
+            last_market_state_check = time.time()
+            
+        logger.info(f"✅ [Market State] New state determined: {current_market_state['overall_regime']}")
+        logger.info(f"   - 1H: {state_1h['trend']} (RSI: {state_1h['rsi']:.1f}, ADX: {state_1h['adx']:.1f})")
+        logger.info(f"   - 4H: {state_4h['trend']} (RSI: {state_4h['rsi']:.1f}, ADX: {state_4h['adx']:.1f})")
+
+        return current_market_state
+
     except Exception as e:
-        logger.error(f"❌ [Market Regime] Failed to determine market regime: {e}")
-        return current_market_regime
+        logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
+        # Return the last known state in case of an error
+        return current_market_state
+
+# ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
 
 def passes_speed_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
-    regime = determine_market_regime()
-    if regime == "DOWNTREND":
-        log_rejection(symbol, "Speed Filter", {"detail": "Disabled due to market downtrend"})
-        return True
     
-    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.5, 40.0, 80.0, "Strict (UPTREND)") if regime == "UPTREND" else (18.0, 0.2, 30.0, 80.0, "Lenient (RANGING)")
+    # Use the new detailed market state
+    with market_state_lock:
+        regime = current_market_state.get("overall_regime", "RANGING")
+
+    if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
+        log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
+        return True # In a downtrend, this filter might not be relevant for buy signals
+    
+    # Adjust thresholds based on market regime
+    if regime == "STRONG UPTREND":
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
+    elif regime == "UPTREND":
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
+    else: # RANGING or UNCERTAIN
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
         return True
     
     log_rejection(symbol, "Speed Filter", {
+        "Regime": regime,
         "ADX": f"{adx:.2f} (Req: >{adx_threshold})",
         "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})",
         "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
@@ -663,10 +1054,15 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     
+    # Add market state to the alert
+    with market_state_lock:
+        market_regime = current_market_state.get('overall_regime', 'N/A')
+
     message = (
         f"💡 *توصية تداول جديدة* 💡\n\n"
         f" *العملة:* `{safe_symbol}`\n"
-        f" *الاستراتيجية:* `{BASE_ML_MODEL_NAME}`\n\n"
+        f" *الاستراتيجية:* `{BASE_ML_MODEL_NAME}`\n"
+        f" *حالة السوق:* `{market_regime}`\n\n"
         f" *الدخول:* `${entry:,.8g}`\n"
         f" *الهدف:* `${target:,.8g}`\n"
         f" *وقف الخسارة:* `${sl:,.8g}`\n\n"
@@ -679,7 +1075,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New Signal: {signal_data['symbol']}", "NEW_SIGNAL")
+        log_and_notify('info', f"New Signal: {signal_data['symbol']} in {market_regime} market", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -786,20 +1182,6 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [Loading] Failed to load notifications: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
-def get_btc_trend() -> Dict[str, Any]:
-    if not client: return {"status": "error", "is_uptrend": False}
-    try:
-        klines = client.get_klines(symbol=BTC_SYMBOL, interval=BTC_TREND_TIMEFRAME, limit=BTC_TREND_EMA_PERIOD * 2)
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
-        df['close'] = pd.to_numeric(df['close'])
-        ema = df['close'].ewm(span=BTC_TREND_EMA_PERIOD, adjust=False).mean().iloc[-1]
-        current_price = df['close'].iloc[-1]
-        is_uptrend = bool(current_price > ema)
-        return {"status": "Uptrend" if is_uptrend else "Downtrend", "is_uptrend": is_uptrend}
-    except Exception as e:
-        logger.error(f"❌ [BTC Filter] Failed to determine Bitcoin trend: {e}")
-        return {"status": "Error", "is_uptrend": False}
-
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is None: logger.error("❌ [BTC Data] Failed to fetch Bitcoin data."); return None
@@ -814,15 +1196,16 @@ def main_loop():
     all_symbols = list(validated_symbols_to_scan)
     while True:
         try:
-            determine_market_regime()
+            market_state = determine_market_state()
+            market_regime = market_state.get("overall_regime", "UNCERTAIN")
             
             for i in range(0, len(all_symbols), MODEL_BATCH_SIZE):
                 symbol_batch = all_symbols[i:i + MODEL_BATCH_SIZE]
                 ml_models_cache.clear(); gc.collect()
                 
-                btc_trend_info = get_btc_trend()
-                if USE_BTC_TREND_FILTER and not btc_trend_info.get("is_uptrend"):
-                    log_rejection("ALL", "BTC Trend Filter", {"detail": "Scan paused due to BTC downtrend"})
+                # --- ✨ IMPROVED: BTC Trend Filter using the new market state ---
+                if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
+                    log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
                     time.sleep(300)
                     break
                 
@@ -910,7 +1293,7 @@ def main_loop():
                                 log_rejection(symbol, "Low Volatility Filter", {"volatility": f"{volatility:.2f}%", "min_required": f"{MIN_VOLATILITY_PERCENT}%"})
                                 continue
 
-                            if USE_BTC_CORRELATION_FILTER and btc_trend_info.get("is_uptrend"):
+                            if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
                                 correlation = last_features.get('btc_correlation', 0)
                                 if correlation < MIN_BTC_CORRELATION:
                                     log_rejection(symbol, "BTC Correlation Filter", {"correlation": f"{correlation:.2f}", "min_required": f"{MIN_BTC_CORRELATION}"})
@@ -971,17 +1354,20 @@ def get_fear_and_greed_index() -> Dict[str, Any]:
 @app.route('/')
 def home():
     try:
-        script_dir = os.path.dirname(__file__)
-        file_path = os.path.join(script_dir, 'index.html')
-        if not os.path.exists(file_path):
-            return "<h1>Dashboard HTML file not found.</h1>", 404
-        with open(file_path, 'r', encoding='utf-8') as f: return render_template_string(f.read())
+        return render_template_string(get_dashboard_html())
     except Exception as e:
         logger.error(f"Error rendering homepage: {e}")
         return "<h1>An error occurred.</h1>", 500
 
 @app.route('/api/market_status')
-def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index(), "market_regime": current_market_regime})
+def get_market_status():
+    with market_state_lock:
+        # Make a copy to avoid race conditions during serialization
+        state_copy = dict(current_market_state)
+    return jsonify({
+        "fear_and_greed": get_fear_and_greed_index(),
+        "market_state": state_copy
+    })
 
 @app.route('/api/stats')
 def get_stats():
@@ -1090,7 +1476,6 @@ def get_rejection_logs():
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    # This log_and_notify might fail if DB is not ready, but it's not critical
     logger.info(f"Attempting to start dashboard on {host}:{port}")
     try:
         from waitress import serve
@@ -1113,19 +1498,19 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         logger.info("✅ [Binance] Connected to Binance API successfully.")
         
-        # Initialize DB and Redis
         init_db()
         init_redis()
         
-        # Load initial data from DB
         load_open_signals_to_cache()
         load_notifications_to_cache()
         
+        # Run initial market state check
+        determine_market_state()
+
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Loops will not start."); return
             
-        # Start core bot threads
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
@@ -1136,15 +1521,11 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting Trading Bot - Version {BASE_ML_MODEL_NAME}...")
+    logger.info(f"🚀 Starting Trading Bot - Improved Version...")
     
-    # Start the bot services in a background thread.
-    # This allows the web server (Flask) to start immediately in the main thread.
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     
-    # Start the Flask web server in the main thread.
-    # This will bind to the port and satisfy the hosting platform's health checks.
     run_flask()
     
     logger.info("👋 [Shutdown] Bot has been shut down."); os._exit(0)
