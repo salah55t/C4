@@ -829,8 +829,8 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.8, 55.0, 70.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 75.0)
+    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
+    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
     else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
@@ -990,10 +990,11 @@ def trade_monitoring_loop():
             logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
             time.sleep(5)
 
-# ---------------------- دوال التنبيهات والإدارة (مع التنسيق المحسن) ----------------------
+# ---------------------- دوال التنبيهات والإدارة (مع الإصلاح) ----------------------
 def escape_markdown(text: Any) -> str:
     """
     Escapes special characters in a string for Telegram's MarkdownV2 parser.
+    This is the fix for the "can't parse entities" error.
     """
     text = str(text)
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
@@ -1013,7 +1014,7 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
              logger.error(f"❌ [Telegram] Failed to send message. Status: {response.status_code}, Response: {response.text}")
              # Fallback to plain text if Markdown fails
              payload['parse_mode'] = None
-             payload['text'] = re.sub(r'[*_`\[\]\\]', '', text) # Remove markdown chars
+             payload['text'] = re.sub(r'[*_`\[\]]', '', text) # Remove markdown chars
              response = requests.post(url, json=payload, timeout=10)
              if response.status_code == 200:
                  logger.info("✅ [Telegram] Message sent successfully in plain text after Markdown failure.")
@@ -1028,59 +1029,39 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         return False
 
 def send_new_signal_alert(signal_data: Dict[str, Any]):
-    try:
-        # --- استخراج وتنسيق البيانات ---
-        symbol = escape_markdown(signal_data['symbol'])
-        entry = float(signal_data['entry_price'])
-        target = float(signal_data['target_price'])
-        sl = float(signal_data['stop_loss'])
-        
-        signal_details = signal_data.get('signal_details', {})
-        ml_confidence_raw = signal_details.get('ML_Confidence', 'N/A')
-        tp_sl_source_raw = signal_details.get('TP_SL_Source', 'N/A')
-        
-        strategy_name_raw = signal_data.get('strategy_name', 'N/A')
-        strategy_name = "الدعم والمقاومة" if 'Support_Resistance' in strategy_name_raw else "نموذج التعلم الآلي"
-        
-        with market_state_lock:
-            market_regime_raw = current_market_state.get('overall_regime', 'N/A')
+    safe_symbol = escape_markdown(signal_data['symbol'])
+    entry = float(signal_data['entry_price'])
+    target = float(signal_data['target_price'])
+    sl = float(signal_data['stop_loss'])
+    profit_pct = ((target / entry) - 1) * 100
+    risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
+    rrr = profit_pct / risk_pct if risk_pct > 0 else 0
+    
+    with market_state_lock:
+        market_regime = escape_markdown(current_market_state.get('overall_regime', 'N/A'))
+    
+    strategy_name = escape_markdown(BASE_ML_MODEL_NAME)
+    ml_confidence = escape_markdown(signal_data['signal_details']['ML_Confidence'])
+    tp_sl_source = escape_markdown(signal_data['signal_details']['TP_SL_Source'])
 
-        # --- معالجة النصوص للتليجرام ---
-        ml_confidence = escape_markdown(ml_confidence_raw)
-        tp_sl_source = escape_markdown(tp_sl_source_raw)
-        strategy_name = escape_markdown(strategy_name)
-        market_regime = escape_markdown(market_regime_raw)
-
-        # --- حساب المقاييس ---
-        profit_pct = ((target / entry) - 1) * 100 if entry > 0 else 0
-        risk_pct = abs(((sl / entry) - 1) * 100) if entry > 0 else 0
-        rrr = profit_pct / risk_pct if risk_pct > 0 else 0
-
-        # --- بناء الرسالة بالتنسيق الجديد ---
-        message_parts = [
-            f"🚀 *توصية شراء جديدة* 🚀\n",
-            f"📈 *العملة:* `{symbol}`",
-            f"➡️ *الدخول:* `{entry:,.8g}`",
-            f"🎯 *الهدف:* `{target:,.8g}`",
-            f"🛡️ *الوقف:* `{sl:,.8g}`\n",
-            "*- - - - - - - - - - - -*\n",
-            f"💰 *الربح المتوقع:* `+{profit_pct:.2f}%`",
-            f"📉 *المخاطرة:* `{risk_pct:.2f}%`",
-            f"⚖️ *المخاطرة/العائد:* `1:{rrr:.2f}`\n",
-            "*- - - - - - - - - - - -*\n",
-            f"🧠 *الاستراتيجية:* {strategy_name}",
-            f"📊 *حالة السوق:* {market_regime}",
-        ]
-        
-        message = "\n".join(message_parts)
-        
-        reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
-        if send_telegram_message(CHAT_ID, message, reply_markup):
-            log_and_notify('info', f"New Signal Alert Sent: {signal_data['symbol']}", "NEW_SIGNAL")
-
-    except Exception as e:
-        logger.error(f"❌ CRITICAL: Unhandled exception in send_new_signal_alert for {signal_data.get('symbol', 'N/A')}: {e}", exc_info=True)
-
+    message = (
+        f"💡 *توصية تداول جديدة* 💡\n\n"
+        f" *العملة:* `{safe_symbol}`\n"
+        f" *الاستراتيجية:* `{strategy_name}`\n"
+        f" *حالة السوق:* `{market_regime}`\n\n"
+        f" *الدخول:* `${entry:,.8g}`\n"
+        f" *الهدف:* `${target:,.8g}`\n"
+        f" *وقف الخسارة:* `${sl:,.8g}`\n\n"
+        f" *الربح المتوقع:* `+{profit_pct:.2f}%`\n"
+        f" *المخاطرة:* `{risk_pct:.2f}%`\n"
+        f" *المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
+        f" *ثقة النموذج:* {ml_confidence}\n"
+        f" *مصدر الهدف:* {tp_sl_source}"
+    )
+    
+    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
+    if send_telegram_message(CHAT_ID, message, reply_markup):
+        log_and_notify('info', f"New Signal: {signal_data['symbol']} in {market_regime} market", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -1117,14 +1098,13 @@ def update_signal_target_in_db(signal_id: int, new_target: float, new_stop_loss:
         return False
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
-    signal_id = signal.get('id'); symbol_raw = signal.get('symbol')
-    logger.info(f"Initiating closure for signal {signal_id} ({symbol_raw}) with status '{status}'")
+    signal_id = signal.get('id'); symbol = signal.get('symbol')
+    logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
     try:
         if not check_db_connection() or not conn: raise OperationalError("DB connection failed.")
         db_closing_price = float(closing_price)
         entry_price = float(signal['entry_price'])
         profit_pct = ((db_closing_price / entry_price) - 1) * 100
-        
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
@@ -1132,32 +1112,27 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
             )
             if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] Signal {signal_id} was already closed or not found."); return
         conn.commit()
-        
         status_map = {
-            'target_hit': '🎯✅ تحقق الهدف',
-            'stop_loss_hit': '🛡️🛑 ضرب وقف الخسارة',
+            'target_hit': '✅ تحقق الهدف',
+            'stop_loss_hit': '🛑 ضرب وقف الخسارة',
             'manual_close': '🖐️ إغلاق يدوي',
-            'closed_by_sell_signal': '📉🔴 إغلاق بإشارة بيع'
+            'closed_by_sell_signal': '🔴 إغلاق بإشارة بيع'
         }
-        
         status_message = escape_markdown(status_map.get(status, status))
-        safe_symbol = escape_markdown(symbol_raw)
-        profit_str = escape_markdown(f"{profit_pct:+.2f}%")
-        
-        alert_msg = f"*{status_message}*\n\n*العملة:* `{safe_symbol}`\n*الربح:* `{profit_str}`"
-        
+        safe_symbol = escape_markdown(symbol)
+        profit_str = f"{profit_pct:+.2f}%"
+        alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{profit_str}`"
         send_telegram_message(CHAT_ID, alert_msg)
-        log_and_notify('info', f"{status_map.get(status, status)}: {symbol_raw} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
+        log_and_notify('info', f"{status_map.get(status, status)}: {symbol} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
         logger.info(f"✅ [DB Close] Signal {signal_id} closed successfully.")
     except Exception as e:
         logger.error(f"❌ [DB Close] Critical error closing signal {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
-        if symbol_raw:
+        if symbol:
             with signal_cache_lock:
-                if symbol_raw not in open_signals_cache: open_signals_cache[symbol_raw] = signal
+                if symbol not in open_signals_cache: open_signals_cache[symbol] = signal
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
-
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
@@ -1238,6 +1213,7 @@ def main_loop():
                                 if current_price >= profit_check_price:
                                     logger.info(f"✅ [Action] Closing open trade for {symbol} due to new SELL signal.")
                                     initiate_signal_closure(symbol, open_signal, 'closed_by_sell_signal', current_price)
+                                    send_telegram_message(CHAT_ID, escape_markdown(f"🔴 *إغلاق بإشارة بيع* `{symbol}`"))
                             elif prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                                 last_atr = df_features.iloc[-1].get('atr', 0)
                                 tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
@@ -1246,8 +1222,7 @@ def main_loop():
                                     if update_signal_target_in_db(open_signal['id'], new_tp, new_sl):
                                         open_signals_cache[symbol]['target_price'] = new_tp
                                         open_signals_cache[symbol]['stop_loss'] = new_sl
-                                        update_msg = escape_markdown(f"🔼 *تحديث الهدف* `{symbol}`\n*الهدف الجديد:* ${new_tp:,.8g}\n*الوقف الجديد:* ${new_sl:,.8g}")
-                                        send_telegram_message(CHAT_ID, update_msg)
+                                        send_telegram_message(CHAT_ID, escape_markdown(f"🔼 *تحديث الهدف* `{symbol}`\n*الهدف الجديد:* ${new_tp:,.8g}\n*الوقف الجديد:* ${new_sl:,.8g}"))
                         elif not is_trade_open and prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                             if slots_available <= 0: continue
                             last_features = df_features.iloc[-1]; last_features.name = symbol
