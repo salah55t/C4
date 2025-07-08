@@ -815,11 +815,11 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     
     # Adjust thresholds based on market regime
     if regime == "STRONG UPTREND":
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.5, 45.0, 85.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 75.0)
     elif regime == "UPTREND":
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.4, 40.0, 80.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 35.0, 80.0)
     else: # RANGING or UNCERTAIN
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (16.0, 0.1, 30.0, 80.0)
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
