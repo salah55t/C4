@@ -78,10 +78,9 @@ SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
 
 # --- إعدادات الهدف ووقف الخسارة ---
-USE_DATABASE_SL_TP: bool = True
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.0
-SL_BUFFER_ATR_PERCENT: float = 0.25 # نسبة من ATR لإضافتها كهامش أمان لوقف الخسارة
+SL_BUFFER_ATR_PERCENT: float = 0.25 
 
 # --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -91,7 +90,7 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 # --- إعدادات الفلاتر المحسّنة ---
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
-BTC_TREND_TIMEFRAME: str = '4h' # This is now a base, but the new logic uses multiple TFs
+BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 50
 
 USE_SPEED_FILTER: bool = True
@@ -119,7 +118,7 @@ last_api_check_time = time.time()
 rejection_logs_cache = deque(maxlen=100)
 rejection_logs_lock = Lock()
 
-# --- ✨ IMPROVED: متغيرات حالة السوق المحسّنة ---
+# --- متغيرات حالة السوق المحسّنة ---
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {
     "overall_regime": "INITIALIZING",
@@ -269,18 +268,15 @@ const REGIME_STYLES = {
 const TF_STATUS_STYLES = {
     "Uptrend": { text: "صاعد", icon: "▲", color: "text-green-400" },
     "Downtrend": { text: "هابط", icon: "▼", color: "text-red-400" },
-    "Ranging": { text: "عرضي", icon: " sideways", color: "text-yellow-400" },
+    "Ranging": { text: "عرضي", icon: "↔", color: "text-yellow-400" },
 };
 
 function updateMarketStatus() {
     fetch('/api/market_status')
         .then(response => response.json())
         .then(data => {
-            // Fear & Greed
             const fg = data.fear_and_greed;
             document.getElementById('fear-greed').textContent = `${fg.value} (${fg.classification})`;
-
-            // Overall Market Regime
             const state = data.market_state;
             const overallRegime = state.overall_regime || "UNCERTAIN";
             const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
@@ -292,7 +288,6 @@ function updateMarketStatus() {
             const overallCard = document.getElementById('overall-regime-card');
             overallCard.className = `card rounded-xl p-4 flex flex-col justify-center items-center ${regimeStyle.bg}`;
 
-            // Timeframe Details
             updateTimeframeCard('1h', state.details['1h']);
             updateTimeframeCard('4h', state.details['4h']);
         });
@@ -573,7 +568,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     if not client: return None
     try:
         limit = int((days * 24 * 60) / int(interval[:-1])) if 'm' in interval else int((days * 24) / int(interval[:-1]))
-        limit = min(limit, 1000) # Binance limit is 1000 klines per request
+        limit = min(limit, 1000)
         
         klines = client.get_historical_klines(symbol, interval, limit=limit)
         if not klines: return None
@@ -607,7 +602,11 @@ def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
         if conn: conn.rollback()
         return pd.DataFrame()
 
+# --- ✨ NEW AND IMPROVED FUNCTION / دالة جديدة ومحسنة ✨ ---
 def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame:
+    """
+    Fetches the latest Ichimoku features from the database and checks if they are recent.
+    """
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = """
         SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
@@ -617,11 +616,24 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
     """
     try:
         df_ichimoku = pd.read_sql(query, conn, params=(symbol, timeframe), index_col='timestamp', parse_dates=['timestamp'])
+        
+        if df_ichimoku.empty:
+            return df_ichimoku
+
         if not df_ichimoku.index.tz:
              df_ichimoku.index = df_ichimoku.index.tz_localize('UTC')
+
+        # --- التحقق من حداثة البيانات ---
+        last_timestamp = df_ichimoku.index[-1]
+        # تعتبر البيانات قديمة إذا مر على تحديثها أكثر من 3 فترات زمنية (مثال: 45 دقيقة لفريم 15 دقيقة)
+        if (datetime.now(timezone.utc) - last_timestamp) > (pd.to_timedelta(timeframe) * 3):
+            logger.warning(f"[{symbol}] ⚠️ Stale Ichimoku data found (from {last_timestamp}). Discarding.")
+            return pd.DataFrame()
+
         for col in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b']:
             if col in df_ichimoku.columns:
                 df_ichimoku[col] = pd.to_numeric(df_ichimoku[col], errors='coerce')
+        
         return df_ichimoku.dropna()
     except Exception as e:
         logger.error(f"❌ [Ichimoku Fetch Bot] Could not fetch Ichimoku features for {symbol}: {e}")
@@ -683,20 +695,18 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- ✨ IMPROVED: دوال تحديد اتجاه السوق المحسّنة ----------------------
+# ---------------------- دوال تحديد اتجاه السوق المحسّنة ----------------------
 
 def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
     """Calculates trend indicators for a single timeframe."""
     if df is None or len(df) < 26:
         return {"trend": "Uncertain", "rsi": -1, "adx": -1}
 
-    # RSI
     delta = df['close'].diff()
     gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=13, adjust=False).mean()
     rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # ADX
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -711,7 +721,6 @@ def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     adx = dx.ewm(span=14, adjust=False).mean()
 
-    # Trend Determination
     ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
     ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
     
@@ -735,11 +744,9 @@ def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
 def determine_market_state():
     """
     Determines the overall market state by analyzing multiple timeframes of BTC.
-    This is a more robust approach than the single timeframe analysis.
     """
     global current_market_state, last_market_state_check
     
-    # --- Cache check to avoid excessive API calls ---
     with market_state_lock:
         if time.time() - last_market_state_check < 300: # 5 minutes
             return current_market_state
@@ -747,7 +754,6 @@ def determine_market_state():
     logger.info("🧠 [Market State] Updating market state using Multi-Timeframe Analysis (MTA)...")
     
     try:
-        # --- Fetch data for all required timeframes ---
         df_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
         df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
         
@@ -755,13 +761,11 @@ def determine_market_state():
             logger.warning("⚠️ [Market State] Could not fetch all required BTC data. Using previous state.")
             return current_market_state
 
-        # --- Analyze each timeframe ---
         state_1h = get_trend_for_timeframe(df_1h)
         state_4h = get_trend_for_timeframe(df_4h)
         
         trends = [state_1h['trend'], state_4h['trend']]
         
-        # --- Combine results to determine overall regime ---
         overall_regime = "UNCERTAIN"
         uptrends = trends.count("Uptrend")
         downtrends = trends.count("Downtrend")
@@ -777,7 +781,6 @@ def determine_market_state():
         elif "Ranging" in trends:
             overall_regime = "RANGING"
 
-        # --- Update the global state variable ---
         with market_state_lock:
             current_market_state = {
                 "overall_regime": overall_regime,
@@ -797,7 +800,6 @@ def determine_market_state():
 
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
-        # Return the last known state in case of an error
         return current_market_state
 
 # ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
@@ -805,21 +807,19 @@ def determine_market_state():
 def passes_speed_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     
-    # Use the new detailed market state
     with market_state_lock:
         regime = current_market_state.get("overall_regime", "RANGING")
 
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
-        return True # In a downtrend, this filter might not be relevant for buy signals
+        return True
     
-    # Adjust thresholds based on market regime
     if regime == "STRONG UPTREND":
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 75.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
     elif regime == "UPTREND":
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 35.0, 80.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
     else: # RANGING or UNCERTAIN
-        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (16.0, 0.1, 30.0, 80.0)
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
@@ -833,65 +833,72 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     })
     return False
 
-def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
-    logger.info(f"[{symbol}] 🧠 Calculating TP/SL from Database for entry price: {entry_price:.4f}")
-    
+# --- ✨ NEW AND IMPROVED FUNCTION / دالة جديدة ومحسنة ✨ ---
+def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
+    """
+    يحسب الهدف ووقف الخسارة بمنطق محسن.
+    1. يجلب مستويات الدعم والمقاومة والإيشيموكو من قاعدة البيانات.
+    2. يتحقق من أن المستويات ليست قريبة جدًا من سعر الدخول.
+    3. إذا فشل، يعود إلى الحساب المعتمد على ATR.
+    """
+    logger.info(f"[{symbol}] 🧠 Calculating TP/SL. Entry: {entry_price:.4f}, ATR: {last_atr:.4f}")
+
+    # --- 1. جلب المستويات من قاعدة البيانات ---
     sr_levels_df = fetch_sr_levels_from_db(symbol)
     ichimoku_df = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
     
-    all_levels = []
+    db_levels = []
     if not sr_levels_df.empty:
-        all_levels.extend(sr_levels_df['level_price'].astype(float).tolist())
-        logger.info(f"[{symbol}] Found {len(sr_levels_df)} S/R & Fibonacci levels in DB.")
-
+        db_levels.extend(sr_levels_df['level_price'].astype(float).tolist())
     if not ichimoku_df.empty:
         last_ichi = ichimoku_df.iloc[-1]
-        ichi_levels = [
-            last_ichi.get('tenkan_sen'),
-            last_ichi.get('kijun_sen'),
-            last_ichi.get('senkou_span_a'),
-            last_ichi.get('senkou_span_b')
-        ]
-        valid_ichi_levels = [float(lvl) for lvl in ichi_levels if pd.notna(lvl)]
-        all_levels.extend(valid_ichi_levels)
-        logger.info(f"[{symbol}] Found {len(valid_ichi_levels)} Ichimoku levels in DB.")
+        ichi_levels = [last_ichi.get(k) for k in ['tenkan_sen', 'kijun_sen', 'senkou_span_a', 'senkou_span_b']]
+        db_levels.extend([float(lvl) for lvl in ichi_levels if pd.notna(lvl)])
 
-    if not all_levels:
-        log_rejection(symbol, "No DB Levels", {"detail": "No S/R or Ichimoku levels found in the database."})
+    # --- 2. محاولة استخدام مستويات قاعدة البيانات ---
+    if db_levels:
+        logger.info(f"[{symbol}] Found {len(db_levels)} potential S/R levels in DB.")
+        unique_levels = sorted(list(set(db_levels)))
+        
+        resistances = [lvl for lvl in unique_levels if lvl > entry_price]
+        supports = [lvl for lvl in unique_levels if lvl < entry_price]
+
+        if resistances and supports:
+            target_price = min(resistances)
+            stop_loss_base = max(supports)
+            
+            # التحقق من أن الهدف ووقف الخسارة ليسا قريبين جدًا
+            min_distance = last_atr * 0.5 # يتطلب مسافة لا تقل عن نصف قيمة ATR
+            if (target_price - entry_price) < min_distance:
+                 logger.warning(f"[{symbol}] ⚠️ Closest resistance {target_price:.4f} is too near entry. Finding next one.")
+                 higher_resistances = [r for r in resistances if (r - entry_price) >= min_distance]
+                 target_price = min(higher_resistances) if higher_resistances else None
+            
+            if stop_loss_base and (entry_price - stop_loss_base) < min_distance:
+                logger.warning(f"[{symbol}] ⚠️ Closest support {stop_loss_base:.4f} is too near entry. Finding next one.")
+                lower_supports = [s for s in supports if (entry_price - s) >= min_distance]
+                stop_loss_base = max(lower_supports) if lower_supports else None
+            
+            # إذا كانت لدينا مستويات صالحة بعد التحقق، نستخدمها
+            if target_price and stop_loss_base:
+                final_stop_loss = stop_loss_base - (last_atr * SL_BUFFER_ATR_PERCENT)
+                
+                logger.info(f"✅ [{symbol}] DB-driven levels selected:")
+                logger.info(f"   - Target (Resistance): {target_price:.4f}")
+                logger.info(f"   - Stop Loss (Support {stop_loss_base:.4f} + Buffer): {final_stop_loss:.4f}")
+                return {'target_price': target_price, 'stop_loss': final_stop_loss, 'source': 'Database_Improved'}
+
+    # --- 3. الخطة البديلة باستخدام ATR ---
+    logger.warning(f"[{symbol}] ⚠️ Could not determine TP/SL from DB. Using ATR Fallback.")
+    if last_atr <= 0:
+        log_rejection(symbol, "Invalid ATR for Fallback", {"detail": "ATR is zero or negative"})
         return None
 
-    unique_levels = sorted(list(set(all_levels)))
-    resistances = [lvl for lvl in unique_levels if lvl > entry_price]
-    supports = [lvl for lvl in unique_levels if lvl < entry_price]
-
-    logger.info(f"[{symbol}] Potential Resistances (> {entry_price:.4f}): {resistances}")
-    logger.info(f"[{symbol}] Potential Supports (< {entry_price:.4f}): {supports}")
-
-    target_price = min(resistances) if resistances else None
-    stop_loss_price = max(supports) if supports else None
-
-    if target_price is None or stop_loss_price is None:
-        logger.warning(f"[{symbol}] ⚠️ Could not determine a clear TP or SL from DB levels. Using ATR fallback.")
-        log_rejection(symbol, "Insufficient DB Levels", {"detail": "Not enough support/resistance found around entry price."})
-        
-        fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
-        fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
-        
-        logger.info(f"[{symbol}] ATR Fallback: TP={fallback_tp:.4f}, SL={fallback_sl:.4f}")
-        return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
+    fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
+    fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
     
-    final_stop_loss = stop_loss_price - (last_atr * SL_BUFFER_ATR_PERCENT)
-    
-    logger.info(f"✅ [{symbol}] DB-driven levels determined:")
-    logger.info(f"   - Target (Closest Resistance): {target_price:.4f}")
-    logger.info(f"   - Stop Loss (Closest Support): {stop_loss_price:.4f}")
-    logger.info(f"   - Final Stop Loss (with ATR buffer): {final_stop_loss:.4f}")
-
-    return {
-        'target_price': target_price,
-        'stop_loss': final_stop_loss,
-        'source': 'Database'
-    }
+    logger.info(f"✅ [{symbol}] ATR Fallback calculated: TP={fallback_tp:.4f}, SL={fallback_sl:.4f}")
+    return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
 
 
 # ---------------------- WebSocket و TradingStrategy ----------------------
@@ -1054,7 +1061,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     
-    # Add market state to the alert
     with market_state_lock:
         market_regime = current_market_state.get('overall_regime', 'N/A')
 
@@ -1203,7 +1209,6 @@ def main_loop():
                 symbol_batch = all_symbols[i:i + MODEL_BATCH_SIZE]
                 ml_models_cache.clear(); gc.collect()
                 
-                # --- ✨ IMPROVED: BTC Trend Filter using the new market state ---
                 if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
                     log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
                     time.sleep(300)
@@ -1267,7 +1272,7 @@ def main_loop():
                             elif prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD: # New BUY signal on open trade
                                 logger.info(f"ℹ️ [Action] Checking for TP update for {symbol} due to new BUY signal.")
                                 last_atr = df_features.iloc[-1].get('atr', 0)
-                                tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, last_atr)
+                                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
 
                                 if tp_sl_data and float(tp_sl_data['target_price']) > float(open_signal['target_price']):
                                     new_tp = float(tp_sl_data['target_price'])
@@ -1299,7 +1304,7 @@ def main_loop():
                                     log_rejection(symbol, "BTC Correlation Filter", {"correlation": f"{correlation:.2f}", "min_required": f"{MIN_BTC_CORRELATION}"})
                                     continue
                             
-                            tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, last_atr)
+                            tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
                             if not tp_sl_data: continue
 
                             new_signal = {
@@ -1315,7 +1320,9 @@ def main_loop():
                                 sl = float(new_signal['stop_loss'])
                                 risk = current_price - sl
                                 reward = tp - current_price
-                                if risk <= 0 or reward <= 0: continue
+                                if risk <= 0 or reward <= 0: 
+                                    log_rejection(symbol, "Invalid Risk/Reward", {"detail": f"Risk or reward is non-positive. Risk: {risk}, Reward: {reward}"})
+                                    continue
                                 rrr = reward / risk
                                 if rrr < MIN_RISK_REWARD_RATIO:
                                     log_rejection(symbol, "Risk/Reward Ratio Filter", {"RRR": f"{rrr:.2f}", "min_required": f"{MIN_RISK_REWARD_RATIO}"})
@@ -1362,7 +1369,6 @@ def home():
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock:
-        # Make a copy to avoid race conditions during serialization
         state_copy = dict(current_market_state)
     return jsonify({
         "fear_and_greed": get_fear_and_greed_index(),
@@ -1504,7 +1510,6 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         
-        # Run initial market state check
         determine_market_state()
 
         validated_symbols_to_scan = get_validated_symbols()
