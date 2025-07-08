@@ -89,7 +89,7 @@ TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 
 # --- إعدادات الفلاتر المحسّنة ---
-USE_BTC_TREND_FILTER: bool = False
+USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 50
@@ -429,7 +429,7 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
         log_rejection(symbol, "Speed Filter", {"detail": "Disabled due to market downtrend"})
         return True
     
-    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "Strict (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "Lenient (RANGING)")
+    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.5, 40.0, 80.0, "Strict (UPTREND)") if regime == "UPTREND" else (18.0, 0.2, 30.0, 80.0, "Lenient (RANGING)")
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
