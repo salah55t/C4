@@ -73,15 +73,15 @@ EMA_SLOW_PERIOD: int = 200
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
-BUY_CONFIDENCE_THRESHOLD = 0.80
-SELL_CONFIDENCE_THRESHOLD = 0.85
+BUY_CONFIDENCE_THRESHOLD = 0.65
+SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
 
 # --- إعدادات الهدف ووقف الخسارة ---
 USE_DATABASE_SL_TP: bool = True
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.0
-SL_BUFFER_ATR_PERCENT: float = 0.25
+SL_BUFFER_ATR_PERCENT: float = 0.25 # نسبة من ATR لإضافتها كهامش أمان لوقف الخسارة
 
 # --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -92,7 +92,7 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
-BTC_TREND_EMA_PERIOD: int = 10
+BTC_TREND_EMA_PERIOD: int = 50
 
 USE_SPEED_FILTER: bool = True
 USE_RRR_FILTER: bool = True
@@ -125,7 +125,7 @@ rejection_logs_lock = Lock()
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
-    logger.info("[قاعدة البيانات] بدء تهيئة الاتصال...")
+    logger.info("[DB] Initializing database connection...")
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(DB_URL, connect_timeout=10, cursor_factory=RealDictCursor)
@@ -149,11 +149,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 
                 try:
                     cur.execute("ALTER TABLE signals ADD COLUMN current_peak_price DOUBLE PRECISION;")
-                    logger.info("✅ [قاعدة البيانات] تم إضافة عمود 'current_peak_price' إلى جدول 'signals'.")
+                    logger.info("✅ [DB] 'current_peak_price' column added to 'signals' table.")
                 except psycopg2.errors.DuplicateColumn:
                     conn.rollback()
                 except Exception as alter_e:
-                    logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع عند تعديل الجدول: {alter_e}")
+                    logger.error(f"❌ [DB] Unexpected error altering table: {alter_e}")
                     conn.rollback()
 
                 cur.execute("""
@@ -166,18 +166,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
             conn.commit()
-            logger.info("✅ [قاعدة البيانات] تم تهيئة جداول قاعدة البيانات بنجاح.")
+            logger.info("✅ [DB] Database tables initialized successfully.")
             return
         except Exception as e:
-            logger.error(f"❌ [قاعدة البيانات] خطأ في الاتصال (المحاولة {attempt + 1}): {e}")
+            logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}): {e}")
             if conn: conn.rollback()
             if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [قاعدة البيانات] فشل الاتصال بعد عدة محاولات."); exit(1)
+            else: logger.critical("❌ [DB] Failed to connect after multiple retries."); exit(1)
 
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
-        logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
+        logger.warning("[DB] Connection is closed, attempting to reconnect...")
         init_db()
     try:
         if conn:
@@ -186,12 +186,12 @@ def check_db_connection() -> bool:
             return True
         return False
     except (OperationalError, InterfaceError) as e:
-        logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال: {e}. محاولة إعادة الاتصال...")
+        logger.error(f"❌ [DB] Connection lost: {e}. Attempting to reconnect...")
         try:
             init_db()
             return conn is not None and conn.closed == 0
         except Exception as retry_e:
-            logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
+            logger.error(f"❌ [DB] Reconnect failed: {retry_e}")
             return False
     return False
 
@@ -207,12 +207,12 @@ def log_and_notify(level: str, message: str, notification_type: str):
             cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ [Notify DB] فشل حفظ التنبيه في قاعدة البيانات: {e}")
+        logger.error(f"❌ [Notify DB] Failed to save notification to DB: {e}")
         if conn: conn.rollback()
 
 def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
     details_str = f" | {details}" if details else ""
-    logger.info(f"ℹ️ [{symbol}] تم رفض الإشارة. السبب: {reason}{details_str}")
+    logger.info(f"ℹ️ [{symbol}] Signal rejected. Reason: {reason}{details_str}")
     with rejection_logs_lock:
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -224,20 +224,20 @@ def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
 
 def init_redis() -> None:
     global redis_client
-    logger.info("[Redis] بدء تهيئة الاتصال...")
+    logger.info("[Redis] Initializing Redis connection...")
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
-        logger.info("✅ [Redis] تم الاتصال بنجاح بخادم Redis.")
+        logger.info("✅ [Redis] Successfully connected to Redis server.")
     except redis.exceptions.ConnectionError as e:
-        logger.critical(f"❌ [Redis] فشل الاتصال بـ Redis على {REDIS_URL}. الخطأ: {e}")
+        logger.critical(f"❌ [Redis] Failed to connect to Redis at {REDIS_URL}. Error: {e}")
         exit(1)
 
 # ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    logger.info(f"ℹ️ [التحقق] قراءة الرموز من '{filename}' والتحقق منها مع Binance...")
+    logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
     if not client:
-        logger.error("❌ [التحقق] كائن Binance client غير مهيأ.")
+        logger.error("❌ [Validation] Binance client is not initialized.")
         return []
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -251,10 +251,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         active = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
         
         validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"✅ [التحقق] سيقوم البوت بمراقبة {len(validated)} عملة معتمدة.")
+        logger.info(f"✅ [Validation] Bot will monitor {len(validated)} validated symbols.")
         return validated
     except Exception as e:
-        logger.error(f"❌ [التحقق] حدث خطأ أثناء التحقق من الرموز: {e}", exc_info=True)
+        logger.error(f"❌ [Validation] An error occurred during symbol validation: {e}", exc_info=True)
         return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
@@ -273,10 +273,10 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df.set_index('timestamp', inplace=True)
         return df.dropna()
     except BinanceAPIException as e:
-        logger.warning(f"⚠️ [API Binance] خطأ في جلب بيانات {symbol}: {e}")
+        logger.warning(f"⚠️ [Binance API] Error fetching data for {symbol}: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ [البيانات] خطأ أثناء جلب البيانات التاريخية لـ {symbol}: {e}")
+        logger.error(f"❌ [Data] Error during historical data fetch for {symbol}: {e}")
         return None
 
 # ---------------------- دوال جلب الميزات من قاعدة البيانات ----------------------
@@ -300,7 +300,7 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
         FROM ichimoku_features
         WHERE symbol = %s AND timeframe = %s
-        ORDER BY timestamp;
+        ORDER BY timestamp DESC LIMIT 1;
     """
     try:
         df_ichimoku = pd.read_sql(query, conn, params=(symbol, timeframe), index_col='timestamp', parse_dates=['timestamp'])
@@ -361,13 +361,13 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
             model_bundle = pickle.load(f)
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
             ml_models_cache[model_name] = model_bundle
-            logger.info(f"✅ [نموذج تعلم الآلة] تم تحميل النموذج '{model_name}' بنجاح.")
+            logger.info(f"✅ [ML Model] Loaded model '{model_name}' successfully.")
             return model_bundle
         else:
-            logger.error(f"❌ [نموذج تعلم الآلة] حزمة النموذج في '{model_path}' غير مكتملة.")
+            logger.error(f"❌ [ML Model] Model bundle at '{model_path}' is incomplete.")
             return None
     except Exception as e:
-        logger.error(f"❌ [نموذج تعلم الآلة] خطأ في تحميل النموذج للعملة {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
 # ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
@@ -375,11 +375,11 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
 def determine_market_regime():
     global current_market_regime, last_market_regime_check
     if time.time() - last_market_regime_check < 300: return current_market_regime
-    logger.info("ℹ️ [نظام السوق] تحديث حالة السوق (BTC)...")
+    logger.info("ℹ️ [Market Regime] Updating market state (BTC)...")
     try:
         btc_data = fetch_historical_data(BTC_SYMBOL, '4h', 10)
         if btc_data is None or len(btc_data) < 50:
-            logger.warning("⚠️ [نظام السوق] بيانات BTC غير كافية، سيتم استخدام النظام السابق.")
+            logger.warning("⚠️ [Market Regime] Insufficient BTC data, using previous regime.")
             return current_market_regime
         ema_fast = btc_data['close'].ewm(span=12, adjust=False).mean()
         ema_slow = btc_data['close'].ewm(span=26, adjust=False).mean()
@@ -401,68 +401,119 @@ def determine_market_regime():
         else:
             current_market_regime = "RANGING"
         last_market_regime_check = time.time()
-        logger.info(f"✅ [نظام السوق] تم تحديد الحالة: {current_market_regime} (ADX: {adx.iloc[-1]:.2f})")
+        logger.info(f"✅ [Market Regime] State determined: {current_market_regime} (ADX: {adx.iloc[-1]:.2f})")
         return current_market_regime
     except Exception as e:
-        logger.error(f"❌ [نظام السوق] فشل تحديد نظام السوق: {e}")
+        logger.error(f"❌ [Market Regime] Failed to determine market regime: {e}")
         return current_market_regime
 
 def passes_speed_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     regime = determine_market_regime()
     if regime == "DOWNTREND":
-        log_rejection(symbol, "فلتر السرعة", {"detail": "تم التعطيل بسبب السوق الهابط"})
+        log_rejection(symbol, "Speed Filter", {"detail": "Disabled due to market downtrend"})
         return True
     
-    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "صارمة (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "مخففة (RANGING)")
+    adx_threshold, rel_vol_threshold, rsi_min, rsi_max, log_msg = (22.0, 0.9, 40.0, 90.0, "Strict (UPTREND)") if regime == "UPTREND" else (18.0, 0.8, 30.0, 80.0, "Lenient (RANGING)")
 
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
         return True
     
-    log_rejection(symbol, "فلتر السرعة", {
+    log_rejection(symbol, "Speed Filter", {
         "ADX": f"{adx:.2f} (Req: >{adx_threshold})",
         "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})",
         "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
     })
     return False
 
-def calculate_db_driven_tp_sl(symbol: str, entry_price: float, sr_levels_df: pd.DataFrame, ichimoku_df: pd.DataFrame, last_atr: float) -> Optional[Dict[str, float]]:
-    resistances, supports = [], []
-    entry_price = float(entry_price)
+# ==============================================================================
+# --- ✨ NEW & IMPROVED: دالة تحديد الهدف ووقف الخسارة من قاعدة البيانات ✨ ---
+# ==============================================================================
+def calculate_db_driven_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
+    """
+    Calculates Take Profit (TP) and Stop Loss (SL) based on S/R, Fibonacci, and Ichimoku levels
+    fetched from the database, which are populated by the sca.py script.
+    
+    Args:
+        symbol (str): The crypto symbol (e.g., 'BTCUSDT').
+        entry_price (float): The current price at which the trade would be entered.
+        last_atr (float): The last calculated ATR value, used for fallback and SL buffer.
 
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary with 'target_price', 'stop_loss', and 'source',
+                                  or None if calculation is not possible.
+    """
+    logger.info(f"[{symbol}] 🧠 Calculating TP/SL from Database for entry price: {entry_price:.4f}")
+    
+    # --- 1. جلب جميع المستويات من قاعدة البيانات ---
+    sr_levels_df = fetch_sr_levels_from_db(symbol)
+    ichimoku_df = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
+    
+    all_levels = []
+    # إضافة مستويات الدعم والمقاومة والفيبوناتشي
     if not sr_levels_df.empty:
-        for _, row in sr_levels_df.iterrows():
-            level_price = float(row['level_price'])
-            if 'resist' in row['level_type'].lower() or 'poc' in row['level_type'].lower():
-                if level_price > entry_price: resistances.append(level_price)
-            if 'supp' in row['level_type'].lower() or 'poc' in row['level_type'].lower():
-                if level_price < entry_price: supports.append(level_price)
+        all_levels.extend(sr_levels_df['level_price'].astype(float).tolist())
+        logger.info(f"[{symbol}] Found {len(sr_levels_df)} S/R & Fibonacci levels in DB.")
 
+    # إضافة مستويات إيشيموكو
     if not ichimoku_df.empty:
         last_ichi = ichimoku_df.iloc[-1]
-        for level_val in [last_ichi.get('kijun_sen'), last_ichi.get('senkou_span_a'), last_ichi.get('senkou_span_b')]:
-            if pd.notna(level_val):
-                level = float(level_val)
-                if level > entry_price:
-                    resistances.append(level)
-                else:
-                    supports.append(level)
-    
-    potential_tps = sorted(list(set(r for r in resistances if r > entry_price)))
-    target_price = potential_tps[0] if potential_tps else None
-    
-    potential_sls = sorted(list(set(s for s in supports if s < entry_price)), reverse=True)
-    stop_loss_price = potential_sls[0] if potential_sls else None
+        ichi_levels = [
+            last_ichi.get('tenkan_sen'),
+            last_ichi.get('kijun_sen'),
+            last_ichi.get('senkou_span_a'),
+            last_ichi.get('senkou_span_b')
+        ]
+        valid_ichi_levels = [float(lvl) for lvl in ichi_levels if pd.notna(lvl)]
+        all_levels.extend(valid_ichi_levels)
+        logger.info(f"[{symbol}] Found {len(valid_ichi_levels)} Ichimoku levels in DB.")
 
+    if not all_levels:
+        log_rejection(symbol, "No DB Levels", {"detail": "No S/R or Ichimoku levels found in the database."})
+        return None # Return None to indicate failure in finding DB levels
+
+    # --- 2. فصل المستويات إلى دعم ومقاومة ---
+    unique_levels = sorted(list(set(all_levels)))
+    resistances = [lvl for lvl in unique_levels if lvl > entry_price]
+    supports = [lvl for lvl in unique_levels if lvl < entry_price]
+
+    logger.info(f"[{symbol}] Potential Resistances (> {entry_price:.4f}): {resistances}")
+    logger.info(f"[{symbol}] Potential Supports (< {entry_price:.4f}): {supports}")
+
+    # --- 3. تحديد الهدف ووقف الخسارة ---
+    # الهدف هو أقرب مستوى مقاومة
+    target_price = min(resistances) if resistances else None
+    
+    # وقف الخسارة هو أقرب مستوى دعم
+    stop_loss_price = max(supports) if supports else None
+
+    # --- 4. التحقق والعودة إلى الطريقة الاحتياطية عند الحاجة ---
     if target_price is None or stop_loss_price is None:
-        log_rejection(symbol, "عدم وجود مستويات دعم/مقاومة", {"detail": "العودة إلى طريقة ATR"})
+        logger.warning(f"[{symbol}] ⚠️ Could not determine a clear TP or SL from DB levels. Using ATR fallback.")
+        log_rejection(symbol, "Insufficient DB Levels", {"detail": "Not enough support/resistance found around entry price."})
+        
         fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
         fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
+        
+        logger.info(f"[{symbol}] ATR Fallback: TP={fallback_tp:.4f}, SL={fallback_sl:.4f}")
         return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
     
+    # --- 5. تطبيق هامش الأمان على وقف الخسارة والعودة ---
+    # نطرح جزءًا من ATR من وقف الخسارة لجعله أكثر أمانًا
     final_stop_loss = stop_loss_price - (last_atr * SL_BUFFER_ATR_PERCENT)
-    return {'target_price': target_price, 'stop_loss': final_stop_loss, 'source': 'Database'}
+    
+    logger.info(f"✅ [{symbol}] DB-driven levels determined:")
+    logger.info(f"   - Target (Closest Resistance): {target_price:.4f}")
+    logger.info(f"   - Stop Loss (Closest Support): {stop_loss_price:.4f}")
+    logger.info(f"   - Final Stop Loss (with ATR buffer): {final_stop_loss:.4f}")
+
+    return {
+        'target_price': target_price,
+        'stop_loss': final_stop_loss,
+        'source': 'Database'
+    }
+
 
 # ---------------------- WebSocket و TradingStrategy ----------------------
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
@@ -472,7 +523,7 @@ def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
         if price_updates:
             redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
     except Exception as e:
-        logger.error(f"❌ [WebSocket Price Updater] خطأ: {e}", exc_info=True)
+        logger.error(f"❌ [WebSocket Price Updater] Error: {e}", exc_info=True)
 
 def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
     signal_id = signal_to_close.get('id')
@@ -488,11 +539,11 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             signals_pending_closure.discard(signal_id)
 
 def run_websocket_manager() -> None:
-    logger.info("ℹ️ [WebSocket] بدء مدير WebSocket...")
+    logger.info("ℹ️ [WebSocket] Starting WebSocket Manager...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     twm.start_miniticker_socket(callback=handle_price_update_message)
-    logger.info("✅ [WebSocket] تم الاتصال بنجاح.")
+    logger.info("✅ [WebSocket] Connection successful.")
     twm.join()
 
 class TradingStrategy:
@@ -519,7 +570,7 @@ class TradingStrategy:
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna()
         except Exception as e:
-            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات: {e}", exc_info=True)
+            logger.error(f"❌ [{self.symbol}] Feature engineering failed: {e}", exc_info=True)
             return None
 
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -535,19 +586,19 @@ class TradingStrategy:
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)
             confidence = float(np.max(prediction_proba[0]))
 
-            logger.info(f"ℹ️ [توليد إشارة] {self.symbol}: تنبأ النموذج '{'شراء' if prediction == 1 else 'بيع'}' بثقة {confidence:.2%}.")
+            logger.info(f"ℹ️ [Signal Generation] {self.symbol}: Model predicted '{'BUY' if prediction == 1 else 'SELL'}' with {confidence:.2%} confidence.")
             
             return {'prediction': int(prediction), 'confidence': confidence}
 
         except Exception as e:
-            logger.warning(f"⚠️ [توليد إشارة] {self.symbol}: خطأ: {e}")
+            logger.warning(f"⚠️ [Signal Generation] {self.symbol}: Error: {e}")
             return None
 
 
 # ---------------------- حلقة مراقبة الصفقات ----------------------
 def trade_monitoring_loop():
     global last_api_check_time
-    logger.info("✅ [Trade Monitor] بدء مراقبة الصفقات (مع دعم الوقف المتحرك).")
+    logger.info("✅ [Trade Monitor] Starting trade monitoring loop (with Trailing Stop support).")
     while True:
         try:
             with signal_cache_lock: signals_to_check = dict(open_signals_cache)
@@ -591,29 +642,28 @@ def trade_monitoring_loop():
                     initiate_signal_closure(symbol, signal, status_to_set, price)
             time.sleep(0.2)
         except Exception as e:
-            logger.error(f"❌ [Trade Monitor] خطأ فادح: {e}", exc_info=True)
+            logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
             time.sleep(5)
 
 # ---------------------- دوال التنبيهات والإدارة ----------------------
-# ✨ UPDATED: Fortified Telegram sending function with detailed logging
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
     if not TELEGRAM_TOKEN or not target_chat_id:
-        logger.error("❌ [Telegram] Token أو Chat ID غير موجود.")
+        logger.error("❌ [Telegram] Token or Chat ID is missing.")
         return False
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'Markdown'}
     if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
     
-    logger.info(f"ℹ️ [Telegram] محاولة إرسال رسالة إلى Chat ID: {target_chat_id}")
+    logger.info(f"ℹ️ [Telegram] Attempting to send message to Chat ID: {target_chat_id}")
     try: 
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"ℹ️ [Telegram] استجابة الخادم: {response.status_code} | النص: {response.text}")
+        logger.info(f"ℹ️ [Telegram] Server Response: {response.status_code} | Text: {response.text}")
         response.raise_for_status()
-        logger.info("✅ [Telegram] تم إرسال الرسالة بنجاح.")
+        logger.info("✅ [Telegram] Message sent successfully.")
         return True
     except requests.exceptions.RequestException as e: 
-        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
+        logger.error(f"❌ [Telegram] Failed to send message: {e}")
         return False
 
 def send_new_signal_alert(signal_data: Dict[str, Any]):
@@ -641,7 +691,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"إشارة جديدة: {signal_data['symbol']}", "NEW_SIGNAL")
+        log_and_notify('info', f"New Signal: {signal_data['symbol']}", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -658,10 +708,10 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             )
             signal['id'] = cur.fetchone()['id']
         conn.commit()
-        logger.info(f"✅ [قاعدة البيانات] تم إدراج الإشارة {signal['id']} لـ {signal['symbol']}.")
+        logger.info(f"✅ [DB] Inserted signal {signal['id']} for {signal['symbol']}.")
         return signal
     except Exception as e:
-        logger.error(f"❌ [إدراج] خطأ في إدراج إشارة {signal['symbol']}: {e}", exc_info=True)
+        logger.error(f"❌ [Insert] Error inserting signal for {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
 
@@ -677,18 +727,18 @@ def update_signal_target_in_db(signal_id: int, new_target: float, new_stop_loss:
                 (db_new_target, db_new_stop_loss, signal_id)
             )
         conn.commit()
-        logger.info(f"✅ [DB Update] تم تحديث الهدف/الوقف للإشارة {signal_id}.")
+        logger.info(f"✅ [DB Update] Updated TP/SL for signal {signal_id}.")
         return True
     except Exception as e:
-        logger.error(f"❌ [DB Update] خطأ في تحديث الإشارة {signal_id}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Update] Error updating signal {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
         return False
 
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     signal_id = signal.get('id'); symbol = signal.get('symbol')
-    logger.info(f"بدء عملية إغلاق الإشارة {signal_id} ({symbol}) بحالة '{status}'")
+    logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
     try:
-        if not check_db_connection() or not conn: raise OperationalError("فشل الاتصال بقاعدة البيانات عند إغلاق الإشارة.")
+        if not check_db_connection() or not conn: raise OperationalError("DB connection failed during signal closure.")
         
         db_closing_price = float(closing_price)
         entry_price = float(signal['entry_price'])
@@ -699,7 +749,7 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
                 "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
                 (status, db_closing_price, profit_pct, signal_id)
             )
-            if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] الإشارة {signal_id} مغلقة بالفعل أو غير موجودة."); return
+            if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] Signal {signal_id} was already closed or not found."); return
         conn.commit()
         status_map = {
             'target_hit': '✅ تحقق الهدف',
@@ -710,20 +760,20 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         status_message = status_map.get(status, status)
         alert_msg = f"*{status_message}*\n`{symbol.replace('_', '\\_')}` | *الربح:* `{profit_pct:+.2f}%`"
         send_telegram_message(CHAT_ID, alert_msg)
-        log_and_notify('info', f"{status_message}: {symbol} | الربح: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
-        logger.info(f"✅ [DB Close] تم إغلاق الإشارة {signal_id} بنجاح.")
+        log_and_notify('info', f"{status_message}: {symbol} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
+        logger.info(f"✅ [DB Close] Signal {signal_id} closed successfully.")
     except Exception as e:
-        logger.error(f"❌ [DB Close] خطأ حاسم أثناء إغلاق الإشارة {signal_id}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Close] Critical error closing signal {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
         if symbol:
             with signal_cache_lock:
-                if symbol not in open_signals_cache: open_signals_cache[symbol] = signal; logger.info(f"🔄 [Recovery] تمت إعادة الإشارة {signal_id} للذاكرة المؤقتة بسبب خطأ.")
+                if symbol not in open_signals_cache: open_signals_cache[symbol] = signal; logger.info(f"🔄 [Recovery] Signal {signal_id} restored to cache due to error.")
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
-    logger.info("ℹ️ [تحميل] جاري تحميل الإشارات المفتوحة...")
+    logger.info("ℹ️ [Loading] Loading open signals...")
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals WHERE status = 'open';")
@@ -731,12 +781,12 @@ def load_open_signals_to_cache():
             with signal_cache_lock:
                 open_signals_cache.clear()
                 for signal in open_signals: open_signals_cache[signal['symbol']] = dict(signal)
-            logger.info(f"✅ [تحميل] تم تحميل {len(open_signals)} إشارة مفتوحة.")
-    except Exception as e: logger.error(f"❌ [تحميل] فشل تحميل الإشارات المفتوحة: {e}")
+            logger.info(f"✅ [Loading] Loaded {len(open_signals)} open signals.")
+    except Exception as e: logger.error(f"❌ [Loading] Failed to load open signals: {e}")
 
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
-    logger.info("ℹ️ [تحميل] جاري تحميل آخر التنبيهات...")
+    logger.info("ℹ️ [Loading] Loading latest notifications...")
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 50;")
@@ -744,8 +794,8 @@ def load_notifications_to_cache():
             with notifications_lock:
                 notifications_cache.clear()
                 for n in reversed(recent): n['timestamp'] = n['timestamp'].isoformat(); notifications_cache.appendleft(dict(n))
-            logger.info(f"✅ [تحميل] تم تحميل {len(notifications_cache)} تنبيه.")
-    except Exception as e: logger.error(f"❌ [تحميل] فشل تحميل التنبيهات: {e}")
+            logger.info(f"✅ [Loading] Loaded {len(notifications_cache)} notifications.")
+    except Exception as e: logger.error(f"❌ [Loading] Failed to load notifications: {e}")
 
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_trend() -> Dict[str, Any]:
@@ -759,20 +809,20 @@ def get_btc_trend() -> Dict[str, Any]:
         is_uptrend = bool(current_price > ema)
         return {"status": "Uptrend" if is_uptrend else "Downtrend", "is_uptrend": is_uptrend}
     except Exception as e:
-        logger.error(f"❌ [فلتر BTC] فشل تحديد اتجاه البيتكوين: {e}")
+        logger.error(f"❌ [BTC Filter] Failed to determine Bitcoin trend: {e}")
         return {"status": "Error", "is_uptrend": False}
 
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-    if btc_data is None: logger.error("❌ [بيانات BTC] فشل جلب بيانات البيتكوين."); return None
+    if btc_data is None: logger.error("❌ [BTC Data] Failed to fetch Bitcoin data."); return None
     btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
 def main_loop():
-    logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
+    logger.info("[Main Loop] Waiting for initialization to complete...")
     time.sleep(15)
-    if not validated_symbols_to_scan: log_and_notify("critical", "لا توجد رموز معتمدة للمسح.", "SYSTEM"); return
-    log_and_notify("info", f"بدء حلقة المسح لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
+    if not validated_symbols_to_scan: log_and_notify("critical", "No validated symbols to scan.", "SYSTEM"); return
+    log_and_notify("info", f"Starting scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
     all_symbols = list(validated_symbols_to_scan)
     while True:
         try:
@@ -784,13 +834,13 @@ def main_loop():
                 
                 btc_trend_info = get_btc_trend()
                 if USE_BTC_TREND_FILTER and not btc_trend_info.get("is_uptrend"):
-                    log_rejection("ALL", "فلتر اتجاه BTC", {"detail": "تم إيقاف المسح بسبب اتجاه BTC الهابط"})
+                    log_rejection("ALL", "BTC Trend Filter", {"detail": "Scan paused due to BTC downtrend"})
                     time.sleep(300)
                     break
                 
                 with signal_cache_lock: open_count = len(open_signals_cache)
                 if open_count >= MAX_OPEN_TRADES:
-                    logger.info(f"ℹ️ [إيقاف مؤقت] تم الوصول للحد الأقصى للصفقات."); time.sleep(60); break
+                    logger.info(f"ℹ️ [Pause] Max open trades limit reached."); time.sleep(60); break
                 
                 slots_available = MAX_OPEN_TRADES - open_count
                 
@@ -827,28 +877,26 @@ def main_loop():
 
                         if is_trade_open:
                             open_signal = open_signals_cache[symbol]
-                            if prediction == -1:
+                            if prediction == -1: # SELL Signal
                                 profit_check_price = float(open_signal['entry_price']) * (1 + MIN_PROFIT_FOR_SELL_CLOSE_PERCENT / 100)
                                 
                                 if confidence < SELL_CONFIDENCE_THRESHOLD:
-                                    logger.info(f"ℹ️ [تجاهل البيع] {symbol}: الثقة {confidence:.2%} أقل من العتبة {SELL_CONFIDENCE_THRESHOLD:.2%}.")
+                                    logger.info(f"ℹ️ [Sell Ignore] {symbol}: Confidence {confidence:.2%} is below threshold {SELL_CONFIDENCE_THRESHOLD:.2%}.")
                                     continue
                                 
                                 if current_price < profit_check_price:
-                                    logger.info(f"ℹ️ [تجاهل البيع] {symbol}: السعر {current_price} لم يصل إلى مستوى الربح الأدنى المطلوب {profit_check_price}.")
+                                    logger.info(f"ℹ️ [Sell Ignore] {symbol}: Price {current_price} has not reached minimum profit level {profit_check_price}.")
                                     continue
 
-                                logger.info(f"✅ [إجراء] إغلاق الصفقة المفتوحة لـ {symbol} بسبب إشارة بيع جديدة مع ثقة وربح كافيين.")
+                                logger.info(f"✅ [Action] Closing open trade for {symbol} due to new SELL signal with sufficient confidence and profit.")
                                 initiate_signal_closure(symbol, open_signal, 'closed_by_sell_signal', current_price)
                                 send_telegram_message(CHAT_ID, f"🔴 *إغلاق بإشارة بيع*\n`{symbol}`\nتم إغلاق الصفقة المفتوحة بسعر السوق لتحقيق الشروط الجديدة.")
                                 continue
 
-                            elif prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
-                                logger.info(f"ℹ️ [إجراء] التحقق من تحديث الهدف لـ {symbol} بسبب إشارة شراء جديدة.")
+                            elif prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD: # New BUY signal on open trade
+                                logger.info(f"ℹ️ [Action] Checking for TP update for {symbol} due to new BUY signal.")
                                 last_atr = df_features.iloc[-1].get('atr', 0)
-                                sr_levels = fetch_sr_levels_from_db(symbol)
-                                ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
-                                tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, sr_levels, ichimoku_data, last_atr)
+                                tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, last_atr)
 
                                 if tp_sl_data and float(tp_sl_data['target_price']) > float(open_signal['target_price']):
                                     new_tp = float(tp_sl_data['target_price'])
@@ -859,7 +907,7 @@ def main_loop():
                                         open_signals_cache[symbol]['stop_loss'] = new_sl
                                         send_telegram_message(CHAT_ID, f"🔼 *تحديث الهدف*\n`{symbol}`\n*الهدف الجديد:* `${new_tp:,.8g}`\n*الوقف الجديد:* `${new_sl:,.8g}`")
                                 else:
-                                    logger.info(f"ℹ️ [معلومة] إشارة الشراء الجديدة لـ {symbol} لم تؤد إلى هدف أعلى. لا يوجد إجراء.")
+                                    logger.info(f"ℹ️ [Info] New BUY signal for {symbol} did not result in a higher target. No action taken.")
                                 continue
                         
                         elif not is_trade_open and prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
@@ -871,19 +919,16 @@ def main_loop():
                             last_atr = last_features.get('atr', 0)
                             volatility = (last_atr / current_price * 100)
                             if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                                log_rejection(symbol, "فلتر التقلب المنخفض", {"volatility": f"{volatility:.2f}%", "min_required": f"{MIN_VOLATILITY_PERCENT}%"})
+                                log_rejection(symbol, "Low Volatility Filter", {"volatility": f"{volatility:.2f}%", "min_required": f"{MIN_VOLATILITY_PERCENT}%"})
                                 continue
 
                             if USE_BTC_CORRELATION_FILTER and btc_trend_info.get("is_uptrend"):
                                 correlation = last_features.get('btc_correlation', 0)
                                 if correlation < MIN_BTC_CORRELATION:
-                                    log_rejection(symbol, "فلتر الارتباط مع BTC", {"correlation": f"{correlation:.2f}", "min_required": f"{MIN_BTC_CORRELATION}"})
+                                    log_rejection(symbol, "BTC Correlation Filter", {"correlation": f"{correlation:.2f}", "min_required": f"{MIN_BTC_CORRELATION}"})
                                     continue
                             
-                            sr_levels = fetch_sr_levels_from_db(symbol)
-                            ichimoku_data = fetch_ichimoku_features_from_db(symbol, SIGNAL_GENERATION_TIMEFRAME)
-                            
-                            tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, sr_levels, ichimoku_data, last_atr)
+                            tp_sl_data = calculate_db_driven_tp_sl(symbol, current_price, last_atr)
                             if not tp_sl_data: continue
 
                             new_signal = {
@@ -902,10 +947,10 @@ def main_loop():
                                 if risk <= 0 or reward <= 0: continue
                                 rrr = reward / risk
                                 if rrr < MIN_RISK_REWARD_RATIO:
-                                    log_rejection(symbol, "فلتر المخاطرة/العائد", {"RRR": f"{rrr:.2f}", "min_required": f"{MIN_RISK_REWARD_RATIO}"})
+                                    log_rejection(symbol, "Risk/Reward Ratio Filter", {"RRR": f"{rrr:.2f}", "min_required": f"{MIN_RISK_REWARD_RATIO}"})
                                     continue
 
-                            logger.info(f"✅ [{symbol}] الإشارة مرت من جميع الفلاتر. جاري الحفظ...")
+                            logger.info(f"✅ [{symbol}] Signal passed all filters. Saving...")
                             saved_signal = insert_signal_into_db(new_signal)
                             if saved_signal:
                                 with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
@@ -915,13 +960,13 @@ def main_loop():
                         del df_15m, df_4h, df_features; gc.collect()
 
                     except Exception as e:
-                        logger.error(f"❌ [خطأ معالجة] {symbol}: {e}", exc_info=True)
+                        logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
                 time.sleep(10)
-            logger.info("ℹ️ [نهاية الدورة] انتهت دورة المسح. انتظار..."); 
+            logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); 
             time.sleep(60)
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err:
-            log_and_notify("error", f"خطأ في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
+            log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
 # ---------------------- واجهة برمجة تطبيقات Flask ----------------------
 app = Flask(__name__)
@@ -941,14 +986,14 @@ def home():
         script_dir = os.path.dirname(__file__)
         file_path = os.path.join(script_dir, 'index.html')
         with open(file_path, 'r', encoding='utf-8') as f: return render_template_string(f.read())
-    except FileNotFoundError: return "<h1>ملف index.html غير موجود.</h1>", 404
+    except FileNotFoundError: return "<h1>index.html file not found.</h1>", 404
 
 @app.route('/api/market_status')
 def get_market_status(): return jsonify({"btc_trend": get_btc_trend(), "fear_and_greed": get_fear_and_greed_index(), "market_regime": current_market_regime})
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+    if not check_db_connection() or not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT status, profit_percentage FROM signals;")
@@ -996,7 +1041,7 @@ def get_stats():
 
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not conn or not redis_client: return jsonify({"error": "فشل الاتصال بالخدمات"}), 500
+    if not check_db_connection() or not conn or not redis_client: return jsonify({"error": "Failed to connect to services"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
@@ -1018,30 +1063,29 @@ def get_signals():
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
-    if not client: return jsonify({"error": "Binance Client غير متاح"}), 500
+    if not client: return jsonify({"error": "Binance Client not available"}), 500
     with closure_lock:
-        if signal_id in signals_pending_closure: return jsonify({"error": "الإشارة قيد الإغلاق"}), 409
-    if not check_db_connection() or not conn: return jsonify({"error": "فشل الاتصال بقاعدة البيانات"}), 500
+        if signal_id in signals_pending_closure: return jsonify({"error": "Signal is already being closed"}), 409
+    if not check_db_connection() or not conn: return jsonify({"error": "Database connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals WHERE id = %s AND status = 'open';", (signal_id,))
             signal_to_close = cur.fetchone()
-        if not signal_to_close: return jsonify({"error": "لم يتم العثور على الإشارة"}), 404
+        if not signal_to_close: return jsonify({"error": "Signal not found"}), 404
         symbol = signal_to_close['symbol']
         price = float(client.get_symbol_ticker(symbol=symbol)['price'])
         initiate_signal_closure(symbol, dict(signal_to_close), 'manual_close', price)
-        return jsonify({"message": f"جاري إغلاق الإشارة {signal_id}."})
+        return jsonify({"message": f"Closing signal {signal_id}..."})
     except Exception as e: return jsonify({"error": str(e)}), 500
 
-# ✨ NEW: Telegram testing endpoint
 @app.route('/api/test_telegram')
 def test_telegram():
     logger.info("API: Received request to test Telegram.")
     message = "👋 رسالة اختبار من بوت التداول الخاص بك. إذا رأيت هذه الرسالة، فالاتصال سليم!"
     if send_telegram_message(CHAT_ID, message):
-        return "✅ تم إرسال رسالة اختبار بنجاح. يرجى التحقق من حساب تليجرام الخاص بك."
+        return "✅ Test message sent successfully. Please check your Telegram."
     else:
-        return "❌ فشل إرسال رسالة الاختبار. يرجى مراجعة سجلات الأخطاء (logs) والتحقق من التوكن ومعرف المحادثة.", 500
+        return "❌ Failed to send test message. Please check logs for errors and verify your Token/Chat ID.", 500
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1054,45 +1098,44 @@ def get_rejection_logs():
 
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    log_and_notify("info", f"بدء تشغيل لوحة التحكم على {host}:{port}", "SYSTEM")
+    log_and_notify("info", f"Starting dashboard on {host}:{port}", "SYSTEM")
     try:
         from waitress import serve
         serve(app, host=host, port=port, threads=8)
     except ImportError:
-        logger.warning("⚠️ [Flask] مكتبة 'waitress' غير موجودة, سيتم استخدام خادم التطوير.")
+        logger.warning("⚠️ [Flask] 'waitress' not found, using development server.")
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def initialize_bot_services():
     global client, validated_symbols_to_scan
-    logger.info("🤖 [خدمات البوت] بدء التهيئة في الخلفية...")
+    logger.info("🤖 [Bot Services] Starting background initialization...")
     
-    # ✨ NEW: Check for Telegram credentials on startup
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.critical("❌ [Telegram] التوكن أو معرف المحادثة غير موجود في متغيرات البيئة. لن يتم إرسال التنبيهات.")
+        logger.critical("❌ [Telegram] Token or Chat ID not found in environment variables. Alerts will not be sent.")
     else:
-        logger.info("✅ [Telegram] تم تحميل التوكن ومعرف المحادثة بنجاح.")
+        logger.info("✅ [Telegram] Token and Chat ID loaded successfully.")
 
     try:
         client = Client(API_KEY, API_SECRET)
-        logger.info("✅ [Binance] تم الاتصال بواجهة برمجة تطبيقات Binance بنجاح.")
+        logger.info("✅ [Binance] Connected to Binance API successfully.")
         init_db()
         init_redis()
         load_open_signals_to_cache(); load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            logger.critical("❌ لا توجد رموز معتمدة للمسح. الحلقات لن تبدأ."); return
+            logger.critical("❌ No validated symbols to scan. Loops will not start."); return
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
-        logger.info("✅ [خدمات البوت] تم بدء جميع خدمات الخلفية بنجاح.")
+        logger.info("✅ [Bot Services] All background services started successfully.")
     except Exception as e:
-        log_and_notify("critical", f"حدث خطأ حاسم أثناء التهيئة: {e}", "SYSTEM")
+        log_and_notify("critical", f"A critical error occurred during initialization: {e}", "SYSTEM")
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 بدء تشغيل بوت التداول - إصدار {BASE_ML_MODEL_NAME}...")
+    logger.info(f"🚀 Starting Trading Bot - Version {BASE_ML_MODEL_NAME}...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
-    logger.info("👋 [إيقاف] تم إيقاف تشغيل البوت."); os._exit(0)
+    logger.info("👋 [Shutdown] Bot has been shut down."); os._exit(0)
