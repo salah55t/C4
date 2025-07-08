@@ -96,11 +96,11 @@ BTC_TREND_EMA_PERIOD: int = 50
 
 USE_SPEED_FILTER: bool = True
 USE_RRR_FILTER: bool = True
-MIN_RISK_REWARD_RATIO: float = 1.5
+MIN_RISK_REWARD_RATIO: float = 1.1
 USE_BTC_CORRELATION_FILTER: bool = True
 MIN_BTC_CORRELATION: float = 0.1
 USE_MIN_VOLATILITY_FILTER: bool = True
-MIN_VOLATILITY_PERCENT: float = 0.4
+MIN_VOLATILITY_PERCENT: float = 0.3
 
 
 # --- المتغيرات العامة وقفل العمليات ---
