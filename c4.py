@@ -829,8 +829,8 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (27.0, 0.8, 55.0, 75.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 80.0)
+    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
+    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
     else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
@@ -993,46 +993,64 @@ def trade_monitoring_loop():
 # ---------------------- دوال التنبيهات والإدارة (مع الإصلاح) ----------------------
 def escape_markdown(text: Any) -> str:
     """
-    Escapes special characters in a string for Telegram's MarkdownV2 parser.
-    This is the fix for the "can't parse entities" error.
+    تهريب الرموز الخاصة في النص لتتوافق مع تنسيق MarkdownV2 الخاص بتيليجرام.
+    هذا هو الإصلاح لخطأ "can't parse entities".
     """
     text = str(text)
     escape_chars = r'\_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
+    """
+    إرسال رسالة إلى تيليجرام مع معالجة محسنة للأخطاء ومنطق احتياطي.
+    """
     if not TELEGRAM_TOKEN or not target_chat_id:
         logger.error("❌ [Telegram] Token or Chat ID is missing.")
         return False
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # المحاولة الأولى: الإرسال باستخدام MarkdownV2
     payload = {'chat_id': str(target_chat_id), 'text': text, 'parse_mode': 'MarkdownV2'}
-    if reply_markup: payload['reply_markup'] = json.dumps(reply_markup)
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+        
     logger.info(f"ℹ️ [Telegram] Attempting to send message to Chat ID: {target_chat_id}")
-    try: 
+    try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code != 200:
-             logger.error(f"❌ [Telegram] Failed to send message. Status: {response.status_code}, Response: {response.text}")
-             # Fallback to plain text if Markdown fails
-             payload['parse_mode'] = None
-             payload['text'] = re.sub(r'[*_`\[\]]', '', text) # Remove markdown chars
-             response = requests.post(url, json=payload, timeout=10)
-             if response.status_code == 200:
-                 logger.info("✅ [Telegram] Message sent successfully in plain text after Markdown failure.")
-                 return True
-             else:
-                 logger.error(f"❌ [Telegram] Plain text fallback also failed. Status: {response.status_code}, Response: {response.text}")
-                 return False
-        logger.info("✅ [Telegram] Message sent successfully with MarkdownV2.")
-        return True
-    except requests.exceptions.RequestException as e: 
+        if response.status_code == 200:
+            logger.info("✅ [Telegram] Message sent successfully with MarkdownV2.")
+            return True
+
+        # إذا فشلت المحاولة الأولى، يتم تسجيل الخطأ والمحاولة مرة أخرى كنص عادي
+        logger.error(f"❌ [Telegram] Failed to send message with MarkdownV2. Status: {response.status_code}, Response: {response.text}")
+        
+        # المحاولة الثانية: الإرسال كنص عادي
+        # نقوم بإزالة 'parse_mode' من الحمولة لإرسالها كنص عادي
+        del payload['parse_mode']
+        
+        # لا حاجة لتعديل النص، تيليجرام سيعرض الرموز كما هي
+        logger.info("ℹ️ [Telegram] Fallback: Attempting to send message as plain text.")
+        fallback_response = requests.post(url, json=payload, timeout=10)
+        
+        if fallback_response.status_code == 200:
+            logger.info("✅ [Telegram] Message sent successfully in plain text after Markdown failure.")
+            return True
+        else:
+            logger.error(f"❌ [Telegram] Plain text fallback also failed. Status: {fallback_response.status_code}, Response: {fallback_response.text}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] Request failed: {e}")
         return False
 
 def send_new_signal_alert(signal_data: Dict[str, Any]):
+    # تهريب جميع المتغيرات التي ستُدرج في الرسالة
     safe_symbol = escape_markdown(signal_data['symbol'])
     entry = float(signal_data['entry_price'])
     target = float(signal_data['target_price'])
     sl = float(signal_data['stop_loss'])
+    
     profit_pct = ((target / entry) - 1) * 100
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
@@ -1044,24 +1062,32 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     ml_confidence = escape_markdown(signal_data['signal_details']['ML_Confidence'])
     tp_sl_source = escape_markdown(signal_data['signal_details']['TP_SL_Source'])
 
+    # الأرقام يتم تنسيقها ووضعها داخل `...` مما يجعلها آمنة
+    entry_str = f"{entry:,.8g}"
+    target_str = f"{target:,.8g}"
+    sl_str = f"{sl:,.8g}"
+    profit_str = f"+{profit_pct:.2f}%"
+    risk_str = f"{risk_pct:.2f}%"
+    rrr_str = f"1:{rrr:.2f}"
+
     message = (
         f"💡 *توصية تداول جديدة* 💡\n\n"
         f" *العملة:* `{safe_symbol}`\n"
         f" *الاستراتيجية:* `{strategy_name}`\n"
         f" *حالة السوق:* `{market_regime}`\n\n"
-        f" *الدخول:* `${entry:,.8g}`\n"
-        f" *الهدف:* `${target:,.8g}`\n"
-        f" *وقف الخسارة:* `${sl:,.8g}`\n\n"
-        f" *الربح المتوقع:* `+{profit_pct:.2f}%`\n"
-        f" *المخاطرة:* `{risk_pct:.2f}%`\n"
-        f" *المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
+        f" *الدخول:* `${entry_str}`\n"
+        f" *الهدف:* `${target_str}`\n"
+        f" *وقف الخسارة:* `${sl_str}`\n\n"
+        f" *الربح المتوقع:* `{escape_markdown(profit_str)}`\n"
+        f" *المخاطرة:* `{escape_markdown(risk_str)}`\n"
+        f" *المخاطرة/العائد:* `{escape_markdown(rrr_str)}`\n\n"
         f" *ثقة النموذج:* {ml_confidence}\n"
         f" *مصدر الهدف:* {tp_sl_source}"
     )
     
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New Signal: {signal_data['symbol']} in {market_regime} market", "NEW_SIGNAL")
+        log_and_notify('info', f"New Signal: {signal_data['symbol']} in {current_market_state.get('overall_regime', 'N/A')} market", "NEW_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -1118,9 +1144,11 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
             'manual_close': '🖐️ إغلاق يدوي',
             'closed_by_sell_signal': '🔴 إغلاق بإشارة بيع'
         }
+        # تهريب جميع المتغيرات الديناميكية
         status_message = escape_markdown(status_map.get(status, status))
         safe_symbol = escape_markdown(symbol)
-        profit_str = f"{profit_pct:+.2f}%"
+        profit_str = escape_markdown(f"{profit_pct:+.2f}%")
+        
         alert_msg = f"*{status_message}*\n`{safe_symbol}` | *الربح:* `{profit_str}`"
         send_telegram_message(CHAT_ID, alert_msg)
         log_and_notify('info', f"{status_map.get(status, status)}: {symbol} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
@@ -1222,7 +1250,11 @@ def main_loop():
                                     if update_signal_target_in_db(open_signal['id'], new_tp, new_sl):
                                         open_signals_cache[symbol]['target_price'] = new_tp
                                         open_signals_cache[symbol]['stop_loss'] = new_sl
-                                        send_telegram_message(CHAT_ID, escape_markdown(f"🔼 *تحديث الهدف* `{symbol}`\n*الهدف الجديد:* ${new_tp:,.8g}\n*الوقف الجديد:* ${new_sl:,.8g}"))
+                                        # تهريب المتغيرات قبل إرسالها
+                                        safe_symbol = escape_markdown(symbol)
+                                        tp_str = escape_markdown(f"{new_tp:,.8g}")
+                                        sl_str = escape_markdown(f"{new_sl:,.8g}")
+                                        send_telegram_message(CHAT_ID, f"🔼 *تحديث الهدف* `{safe_symbol}`\n*الهدف الجديد:* ${tp_str}\n*الوقف الجديد:* ${sl_str}")
                         elif not is_trade_open and prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                             if slots_available <= 0: continue
                             last_features = df_features.iloc[-1]; last_features.name = symbol
