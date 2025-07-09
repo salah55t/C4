@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -276,6 +276,7 @@ const TF_STATUS_STYLES = {
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
+    if (num === Infinity) return '∞';
     return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
@@ -355,7 +356,15 @@ function updateMarketStatus() {
 
 function updateStats() {
     apiFetch('/api/stats').then(data => {
-        if (!data) return;
+        if (!data || data.error) {
+            console.error("Failed to fetch stats:", data ? data.error : "No data");
+            // Optionally indicate error on the UI
+            ['open-trades-value', 'net-profit-usdt', 'win-rate', 'profit-factor'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = 'Error';
+            });
+            return;
+        }
         const fields = {
             'open-trades-value': data.open_trades_count,
             'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
@@ -1175,26 +1184,63 @@ def get_market_status():
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
+    """
+    دالة محسّنة وموثوقة لحساب وعرض إحصائيات التداول.
+    تقوم بحساب جميع المقاييس مباشرة من قاعدة البيانات لضمان الدقة.
+    """
+    if not check_db_connection() or not conn:
+        logger.error("❌ [API Stats] DB connection check failed.")
+        return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
+            # جلب جميع البيانات اللازمة في استعلام واحد
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
-        with signal_cache_lock: open_trades_count = len(open_signals_cache)
+
+        # --- أصبحت الحسابات الآن مكتفية ذاتيًا ---
+
+        # 1. عدد الصفقات المفتوحة
+        # حساب موثوق من بيانات قاعدة البيانات المحدثة، وليس من الذاكرة المؤقتة.
+        open_trades_count = sum(1 for s in all_signals if s.get('status') == 'open')
+
+        # 2. بيانات الصفقات المغلقة
         closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
-        total_net_profit_usdt = sum(((float(t['profit_percentage']) - 2 * TRADING_FEE_PERCENT) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT for t in closed_trades)
-        wins = [s for s in closed_trades if float(s['profit_percentage']) > 0]
-        win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
-        total_profit_from_wins = sum(float(s['profit_percentage']) for s in wins)
-        total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) <= 0))
-        profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else float('inf')
+
+        # 3. صافي الربح (USDT)
+        total_net_profit_usdt = 0.0
+        if closed_trades:
+            total_net_profit_usdt = sum(
+                ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
+                for t in closed_trades
+            )
+
+        # 4. نسبة النجاح
+        win_rate = 0.0
+        if closed_trades:
+            wins = sum(1 for s in closed_trades if float(s['profit_percentage']) > 0)
+            win_rate = (wins / len(closed_trades) * 100) if len(closed_trades) > 0 else 0.0
+
+        # 5. عامل الربح
+        profit_factor = 0.0  # القيمة الافتراضية هي 0
+        if closed_trades:
+            total_profit_from_wins = sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0)
+            total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0))
+            
+            if total_loss_from_losses > 0:
+                profit_factor = total_profit_from_wins / total_loss_from_losses
+            elif total_profit_from_wins > 0:
+                profit_factor = float('inf')  # حالة وجود أرباح وعدم وجود خسائر
+
         return jsonify({
-            "open_trades_count": open_trades_count, "net_profit_usdt": total_net_profit_usdt,
-            "win_rate": win_rate, "profit_factor": profit_factor
+            "open_trades_count": open_trades_count,
+            "net_profit_usdt": total_net_profit_usdt,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
