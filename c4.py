@@ -500,7 +500,7 @@ function updateSignals() {
         if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
         if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
         tableBody.innerHTML = data.map(signal => {
-            const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
+            const pnlPct = signal.status === 'open' || signal.status === 'updated' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
             const statusClass = signal.status === 'open' ? 'text-yellow-400' : (signal.status === 'updated' ? 'text-blue-400' : 'text-gray-400');
             const statusText = signal.status === 'updated' ? 'تم تحديثها' : signal.status;
             return `<tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
@@ -1430,9 +1430,9 @@ def run_websocket_manager():
     symbol_chunks = [validated_symbols_to_scan[i:i + chunk_size] for i in range(0, len(validated_symbols_to_scan), chunk_size)]
     
     for i, chunk in enumerate(symbol_chunks):
-        stream_name = f"price_chunk_{i}"
         streams = [f"{s.lower()}@miniTicker" for s in chunk]
-        twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams, name=stream_name)
+        # FIX: Removed the 'name' parameter which was causing the TypeError
+        twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
         logger.info(f"✅ [WebSocket] Subscribed to price stream chunk {i+1}/{len(symbol_chunks)}.")
 
     twm.join()
