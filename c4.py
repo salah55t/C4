@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v12.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11_Enhanced')
+logger = logging.getLogger('CryptoBotV12_MarketTrend')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -131,10 +131,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V3) ----------------------
-def get_dashboard_html_v3():
+# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V4) ----------------------
+def get_dashboard_html_v4():
     """
-    لوحة تحكم محسنة مع منحنى الربح، تصميم عصري، وتفاعلات محسنة.
+    لوحة تحكم محسنة مع عرض اتجاه السوق، مؤشر الخوف والطمع، وتصميم عصري.
     """
     return """
 <!DOCTYPE html>
@@ -142,7 +142,7 @@ def get_dashboard_html_v3():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V3</title>
+    <title>لوحة تحكم بوت التداول V4</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -170,65 +170,39 @@ def get_dashboard_html_v3():
             border: 1px solid var(--border-color);
             border-radius: 0.75rem;
             transition: all 0.3s ease-in-out;
+            padding: 1rem;
         }
         .card:hover {
             transform: translateY(-4px);
             box-shadow: 0 8px 25px rgba(0,0,0,0.2);
             border-color: var(--accent-blue);
         }
-        .glassmorphism {
-            background: rgba(31, 41, 55, 0.6);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-        }
-        .progress-bar-container {
-            position: relative;
-            width: 100%;
-            height: 1.25rem; /* 20px */
-            background-color: #374151; /* Gray 700 */
-            border-radius: 0.5rem;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-        }
-        .progress-bar {
-            height: 100%;
-            transition: width 0.5s ease-in-out;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 0.75rem;
-            font-weight: bold;
-            color: white;
-            position: relative;
-        }
-        .progress-point {
-            position: absolute;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            border: 2px solid white;
-        }
-        .entry-point { background-color: var(--accent-blue); }
-        .current-point { background-color: var(--accent-yellow); }
-        .progress-labels {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.7rem;
-            color: var(--text-secondary);
-            padding: 0 2px;
-            margin-top: 2px;
-        }
         .skeleton {
             animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
             background-color: #374151;
             border-radius: 0.5rem;
         }
-        @keyframes pulse {
-            50% { opacity: .5; }
+        @keyframes pulse { 50% { opacity: .5; } }
+        .progress-bar-container {
+            position: relative; width: 100%; height: 1.25rem;
+            background-color: #374151; border-radius: 0.5rem;
+            overflow: hidden; display: flex; align-items: center;
         }
+        .progress-bar {
+            height: 100%; transition: width 0.5s ease-in-out;
+        }
+        .progress-point {
+            position: absolute; top: 50%; transform: translateY(-50%);
+            width: 8px; height: 8px; border-radius: 50%; border: 2px solid white;
+        }
+        .entry-point { background-color: var(--accent-blue); }
+        .current-point { background-color: var(--accent-yellow); }
+        .progress-labels {
+            display: flex; justify-content: space-between;
+            font-size: 0.7rem; color: var(--text-secondary);
+            padding: 0 2px; margin-top: 2px;
+        }
+        #needle { transition: transform 1s cubic-bezier(0.68, -0.55, 0.27, 1.55); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -236,22 +210,62 @@ def get_dashboard_html_v3():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-3xl md:text-4xl font-black text-white">لوحة تحكم التداول</h1>
             <div id="connection-status" class="flex items-center gap-2 text-sm">
-                <div id="db-status-light" class="w-3 h-3 rounded-full bg-gray-500"></div>
-                <span class="text-text-secondary">DB</span>
-                <div id="api-status-light" class="w-3 h-3 rounded-full bg-gray-500"></div>
-                <span class="text-text-secondary">API</span>
+                <div id="db-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">DB</span>
+                <div id="api-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">API</span>
             </div>
         </header>
 
-        <!-- Main Stats & Market Status -->
-        <section class="mb-6 grid grid-cols-1 lg:grid-cols-4 gap-5">
-            <div id="stats-container" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-2 gap-4 lg:col-span-1">
-                <!-- Stats Cards will be injected here -->
+        <!-- Market Status & Key Metrics -->
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            <div class="card lg:col-span-2">
+                <h3 class="font-bold mb-3 text-lg">اتجاه السوق (BTC)</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">الاتجاه العام</h4>
+                        <div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار 4 ساعات</h4>
+                        <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-4h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار ساعة</h4>
+                        <div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-1h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                </div>
             </div>
-            <div id="profit-chart-card" class="card lg:col-span-3 p-4 min-h-[300px]">
-                <h3 class="font-bold mb-2">منحنى الربح التراكمي (٪)</h3>
-                <div class="h-full w-full">
-                    <canvas id="profitChart"></canvas>
+            <div class="card flex flex-col justify-center items-center">
+                 <h3 class="font-bold mb-2 text-lg">مؤشر الخوف والطمع</h3>
+                 <div id="fear-greed-gauge" class="relative w-full max-w-[180px] aspect-square"></div>
+                 <div id="fear-greed-value" class="text-3xl font-bold mt-[-25px] skeleton h-10 w-1/2"></div>
+                 <div id="fear-greed-text" class="text-md text-text-secondary skeleton h-6 w-3/4 mt-1"></div>
+            </div>
+            <div class="card flex flex-col justify-center items-center text-center">
+                <h3 class="font-bold text-text-secondary text-lg">صفقات مفتوحة</h3>
+                <div id="open-trades-value" class="text-5xl font-black text-accent-blue mt-2 skeleton h-12 w-1/2"></div>
+            </div>
+        </section>
+
+        <!-- Profit Chart & Other Stats -->
+        <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div id="profit-chart-card" class="card lg:col-span-2 min-h-[350px]">
+                <h3 class="font-bold mb-2">منحنى الربح التراكمي (%)</h3>
+                <div class="h-full w-full"><canvas id="profitChart"></canvas></div>
+            </div>
+            <div id="other-stats-container" class="grid grid-rows-3 gap-4">
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">صافي الربح (USDT)</div>
+                    <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto"></div>
+                </div>
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
+                    <div id="win-rate" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                </div>
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
+                    <div id="profit-factor" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
                 </div>
             </div>
         </section>
@@ -267,23 +281,7 @@ def get_dashboard_html_v3():
 
         <!-- Content Area -->
         <main>
-            <div id="signals-tab" class="tab-content">
-                <div class="overflow-x-auto card">
-                    <table class="min-w-full text-sm text-right">
-                        <thead class="border-b border-border-color">
-                            <tr>
-                                <th class="p-4 font-semibold">العملة</th>
-                                <th class="p-4 font-semibold">الحالة</th>
-                                <th class="p-4 font-semibold">الربح/الخسارة</th>
-                                <th class="p-4 font-semibold w-[35%]">التقدم نحو الهدف</th>
-                                <th class="p-4 font-semibold">الدخول / الحالي</th>
-                                <th class="p-4 font-semibold">إجراء</th>
-                            </tr>
-                        </thead>
-                        <tbody id="signals-table"></tbody>
-                    </table>
-                </div>
-            </div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[35%]">التقدم نحو الهدف</th><th class="p-4 font-semibold">الدخول / الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
@@ -291,10 +289,20 @@ def get_dashboard_html_v3():
 
 <script>
 let profitChartInstance;
+const REGIME_STYLES = {
+    "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
+    "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
+    "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
+    "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" }
+};
+const TF_STATUS_STYLES = {
+    "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" }, "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" },
+    "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" }, "Uncertain": { text: "غير واضح", icon: "?", color: "text-text-secondary" }
+};
 
-function formatNumber(num) {
-    if (num === null || num === undefined) return 'N/A';
-    return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function formatNumber(num, digits = 2) {
+    if (num === null || num === undefined || isNaN(num)) return 'N/A';
+    return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 function showTab(tabName) {
@@ -304,205 +312,153 @@ function showTab(tabName) {
         btn.classList.remove('text-white', 'border-accent-blue', 'font-semibold');
         btn.classList.add('text-text-secondary');
     });
-    const activeBtn = event.target;
-    activeBtn.classList.add('text-white', 'border-accent-blue', 'font-semibold');
-    activeBtn.classList.remove('text-text-secondary');
+    event.target.classList.add('text-white', 'border-accent-blue', 'font-semibold');
+    event.target.classList.remove('text-text-secondary');
 }
 
-async function apiFetch(url, options = {}) {
+async function apiFetch(url) {
     try {
-        const response = await fetch(url, options);
-        if (!response.ok) {
-            console.error(`API Error ${response.status}: ${response.statusText}`);
-            return null;
-        }
+        const response = await fetch(url);
+        if (!response.ok) { console.error(`API Error ${response.status}`); return null; }
         return await response.json();
-    } catch (error) {
-        console.error(`Failed to fetch ${url}:`, error);
-        return null;
+    } catch (error) { console.error(`Fetch error for ${url}:`, error); return null; }
+}
+
+function getFngColor(value) {
+    if (value < 25) return '#EF4444'; if (value < 45) return '#F97316';
+    if (value < 55) return '#EAB308'; if (value < 75) return '#84CC16';
+    return '#22C55E';
+}
+
+function renderFearGreedGauge(value, classification) {
+    const container = document.getElementById('fear-greed-gauge');
+    const valueEl = document.getElementById('fear-greed-value');
+    const textEl = document.getElementById('fear-greed-text');
+    [valueEl, textEl].forEach(el => el.classList.remove('skeleton', 'h-10', 'w-1/2', 'h-6', 'w-3/4'));
+
+    if (value === -1) {
+        container.innerHTML = `<div class="text-center text-text-secondary">خطأ</div>`;
+        valueEl.textContent = 'N/A'; textEl.textContent = 'فشل التحميل';
+        return;
     }
+    valueEl.textContent = value; textEl.textContent = classification;
+    const angle = -90 + (value / 100) * 180;
+    const color = getFngColor(value);
+    valueEl.style.color = color;
+    container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#EF4444"/><stop offset="50%" stop-color="#EAB308"/><stop offset="100%" stop-color="#22C55E"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`;
+}
+
+function updateMarketStatus() {
+    apiFetch('/api/market_status').then(data => {
+        if (!data) return;
+        document.getElementById('db-status-light').className = `w-3 h-3 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        document.getElementById('api-status-light').className = `w-3 h-3 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        
+        const state = data.market_state;
+        const overallRegime = state.overall_regime || "UNCERTAIN";
+        const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
+        const overallDiv = document.getElementById('overall-regime');
+        overallDiv.textContent = regimeStyle.text;
+        overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
+        overallDiv.classList.remove('skeleton', 'h-8', 'w-3/4', 'mx-auto', 'mt-1');
+
+        ['4h', '1h'].forEach(tf => {
+            const tfData = state.details[tf];
+            const statusDiv = document.getElementById(`tf-${tf}-status`);
+            const detailsDiv = document.getElementById(`tf-${tf}-details`);
+            [statusDiv, detailsDiv].forEach(el => el.classList.remove('skeleton', 'h-7', 'w-2/3', 'h-4', 'w-1/2', 'mx-auto', 'mt-1'));
+            if (tfData) {
+                const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
+                statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
+                detailsDiv.textContent = `RSI: ${formatNumber(tfData.rsi, 1)} | ADX: ${formatNumber(tfData.adx, 1)}`;
+            } else {
+                statusDiv.textContent = 'N/A'; detailsDiv.textContent = '';
+            }
+        });
+        renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
+    });
 }
 
 function updateStats() {
     apiFetch('/api/stats').then(data => {
-        const container = document.getElementById('stats-container');
-        if (!data) {
-            container.innerHTML = '<p>فشل تحميل الإحصائيات.</p>';
-            return;
+        if (!data) return;
+        const fields = {
+            'open-trades-value': data.open_trades_count,
+            'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
+            'win-rate': `${formatNumber(data.win_rate)}%`,
+            'profit-factor': formatNumber(data.profit_factor)
+        };
+        for (const [id, value] of Object.entries(fields)) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+                el.classList.remove('skeleton', 'h-12', 'h-8', 'w-1/2', 'w-3/4', 'mx-auto');
+                if (id === 'net-profit-usdt') {
+                    el.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
+                }
+            }
         }
-
-        document.getElementById('db-status-light').className = `w-3 h-3 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
-        document.getElementById('api-status-light').className = `w-3 h-3 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
-
-        const stats = [
-            { label: 'صفقات مفتوحة', value: data.open_trades_count, color: 'text-accent-blue' },
-            { label: 'صافي الربح (USDT)', value: `$${formatNumber(data.net_profit_usdt)}`, color: data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red' },
-            { label: 'نسبة النجاح', value: `${formatNumber(data.win_rate)}%`, color: 'text-white' },
-            { label: 'عامل الربح', value: formatNumber(data.profit_factor), color: 'text-white' }
-        ];
-
-        container.innerHTML = stats.map(stat => `
-            <div class="card p-4 text-center flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">${stat.label}</div>
-                <div class="text-2xl font-bold ${stat.color}">${stat.value}</div>
-            </div>
-        `).join('');
     });
 }
 
 function updateProfitChart() {
     apiFetch('/api/profit_curve').then(data => {
-        if (!data || data.length === 0) return;
+        const chartCard = document.getElementById('profit-chart-card');
+        if (!data) { chartCard.innerHTML += '<p>فشل تحميل بيانات الرسم البياني.</p>'; return; }
+        if (data.length === 0) { chartCard.innerHTML += '<p class="text-center text-text-secondary mt-8">لا توجد بيانات صفقات مغلقة لعرضها.</p>'; return; }
 
         const ctx = document.getElementById('profitChart').getContext('2d');
         const labels = data.map(d => d.timestamp);
         const profitData = data.map(d => d.cumulative_profit);
-
-        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
         const lastProfit = profitData[profitData.length - 1];
-        if (lastProfit >= 0) {
-            gradient.addColorStop(0, 'rgba(34, 197, 94, 0.6)');
-            gradient.addColorStop(1, 'rgba(34, 197, 94, 0)');
-        } else {
-            gradient.addColorStop(0, 'rgba(239, 68, 68, 0.6)');
-            gradient.addColorStop(1, 'rgba(239, 68, 68, 0)');
-        }
+        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
+        gradient.addColorStop(0, `${lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}60`);
+        gradient.addColorStop(1, `${lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'}00`);
 
-        const config = {
-            type: 'line',
-            data: {
-                labels: labels,
-                datasets: [{
-                    label: 'الربح التراكمي %',
-                    data: profitData,
-                    borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-                    backgroundColor: gradient,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 6,
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    x: {
-                        type: 'time',
-                        time: { unit: 'day', tooltipFormat: 'DD T' },
-                        ticks: { color: 'var(--text-secondary)' },
-                        grid: { color: 'rgba(55, 65, 81, 0.5)' }
-                    },
-                    y: {
-                        ticks: { color: 'var(--text-secondary)', callback: value => value + '%' },
-                        grid: { color: 'rgba(55, 65, 81, 0.5)' }
-                    }
-                },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        backgroundColor: 'var(--bg-card)',
-                        titleFont: { weight: 'bold' },
-                        bodyFont: { family: 'Cairo' },
-                        callbacks: {
-                            label: (context) => `الربح: ${context.parsed.y.toFixed(2)}%`
-                        }
-                    }
-                },
-                interaction: {
-                    mode: 'index',
-                    intersect: false,
-                }
+        const config = { type: 'line', data: { labels: labels, datasets: [{ data: profitData, borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', backgroundColor: gradient, fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 6 }] },
+            options: { responsive: true, maintainAspectRatio: false,
+                scales: { x: { type: 'time', time: { unit: 'day', tooltipFormat: 'DD T' }, ticks: { color: 'var(--text-secondary)' }, grid: { color: '#37415180' } },
+                          y: { ticks: { color: 'var(--text-secondary)', callback: v => v + '%' }, grid: { color: '#37415180' } } },
+                plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: 'var(--bg-card)', titleFont: { weight: 'bold' }, bodyFont: { family: 'Cairo' }, callbacks: { label: c => `الربح: ${c.parsed.y.toFixed(2)}%` } } },
+                interaction: { mode: 'index', intersect: false }
             }
         };
-
         if (profitChartInstance) {
             profitChartInstance.data.labels = labels;
             profitChartInstance.data.datasets[0].data = profitData;
             profitChartInstance.data.datasets[0].borderColor = lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
             profitChartInstance.data.datasets[0].backgroundColor = gradient;
-            profitChartInstance.update();
-        } else {
-            profitChartInstance = new Chart(ctx, config);
-        }
+            profitChartInstance.update('none');
+        } else { profitChartInstance = new Chart(ctx, config); }
     });
 }
 
 function renderProgressBar(signal) {
     const { entry_price, stop_loss, target_price, current_price } = signal;
-    if (current_price === null || stop_loss === null || target_price === null) {
-        return '<span>لا تتوفر بيانات التقدم</span>';
-    }
-
-    const entry = parseFloat(entry_price);
-    const sl = parseFloat(stop_loss);
-    const tp = parseFloat(target_price);
-    const current = parseFloat(current_price);
-
+    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null)) return '<span>لا تتوفر بيانات</span>';
+    const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat);
     const totalDist = tp - sl;
     if (totalDist <= 0) return '<span>بيانات غير صالحة</span>';
-
-    const currentDist = current - sl;
-    let progressPct = (currentDist / totalDist) * 100;
-    progressPct = Math.max(0, Math.min(100, progressPct));
-    
-    const entryPointPct = ((entry - sl) / totalDist) * 100;
-
-    const barColor = current >= entry ? 'bg-accent-green' : 'bg-accent-red';
-
-    return `
-        <div class="flex flex-col w-full">
-            <div class="progress-bar-container">
-                <div class="progress-bar ${barColor}" style="width: ${progressPct}%">
-                    <div class="progress-point entry-point" style="left: ${entryPointPct}%" title="سعر الدخول: ${entry.toFixed(4)}"></div>
-                    <div class="progress-point current-point" style="left: ${progressPct}%" title="السعر الحالي: ${current.toFixed(4)}"></div>
-                </div>
-            </div>
-            <div class="progress-labels">
-                <span title="وقف الخسارة">${sl.toFixed(4)}</span>
-                <span title="الهدف">${tp.toFixed(4)}</span>
-            </div>
-        </div>
-    `;
+    const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
+    const entryPointPct = Math.max(0, Math.min(100, ((entry - sl) / totalDist) * 100));
+    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div><div class="progress-point entry-point" style="left: ${entryPointPct}%" title="الدخول: ${entry.toFixed(4)}"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
 }
-
 
 function updateSignals() {
     apiFetch('/api/signals').then(data => {
         const tableBody = document.getElementById('signals-table');
-        if (!data) {
-            tableBody.innerHTML = '<tr><td colspan="6" class="text-center p-8">فشل تحميل الصفقات.</td></tr>';
-            return;
-        }
-        if (data.length === 0) {
-            tableBody.innerHTML = '<tr><td colspan="6" class="text-center p-8">لا توجد صفقات لعرضها.</td></tr>';
-            return;
-        }
-
+        if (!data) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
+        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
         tableBody.innerHTML = data.map(signal => {
             const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
-            const pnlClass = pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red';
-            const statusClass = signal.status === 'open' ? 'text-yellow-400' : 'text-gray-400';
-
-            return `
-                <tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
+            return `<tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
                     <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
-                    <td class="p-4 font-bold ${statusClass}">${signal.status}</td>
-                    <td class="p-4 font-mono font-bold ${pnlClass}">${formatNumber(pnlPct)}%</td>
-                    <td class="p-4">
-                        ${signal.status === 'open' ? renderProgressBar(signal) : '<span>-</span>'}
-                    </td>
-                    <td class="p-4 font-mono text-xs">
-                        <div>${parseFloat(signal.entry_price).toFixed(5)}</div>
-                        <div class="text-text-secondary">${signal.current_price ? parseFloat(signal.current_price).toFixed(5) : 'N/A'}</div>
-                    </td>
-                    <td class="p-4">
-                        ${signal.status === 'open' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md transition-colors">إغلاق</button>` : ''}
-                    </td>
-                </tr>
-            `;
+                    <td class="p-4 font-bold ${signal.status === 'open' ? 'text-yellow-400' : 'text-gray-400'}">${signal.status}</td>
+                    <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
+                    <td class="p-4">${signal.status === 'open' ? renderProgressBar(signal) : '-'}</td>
+                    <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
+                    <td class="p-4">${signal.status === 'open' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                </tr>`;
         }).join('');
     });
 }
@@ -510,32 +466,26 @@ function updateSignals() {
 function updateList(endpoint, listId, formatter) {
     apiFetch(endpoint).then(data => {
         if (!data) return;
-        document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="text-center text-text-secondary p-4">لا توجد بيانات.</div>`;
+        document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="p-4 text-center text-text-secondary">لا توجد بيانات.</div>`;
     });
 }
 
 function manualCloseSignal(signalId) {
     if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
-        apiFetch(`/api/close/${signalId}`, { method: 'POST' }).then(data => {
-            if (data) {
-                alert(data.message || data.error);
-                refreshData();
-            }
+        fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
+            alert(data.message || data.error);
+            refreshData();
         });
     }
 }
 
 function refreshData() {
+    updateMarketStatus();
     updateStats();
     updateProfitChart();
     updateSignals();
-    updateList('/api/notifications', 'notifications-list', n =>
-        `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString('ar-EG')}] ${n.message}</div>`
-    );
-    updateList('/api/rejection_logs', 'rejections-list', log => {
-        const details = JSON.stringify(log.details);
-        return `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString('ar-EG')}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${details}</span></div>`;
-    });
+    updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString('ar-EG')}] ${n.message}</div>`);
+    updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString('ar-EG')}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
 
 setInterval(refreshData, 8000);
@@ -807,30 +757,34 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
 def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
     if df is None or len(df) < 26:
         return {"trend": "Uncertain", "rsi": -1, "adx": -1}
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=13, adjust=False).mean()
-    rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.ewm(span=14, adjust=False).mean()
-    up_move = df['high'].diff()
-    down_move = -df['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
-    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    adx = dx.ewm(span=14, adjust=False).mean()
-    ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
-    ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-    trend = "Ranging"
-    if adx.iloc[-1] > 20:
-        if ema_fast > ema_slow and rsi.iloc[-1] > 50: trend = "Uptrend"
-        elif ema_fast < ema_slow and rsi.iloc[-1] < 50: trend = "Downtrend"
-    return {"trend": trend, "rsi": rsi.iloc[-1], "adx": adx.iloc[-1]}
+    try:
+        delta = df['close'].diff()
+        gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+        loss = -delta.clip(upper=0).ewm(com=13, adjust=False).mean()
+        rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.ewm(span=14, adjust=False).mean()
+        up_move = df['high'].diff()
+        down_move = -df['low'].diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
+        minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / atr.replace(0, 1e-9)
+        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+        adx = dx.ewm(span=14, adjust=False).mean()
+        ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
+        ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
+        trend = "Ranging"
+        if adx.iloc[-1] > 20:
+            if ema_fast > ema_slow and rsi.iloc[-1] > 50: trend = "Uptrend"
+            elif ema_fast < ema_slow and rsi.iloc[-1] < 50: trend = "Downtrend"
+        return {"trend": trend, "rsi": rsi.iloc[-1], "adx": adx.iloc[-1]}
+    except Exception as e:
+        logger.error(f"Error in get_trend_for_timeframe: {e}")
+        return {"trend": "Uncertain", "rsi": -1, "adx": -1}
 
 def determine_market_state():
     global current_market_state, last_market_state_check
@@ -840,11 +794,10 @@ def determine_market_state():
     try:
         df_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
         df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
-        if df_1h is None or df_4h is None:
-            logger.warning("⚠️ [Market State] Could not fetch all required BTC data.")
-            return current_market_state
-        state_1h = get_trend_for_timeframe(df_1h)
-        state_4h = get_trend_for_timeframe(df_4h)
+        
+        state_1h = get_trend_for_timeframe(df_1h) if df_1h is not None else {"trend": "Uncertain", "rsi": -1, "adx": -1}
+        state_4h = get_trend_for_timeframe(df_4h) if df_4h is not None else {"trend": "Uncertain", "rsi": -1, "adx": -1}
+
         trends = [state_1h['trend'], state_4h['trend']]
         uptrends = trends.count("Uptrend"); downtrends = trends.count("Downtrend")
         overall_regime = "RANGING"
@@ -852,6 +805,8 @@ def determine_market_state():
         elif uptrends == 1 and downtrends == 0: overall_regime = "UPTREND"
         elif downtrends == 2: overall_regime = "STRONG DOWNTREND"
         elif downtrends == 1 and uptrends == 0: overall_regime = "DOWNTREND"
+        elif "Uncertain" in trends: overall_regime = "UNCERTAIN"
+        
         with market_state_lock:
             current_market_state = {
                 "overall_regime": overall_regime,
@@ -863,6 +818,8 @@ def determine_market_state():
         return current_market_state
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
+        with market_state_lock:
+            current_market_state['overall_regime'] = "UNCERTAIN"
         return current_market_state
 
 # ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
@@ -1293,24 +1250,51 @@ def main_loop():
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V3) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V4) ----------------------
 app = Flask(__name__)
 CORS(app)
 
+def get_fear_and_greed_index() -> Dict[str, Any]:
+    try:
+        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10).json()
+        value = int(response['data'][0]['value'])
+        classification = response['data'][0]['value_classification']
+        return {"value": value, "classification": classification}
+    except Exception as e:
+        logger.warning(f"⚠️ [F&G Index] Could not fetch Fear & Greed index: {e}")
+        return {"value": -1, "classification": "Error"}
+
+def check_api_status() -> bool:
+    if not client: return False
+    try:
+        client.ping()
+        return True
+    except Exception:
+        return False
+
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v3())
+    return render_template_string(get_dashboard_html_v4())
+
+@app.route('/api/market_status')
+def get_market_status():
+    with market_state_lock:
+        state_copy = dict(current_market_state)
+    return jsonify({
+        "fear_and_greed": get_fear_and_greed_index(),
+        "market_state": state_copy,
+        "db_ok": check_db_connection(),
+        "api_ok": check_api_status()
+    })
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection() or not conn:
-        return jsonify({"error": "DB connection failed", "db_ok": False}), 500
-
+    if not check_db_connection():
+        return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
-
         with signal_cache_lock:
             open_trades_count = len(open_signals_cache)
 
@@ -1318,42 +1302,30 @@ def get_stats():
         total_net_profit_usdt = 0
         if closed_trades:
             for trade in closed_trades:
-                # حساب الربح الصافي بعد خصم الرسوم (مرتين: للدخول والخروج)
                 net_profit_pct = float(trade['profit_percentage']) - (2 * TRADING_FEE_PERCENT)
-                # حساب الربح بالدولار بناءً على حجم الصفقة الافتراضي
                 trade_profit_usdt = (net_profit_pct / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
                 total_net_profit_usdt += trade_profit_usdt
 
         wins = [s for s in closed_trades if float(s['profit_percentage']) > 0]
         losses = [s for s in closed_trades if float(s['profit_percentage']) <= 0]
-
         win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
         total_profit_from_wins = sum(float(s['profit_percentage']) for s in wins)
         total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in losses))
         profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else float('inf')
 
-        is_api_ok = client is not None
-        try:
-            if client: client.ping()
-        except:
-            is_api_ok = False
-
         return jsonify({
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
             "win_rate": win_rate,
-            "profit_factor": profit_factor,
-            "db_ok": True,
-            "api_ok": is_api_ok
+            "profit_factor": profit_factor
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
-        return jsonify({"error": str(e), "db_ok": False, "api_ok": False}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
-    if not check_db_connection() or not conn:
-        return jsonify([]), 500
+    if not check_db_connection(): return jsonify([]), 500
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1363,9 +1335,8 @@ def get_profit_curve():
                 ORDER BY closed_at ASC;
             """)
             trades = cur.fetchall()
-
         cumulative_profit = 0
-        curve_data = []
+        curve_data = [{"timestamp": (datetime.now(timezone.utc) - timedelta(days=len(trades) or 1)).isoformat(), "cumulative_profit": 0}]
         for trade in trades:
             cumulative_profit += float(trade['profit_percentage'])
             curve_data.append({
@@ -1379,7 +1350,7 @@ def get_profit_curve():
 
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not conn or not redis_client: return jsonify({"error": "Service connection failed"}), 500
+    if not check_db_connection() or not redis_client: return jsonify({"error": "Service connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
@@ -1401,7 +1372,7 @@ def manual_close_signal_api(signal_id):
     if not client: return jsonify({"error": "Binance Client not available"}), 500
     with closure_lock:
         if signal_id in signals_pending_closure: return jsonify({"error": "Signal is already being closed"}), 409
-    if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
+    if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
 
     try:
         with conn.cursor() as cur:
@@ -1421,12 +1392,10 @@ def manual_close_signal_api(signal_id):
             return jsonify({"error": f"Could not fetch price for {symbol}"}), 500
 
         initiate_signal_closure(symbol, signal_data, 'manual_close', price)
-
         return jsonify({"message": f"تم إرسال طلب إغلاق الصفقة {signal_id}..."})
     except Exception as e:
         logger.error(f"❌ [API Close] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1457,7 +1426,8 @@ def initialize_bot_services():
         init_redis()
         load_open_signals_to_cache()
         load_notifications_to_cache()
-        determine_market_state()
+        # Initial market state determination
+        Thread(target=determine_market_state).start()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Loops will not start."); return
@@ -1470,7 +1440,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting Trading Bot - Enhanced Dashboard Version...")
+    logger.info(f"🚀 Starting Trading Bot - Market Trend Dashboard Version...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
