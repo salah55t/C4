@@ -30,7 +30,6 @@ import gc
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-
 # ---------------------- إعداد نظام التسجيل (Logging) ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +76,8 @@ MAX_OPEN_TRADES: int = 10
 BUY_CONFIDENCE_THRESHOLD = 0.65
 SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
+TRADE_AMOUNT_USDT: float = 10.0  # حجم الصفقة الافتراضي بالدولار
+BINANCE_FEE_RATE: float = 0.001 # رسوم Binance (0.1%)
 
 # --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
@@ -93,7 +94,6 @@ USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 50
-
 USE_SPEED_FILTER: bool = True
 USE_RRR_FILTER: bool = True
 MIN_RISK_REWARD_RATIO: float = 1.1
@@ -101,7 +101,6 @@ USE_BTC_CORRELATION_FILTER: bool = True
 MIN_BTC_CORRELATION: float = 0.1
 USE_MIN_VOLATILITY_FILTER: bool = True
 MIN_VOLATILITY_PERCENT: float = 0.3
-
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -129,374 +128,441 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة) ----------------------
-def get_dashboard_html_v2():
+# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V3) ----------------------
+def get_dashboard_html_v3():
+    # This function returns the full HTML for the new dashboard.
+    # It includes TailwindCSS, Chart.js, and custom styling for a modern look.
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V2</title>
+    <title>لوحة تحكم بوت التداول V3</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --bg-dark: #0d1117;
-            --bg-card: #161b22;
-            --border-color: #30363d;
-            --text-primary: #c9d1d9;
-            --text-secondary: #8b949e;
-            --accent-blue: #58a6ff;
-            --accent-green: #3fb950;
-            --accent-red: #f85149;
-            --accent-yellow: #d29922;
-        }
-        body { 
-            font-family: 'Tajawal', sans-serif; 
-            background-color: var(--bg-dark);
-            color: var(--text-primary);
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030712; /* gray-950 */
+            color: #f9fafb; /* gray-50 */
         }
         .card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
-            transition: all 0.2s ease-in-out;
+            background-color: #111827; /* gray-900 */
+            border: 1px solid #1f2937; /* gray-800 */
+            transition: all 0.3s ease;
         }
         .card:hover {
+            border-color: #374151; /* gray-700 */
             transform: translateY(-2px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
         }
-        .progress-bar-bg { background-color: #2d333b; }
-        .soft-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: .7; }
+        .tab-btn.active {
+            color: #2563eb; /* blue-600 */
+            border-bottom-color: #2563eb;
         }
-        /* Modal Styles */
-        .modal-backdrop {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(0,0,0,0.7);
-            display: flex; justify-content: center; align-items: center;
-            z-index: 1000; opacity: 0; transition: opacity 0.3s ease; pointer-events: none;
+        .progress-container {
+            position: relative;
+            height: 10px;
+            background-color: #374151; /* gray-700 */
+            border-radius: 9999px;
         }
-        .modal-content {
-            background-color: var(--bg-card); border: 1px solid var(--border-color);
-            padding: 2rem; border-radius: 0.75rem;
-            width: 90%; max-width: 400px;
-            transform: scale(0.95); transition: transform 0.3s ease;
+        .progress-bar {
+            height: 100%;
+            border-radius: 9999px;
+            transition: width 0.5s ease-in-out;
         }
-        .modal-backdrop.active { opacity: 1; pointer-events: auto; }
-        .modal-backdrop.active .modal-content { transform: scale(1); }
-        /* Toast Styles */
-        #toast-container {
-            position: fixed; bottom: 1.5rem; left: 1.5rem;
-            z-index: 1001; display: flex; flex-direction: column; gap: 0.5rem;
+        .progress-point {
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid #111827; /* gray-900 */
         }
-        .toast {
-            background-color: var(--bg-card); border-left: 4px solid var(--accent-blue);
-            padding: 1rem; border-radius: 0.5rem;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-            opacity: 0; transform: translateX(-100%);
-            transition: all 0.4s cubic-bezier(0.215, 0.610, 0.355, 1);
+        .progress-point.current {
+             width: 16px; height: 16px; z-index: 10;
         }
-        .toast.show { opacity: 1; transform: translateX(0); }
+        /* Chart.js tooltip custom styles */
+        .chartjs-tooltip {
+            background: rgba(31, 41, 55, 0.8);
+            border-radius: 0.5rem;
+            color: white;
+            padding: 0.5rem 1rem;
+            pointer-events: none;
+            position: absolute;
+            transition: all .1s ease;
+            backdrop-filter: blur(4px);
+        }
+        .fade-in {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
-<body class="p-4 md:p-6">
-    <div class="container mx-auto max-w-7xl">
-        <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-bold text-white">لوحة تحكم بوت التداول</h1>
-            <button id="testTelegram" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition-colors">
-                اختبار تليجرام
-            </button>
+<body class="p-4 sm:p-6 lg:p-8">
+    <div class="container mx-auto max-w-screen-2xl">
+        <!-- Header -->
+        <header class="mb-8 flex flex-wrap justify-between items-center gap-4">
+            <h1 class="text-3xl font-bold text-white">لوحة التحكم الاحترافية</h1>
+            <div id="last-updated" class="text-sm text-gray-400">آخر تحديث: ...</div>
         </header>
 
-        <!-- Market Status & Stats -->
-        <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Market Status -->
-            <div id="market-status" class="lg:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div id="overall-regime-card" class="card rounded-xl p-4 flex flex-col justify-center items-center text-center">
-                    <h3 class="text-base font-semibold mb-2 text-text-secondary">حالة السوق العامة</h3>
-                    <div id="overall-regime" class="text-2xl font-bold">...</div>
-                </div>
-                <div id="tf-1h-card" class="card rounded-xl p-4 text-center">
-                    <h3 class="text-base font-semibold mb-2 text-text-secondary">اتجاه (1 ساعة)</h3>
-                    <div id="tf-1h-status" class="text-xl font-bold">...</div>
-                    <div id="tf-1h-details" class="text-sm text-text-secondary mt-1">...</div>
-                </div>
-                <div id="tf-4h-card" class="card rounded-xl p-4 text-center">
-                    <h3 class="text-base font-semibold mb-2 text-text-secondary">اتجاه (4 ساعات)</h3>
-                    <div id="tf-4h-status" class="text-xl font-bold">...</div>
-                    <div id="tf-4h-details" class="text-sm text-text-secondary mt-1">...</div>
-                </div>
-            </div>
-            <!-- Main Stats -->
-            <div id="stats" class="card rounded-xl p-4 grid grid-cols-2 grid-rows-2 gap-4">
-                <!-- Stats will be injected here -->
-            </div>
-        </section>
-
-        <!-- Tabs -->
-        <div class="mb-4 border-b border-border-color">
-            <nav class="flex space-x-4 -mb-px" aria-label="Tabs">
-                <button onclick="showTab('signals')" class="tab-btn active text-white border-b-2 border-accent-blue py-3 px-4 font-semibold">التوصيات</button>
-                <button onclick="showTab('notifications')" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الإشعارات</button>
-                <button onclick="showTab('rejections')" class="tab-btn text-text-secondary hover:text-white py-3 px-4">التوصيات المرفوضة</button>
-            </nav>
-        </div>
-
-        <!-- Content Area -->
-        <main>
-            <!-- Signals Table -->
-            <div id="signals-tab" class="tab-content">
-                <div class="overflow-x-auto card rounded-lg">
-                    <table class="min-w-full text-sm text-right">
-                        <thead class="border-b border-border-color">
-                            <tr>
-                                <th class="p-4 font-semibold">العملة</th>
-                                <th class="p-4 font-semibold">الحالة</th>
-                                <th class="p-4 font-semibold">الربح/الخسارة</th>
-                                <th class="p-4 font-semibold w-1/4">التقدم</th>
-                                <th class="p-4 font-semibold">الدخول / الحالي</th>
-                                <th class="p-4 font-semibold">إجراء</th>
-                            </tr>
-                        </thead>
-                        <tbody id="signals-table"></tbody>
-                    </table>
-                </div>
-            </div>
+        <!-- Main Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 xl:grid-cols-4 gap-6">
             
-            <!-- Notifications & Rejections -->
-            <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card rounded-lg p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
-            <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card rounded-lg p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
-        </main>
-    </div>
+            <!-- Left Column: Stats & Chart -->
+            <div class="lg:col-span-1 xl:col-span-1 flex flex-col gap-6">
+                <!-- Stats Cards -->
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="card rounded-xl p-4 fade-in">
+                        <h3 class="text-sm font-medium text-gray-400">صافي الربح (USDT)</h3>
+                        <p id="net-profit-usdt" class="text-2xl font-semibold mt-1">...</p>
+                    </div>
+                    <div class="card rounded-xl p-4 fade-in" style="animation-delay: 0.1s;">
+                        <h3 class="text-sm font-medium text-gray-400">نسبة النجاح</h3>
+                        <p id="win-rate" class="text-2xl font-semibold mt-1">...</p>
+                    </div>
+                    <div class="card rounded-xl p-4 fade-in" style="animation-delay: 0.2s;">
+                        <h3 class="text-sm font-medium text-gray-400">عامل الربح</h3>
+                        <p id="profit-factor" class="text-2xl font-semibold mt-1">...</p>
+                    </div>
+                    <div class="card rounded-xl p-4 fade-in" style="animation-delay: 0.3s;">
+                        <h3 class="text-sm font-medium text-gray-400">إجمالي الرسوم (USDT)</h3>
+                        <p id="total-fees" class="text-2xl font-semibold mt-1">...</p>
+                    </div>
+                </div>
 
-    <!-- Modal Structure -->
-    <div id="confirmation-modal" class="modal-backdrop">
-        <div class="modal-content">
-            <h3 id="modal-title" class="text-xl font-bold mb-4"></h3>
-            <p id="modal-body" class="text-text-secondary mb-6"></p>
-            <div class="flex justify-end gap-3">
-                <button id="modal-cancel" class="py-2 px-4 rounded-lg bg-gray-600 hover:bg-gray-700">إلغاء</button>
-                <button id="modal-confirm" class="py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white">تأكيد</button>
+                <!-- Equity Curve Chart -->
+                <div class="card rounded-xl p-4 h-80 fade-in" style="animation-delay: 0.4s;">
+                    <h3 class="text-lg font-semibold mb-2">منحنى الربح التراكمي</h3>
+                    <div class="relative h-full w-full">
+                        <canvas id="equityCurveChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Trades & Info -->
+            <div class="lg:col-span-2 xl:col-span-3 flex flex-col gap-6">
+                <!-- Tabs -->
+                <div class="card rounded-xl p-2 fade-in" style="animation-delay: 0.5s;">
+                    <nav class="flex space-x-2 sm:space-x-4">
+                        <button onclick="showTab('open-signals')" class="tab-btn active text-gray-300 hover:text-white py-2 px-4 font-semibold border-b-2 border-transparent transition-colors duration-200">الصفقات المفتوحة</button>
+                        <button onclick="showTab('closed-signals')" class="tab-btn text-gray-400 hover:text-white py-2 px-4 font-semibold border-b-2 border-transparent transition-colors duration-200">سجل الصفقات</button>
+                        <button onclick="showTab('notifications')" class="tab-btn text-gray-400 hover:text-white py-2 px-4 font-semibold border-b-2 border-transparent transition-colors duration-200">الإشعارات</button>
+                    </nav>
+                </div>
+
+                <!-- Tab Content -->
+                <main class="card rounded-xl p-4 min-h-[60vh] fade-in" style="animation-delay: 0.6s;">
+                    <div id="open-signals-tab" class="tab-content">
+                        <div id="open-signals-list" class="space-y-4"></div>
+                    </div>
+                    <div id="closed-signals-tab" class="tab-content hidden">
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full text-sm text-right">
+                                <thead class="border-b border-gray-700">
+                                    <tr>
+                                        <th class="p-3 font-semibold text-gray-400">العملة</th>
+                                        <th class="p-3 font-semibold text-gray-400">تاريخ الإغلاق</th>
+                                        <th class="p-3 font-semibold text-gray-400">الربح %</th>
+                                        <th class="p-3 font-semibold text-gray-400">الربح USDT</th>
+                                        <th class="p-3 font-semibold text-gray-400">الحالة</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="closed-signals-table-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div id="notifications-tab" class="tab-content hidden">
+                        <div id="notifications-list" class="space-y-2 max-h-[70vh] overflow-y-auto"></div>
+                    </div>
+                </main>
             </div>
         </div>
     </div>
-
-    <!-- Toast Container -->
-    <div id="toast-container"></div>
+    
+    <!-- Modal for manual close -->
+    <div id="confirmation-modal" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 transition-opacity duration-300 opacity-0 pointer-events-none">
+        <div class="card rounded-xl p-6 w-full max-w-sm transform scale-95 transition-transform duration-300">
+            <h3 id="modal-title" class="text-xl font-bold mb-4"></h3>
+            <p id="modal-body" class="text-gray-300 mb-6"></p>
+            <div class="flex justify-end gap-3">
+                <button id="modal-cancel" class="py-2 px-4 rounded-lg bg-gray-600 hover:bg-gray-500 transition-colors">إلغاء</button>
+                <button id="modal-confirm" class="py-2 px-4 rounded-lg bg-red-600 hover:bg-red-500 text-white transition-colors">تأكيد الإغلاق</button>
+            </div>
+        </div>
+    </div>
 
 <script>
-const REGIME_STYLES = {
-    "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green", bg: "bg-green-900/50" },
-    "UPTREND": { text: "صاعد", color: "text-green-400", bg: "bg-green-800/40" },
-    "RANGING": { text: "عرضي", color: "text-accent-yellow", bg: "bg-yellow-900/50" },
-    "DOWNTREND": { text: "هابط", color: "text-red-400", bg: "bg-red-800/40" },
-    "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red", bg: "bg-red-900/50" },
-    "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary", bg: "bg-gray-800/50" },
-    "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue", bg: "bg-blue-900/50" }
+let equityChart = null;
+
+// --- Chart.js Configuration ---
+const chartConfig = {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'الربح التراكمي (USDT)',
+            data: [],
+            borderColor: '#22d3ee', // cyan-400
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 6,
+            pointBackgroundColor: '#22d3ee',
+            tension: 0.3,
+            fill: true,
+            backgroundColor: (context) => {
+                const ctx = context.chart.ctx;
+                const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+                gradient.addColorStop(0, 'rgba(34, 211, 238, 0.3)');
+                gradient.addColorStop(1, 'rgba(34, 211, 238, 0)');
+                return gradient;
+            },
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            x: {
+                ticks: { color: '#9ca3af' }, // gray-400
+                grid: { color: 'rgba(55, 65, 81, 0.5)' } // gray-700
+            },
+            y: {
+                ticks: { color: '#9ca3af', callback: (value) => '$' + value },
+                grid: { color: 'rgba(55, 65, 81, 0.5)' }
+            }
+        },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                enabled: false,
+                external: (context) => {
+                    // Custom Tooltip
+                    let tooltipEl = document.getElementById('chartjs-tooltip');
+                    if (!tooltipEl) {
+                        tooltipEl = document.createElement('div');
+                        tooltipEl.id = 'chartjs-tooltip';
+                        tooltipEl.className = 'chartjs-tooltip';
+                        document.body.appendChild(tooltipEl);
+                    }
+                    const tooltipModel = context.tooltip;
+                    if (tooltipModel.opacity === 0) {
+                        tooltipEl.style.opacity = 0;
+                        return;
+                    }
+                    if (tooltipModel.body) {
+                        const date = tooltipModel.title || [];
+                        const value = tooltipModel.dataPoints[0].formattedValue;
+                        tooltipEl.innerHTML = `<div>${date}</div><div><strong>${value}</strong></div>`;
+                    }
+                    const position = context.chart.canvas.getBoundingClientRect();
+                    tooltipEl.style.opacity = 1;
+                    tooltipEl.style.left = position.left + window.pageXOffset + tooltipModel.caretX + 'px';
+                    tooltipEl.style.top = position.top + window.pageYOffset + tooltipModel.caretY + 'px';
+                }
+            }
+        }
+    }
 };
-const TF_STATUS_STYLES = {
-    "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" },
-    "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" },
-    "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" },
-};
 
-function showToast(message, type = 'info') {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    const typeColors = {
-        success: 'border-accent-green',
-        error: 'border-accent-red',
-        info: 'border-accent-blue'
-    };
-    toast.className = `toast ${typeColors[type] || typeColors.info}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    setTimeout(() => toast.classList.add('show'), 10);
-    setTimeout(() => {
-        toast.classList.remove('show');
-        toast.addEventListener('transitionend', () => toast.remove());
-    }, 4000);
-}
-
-function showConfirmationModal(title, body, onConfirm) {
-    const modal = document.getElementById('confirmation-modal');
-    document.getElementById('modal-title').textContent = title;
-    document.getElementById('modal-body').textContent = body;
-    modal.classList.add('active');
-
-    const confirmBtn = document.getElementById('modal-confirm');
-    const cancelBtn = document.getElementById('modal-cancel');
-
-    const close = () => modal.classList.remove('active');
-
-    const confirmHandler = () => {
-        onConfirm();
-        close();
-    };
-
-    confirmBtn.onclick = confirmHandler;
-    cancelBtn.onclick = close;
-    modal.onclick = (e) => { if (e.target === modal) close(); };
-}
-
-async function apiFetch(url) {
+// --- API & Data Handling ---
+async function fetchData(url) {
     try {
         const response = await fetch(url);
-        if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
+        if (!response.ok) throw new Error(`API Error: ${response.status}`);
         return await response.json();
     } catch (error) {
-        console.error(`Failed to fetch ${url}:`, error);
-        showToast(`فشل في جلب البيانات من ${url}`, 'error');
+        console.error(`Failed to fetch from ${url}:`, error);
         return null;
     }
 }
 
-function updateMarketStatus() {
-    apiFetch('/api/market_status').then(data => {
+function updateStats() {
+    fetchData('/api/stats_v2').then(data => {
         if (!data) return;
-        const state = data.market_state;
-        const overallRegime = state.overall_regime || "UNCERTAIN";
-        const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
+        const profitEl = document.getElementById('net-profit-usdt');
+        profitEl.textContent = `${data.total_net_profit_usdt.toFixed(2)} $`;
+        profitEl.className = `text-2xl font-semibold mt-1 ${data.total_net_profit_usdt >= 0 ? 'text-green-400' : 'text-red-400'}`;
         
-        const overallDiv = document.getElementById('overall-regime');
-        overallDiv.textContent = regimeStyle.text;
-        overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
-        document.getElementById('overall-regime-card').className = `card rounded-xl p-4 flex flex-col justify-center items-center text-center ${regimeStyle.bg}`;
-
-        updateTimeframeCard('1h', state.details['1h']);
-        updateTimeframeCard('4h', state.details['4h']);
+        document.getElementById('win-rate').textContent = `${data.win_rate.toFixed(2)} %`;
+        document.getElementById('profit-factor').textContent = data.profit_factor.toFixed(2);
+        document.getElementById('total-fees').textContent = `${data.total_fees_usdt.toFixed(2)} $`;
     });
 }
 
-function updateTimeframeCard(tf, data) {
-    const statusDiv = document.getElementById(`tf-${tf}-status`);
-    const detailsDiv = document.getElementById(`tf-${tf}-details`);
-    if (!data) { statusDiv.textContent = 'N/A'; detailsDiv.textContent = ''; return; }
-    const style = TF_STATUS_STYLES[data.trend] || { text: 'N/A', icon: '', color: 'text-text-secondary' };
-    statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
-    detailsDiv.textContent = `RSI: ${data.rsi.toFixed(1)} | ADX: ${data.adx.toFixed(1)}`;
-}
-
-function updateStats() {
-    apiFetch('/api/stats').then(data => {
+function updateEquityCurve() {
+    fetchData('/api/equity_curve').then(data => {
         if (!data) return;
-        const statsContainer = document.getElementById('stats');
-        statsContainer.innerHTML = `
-            <div class="text-center"><div class="text-sm text-text-secondary">صفقات مفتوحة</div><div class="text-2xl font-bold">${data.open_trades_count}</div></div>
-            <div class="text-center"><div class="text-sm text-text-secondary">إجمالي الربح</div><div class="text-2xl font-bold ${data.total_profit_pct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${data.total_profit_pct.toFixed(2)}%</div></div>
-            <div class="text-center"><div class="text-sm text-text-secondary">نسبة النجاح</div><div class="text-2xl font-bold">${data.win_rate.toFixed(2)}%</div></div>
-            <div class="text-center"><div class="text-sm text-text-secondary">عامل الربح</div><div class="text-2xl font-bold">${data.profit_factor.toFixed(2)}</div></div>
-        `;
+        const chartCanvas = document.getElementById('equityCurveChart');
+        if (!chartCanvas) return;
+
+        const labels = data.map(d => new Date(d.timestamp).toLocaleDateString('ar-EG'));
+        const values = data.map(d => d.cumulative_profit);
+
+        if (!equityChart) {
+            equityChart = new Chart(chartCanvas, chartConfig);
+        }
+        equityChart.data.labels = labels;
+        equityChart.data.datasets[0].data = values;
+        equityChart.update();
     });
 }
 
 function updateSignals() {
-    apiFetch('/api/signals').then(data => {
+    fetchData('/api/signals_v2').then(data => {
         if (!data) return;
-        const tableBody = document.getElementById('signals-table');
-        if (data.error) {
-            tableBody.innerHTML = '<tr><td colspan="6" class="text-center p-4">فشل في تحميل البيانات.</td></tr>';
-            return;
-        }
-        tableBody.innerHTML = data.map(signal => {
-            const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
-            const pnlClass = pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red';
-            const statusClass = signal.status === 'open' ? 'text-yellow-400 soft-pulse' : 'text-text-secondary';
-            
-            let progressHtml = '<td>-</td>';
-            if (signal.status === 'open' && signal.current_price) {
-                const { entry_price, stop_loss, target_price, current_price } = signal;
-                const total_dist = target_price - stop_loss;
-                const current_dist = current_price - stop_loss;
-                let progress_pct = total_dist > 0 ? (current_dist / total_dist) * 100 : 0;
-                progress_pct = Math.max(0, Math.min(100, progress_pct));
-                const barColor = progress_pct >= 50 ? 'bg-accent-green' : 'bg-accent-yellow';
-                progressHtml = `
-                    <div class="w-full progress-bar-bg rounded-full h-2.5">
-                        <div class="${barColor} h-2.5 rounded-full" style="width: ${progress_pct}%"></div>
-                    </div>
-                `;
-            }
+        
+        const openSignals = data.filter(s => s.status === 'open');
+        const closedSignals = data.filter(s => s.status !== 'open');
 
-            return `
-                <tr class="border-b border-border-color hover:bg-gray-800/50">
-                    <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
-                    <td class="p-4 ${statusClass}">${signal.status}</td>
-                    <td class="p-4 font-mono ${pnlClass}">${pnlPct.toFixed(2)}%</td>
-                    <td class="p-4">${progressHtml}</td>
-                    <td class="p-4 font-mono text-xs">
-                        <div>${parseFloat(signal.entry_price).toFixed(4)}</div>
-                        <div class="text-text-secondary">${signal.current_price ? parseFloat(signal.current_price).toFixed(4) : 'N/A'}</div>
-                    </td>
-                    <td class="p-4">
-                        ${signal.status === 'open' ? `<button onclick="confirmCloseSignal(${signal.id}, '${signal.symbol}')" class="bg-red-800 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}
-                    </td>
-                </tr>
-            `;
-        }).join('');
+        const openList = document.getElementById('open-signals-list');
+        openList.innerHTML = openSignals.length > 0 ? openSignals.map(createOpenSignalCard).join('') : '<p class="text-gray-400 text-center">لا توجد صفقات مفتوحة حالياً.</p>';
+
+        const closedBody = document.getElementById('closed-signals-table-body');
+        closedBody.innerHTML = closedSignals.map(createClosedSignalRow).join('');
     });
 }
 
-function updateList(endpoint, listId, formatter) {
-    apiFetch(endpoint).then(data => {
-        if (!data) return;
-        document.getElementById(listId).innerHTML = data.map(formatter).join('');
-    });
+function createOpenSignalCard(signal) {
+    const pnlPct = signal.pnl_pct || 0;
+    const pnlColor = pnlPct >= 0 ? 'text-green-400' : 'text-red-400';
+    
+    const { sl, entry, tp, current } = {
+        sl: parseFloat(signal.stop_loss),
+        entry: parseFloat(signal.entry_price),
+        tp: parseFloat(signal.target_price),
+        current: parseFloat(signal.current_price)
+    };
+
+    let progress = 0;
+    const range = tp - sl;
+    if (range > 0) {
+        progress = ((current - sl) / range) * 100;
+    }
+    progress = Math.max(0, Math.min(100, progress));
+
+    const slPos = 0;
+    const entryPos = ((entry - sl) / range) * 100;
+    const tpPos = 100;
+
+    return `
+        <div class="card rounded-lg p-4 border-l-4 ${pnlPct >= 0 ? 'border-green-500' : 'border-red-500'}">
+            <div class="flex justify-between items-center mb-3">
+                <div class="flex items-center gap-3">
+                    <span class="font-bold text-lg">${signal.symbol}</span>
+                    <span class="text-xs font-mono px-2 py-1 rounded bg-gray-700">${signal.strategy_name}</span>
+                </div>
+                <div class="${pnlColor} font-semibold text-lg">${pnlPct.toFixed(2)}%</div>
+            </div>
+
+            <div class="space-y-2 text-sm mb-4">
+                <div class="flex justify-between">
+                    <span class="text-gray-400">الدخول:</span>
+                    <span class="font-mono">${entry.toFixed(5)}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">السعر الحالي:</span>
+                    <span class="font-mono">${current.toFixed(5)}</span>
+                </div>
+            </div>
+
+            <div class="progress-container my-2">
+                <div class="progress-bar ${pnlPct >= 0 ? 'bg-green-500' : 'bg-red-500'}" style="width: ${progress}%"></div>
+                <!-- Points -->
+                <div class="progress-point bg-red-500" style="left: ${slPos}%" title="Stop Loss: ${sl.toFixed(5)}"></div>
+                <div class="progress-point bg-gray-400" style="left: ${entryPos}%" title="Entry: ${entry.toFixed(5)}"></div>
+                <div class="progress-point current bg-white" style="left: ${progress}%" title="Current: ${current.toFixed(5)}"></div>
+                <div class="progress-point bg-green-500" style="left: ${tpPos}%" title="Take Profit: ${tp.toFixed(5)}"></div>
+            </div>
+            <div class="flex justify-between text-xs text-gray-400 mt-1">
+                <span>SL: ${sl.toFixed(5)}</span>
+                <span>TP: ${tp.toFixed(5)}</span>
+            </div>
+
+            <div class="mt-4 text-right">
+                <button onclick="confirmCloseSignal(${signal.id}, '${signal.symbol}')" class="bg-red-700 hover:bg-red-600 text-white text-xs py-1.5 px-3 rounded-md transition-colors">إغلاق يدوي</button>
+            </div>
+        </div>
+    `;
+}
+
+function createClosedSignalRow(signal) {
+    const profitPct = signal.profit_percentage || 0;
+    const netProfitUsdt = signal.net_profit_usdt || 0;
+    const pnlColor = profitPct >= 0 ? 'text-green-400' : 'text-red-400';
+    return `
+        <tr class="border-b border-gray-800 hover:bg-gray-800/50">
+            <td class="p-3 font-semibold">${signal.symbol}</td>
+            <td class="p-3 text-gray-400">${new Date(signal.closed_at).toLocaleString('ar-EG')}</td>
+            <td class="p-3 font-mono ${pnlColor}">${profitPct.toFixed(2)}%</td>
+            <td class="p-3 font-mono ${pnlColor}">${netProfitUsdt.toFixed(3)} $</td>
+            <td class="p-3 text-gray-300">${signal.status}</td>
+        </tr>
+    `;
+}
+
+function createNotificationItem(notification) {
+    return `<div class="p-3 rounded-md bg-gray-800/50 text-sm text-gray-300">[${new Date(notification.timestamp).toLocaleString('ar-EG')}] ${notification.message}</div>`;
+}
+
+// --- UI Interaction ---
+function showTab(tabId) {
+    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+    document.getElementById(`${tabId}-tab`).classList.remove('hidden');
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    event.target.classList.add('active');
 }
 
 function confirmCloseSignal(id, symbol) {
-    showConfirmationModal(
-        `تأكيد إغلاق الصفقة`,
-        `هل أنت متأكد من رغبتك في إغلاق الصفقة #${id} للعملة ${symbol} يدوياً؟`,
-        () => {
-            fetch(`/api/close/${id}`, { method: 'POST' })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.error) {
-                        showToast(`خطأ: ${data.error}`, 'error');
-                    } else {
-                        showToast(data.message || `تم إرسال طلب إغلاق الصفقة #${id}`, 'success');
-                    }
-                    updateSignals();
-                });
-        }
-    );
+    const modal = document.getElementById('confirmation-modal');
+    document.getElementById('modal-title').textContent = `تأكيد إغلاق الصفقة`;
+    document.getElementById('modal-body').textContent = `هل أنت متأكد من رغبتك في إغلاق الصفقة #${id} للعملة ${symbol} يدوياً؟`;
+    
+    modal.classList.remove('opacity-0', 'pointer-events-none');
+    modal.querySelector('.card').classList.remove('scale-95');
+
+    const confirmBtn = document.getElementById('modal-confirm');
+    const cancelBtn = document.getElementById('modal-cancel');
+
+    const close = () => {
+        modal.classList.add('opacity-0', 'pointer-events-none');
+        modal.querySelector('.card').classList.add('scale-95');
+    };
+
+    confirmBtn.onclick = () => {
+        fetch(`/api/close/${id}`, { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if(data.error) console.error("Close Error:", data.error);
+                refreshData();
+            });
+        close();
+    };
+    cancelBtn.onclick = close;
 }
 
-function showTab(tabName) {
-    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
-    document.getElementById(`${tabName}-tab`).classList.remove('hidden');
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('text-white', 'border-accent-blue', 'border-b-2', 'font-semibold');
-        btn.classList.add('text-text-secondary');
-    });
-    const activeBtn = event.target;
-    activeBtn.classList.add('text-white', 'border-accent-blue', 'border-b-2', 'font-semibold');
-    activeBtn.classList.remove('text-text-secondary');
-}
-
-document.getElementById('testTelegram').addEventListener('click', () => {
-    fetch('/api/test_telegram').then(res => res.text()).then(text => showToast(text, 'info'));
-});
-
+// --- Initial Load & Refresh ---
 function refreshData() {
-    updateMarketStatus();
     updateStats();
+    updateEquityCurve();
     updateSignals();
-    updateList('/api/notifications', 'notifications-list', n => 
-        `<li class="p-3 rounded-md bg-gray-800/50 text-sm">[${new Date(n.timestamp).toLocaleString('ar-EG')}] ${n.message}</li>`
-    );
-    updateList('/api/rejection_logs', 'rejections-list', log => {
-        const details = JSON.stringify(log.details);
-        return `<li class="p-3 rounded-md bg-gray-800/50 text-sm">[${new Date(log.timestamp).toLocaleString('ar-EG')}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${details}</span></li>`;
+    fetchData('/api/notifications').then(data => {
+        if(data) document.getElementById('notifications-list').innerHTML = data.map(createNotificationItem).join('');
     });
+    document.getElementById('last-updated').textContent = `آخر تحديث: ${new Date().toLocaleTimeString('ar-EG')}`;
 }
 
-setInterval(refreshData, 7000);
-window.onload = refreshData;
+window.onload = () => {
+    refreshData();
+    setInterval(refreshData, 10000); // Refresh every 10 seconds
+};
+
 </script>
 </body>
 </html>
@@ -510,12 +576,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         separator = '&' if '?' in db_url_to_use else '?'
         db_url_to_use += f"{separator}sslmode=require"
-        logger.info("[DB] 'sslmode=require' was automatically added to the database URL for cloud compatibility.")
+        logger.info("[DB] 'sslmode=require' was automatically added to the database URL.")
+    
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # Add new columns for USDT profit calculation
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY,
@@ -529,7 +597,10 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         profit_percentage DOUBLE PRECISION,
                         strategy_name TEXT,
                         signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION
+                        current_peak_price DOUBLE PRECISION,
+                        trade_amount_usdt DOUBLE PRECISION,
+                        fees_usdt DOUBLE PRECISION,
+                        net_profit_usdt DOUBLE PRECISION
                     );
                 """)
                 cur.execute("""
@@ -550,8 +621,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if attempt < retries - 1:
                 time.sleep(delay)
             else:
-                logger.critical("❌ [DB] Failed to connect to the database after multiple retries.")
-
+                logger.critical("❌ [DB] Failed to connect after multiple retries.")
+                exit(1)
 
 def check_db_connection() -> bool:
     global conn
@@ -565,7 +636,7 @@ def check_db_connection() -> bool:
             return True
         return False
     except (OperationalError, InterfaceError) as e:
-        logger.error(f"❌ [DB] Connection lost: {e}. Attempting to reconnect...")
+        logger.error(f"❌ [DB] Connection lost: {e}. Reconnecting...")
         try:
             init_db()
             return conn is not None and conn.closed == 0
@@ -612,7 +683,6 @@ def init_redis() -> None:
         logger.critical(f"❌ [Redis] Failed to connect to Redis at {REDIS_URL}. Error: {e}")
         exit(1)
 
-# ---------------------- دوال Binance والبيانات ----------------------
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     logger.info(f"ℹ️ [Validation] Reading symbols from '{filename}' and validating with Binance...")
     if not client:
@@ -659,7 +729,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error during historical data fetch for {symbol}: {e}")
         return None
 
-# ---------------------- دوال جلب الميزات من قاعدة البيانات ----------------------
 def fetch_sr_levels_from_db(symbol: str) -> pd.DataFrame:
     if not check_db_connection() or not conn: return pd.DataFrame()
     query = "SELECT level_price, level_type FROM support_resistance_levels WHERE symbol = %s"
@@ -705,7 +774,6 @@ def fetch_ichimoku_features_from_db(symbol: str, timeframe: str) -> pd.DataFrame
         if conn: conn.rollback()
         return pd.DataFrame()
 
-# ---------------------- دوال حساب الميزات ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
@@ -760,7 +828,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- دوال تحديد اتجاه السوق المحسّنة ----------------------
 def get_trend_for_timeframe(df: pd.DataFrame) -> Dict[str, Any]:
     if df is None or len(df) < 26:
         return {"trend": "Uncertain", "rsi": -1, "adx": -1}
@@ -822,19 +889,35 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         return current_market_state
 
-# ---------------------- دوال الفلاتر وحساب الأهداف ----------------------
+# --- [RESTORED] Dynamic Speed Filter ---
 def passes_speed_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     with market_state_lock: regime = current_market_state.get("overall_regime", "RANGING")
+    
+    # Dynamic thresholds based on market regime
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
-        log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
+        log_rejection(symbol, "Speed Filter", {"detail": f"Trading disabled in market regime: {regime}"})
+        return False # Disable trading in downtrends as per original logic
+    elif regime == "STRONG UPTREND": 
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
+    elif regime == "UPTREND": 
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
+    else: # RANGING or UNCERTAIN
+        adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
+        
+    adx = last_features.get('adx', 0)
+    rel_vol = last_features.get('relative_volume', 0)
+    rsi = last_features.get('rsi', 0)
+    
+    if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): 
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
-    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
-    adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
-    if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
-    log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
+        
+    log_rejection(symbol, "Speed Filter", {
+        "Regime": regime, 
+        "ADX": f"{adx:.2f} (Req: >{adx_threshold})", 
+        "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", 
+        "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
+    })
     return False
 
 def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
@@ -873,7 +956,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optiona
     fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
     return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
 
-# ---------------------- WebSocket و TradingStrategy ----------------------
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
     try:
@@ -882,11 +964,6 @@ def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     except Exception as e: logger.error(f"❌ [WebSocket Price Updater] Error: {e}", exc_info=True)
 
 def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
-    """
-    [تم الإصلاح] تبدأ عملية إغلاق الصفقة في خيط منفصل.
-    تستخدم هذه الدالة الآن دائمًا بيانات الصفقة التي تم تمريرها إليها،
-    مما يضمن أن الإغلاق اليدوي يستخدم البيانات الحديثة من قاعدة البيانات.
-    """
     signal_id = signal_to_close.get('id')
     if not signal_id:
         logger.error(f"❌ [Closure] Attempted to close a signal without an ID for symbol {symbol}")
@@ -898,14 +975,11 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
             return
         signals_pending_closure.add(signal_id)
 
-    # إزالة الصفقة من الذاكرة المؤقتة لإيقاف المراقبة الفورية
     with signal_cache_lock:
         open_signals_cache.pop(symbol, None)
 
-    # بدء خيط الإغلاق باستخدام بيانات الصفقة التي تم تمريرها
     logger.info(f"ℹ️ [Closure] Starting closure thread for signal {signal_id} ({symbol}) with status '{status}'.")
     Thread(target=close_signal, args=(signal_to_close, status, closing_price, "initiator")).start()
-
 
 def run_websocket_manager() -> None:
     logger.info("ℹ️ [WebSocket] Starting WebSocket Manager...")
@@ -957,7 +1031,6 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# ---------------------- حلقة مراقبة الصفقات ----------------------
 def trade_monitoring_loop():
     global last_api_check_time
     logger.info("✅ [Trade Monitor] Starting trade monitoring loop.")
@@ -1004,20 +1077,13 @@ def trade_monitoring_loop():
             logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
             time.sleep(5)
 
-# ---------------------- دوال التنبيهات والإدارة (مع الإصلاح) ----------------------
-def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
-    """
-    [تم التبسيط] إرسال رسالة نصية عادية إلى تيليجرام.
-    تمت إزالة كل تعقيدات التنسيق لضمان وصول الرسائل دائماً.
-    """
+def send_telegram_message(target_chat_id: str, text: str) -> bool:
     if not TELEGRAM_TOKEN or not target_chat_id:
         logger.error("❌ [Telegram] Token or Chat ID is missing.")
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {'chat_id': str(target_chat_id), 'text': text}
-    if reply_markup:
-        payload['reply_markup'] = json.dumps(reply_markup)
         
     logger.info(f"ℹ️ [Telegram] Attempting to send plain text message to Chat ID: {target_chat_id}")
     try:
@@ -1033,107 +1099,81 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         return False
 
 def send_new_signal_alert(signal_data: Dict[str, Any]):
-    symbol = signal_data['symbol']
-    entry = float(signal_data['entry_price'])
-    target = float(signal_data['target_price'])
-    sl = float(signal_data['stop_loss'])
-    profit_pct = ((target / entry) - 1) * 100
-    risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
-    rrr = profit_pct / risk_pct if risk_pct > 0 else 0
-    
-    with market_state_lock:
-        market_regime = current_market_state.get('overall_regime', 'N/A')
-    
     message = (
         f"💡 توصية تداول جديدة 💡\n\n"
-        f"العملة: {symbol}\n"
-        f"الاستراتيجية: {BASE_ML_MODEL_NAME}\n"
-        f"حالة السوق: {market_regime}\n\n"
-        f"الدخول: {entry:,.8g}\n"
-        f"الهدف: {target:,.8g}\n"
-        f"وقف الخسارة: {sl:,.8g}\n\n"
-        f"الربح المتوقع: {profit_pct:.2f}%\n"
-        f"المخاطرة: {risk_pct:.2f}%\n"
-        f"المخاطرة/العائد: 1:{rrr:.2f}\n\n"
-        f"ثقة النموذج: {signal_data['signal_details']['ML_Confidence']}\n"
-        f"مصدر الهدف: {signal_data['signal_details']['TP_SL_Source']}"
+        f"العملة: {signal_data['symbol']}\n"
+        f"الدخول: {float(signal_data['entry_price']):.8g}\n"
+        f"الهدف: {float(signal_data['target_price']):.8g}\n"
+        f"وقف الخسارة: {float(signal_data['stop_loss']):.8g}"
     )
-    
-    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
-    if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
+    send_telegram_message(CHAT_ID, message)
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
-        entry = float(signal['entry_price'])
-        target = float(signal['target_price'])
-        sl = float(signal['stop_loss'])
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;""",
-                (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), entry)
+                """INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price, trade_amount_usdt)
+                   VALUES (%(symbol)s, %(entry_price)s, %(target_price)s, %(stop_loss)s, %(strategy_name)s, %(signal_details)s, %(entry_price)s, %(trade_amount_usdt)s) RETURNING id;""",
+                {
+                    'symbol': signal['symbol'],
+                    'entry_price': float(signal['entry_price']),
+                    'target_price': float(signal['target_price']),
+                    'stop_loss': float(signal['stop_loss']),
+                    'strategy_name': signal.get('strategy_name'),
+                    'signal_details': json.dumps(signal.get('signal_details', {})),
+                    'trade_amount_usdt': float(signal.get('trade_amount_usdt'))
+                }
             )
             signal['id'] = cur.fetchone()['id']
         conn.commit()
         logger.info(f"✅ [DB] Inserted signal {signal['id']} for {signal['symbol']}.")
         return signal
     except Exception as e:
-        logger.error(f"❌ [Insert] Error inserting signal for {signal['symbol']}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Insert] Error inserting signal for {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
 
-def update_signal_target_in_db(signal_id: int, new_target: float, new_stop_loss: float) -> bool:
-    if not check_db_connection() or not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE signals SET target_price = %s, stop_loss = %s WHERE id = %s;", (float(new_target), float(new_stop_loss), signal_id))
-        conn.commit()
-        logger.info(f"✅ [DB Update] Updated TP/SL for signal {signal_id}.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ [DB Update] Error updating signal {signal_id}: {e}", exc_info=True)
-        if conn: conn.rollback()
-        return False
-
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     signal_id = signal.get('id'); symbol = signal.get('symbol')
-    logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
+    logger.info(f"Closing signal {signal_id} ({symbol}) with status '{status}' by {closed_by}")
     try:
         if not check_db_connection() or not conn: raise OperationalError("DB connection failed.")
-        db_closing_price = float(closing_price)
+        
         entry_price = float(signal['entry_price'])
-        profit_pct = ((db_closing_price / entry_price) - 1) * 100
+        trade_amount = float(signal.get('trade_amount_usdt', TRADE_AMOUNT_USDT))
+        profit_pct = ((closing_price / entry_price) - 1) * 100
+        
+        pnl_usdt = trade_amount * (profit_pct / 100)
+        entry_fee = trade_amount * BINANCE_FEE_RATE
+        exit_fee = (trade_amount + pnl_usdt) * BINANCE_FEE_RATE
+        total_fees = entry_fee + exit_fee
+        net_profit_usdt = pnl_usdt - total_fees
+
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
-                (status, db_closing_price, profit_pct, signal_id)
+                """UPDATE signals 
+                   SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s,
+                       fees_usdt = %s, net_profit_usdt = %s
+                   WHERE id = %s AND status = 'open';""",
+                (status, closing_price, profit_pct, total_fees, net_profit_usdt, signal_id)
             )
-            if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] Signal {signal_id} was already closed or not found."); return
+            if cur.rowcount == 0: 
+                logger.warning(f"⚠️ [DB Close] Signal {signal_id} already closed or not found."); 
+                return
         conn.commit()
-        status_map = {
-            'target_hit': '✅ تحقق الهدف',
-            'stop_loss_hit': '🛑 ضرب وقف الخسارة',
-            'manual_close': '🖐️ إغلاق يدوي',
-            'closed_by_sell_signal': '🔴 إغلاق بإشارة بيع'
-        }
+
+        status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ إغلاق يدوي', 'closed_by_sell_signal': '🔴 إغلاق بإشارة بيع'}
         status_message = status_map.get(status, status)
         
-        alert_msg = (
-            f"{status_message}\n"
-            f"العملة: {symbol}\n"
-            f"الربح: {profit_pct:+.2f}%"
-        )
+        alert_msg = f"{status_message}\nالعملة: {symbol}\nالربح: {net_profit_usdt:+.2f} USDT ({profit_pct:+.2f}%)"
         send_telegram_message(CHAT_ID, alert_msg)
-        log_and_notify('info', f"{status_message}: {symbol} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
-        logger.info(f"✅ [DB Close] Signal {signal_id} closed successfully.")
+        log_and_notify('info', f"{status_message}: {symbol} | Net Profit: {net_profit_usdt:+.2f} USDT", 'CLOSE_SIGNAL')
+        logger.info(f"✅ [DB Close] Signal {signal_id} closed. Net Profit: {net_profit_usdt:.2f} USDT")
+
     except Exception as e:
         logger.error(f"❌ [DB Close] Critical error closing signal {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
-        if symbol:
-            with signal_cache_lock:
-                if symbol not in open_signals_cache: open_signals_cache[symbol] = signal
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
 
@@ -1163,13 +1203,13 @@ def load_notifications_to_cache():
             logger.info(f"✅ [Loading] Loaded {len(notifications_cache)} notifications.")
     except Exception as e: logger.error(f"❌ [Loading] Failed to load notifications: {e}")
 
-# ---------------------- حلقة العمل الرئيسية ----------------------
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is None: logger.error("❌ [BTC Data] Failed to fetch Bitcoin data."); return None
     btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
+# --- [RESTORED] Main Loop with Original Filters ---
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1216,7 +1256,6 @@ def main_loop():
                                 if current_price >= profit_check_price:
                                     logger.info(f"✅ [Action] Closing open trade for {symbol} due to new SELL signal.")
                                     initiate_signal_closure(symbol, open_signal, 'closed_by_sell_signal', current_price)
-                                    send_telegram_message(CHAT_ID, f"🔴 إغلاق بإشارة بيع\nالعملة: {symbol}")
                             elif prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                                 last_atr = df_features.iloc[-1].get('atr', 0)
                                 tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
@@ -1242,12 +1281,21 @@ def main_loop():
                                     continue
                             tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
                             if not tp_sl_data: continue
-                            new_signal = {'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Confidence': f"{confidence:.2%}", 'TP_SL_Source': tp_sl_data['source']}, 'entry_price': current_price, **tp_sl_data}
+                            new_signal = {
+                                'symbol': symbol, 
+                                'strategy_name': BASE_ML_MODEL_NAME, 
+                                'signal_details': {'ML_Confidence': f"{confidence:.2%}", 'TP_SL_Source': tp_sl_data['source']}, 
+                                'entry_price': current_price, 
+                                'trade_amount_usdt': TRADE_AMOUNT_USDT,
+                                **tp_sl_data
+                            }
                             if USE_RRR_FILTER:
                                 risk = current_price - float(new_signal['stop_loss'])
                                 reward = float(new_signal['target_price']) - current_price
-                                if risk <= 0 or reward <= 0: log_rejection(symbol, "Invalid R/R", {}); continue
-                                if (reward / risk) < MIN_RISK_REWARD_RATIO: log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}"}); continue
+                                if risk <= 0 or reward <= 0: 
+                                    log_rejection(symbol, "Invalid R/R", {}); continue
+                                if (reward / risk) < MIN_RISK_REWARD_RATIO: 
+                                    log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}"}); continue
                             logger.info(f"✅ [{symbol}] Signal passed all filters. Saving...")
                             saved_signal = insert_signal_into_db(new_signal)
                             if saved_signal:
@@ -1261,58 +1309,77 @@ def main_loop():
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (محسنة) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V3) ----------------------
 app = Flask(__name__)
 CORS(app)
 
-def get_fear_and_greed_index() -> Dict[str, Any]:
-    try:
-        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10).json()
-        value = int(response['data'][0]['value'])
-        classification = response['data'][0]['value_classification']
-        return {"value": value, "classification": classification}
-    except Exception: return {"value": -1, "classification": "Error"}
-
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v2())
+    return render_template_string(get_dashboard_html_v3())
 
-@app.route('/api/market_status')
-def get_market_status():
-    with market_state_lock: state_copy = dict(current_market_state)
-    return jsonify({"fear_and_greed": get_fear_and_greed_index(), "market_state": state_copy})
-
-@app.route('/api/stats')
-def get_stats():
+@app.route('/api/stats_v2')
+def get_stats_v2():
     if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, profit_percentage FROM signals;")
-            all_signals = cur.fetchall()
-        with signal_cache_lock: open_trades_count = len(open_signals_cache)
-        closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
-        wins = [s for s in closed_trades if float(s['profit_percentage']) > 0]
-        losses = [s for s in closed_trades if float(s['profit_percentage']) <= 0]
-        total_profit_pct = sum(float(s['profit_percentage']) for s in closed_trades)
-        win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
-        total_profit_from_wins = sum(float(s['profit_percentage']) for s in wins)
-        total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in losses))
-        profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else float('inf')
+            cur.execute("SELECT net_profit_usdt, fees_usdt FROM signals WHERE status != 'open' AND net_profit_usdt IS NOT NULL;")
+            closed_trades = cur.fetchall()
+            
+            total_net_profit = sum(s['net_profit_usdt'] for s in closed_trades)
+            total_fees = sum(s['fees_usdt'] for s in closed_trades)
+            
+            wins = [s for s in closed_trades if s['net_profit_usdt'] > 0]
+            win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0
+            
+            total_profit_from_wins = sum(s['net_profit_usdt'] for s in wins)
+            total_loss_from_losses = abs(sum(s['net_profit_usdt'] for s in closed_trades if s['net_profit_usdt'] <= 0))
+            profit_factor = (total_profit_from_wins / total_loss_from_losses) if total_loss_from_losses > 0 else float('inf')
+
         return jsonify({
-            "open_trades_count": open_trades_count, "total_profit_pct": total_profit_pct,
-            "win_rate": win_rate, "profit_factor": profit_factor
+            "total_net_profit_usdt": total_net_profit,
+            "total_fees_usdt": total_fees,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor
         })
     except Exception as e:
-        logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
+        logger.error(f"❌ [API Stats V2] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/signals')
-def get_signals():
+@app.route('/api/equity_curve')
+def get_equity_curve():
+    if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT closed_at, net_profit_usdt 
+                FROM signals 
+                WHERE status != 'open' AND net_profit_usdt IS NOT NULL 
+                ORDER BY closed_at ASC;
+            """)
+            trades = cur.fetchall()
+        
+        cumulative_profit = 0
+        equity_data = []
+        for trade in trades:
+            cumulative_profit += trade['net_profit_usdt']
+            equity_data.append({
+                "timestamp": trade['closed_at'].isoformat(),
+                "cumulative_profit": cumulative_profit
+            })
+        
+        return jsonify(equity_data)
+    except Exception as e:
+        logger.error(f"❌ [API Equity Curve] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/signals_v2')
+def get_signals_v2():
     if not check_db_connection() or not conn or not redis_client: return jsonify({"error": "Service connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
+            cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, closed_at DESC, id DESC;")
             all_signals = [dict(s) for s in cur.fetchall()]
+        
         open_symbols = [s['symbol'] for s in all_signals if s['status'] == 'open']
         if open_symbols:
             prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_symbols)
@@ -1321,9 +1388,13 @@ def get_signals():
                 if s['status'] == 'open':
                     price = current_prices.get(s['symbol'])
                     s['current_price'] = price
-                    if price and s.get('entry_price'): s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
+                    if price and s.get('entry_price'): 
+                        s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
+        
         return jsonify(all_signals)
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e: 
+        logger.error(f"❌ [API Signals V2] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal(signal_id):
@@ -1356,26 +1427,13 @@ def manual_close_signal(signal_id):
         logger.error(f"❌ [API Close] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/test_telegram')
-def test_telegram():
-    logger.info("API: Received request to test Telegram.")
-    message = "👋 رسالة اختبار من بوت التداول الخاص بك. الاتصال سليم!"
-    if send_telegram_message(CHAT_ID, message):
-        return "✅ تم إرسال رسالة الاختبار بنجاح."
-    else:
-        return "❌ فشل إرسال الرسالة. تحقق من الإعدادات.", 500
-
 @app.route('/api/notifications')
 def get_notifications():
     with notifications_lock: return jsonify(list(notifications_cache))
 
-@app.route('/api/rejection_logs')
-def get_rejection_logs():
-    with rejection_logs_lock: return jsonify(list(rejection_logs_cache))
-
 def run_flask():
     host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    logger.info(f"Attempting to start dashboard on {host}:{port}")
+    logger.info(f"Dashboard V3 is starting on http://{host}:{port}")
     try:
         from waitress import serve
         serve(app, host=host, port=port, threads=8)
@@ -1407,7 +1465,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting Trading Bot - Improved Version...")
+    logger.info(f"🚀 Starting Trading Bot - Dashboard V3 with Original Filters...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
