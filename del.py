@@ -2,7 +2,8 @@ import os
 import psycopg2
 from decouple import config
 import logging
-from flask import Flask, request, flash, redirect, url_for, Markup
+from flask import Flask, request, flash, redirect, url_for, get_flashed_messages
+from markupsafe import Markup
 
 # --- إعداد التطبيق والتسجيل ---
 app = Flask(__name__)
@@ -182,7 +183,7 @@ def render_page_with_messages():
     """تجهيز كود HTML لعرض الرسائل."""
     messages_html = ""
     # استرجاع الرسائل التي تم إرسالها عبر flash
-    flashed_messages = get_flashed_messages(with_categories=true)
+    flashed_messages = get_flashed_messages(with_categories=True)
     if flashed_messages:
         messages_html += '<ul class="messages">'
         for category, message in flashed_messages:
@@ -197,7 +198,8 @@ def render_page_with_messages():
 @app.route('/')
 def index():
     """عرض صفحة التحكم الرئيسية."""
-    return render_page_with_messages()
+    with app.app_context():
+        return render_page_with_messages()
 
 @app.route('/clear-data', methods=['POST'])
 def clear_data():
