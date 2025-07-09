@@ -678,7 +678,8 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         if last_row['adx'] > 20:
             if ema_fast > ema_slow and last_row['rsi'] > 50: trend = "Uptrend"
             elif ema_fast < ema_slow and last_row['rsi'] < 50: trend = "Downtrend"
-        return {"trend": trend, "rsi": last_row['rsi'], "adx": last_row['adx']}
+        # FIX: Convert numpy types to native Python types for JSON serialization
+        return {"trend": trend, "rsi": float(last_row['rsi']), "adx": float(last_row['adx'])}
     except Exception as e:
         logger.error(f"Error in get_trend_for_timeframe: {e}")
         return {"trend": "Uncertain", "rsi": -1, "adx": -1}
