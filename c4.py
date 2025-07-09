@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -1006,7 +1006,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
 
-# ✨ New: Function to send trade update alerts
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
     old_target = float(old_signal_data['target_price'])
@@ -1042,7 +1041,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if conn: conn.rollback()
         return None
 
-# ✨ New: Function to update an existing signal in the database
 def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
     if not check_db_connection() or not conn: return False
     try:
@@ -1123,7 +1121,6 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
-# ✨ UPDATED: Main loop with trade update (reinforcement) logic
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1159,17 +1156,28 @@ def main_loop():
                     current_price = float(current_price_str)
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
                     
-                    # Logic for BUY signals
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                         last_features = df_features.iloc[-1]; last_features.name = symbol
                         
-                        # --- Case 1: An existing trade is open for this symbol ---
                         if open_trade:
-                            old_confidence = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
+                            old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
+                            
+                            # ✨ FIX: Robustly convert old_confidence to a float to handle legacy string data
+                            old_confidence = 0.0
+                            try:
+                                if isinstance(old_confidence_raw, str):
+                                    cleaned_str = old_confidence_raw.strip().replace('%', '')
+                                    numeric_val = float(cleaned_str)
+                                    old_confidence = numeric_val / 100.0 if numeric_val > 1 else numeric_val
+                                elif old_confidence_raw is not None:
+                                    old_confidence = float(old_confidence_raw)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"[{symbol}] Could not parse old confidence value '{old_confidence_raw}'. Defaulting to 0.0. Error: {e}")
+                                old_confidence = 0.0
+
                             if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
-                                logger.info(f"🔄 [{symbol}] Stronger BUY signal detected. Old confidence: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
+                                logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old confidence: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
                                 
-                                # Re-check filters for the new signal
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                                 if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                                 
@@ -1178,14 +1186,10 @@ def main_loop():
                                 if not tp_sl_data: continue
                                 
                                 updated_signal_data = {
-                                    'symbol': symbol,
-                                    'target_price': tp_sl_data['target_price'],
-                                    'stop_loss': tp_sl_data['stop_loss'],
+                                    'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
                                     'signal_details': {
-                                        'ML_Confidence': confidence,
-                                        'ML_Confidence_Display': f"{confidence:.2%}",
-                                        'Original_Confidence': old_confidence,
-                                        'Update_Reason': 'Reinforcement Signal'
+                                        'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}",
+                                        'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal'
                                     }
                                 }
                                 
@@ -1198,11 +1202,9 @@ def main_loop():
                                     logger.error(f"❌ [{symbol}] Failed to update signal in DB, aborting.")
                             else:
                                 logger.debug(f"[{symbol}] New BUY signal not strong enough to update existing trade.")
-                            continue # Move to next symbol after handling the open trade case
+                            continue
 
-                        # --- Case 2: No open trade, and we are below the max trades limit ---
                         if open_trade_count < MAX_OPEN_TRADES:
-                            # Apply all filters for a new trade
                             if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                             if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                             
@@ -1219,14 +1221,9 @@ def main_loop():
                             if not tp_sl_data: continue
                             
                             new_signal = {
-                                'symbol': symbol, 
-                                'strategy_name': BASE_ML_MODEL_NAME, 
-                                'signal_details': {
-                                    'ML_Confidence': confidence,
-                                    'ML_Confidence_Display': f"{confidence:.2%}"
-                                }, 
-                                'entry_price': current_price, 
-                                **tp_sl_data
+                                'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
+                                'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                                'entry_price': current_price, **tp_sl_data
                             }
 
                             if USE_RRR_FILTER:
@@ -1239,7 +1236,6 @@ def main_loop():
                                 with signal_cache_lock:
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
                                 send_new_signal_alert(saved_signal)
-
                     time.sleep(2)
                 except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
             logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
@@ -1312,7 +1308,6 @@ def get_stats():
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred while calculating stats."}), 500
 
-# ✨ UPDATED: Profit curve API for waterfall/candlestick style
 @app.route('/api/profit_curve')
 def get_profit_curve():
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
@@ -1324,7 +1319,6 @@ def get_profit_curve():
         curve_data = []
         cumulative_profit = 0.0
         
-        # Add a starting point for the chart
         start_time = (trades[0]['closed_at'] - timedelta(minutes=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
         curve_data.append({"timestamp": start_time, "profit_range": [0.0, 0.0], "profit_change": 0.0})
 
@@ -1425,13 +1419,11 @@ def run_websocket_manager():
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     
-    # Subscribe to streams in chunks to avoid URL length issues
     chunk_size = 50 
     symbol_chunks = [validated_symbols_to_scan[i:i + chunk_size] for i in range(0, len(validated_symbols_to_scan), chunk_size)]
     
     for i, chunk in enumerate(symbol_chunks):
         streams = [f"{s.lower()}@miniTicker" for s in chunk]
-        # FIX: Removed the 'name' parameter which was causing the TypeError
         twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
         logger.info(f"✅ [WebSocket] Subscribed to price stream chunk {i+1}/{len(symbol_chunks)}.")
 
