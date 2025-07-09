@@ -1314,13 +1314,31 @@ def get_rejection_logs():
     with rejection_logs_lock: return jsonify(list(rejection_logs_cache))
 
 def run_flask():
-    host, port = "0.0.0.0", int(os.environ.get('PORT', 10000))
-    logger.info(f"Attempting to start dashboard on {host}:{port}")
+    # Robustly get the port from the environment variable
+    port_str = os.environ.get('PORT', '10000')
+    try:
+        port = int(port_str)
+    except (ValueError, TypeError):
+        logger.error(f"❌ Invalid PORT environment variable: '{port_str}'. Defaulting to 10000.")
+        port = 10000
+
+    host = "0.0.0.0" # Bind to all network interfaces
+    logger.info(f"✅ Preparing to start dashboard on {host}:{port}")
+    
+    # Start the background services in a separate thread.
+    # This is crucial so that the web server can start immediately
+    # while the bot initializes in the background.
+    logger.info("🤖 Starting background bot services in a separate thread...")
+    initialization_thread = Thread(target=initialize_bot_services, daemon=True)
+    initialization_thread.start()
+    
+    logger.info("🌐 Starting web server...")
     try:
         from waitress import serve
+        logger.info("✅ Found 'waitress', starting production server...")
         serve(app, host=host, port=port, threads=8)
     except ImportError:
-        logger.warning("⚠️ [Flask] 'waitress' not found, using development server.")
+        logger.warning("⚠️ 'waitress' not found. Using Flask's development server (NOT recommended for production).")
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
@@ -1346,8 +1364,10 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting Trading Bot - Version with Momentum Filter...")
-    initialization_thread = Thread(target=initialize_bot_services, daemon=True)
-    initialization_thread.start()
+    logger.info("======================================================")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD APPLICATION 🚀")
+    logger.info("======================================================")
+    # The run_flask function now handles starting the background
+    # threads and then starting the web server.
     run_flask()
-    logger.info("👋 [Shutdown] Bot has been shut down."); os._exit(0)
+    logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
