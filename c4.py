@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v15.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v16.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV15_MomentumFilter')
+logger = logging.getLogger('CryptoBotV16_Reinforcement')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -74,7 +74,6 @@ ATR_PERIOD: int = 14
 EMA_FAST_PERIOD: int = 50
 EMA_SLOW_PERIOD: int = 200
 REL_VOL_PERIOD: int = 30
-# New Momentum and Velocity Parameters
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
 
@@ -84,6 +83,8 @@ MAX_OPEN_TRADES: int = 10
 BUY_CONFIDENCE_THRESHOLD = 0.65
 SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
+# ✨ New: Minimum confidence increase to justify a trade update
+MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05 
 
 # --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
@@ -94,13 +95,14 @@ SL_BUFFER_ATR_PERCENT: float = 0.25
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
+LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
+PEAK_UPDATE_COOLDOWN: int = 60
 
 # --- إعدادات الفلاتر المحسّنة ---
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 BTC_TREND_TIMEFRAME: str = '4h'
 BTC_TREND_EMA_PERIOD: int = 50
-
 USE_SPEED_FILTER: bool = True
 USE_RRR_FILTER: bool = True
 MIN_RISK_REWARD_RATIO: float = 1.1
@@ -108,7 +110,6 @@ USE_BTC_CORRELATION_FILTER: bool = True
 MIN_BTC_CORRELATION: float = 0.1
 USE_MIN_VOLATILITY_FILTER: bool = True
 MIN_VOLATILITY_PERCENT: float = 0.3
-# --- ✨ New Dynamic Filter Switch ---
 USE_MOMENTUM_FILTER: bool = True
 
 
@@ -127,8 +128,6 @@ closure_lock = Lock()
 last_api_check_time = time.time()
 rejection_logs_cache = deque(maxlen=100)
 rejection_logs_lock = Lock()
-
-# --- متغيرات حالة السوق المحسّنة ---
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {
     "overall_regime": "INITIALIZING",
@@ -400,6 +399,7 @@ function updateStats() {
     });
 }
 
+// ✨ UPDATED: Profit chart function for waterfall/candlestick style
 function updateProfitChart() {
     const chartCard = document.getElementById('profit-chart-card');
     const canvas = document.getElementById('profitChart');
@@ -421,7 +421,7 @@ function updateProfitChart() {
         
         canvas.style.display = 'block';
         const ctx = canvas.getContext('2d');
-        const labels = data.map((d, i) => `صفقة ${i}`);
+        const labels = data.map((d, i) => i > 0 ? `صفقة ${i}` : 'البداية');
         const chartData = data.map(d => d.profit_range);
         
         const config = {
@@ -434,16 +434,17 @@ function updateProfitChart() {
                     backgroundColor: (ctx) => {
                         if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
                         const [start, end] = ctx.raw;
-                        return end > start ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+                        return end >= start ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)';
                     },
                     borderColor: (ctx) => {
                         if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
                         const [start, end] = ctx.raw;
-                        return end > start ? 'var(--accent-green)' : 'var(--accent-red)';
+                        return end >= start ? 'var(--accent-green)' : 'var(--accent-red)';
                     },
                     borderWidth: 1,
                     barPercentage: 0.8,
-                    categoryPercentage: 0.9
+                    categoryPercentage: 0.9,
+                    borderSkipped: false
                 }]
             },
             options: {
@@ -458,7 +459,9 @@ function updateProfitChart() {
                         mode: 'index', intersect: false, backgroundColor: 'var(--bg-card)',
                         titleFont: { weight: 'bold' }, bodyFont: { family: 'Cairo' },
                         callbacks: {
+                            title: (ctx) => ctx[0] ? ctx[0].label : '',
                             label: (ctx) => {
+                                if (ctx.dataIndex === 0) return `البداية: ${formatNumber(ctx.raw[1])}%`;
                                 const tradeData = data[ctx.dataIndex];
                                 const profit = tradeData.profit_change;
                                 const cumulative = tradeData.profit_range[1];
@@ -498,13 +501,15 @@ function updateSignals() {
         if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
         tableBody.innerHTML = data.map(signal => {
             const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
+            const statusClass = signal.status === 'open' ? 'text-yellow-400' : (signal.status === 'updated' ? 'text-blue-400' : 'text-gray-400');
+            const statusText = signal.status === 'updated' ? 'تم تحديثها' : signal.status;
             return `<tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
                     <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
-                    <td class="p-4 font-bold ${signal.status === 'open' ? 'text-yellow-400' : 'text-gray-400'}">${signal.status}</td>
+                    <td class="p-4 font-bold ${statusClass}">${statusText}</td>
                     <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
-                    <td class="p-4">${signal.status === 'open' ? renderProgressBar(signal) : '-'}</td>
+                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? renderProgressBar(signal) : '-'}</td>
                     <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
-                    <td class="p-4">${signal.status === 'open' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
                 </tr>`;
         }).join('');
     });
@@ -566,6 +571,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         current_peak_price DOUBLE PRECISION
                     );
                 """)
+                # Add status index for faster queries
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -616,9 +623,6 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
-    """
-    Logs the reason for a signal rejection to the console and a temporary cache.
-    """
     log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason} | Details: {details or {}}"
     logger.info(log_message)
     with rejection_logs_lock:
@@ -675,19 +679,12 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---------------------- دوال حساب الميزات وتحديد الاتجاه ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """
-    Function to calculate all technical analysis features for the model.
-    Must match the feature calculation in the training script exactly.
-    """
     df_calc = df.copy()
-
-    # --- Existing Features ---
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -696,52 +693,33 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
-    
     if btc_df is not None and not btc_df.empty:
         merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
-
-    # --- ✨ New Features: Momentum, Velocity, and Market Direction ---
-    
-    # 1. Momentum (Rate of Change)
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    
-    # 2. Velocity (Acceleration of Momentum)
     df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    
-    # 3. Market Direction (Short-term EMA Slope)
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
-
     df_calc['hour_of_day'] = df_calc.index.hour
-    
     return df_calc.astype('float32', errors='ignore')
 
 def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     if df is None or len(df) < 26: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
     try:
-        # Use a simplified feature calculation for market state to save resources
-        last_row = df.iloc[-1]
         close_series = df['close']
-        
-        # RSI
         delta = close_series.diff()
         gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
         loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
         rsi = (100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))).iloc[-1]
-
-        # ADX
         high_low = df['high'] - df['low']
         high_close = (df['high'] - close_series.shift()).abs()
         low_close = (df['low'] - close_series.shift()).abs()
@@ -754,15 +732,12 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
         dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
         adx = dx.ewm(span=ADX_PERIOD, adjust=False).mean().iloc[-1]
-        
-        # Trend
         ema_fast = close_series.ewm(span=12, adjust=False).mean().iloc[-1]
         ema_slow = close_series.ewm(span=26, adjust=False).mean().iloc[-1]
         trend = "Ranging"
         if adx > 20:
             if ema_fast > ema_slow and rsi > 50: trend = "Uptrend"
             elif ema_fast < ema_slow and rsi < 50: trend = "Downtrend"
-            
         return {"trend": trend, "rsi": float(rsi), "adx": float(adx)}
     except Exception as e:
         logger.error(f"Error in get_trend_for_timeframe: {e}")
@@ -777,22 +752,18 @@ def determine_market_state():
         df_15m = fetch_historical_data(BTC_SYMBOL, '15m', 2)
         df_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
         df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
-        
         state_15m = get_trend_for_timeframe(df_15m)
         state_1h = get_trend_for_timeframe(df_1h)
         state_4h = get_trend_for_timeframe(df_4h)
-        
         trends = [state_15m['trend'], state_1h['trend'], state_4h['trend']]
         uptrends = trends.count("Uptrend")
         downtrends = trends.count("Downtrend")
-        
         overall_regime = "RANGING"
         if uptrends == 3: overall_regime = "STRONG UPTREND"
         elif uptrends >= 2 and downtrends == 0: overall_regime = "UPTREND"
         elif downtrends == 3: overall_regime = "STRONG DOWNTREND"
         elif downtrends >= 2 and uptrends == 0: overall_regime = "DOWNTREND"
         elif "Uncertain" in trends: overall_regime = "UNCERTAIN"
-        
         with market_state_lock:
             current_market_state = {
                 "overall_regime": overall_regime,
@@ -811,13 +782,10 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     if model_name in ml_models_cache:
         return ml_models_cache[model_name]
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Create the folder if it doesn't exist
     model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
     if not os.path.exists(model_dir_path):
         os.makedirs(model_dir_path)
         logger.info(f"📁 Created model directory: {model_dir_path}")
-
     model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
     if not os.path.exists(model_path):
         logger.warning(f"⚠️ [ML Model] Model file not found at '{model_path}'.")
@@ -845,20 +813,13 @@ class TradingStrategy:
         if self.feature_names is None: return None
         try:
             df_featured = calculate_features(df_15m, btc_df)
-            
-            # MTF Features
-            df_4h_features = calculate_features(df_4h, None) # BTC data not needed for 4h features
-            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h" if c not in ['atr', 'volume'] else c, inplace=False) # Avoid renaming essential columns
-            
-            # Select only the required 4h features to join
+            df_4h_features = calculate_features(df_4h, None)
+            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h" if c not in ['atr', 'volume'] else c, inplace=False)
             required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
             df_featured = df_featured.join(df_4h_features[required_4h_cols], how='outer')
             df_featured.fillna(method='ffill', inplace=True)
-            
-            # Ensure all required model features are present
             for col in self.feature_names:
                 if col not in df_featured.columns: df_featured[col] = 0.0
-            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
@@ -880,23 +841,13 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# --- ✨ New Dynamic Momentum Filter ---
 def passes_momentum_filter(last_features: pd.Series) -> bool:
-    """
-    Checks if the signal passes the dynamic momentum, velocity, and direction filter.
-    """
     symbol = last_features.name
     roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
     accel = last_features.get('roc_acceleration', 0)
     slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-
-    # For a BUY signal, we want:
-    # 1. Positive momentum (price is rising).
-    # 2. Non-negative acceleration (momentum is not decreasing).
-    # 3. Positive short-term trend slope.
     if roc > 0 and accel >= 0 and slope > 0:
         return True
-
     log_rejection(symbol, "Momentum Filter", {
         "ROC": f"{roc:.2f} (Req: > 0)",
         "Acceleration": f"{accel:.4f} (Req: >= 0)",
@@ -917,6 +868,7 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
     log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
     return False
+
 def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
     if last_atr <= 0:
         log_rejection(symbol, "Invalid ATR for Fallback", {"detail": "ATR is zero or negative"})
@@ -924,12 +876,14 @@ def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optiona
     fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
     fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
     return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
+
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
     try:
         price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
         if price_updates: redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
     except Exception as e: logger.error(f"❌ [WebSocket Price Updater] Error: {e}", exc_info=True)
+
 def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
     signal_id = signal_to_close.get('id')
     if not signal_id:
@@ -943,35 +897,54 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
     with signal_cache_lock: open_signals_cache.pop(symbol, None)
     logger.info(f"ℹ️ [Closure] Starting closure thread for signal {signal_id} ({symbol}) with status '{status}'.")
     Thread(target=close_signal, args=(signal_to_close, status, closing_price, "initiator")).start()
-def run_websocket_manager() -> None:
-    logger.info("ℹ️ [WebSocket] Starting WebSocket Manager...")
-    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-    twm.start()
-    twm.start_miniticker_socket(callback=handle_price_update_message)
-    logger.info("✅ [WebSocket] Connection successful.")
-    twm.join()
+
+def update_signal_peak_price_in_db(signal_id: int, new_peak_price: float):
+    if not check_db_connection() or not conn:
+        logger.error(f"❌ [DB Peak Update] Cannot update peak for signal {signal_id}, DB connection is down.")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s;", (new_peak_price, signal_id))
+        conn.commit()
+        logger.debug(f"💾 [DB Peak Update] Saved new peak price {new_peak_price} for signal {signal_id}.")
+    except Exception as e:
+        logger.error(f"❌ [DB Peak Update] Failed to update peak price for signal {signal_id}: {e}")
+        if conn: conn.rollback()
+
 def trade_monitoring_loop():
     global last_api_check_time
     logger.info("✅ [Trade Monitor] Starting trade monitoring loop.")
     while True:
         try:
-            with signal_cache_lock: signals_to_check = dict(open_signals_cache)
-            if not signals_to_check or not redis_client or not client: time.sleep(1); continue
+            with signal_cache_lock:
+                signals_to_check = dict(open_signals_cache)
+            if not signals_to_check or not redis_client or not client:
+                time.sleep(1)
+                continue
             perform_direct_api_check = (time.time() - last_api_check_time) > DIRECT_API_CHECK_INTERVAL
-            if perform_direct_api_check: last_api_check_time = time.time()
+            if perform_direct_api_check:
+                last_api_check_time = time.time()
             symbols_to_fetch = list(signals_to_check.keys())
             redis_prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols_to_fetch)
             redis_prices = {symbol: price for symbol, price in zip(symbols_to_fetch, redis_prices_list)}
             for symbol, signal in signals_to_check.items():
                 signal_id = signal.get('id')
+                if not signal_id: continue
                 with closure_lock:
-                    if signal_id in signals_pending_closure: continue
+                    if signal_id in signals_pending_closure:
+                        continue
                 price = None
                 if perform_direct_api_check:
-                    try: price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    try:
+                        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception: pass
-                if not price and redis_prices.get(symbol): price = float(redis_prices[symbol])
+                if not price and redis_prices.get(symbol):
+                    price = float(redis_prices[symbol])
                 if not price: continue
+                with signal_cache_lock:
+                    if symbol in open_signals_cache:
+                        open_signals_cache[symbol]['current_price'] = price
+                        open_signals_cache[symbol]['pnl_pct'] = ((price / float(signal['entry_price'])) - 1) * 100
                 target_price = float(signal.get('target_price', 0))
                 original_stop_loss = float(signal.get('stop_loss', 0))
                 effective_stop_loss = original_stop_loss
@@ -981,20 +954,32 @@ def trade_monitoring_loop():
                     if price > activation_price:
                         current_peak = float(signal.get('current_peak_price', entry_price))
                         if price > current_peak:
-                            signal['current_peak_price'] = price
+                            with signal_cache_lock:
+                                if symbol in open_signals_cache:
+                                    open_signals_cache[symbol]['current_peak_price'] = price
+                            now = time.time()
+                            last_update = LAST_PEAK_UPDATE_TIME.get(signal_id, 0)
+                            if now - last_update > PEAK_UPDATE_COOLDOWN:
+                                update_signal_peak_price_in_db(signal_id, price)
+                                LAST_PEAK_UPDATE_TIME[signal_id] = now
                             current_peak = price
                         trailing_stop_price = current_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
-                        effective_stop_loss = max(original_stop_loss, trailing_stop_price)
+                        if trailing_stop_price > effective_stop_loss:
+                            logger.info(f"📈 [Trailing SL] {symbol} new peak: {current_peak:.4f}. Adjusted SL to: {trailing_stop_price:.4f}")
+                            effective_stop_loss = trailing_stop_price
                 status_to_set = None
-                if price >= target_price: status_to_set = 'target_hit'
-                elif price <= effective_stop_loss: status_to_set = 'stop_loss_hit'
+                if price >= target_price:
+                    status_to_set = 'target_hit'
+                elif price <= effective_stop_loss:
+                    status_to_set = 'stop_loss_hit'
                 if status_to_set:
-                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | Condition '{status_to_set}' met.")
+                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | Condition '{status_to_set}' met at price {price}.")
                     initiate_signal_closure(symbol, signal, status_to_set, price)
             time.sleep(0.2)
         except Exception as e:
             logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
             time.sleep(5)
+
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
     if not TELEGRAM_TOKEN or not target_chat_id: return False
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -1005,19 +990,42 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         if response.status_code == 200: return True
         else: logger.error(f"❌ [Telegram] Failed to send message. Status: {response.status_code}, Response: {response.text}"); return False
     except requests.exceptions.RequestException as e: logger.error(f"❌ [Telegram] Request failed: {e}"); return False
+
 def send_new_signal_alert(signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']; entry = float(signal_data['entry_price']); target = float(signal_data['target_price']); sl = float(signal_data['stop_loss'])
     profit_pct = ((target / entry) - 1) * 100
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
+    confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n\n"
                f"*الدخول:* `{entry:,.8g}`\n*الهدف:* `{target:,.8g}`\n*وقف الخسارة:* `{sl:,.8g}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
-               f"*ثقة النموذج:* `{signal_data['signal_details']['ML_Confidence']}`")
+               f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
+
+# ✨ New: Function to send trade update alerts
+def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
+    symbol = signal_data['symbol']
+    old_target = float(old_signal_data['target_price'])
+    new_target = float(signal_data['target_price'])
+    old_sl = float(old_signal_data['stop_loss'])
+    new_sl = float(signal_data['stop_loss'])
+    old_conf = old_signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
+    new_conf = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
+    
+    message = (f"🔄 *تحديث صفقة (تعزيز)* 🔄\n\n"
+               f"*العملة:* `{symbol}`\n\n"
+               f"*الثقة:* `{old_conf}` ⬅️ `{new_conf}`\n"
+               f"*الهدف:* `{old_target:,.8g}` ⬅️ `{new_target:,.8g}`\n"
+               f"*الوقف:* `{old_sl:,.8g}` ⬅️ `{new_sl:,.8g}`\n\n"
+               f"تم تحديث الصفقة بناءً على إشارة شراء أقوى.")
+    reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
+    if send_telegram_message(CHAT_ID, message, reply_markup):
+        log_and_notify('info', f"Updated Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
+
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
@@ -1033,6 +1041,32 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [Insert] Error inserting signal for {signal['symbol']}: {e}", exc_info=True)
         if conn: conn.rollback()
         return None
+
+# ✨ New: Function to update an existing signal in the database
+def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
+    if not check_db_connection() or not conn: return False
+    try:
+        target = float(new_data['target_price'])
+        sl = float(new_data['stop_loss'])
+        details = json.dumps(new_data.get('signal_details', {}))
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE signals 
+                SET target_price = %s, stop_loss = %s, signal_details = %s, status = 'updated'
+                WHERE id = %s AND status IN ('open', 'updated');
+            """, (target, sl, details, signal_id))
+            if cur.rowcount == 0:
+                logger.warning(f"⚠️ [DB Update] Signal {signal_id} not found or already closed. No update performed.")
+                return False
+        conn.commit()
+        logger.info(f"✅ [DB] Updated signal {signal_id} for {new_data['symbol']}.")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [Update] Error updating signal {signal_id}: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return False
+
 def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str):
     signal_id = signal.get('id'); symbol = signal.get('symbol')
     logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
@@ -1041,7 +1075,7 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
         db_closing_price = float(closing_price); entry_price = float(signal['entry_price'])
         profit_pct = ((db_closing_price / entry_price) - 1) * 100
         with conn.cursor() as cur:
-            cur.execute("UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status = 'open';",
+            cur.execute("UPDATE signals SET status = %s, closing_price = %s, closed_at = NOW(), profit_percentage = %s WHERE id = %s AND status IN ('open', 'updated');",
                         (status, db_closing_price, profit_pct, signal_id))
             if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] Signal {signal_id} was already closed or not found."); return
         conn.commit()
@@ -1059,17 +1093,19 @@ def close_signal(signal: Dict, status: str, closing_price: float, closed_by: str
                 if symbol not in open_signals_cache: open_signals_cache[symbol] = signal
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
+
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals WHERE status = 'open';")
+            cur.execute("SELECT * FROM signals WHERE status IN ('open', 'updated');")
             open_signals = cur.fetchall()
             with signal_cache_lock:
                 open_signals_cache.clear()
                 for signal in open_signals: open_signals_cache[signal['symbol']] = dict(signal)
             logger.info(f"✅ [Loading] Loaded {len(open_signals)} open signals.")
     except Exception as e: logger.error(f"❌ [Loading] Failed to load open signals: {e}")
+
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -1081,10 +1117,13 @@ def load_notifications_to_cache():
                 for n in reversed(recent): n['timestamp'] = n['timestamp'].isoformat(); notifications_cache.appendleft(dict(n))
             logger.info(f"✅ [Loading] Loaded {len(notifications_cache)} notifications.")
     except Exception as e: logger.error(f"❌ [Loading] Failed to load notifications: {e}")
+
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
+
+# ✨ UPDATED: Main loop with trade update (reinforcement) logic
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1097,16 +1136,14 @@ def main_loop():
             if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
                 log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
                 time.sleep(300); continue
-            with signal_cache_lock: open_count = len(open_signals_cache)
-            if open_count >= MAX_OPEN_TRADES:
-                logger.info(f"ℹ️ [Pause] Max open trades limit reached."); time.sleep(60); continue
-            slots_available = MAX_OPEN_TRADES - open_count
+            
             btc_data = get_btc_data_for_bot()
             for symbol in validated_symbols_to_scan:
                 try:
-                    with signal_cache_lock: is_trade_open = symbol in open_signals_cache
-                    if is_trade_open: continue
-                    if slots_available <= 0: break
+                    with signal_cache_lock:
+                        open_trade = open_signals_cache.get(symbol)
+                        open_trade_count = len(open_signals_cache)
+
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_15m is None: continue
                     strategy = TradingStrategy(symbol)
@@ -1121,36 +1158,88 @@ def main_loop():
                     if not current_price_str: continue
                     current_price = float(current_price_str)
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
+                    
+                    # Logic for BUY signals
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                         last_features = df_features.iloc[-1]; last_features.name = symbol
                         
-                        # --- Applying all dynamic filters ---
-                        if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                        if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue # ✨ New filter check
-                        
-                        last_atr = last_features.get('atr', 0)
-                        volatility = (last_atr / current_price * 100)
-                        if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                            log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
-                        if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
-                            correlation = last_features.get('btc_correlation', 0)
-                            if correlation < MIN_BTC_CORRELATION:
-                                log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
-                        
-                        tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
-                        if not tp_sl_data: continue
-                        
-                        new_signal = {'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 'signal_details': {'ML_Confidence': f"{confidence:.2%}"}, 'entry_price': current_price, **tp_sl_data}
-                        if USE_RRR_FILTER:
-                            risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
-                            if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
-                                log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
-                        
-                        saved_signal = insert_signal_into_db(new_signal)
-                        if saved_signal:
-                            with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                            send_new_signal_alert(saved_signal)
-                            slots_available -= 1
+                        # --- Case 1: An existing trade is open for this symbol ---
+                        if open_trade:
+                            old_confidence = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
+                            if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
+                                logger.info(f"🔄 [{symbol}] Stronger BUY signal detected. Old confidence: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
+                                
+                                # Re-check filters for the new signal
+                                if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
+                                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                                
+                                last_atr = last_features.get('atr', 0)
+                                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                                if not tp_sl_data: continue
+                                
+                                updated_signal_data = {
+                                    'symbol': symbol,
+                                    'target_price': tp_sl_data['target_price'],
+                                    'stop_loss': tp_sl_data['stop_loss'],
+                                    'signal_details': {
+                                        'ML_Confidence': confidence,
+                                        'ML_Confidence_Display': f"{confidence:.2%}",
+                                        'Original_Confidence': old_confidence,
+                                        'Update_Reason': 'Reinforcement Signal'
+                                    }
+                                }
+                                
+                                if update_signal_in_db(open_trade['id'], updated_signal_data):
+                                    with signal_cache_lock:
+                                        open_signals_cache[symbol].update(updated_signal_data)
+                                        open_signals_cache[symbol]['status'] = 'updated'
+                                    send_trade_update_alert(updated_signal_data, open_trade)
+                                else:
+                                    logger.error(f"❌ [{symbol}] Failed to update signal in DB, aborting.")
+                            else:
+                                logger.debug(f"[{symbol}] New BUY signal not strong enough to update existing trade.")
+                            continue # Move to next symbol after handling the open trade case
+
+                        # --- Case 2: No open trade, and we are below the max trades limit ---
+                        if open_trade_count < MAX_OPEN_TRADES:
+                            # Apply all filters for a new trade
+                            if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
+                            if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                            
+                            last_atr = last_features.get('atr', 0)
+                            volatility = (last_atr / current_price * 100)
+                            if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
+                                log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
+                            if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
+                                correlation = last_features.get('btc_correlation', 0)
+                                if correlation < MIN_BTC_CORRELATION:
+                                    log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
+                            
+                            tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                            if not tp_sl_data: continue
+                            
+                            new_signal = {
+                                'symbol': symbol, 
+                                'strategy_name': BASE_ML_MODEL_NAME, 
+                                'signal_details': {
+                                    'ML_Confidence': confidence,
+                                    'ML_Confidence_Display': f"{confidence:.2%}"
+                                }, 
+                                'entry_price': current_price, 
+                                **tp_sl_data
+                            }
+
+                            if USE_RRR_FILTER:
+                                risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
+                                if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
+                                    log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
+                            
+                            saved_signal = insert_signal_into_db(new_signal)
+                            if saved_signal:
+                                with signal_cache_lock:
+                                    open_signals_cache[saved_signal['symbol']] = saved_signal
+                                send_new_signal_alert(saved_signal)
+
                     time.sleep(2)
                 except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
             logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
@@ -1195,33 +1284,24 @@ def get_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
-
-        open_trades_count = sum(1 for s in all_signals if s.get('status') == 'open')
-        closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
-
+        open_trades_count = sum(1 for s in all_signals if s.get('status') in ['open', 'updated'])
+        closed_trades = [s for s in all_signals if s.get('status') not in ['open', 'updated'] and s.get('profit_percentage') is not None]
         total_net_profit_usdt = 0.0
         win_rate = 0.0
         profit_factor_val = 0.0
-
         if closed_trades:
-            # صافي الربح
             total_net_profit_usdt = sum(
                 ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
                 for t in closed_trades
             )
-            # نسبة النجاح
             wins = sum(1 for s in closed_trades if float(s['profit_percentage']) > 0)
             win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0.0
-            
-            # عامل الربح
             total_profit_from_wins = sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0)
             total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0))
-            
             if total_loss_from_losses > 0:
                 profit_factor_val = total_profit_from_wins / total_loss_from_losses
             elif total_profit_from_wins > 0:
-                profit_factor_val = "Infinity" # إرسال كنص لتجنب خطأ JSON
-        
+                profit_factor_val = "Infinity"
         return jsonify({
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
@@ -1232,18 +1312,19 @@ def get_stats():
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred while calculating stats."}), 500
 
-
+# ✨ UPDATED: Profit curve API for waterfall/candlestick style
 @app.route('/api/profit_curve')
 def get_profit_curve():
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT closed_at, profit_percentage FROM signals WHERE status != 'open' AND profit_percentage IS NOT NULL AND closed_at IS NOT NULL ORDER BY closed_at ASC;")
+            cur.execute("SELECT closed_at, profit_percentage FROM signals WHERE status NOT IN ('open', 'updated') AND profit_percentage IS NOT NULL AND closed_at IS NOT NULL ORDER BY closed_at ASC;")
             trades = cur.fetchall()
         
         curve_data = []
         cumulative_profit = 0.0
         
+        # Add a starting point for the chart
         start_time = (trades[0]['closed_at'] - timedelta(minutes=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
         curve_data.append({"timestamp": start_time, "profit_range": [0.0, 0.0], "profit_change": 0.0})
 
@@ -1268,14 +1349,14 @@ def get_signals():
     if not check_db_connection() or not redis_client: return jsonify({"error": "Service connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;")
+            cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status IN ('open', 'updated') THEN 0 ELSE 1 END, id DESC;")
             all_signals = [dict(s) for s in cur.fetchall()]
-        open_symbols = [s['symbol'] for s in all_signals if s['status'] == 'open']
+        open_symbols = [s['symbol'] for s in all_signals if s['status'] in ('open', 'updated')]
         if open_symbols:
             prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_symbols)
             current_prices = {symbol: float(p) if p else None for symbol, p in zip(open_symbols, prices_list)}
             for s in all_signals:
-                if s['status'] == 'open':
+                if s['status'] in ('open', 'updated'):
                     price = current_prices.get(s['symbol'])
                     s['current_price'] = price
                     if price and s.get('entry_price'): s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
@@ -1290,7 +1371,7 @@ def manual_close_signal_api(signal_id):
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals WHERE id = %s AND status = 'open';", (signal_id,))
+            cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
             signal_to_close = cur.fetchone()
         if not signal_to_close: return jsonify({"error": "Signal not found or already closed"}), 404
         symbol = dict(signal_to_close)['symbol']
@@ -1314,24 +1395,17 @@ def get_rejection_logs():
     with rejection_logs_lock: return jsonify(list(rejection_logs_cache))
 
 def run_flask():
-    # Robustly get the port from the environment variable
     port_str = os.environ.get('PORT', '10000')
     try:
         port = int(port_str)
     except (ValueError, TypeError):
         logger.error(f"❌ Invalid PORT environment variable: '{port_str}'. Defaulting to 10000.")
         port = 10000
-
-    host = "0.0.0.0" # Bind to all network interfaces
+    host = "0.0.0.0"
     logger.info(f"✅ Preparing to start dashboard on {host}:{port}")
-    
-    # Start the background services in a separate thread.
-    # This is crucial so that the web server can start immediately
-    # while the bot initializes in the background.
     logger.info("🤖 Starting background bot services in a separate thread...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
-    
     logger.info("🌐 Starting web server...")
     try:
         from waitress import serve
@@ -1342,6 +1416,27 @@ def run_flask():
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
+def run_websocket_manager():
+    """Manages the WebSocket connection for real-time price updates."""
+    if not client or not validated_symbols_to_scan:
+        logger.error("❌ [WebSocket] Cannot start WebSocket manager: Client or symbols not initialized.")
+        return
+    logger.info("📈 [WebSocket] Starting WebSocket Manager for price streams...")
+    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
+    twm.start()
+    
+    # Subscribe to streams in chunks to avoid URL length issues
+    chunk_size = 50 
+    symbol_chunks = [validated_symbols_to_scan[i:i + chunk_size] for i in range(0, len(validated_symbols_to_scan), chunk_size)]
+    
+    for i, chunk in enumerate(symbol_chunks):
+        stream_name = f"price_chunk_{i}"
+        streams = [f"{s.lower()}@miniTicker" for s in chunk]
+        twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams, name=stream_name)
+        logger.info(f"✅ [WebSocket] Subscribed to price stream chunk {i+1}/{len(symbol_chunks)}.")
+
+    twm.join()
+
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
@@ -1367,7 +1462,5 @@ if __name__ == "__main__":
     logger.info("======================================================")
     logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD APPLICATION 🚀")
     logger.info("======================================================")
-    # The run_flask function now handles starting the background
-    # threads and then starting the web server.
     run_flask()
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
