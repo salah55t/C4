@@ -603,10 +603,17 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
+    """
+    Logs the reason for a signal rejection to the console and a temporary cache.
+    """
+    log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason} | Details: {details or {}}"
+    logger.info(log_message)
     with rejection_logs_lock:
         rejection_logs_cache.appendleft({
-            "timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
-            "reason": reason, "details": details or {}
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "reason": reason,
+            "details": details or {}
         })
 
 def init_redis() -> None:
