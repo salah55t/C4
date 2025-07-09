@@ -131,10 +131,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V5) ----------------------
+# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V6 - متجاوبة) ----------------------
 def get_dashboard_html_v5():
     """
-    لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال).
+    لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال) وتصميم متجاوب.
     """
     return """
 <!DOCTYPE html>
@@ -142,7 +142,7 @@ def get_dashboard_html_v5():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V5</title>
+    <title>لوحة تحكم بوت التداول V6</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -166,6 +166,7 @@ def get_dashboard_html_v5():
         .current-point { background-color: var(--accent-yellow); }
         .progress-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); padding: 0 2px; margin-top: 2px; }
         #needle { transition: transform 1s cubic-bezier(0.68, -0.55, 0.27, 1.55); }
+        .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--text-primary); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -211,11 +212,13 @@ def get_dashboard_html_v5():
         </section>
 
         <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <div id="profit-chart-card" class="card lg:col-span-2 min-h-[350px]">
-                <h3 class="font-bold mb-2">أداء الصفقات (الربح التراكمي %)</h3>
-                <div class="h-full w-full"><canvas id="profitChart"></canvas></div>
+            <div id="profit-chart-card" class="card lg:col-span-2">
+                <h3 class="font-bold mb-3">أداء الصفقات (الربح التراكمي %)</h3>
+                <div class="relative h-80 md:h-96">
+                    <canvas id="profitChart"></canvas>
+                </div>
             </div>
-            <div id="other-stats-container" class="grid grid-rows-3 gap-4">
+            <div id="other-stats-container" class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-1 gap-4">
                 <div class="card text-center flex flex-col justify-center">
                     <div class="text-sm text-text-secondary mb-1">صافي الربح (USDT)</div>
                     <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto"></div>
@@ -233,9 +236,9 @@ def get_dashboard_html_v5():
 
         <div class="mb-4 border-b border-border-color">
             <nav class="flex space-x-4 -mb-px" aria-label="Tabs">
-                <button onclick="showTab('signals')" class="tab-btn active text-white border-b-2 border-accent-blue py-3 px-4 font-semibold">الصفقات</button>
-                <button onclick="showTab('notifications')" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الإشعارات</button>
-                <button onclick="showTab('rejections')" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الصفقات المرفوضة</button>
+                <button onclick="showTab('signals', this)" class="tab-btn active text-white border-b-2 py-3 px-4 font-semibold">الصفقات</button>
+                <button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الإشعارات</button>
+                <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الصفقات المرفوضة</button>
             </nav>
         </div>
 
@@ -264,15 +267,15 @@ function formatNumber(num, digits = 2) {
     return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-function showTab(tabName) {
+function showTab(tabName, element) {
     document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
     document.getElementById(`${tabName}-tab`).classList.remove('hidden');
     document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('text-white', 'border-accent-blue', 'font-semibold');
-        btn.classList.add('text-text-secondary');
+        btn.classList.remove('active', 'text-white', 'border-accent-blue', 'font-semibold');
+        btn.classList.add('text-text-secondary', 'border-transparent');
     });
-    event.target.classList.add('text-white', 'border-accent-blue', 'font-semibold');
-    event.target.classList.remove('text-text-secondary');
+    element.classList.add('active', 'text-white', 'border-accent-blue', 'font-semibold');
+    element.classList.remove('text-text-secondary', 'border-transparent');
 }
 
 async function apiFetch(url) {
@@ -363,10 +366,21 @@ function updateStats() {
 function updateProfitChart() {
     apiFetch('/api/profit_curve').then(data => {
         const chartCard = document.getElementById('profit-chart-card');
+        const canvas = document.getElementById('profitChart');
         if (!data) { chartCard.innerHTML += '<p>فشل تحميل بيانات الرسم البياني.</p>'; return; }
-        if (data.length <= 1) { chartCard.querySelector('canvas').style.display = 'none'; chartCard.innerHTML += '<p class="text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض الرسم البياني.</p>'; return; }
+        if (data.length <= 1) { 
+            canvas.style.display = 'none'; 
+            if (!chartCard.querySelector('.no-data-msg')) {
+                chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض الرسم البياني.</p>');
+            }
+            return;
+        }
+        
+        canvas.style.display = 'block';
+        const noDataMsg = chartCard.querySelector('.no-data-msg');
+        if (noDataMsg) noDataMsg.remove();
 
-        const ctx = document.getElementById('profitChart').getContext('2d');
+        const ctx = canvas.getContext('2d');
         const labels = data.map((d, i) => `صفقة ${i}`);
         const chartData = data.map(d => d.profit_range);
         
@@ -698,8 +712,6 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
-# ... (Rest of the bot logic: TradingStrategy, loops, etc. remains the same)
-# The core logic of the bot is unchanged. We only modify the Flask API part.
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
