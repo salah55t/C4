@@ -139,18 +139,395 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دوال HTML للوحة التحكم (نسخة V8) ----------------------
-def get_dashboard_html_v8():
+# ---------------------- دالة HTML للوحة التحكم (تم الإصلاح) ----------------------
+def get_dashboard_html():
     """
-    لوحة تحكم V8 المحسنة.
+    لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال) وتصميم متجاوب.
     """
-    # The HTML content from c4.py can be copied here.
-    # For brevity, I'll use a placeholder.
-    return get_dashboard_html_v7() # Re-using the same HTML as it's robust.
+    return """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>لوحة تحكم بوت التداول V8</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #111827; --bg-card: #1F2937; --border-color: #374151;
+            --text-primary: #F9FAFB; --text-secondary: #9CA3AF;
+            --accent-blue: #3B82F6; --accent-green: #22C55E; --accent-red: #EF4444; --accent-yellow: #EAB308;
+        }
+        body { font-family: 'Cairo', sans-serif; background-color: var(--bg-dark); color: var(--text-primary); }
+        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.75rem; transition: all 0.3s ease-in-out; padding: 1rem; }
+        .card:hover { transform: translateY(-4px); box-shadow: 0 8px 25px rgba(0,0,0,0.2); border-color: var(--accent-blue); }
+        .skeleton { animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; background-color: #374151; border-radius: 0.5rem; }
+        @keyframes pulse { 50% { opacity: .5; } }
+        .progress-bar-container { position: relative; width: 100%; height: 1.25rem; background-color: #374151; border-radius: 0.5rem; overflow: hidden; display: flex; align-items: center; }
+        .progress-bar { height: 100%; transition: width 0.5s ease-in-out; }
+        .progress-point { position: absolute; top: 50%; transform: translateY(-50%); width: 8px; height: 8px; border-radius: 50%; border: 2px solid white; }
+        .entry-point { background-color: var(--accent-blue); }
+        .current-point { background-color: var(--accent-yellow); }
+        .progress-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); padding: 0 2px; margin-top: 2px; }
+        #needle { transition: transform 1s cubic-bezier(0.68, -0.55, 0.27, 1.55); }
+        .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--text-primary); }
+    </style>
+</head>
+<body class="p-4 md:p-6">
+    <div class="container mx-auto max-w-7xl">
+        <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
+            <h1 class="text-3xl md:text-4xl font-black text-white">لوحة تحكم التداول</h1>
+            <div id="connection-status" class="flex items-center gap-2 text-sm">
+                <div id="db-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">DB</span>
+                <div id="api-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">API</span>
+            </div>
+        </header>
 
-# Placeholder for the actual HTML function from the original file
-get_dashboard_html_v7 = get_dashboard_html_v8
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            <div class="card lg:col-span-2">
+                <h3 class="font-bold mb-3 text-lg">اتجاه السوق (BTC)</h3>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">الاتجاه العام</h4>
+                        <div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار 15 دقيقة</h4>
+                        <div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-15m-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار ساعة</h4>
+                        <div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-1h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار 4 ساعات</h4>
+                        <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-4h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card flex flex-col justify-center items-center">
+                 <h3 class="font-bold mb-2 text-lg">مؤشر الخوف والطمع</h3>
+                 <div id="fear-greed-gauge" class="relative w-full max-w-[180px] aspect-square"></div>
+                 <div id="fear-greed-value" class="text-3xl font-bold mt-[-25px] skeleton h-10 w-1/2"></div>
+                 <div id="fear-greed-text" class="text-md text-text-secondary skeleton h-6 w-3/4 mt-1"></div>
+            </div>
+            <div class="card flex flex-col justify-center items-center text-center">
+                <h3 class="font-bold text-text-secondary text-lg">صفقات مفتوحة</h3>
+                <div id="open-trades-value" class="text-5xl font-black text-accent-blue mt-2 skeleton h-12 w-1/2"></div>
+            </div>
+        </section>
 
+        <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div id="profit-chart-card" class="card lg:col-span-2">
+                <h3 class="font-bold mb-3">أداء الصفقات (الربح التراكمي %)</h3>
+                <div class="relative h-80 md:h-96">
+                    <canvas id="profitChart"></canvas>
+                </div>
+            </div>
+            <div id="other-stats-container" class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-1 gap-4">
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">صافي الربح (USDT)</div>
+                    <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto"></div>
+                </div>
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
+                    <div id="win-rate" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                </div>
+                <div class="card text-center flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
+                    <div id="profit-factor" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                </div>
+            </div>
+        </section>
+
+        <div class="mb-4 border-b border-border-color">
+            <nav class="flex space-x-4 -mb-px" aria-label="Tabs">
+                <button onclick="showTab('signals', this)" class="tab-btn active text-white border-b-2 py-3 px-4 font-semibold">الصفقات</button>
+                <button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الإشعارات</button>
+                <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الصفقات المرفوضة</button>
+            </nav>
+        </div>
+
+        <main>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[35%]">التقدم نحو الهدف</th><th class="p-4 font-semibold">الدخول / الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
+            <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
+        </main>
+    </div>
+
+<script>
+let profitChartInstance;
+const REGIME_STYLES = {
+    "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
+    "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
+    "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
+    "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" }
+};
+const TF_STATUS_STYLES = {
+    "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" }, "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" },
+    "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" }, "Uncertain": { text: "غير واضح", icon: "?", color: "text-text-secondary" }
+};
+
+function formatNumber(num, digits = 2) {
+    if (num === null || num === undefined || isNaN(num)) return 'N/A';
+    return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function showTab(tabName, element) {
+    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+    document.getElementById(`${tabName}-tab`).classList.remove('hidden');
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active', 'text-white', 'border-accent-blue', 'font-semibold');
+        btn.classList.add('text-text-secondary', 'border-transparent');
+    });
+    element.classList.add('active', 'text-white', 'border-accent-blue', 'font-semibold');
+    element.classList.remove('text-text-secondary', 'border-transparent');
+}
+
+async function apiFetch(url) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) { console.error(`API Error ${response.status}`); return null; }
+        return await response.json();
+    } catch (error) { console.error(`Fetch error for ${url}:`, error); return null; }
+}
+
+function getFngColor(value) {
+    if (value < 25) return '#EF4444'; if (value < 45) return '#F97316';
+    if (value < 55) return '#EAB308'; if (value < 75) return '#84CC16';
+    return '#22C55E';
+}
+
+function renderFearGreedGauge(value, classification) {
+    const container = document.getElementById('fear-greed-gauge');
+    const valueEl = document.getElementById('fear-greed-value');
+    const textEl = document.getElementById('fear-greed-text');
+    [valueEl, textEl].forEach(el => el.classList.remove('skeleton', 'h-10', 'w-1/2', 'h-6', 'w-3/4'));
+
+    if (value === -1) {
+        container.innerHTML = `<div class="text-center text-text-secondary">خطأ</div>`;
+        valueEl.textContent = 'N/A'; textEl.textContent = 'فشل التحميل';
+        return;
+    }
+    valueEl.textContent = value; textEl.textContent = classification;
+    const angle = -90 + (value / 100) * 180;
+    const color = getFngColor(value);
+    valueEl.style.color = color;
+    container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#EF4444"/><stop offset="50%" stop-color="#EAB308"/><stop offset="100%" stop-color="#22C55E"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`;
+}
+
+function updateMarketStatus() {
+    apiFetch('/api/market_status').then(data => {
+        if (!data) return;
+        document.getElementById('db-status-light').className = `w-3 h-3 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        document.getElementById('api-status-light').className = `w-3 h-3 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        
+        const state = data.market_state;
+        const overallRegime = state.overall_regime || "UNCERTAIN";
+        const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
+        const overallDiv = document.getElementById('overall-regime');
+        overallDiv.textContent = regimeStyle.text;
+        overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
+        overallDiv.classList.remove('skeleton', 'h-8', 'w-3/4', 'mx-auto', 'mt-1');
+
+        ['15m', '1h', '4h'].forEach(tf => {
+            const tfData = state.details[tf];
+            const statusDiv = document.getElementById(`tf-${tf}-status`);
+            const detailsDiv = document.getElementById(`tf-${tf}-details`);
+            [statusDiv, detailsDiv].forEach(el => el.classList.remove('skeleton', 'h-7', 'w-2/3', 'h-4', 'w-1/2', 'mx-auto', 'mt-1'));
+            if (tfData) {
+                const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
+                statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
+                detailsDiv.textContent = `RSI: ${formatNumber(tfData.rsi, 1)} | ADX: ${formatNumber(tfData.adx, 1)}`;
+            } else {
+                statusDiv.textContent = 'N/A'; detailsDiv.textContent = '';
+            }
+        });
+        renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
+    });
+}
+
+function updateStats() {
+    apiFetch('/api/stats').then(data => {
+        if (!data) return;
+        const fields = {
+            'open-trades-value': data.open_trades_count,
+            'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
+            'win-rate': `${formatNumber(data.win_rate)}%`,
+            'profit-factor': formatNumber(data.profit_factor)
+        };
+        for (const [id, value] of Object.entries(fields)) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+                el.classList.remove('skeleton', 'h-12', 'h-8', 'w-1/2', 'w-3/4', 'mx-auto');
+                if (id === 'net-profit-usdt') {
+                    el.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
+                }
+            }
+        }
+    });
+}
+
+function updateProfitChart() {
+    apiFetch('/api/profit_curve').then(data => {
+        const chartCard = document.getElementById('profit-chart-card');
+        const canvas = document.getElementById('profitChart');
+        if (!data) { chartCard.innerHTML += '<p>فشل تحميل بيانات الرسم البياني.</p>'; return; }
+        if (data.length <= 1) { 
+            canvas.style.display = 'none'; 
+            if (!chartCard.querySelector('.no-data-msg')) {
+                chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض الرسم البياني.</p>');
+            }
+            return;
+        }
+        
+        canvas.style.display = 'block';
+        const noDataMsg = chartCard.querySelector('.no-data-msg');
+        if (noDataMsg) noDataMsg.remove();
+
+        const ctx = canvas.getContext('2d');
+        const labels = data.map((d, i) => `صفقة ${i}`);
+        const chartData = data.map(d => d.profit_range);
+        
+        const config = {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'الربح/الخسارة للصفقة',
+                    data: chartData,
+                    backgroundColor: (ctx) => {
+                        if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
+                        const [start, end] = ctx.raw;
+                        return end > start ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+                    },
+                    borderColor: (ctx) => {
+                        if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
+                        const [start, end] = ctx.raw;
+                        return end > start ? 'var(--accent-green)' : 'var(--accent-red)';
+                    },
+                    borderWidth: 1,
+                    barPercentage: 0.8,
+                    categoryPercentage: 0.9
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        ticks: { display: false },
+                        grid: { display: false }
+                    },
+                    y: {
+                        beginAtZero: false,
+                        ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' },
+                        grid: { color: '#37415180' }
+                    }
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        backgroundColor: 'var(--bg-card)',
+                        titleFont: { weight: 'bold' },
+                        bodyFont: { family: 'Cairo' },
+                        callbacks: {
+                            label: (ctx) => {
+                                const tradeData = data[ctx.dataIndex];
+                                const profit = tradeData.profit_change;
+                                const cumulative = tradeData.profit_range[1];
+                                return [
+                                    `ربح الصفقة: ${formatNumber(profit)}%`,
+                                    `الربح التراكمي: ${formatNumber(cumulative)}%`
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        if (profitChartInstance) {
+            profitChartInstance.data.labels = labels;
+            profitChartInstance.data.datasets[0].data = chartData;
+            profitChartInstance.update('none');
+        } else {
+            profitChartInstance = new Chart(ctx, config);
+        }
+    });
+}
+
+function renderProgressBar(signal) {
+    const { entry_price, stop_loss, target_price, current_price } = signal;
+    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null)) return '<span>لا تتوفر بيانات</span>';
+    const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat);
+    const totalDist = tp - sl;
+    if (totalDist <= 0) return '<span>بيانات غير صالحة</span>';
+    const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
+    const entryPointPct = Math.max(0, Math.min(100, ((entry - sl) / totalDist) * 100));
+    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div><div class="progress-point entry-point" style="left: ${entryPointPct}%" title="الدخول: ${entry.toFixed(4)}"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
+}
+
+function updateSignals() {
+    apiFetch('/api/signals').then(data => {
+        const tableBody = document.getElementById('signals-table');
+        if (!data) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
+        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
+        tableBody.innerHTML = data.map(signal => {
+            const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
+            return `<tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
+                    <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
+                    <td class="p-4 font-bold ${signal.status === 'open' ? 'text-yellow-400' : 'text-gray-400'}">${signal.status}</td>
+                    <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
+                    <td class="p-4">${signal.status === 'open' ? renderProgressBar(signal) : '-'}</td>
+                    <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
+                    <td class="p-4">${signal.status === 'open' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                </tr>`;
+        }).join('');
+    });
+}
+
+function updateList(endpoint, listId, formatter) {
+    apiFetch(endpoint).then(data => {
+        if (!data) return;
+        document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="p-4 text-center text-text-secondary">لا توجد بيانات.</div>`;
+    });
+}
+
+function manualCloseSignal(signalId) {
+    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
+        fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
+            alert(data.message || data.error);
+            refreshData();
+        });
+    }
+}
+
+function refreshData() {
+    updateMarketStatus();
+    updateStats();
+    updateProfitChart();
+    updateSignals();
+    updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString('ar-EG')}] ${n.message}</div>`);
+    updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString('ar-EG')}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
+}
+
+setInterval(refreshData, 8000);
+window.onload = refreshData;
+</script>
+</body>
+</html>
+    """
 
 # ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -758,7 +1135,7 @@ def main_loop():
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V8) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (تم الإصلاح) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -776,7 +1153,8 @@ def check_api_status() -> bool:
     except Exception: return False
 
 @app.route('/')
-def home(): return render_template_string(get_dashboard_html_v8())
+def home():
+    return render_template_string(get_dashboard_html())
 
 @app.route('/api/market_status')
 def get_market_status():
