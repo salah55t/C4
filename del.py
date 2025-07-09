@@ -7,22 +7,21 @@ from markupsafe import Markup
 
 # --- إعداد التطبيق والتسجيل ---
 app = Flask(__name__)
-app.secret_key = os.urandom(24) # مطلوب لاستخدام الرسائل الفورية (flash messages)
+# Render will set the SECRET_KEY environment variable
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
 
 # إعداد نظام التسجيل
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('DBCleanupWebApp')
 
 # --- تحميل متغيرات البيئة ---
-try:
-    DB_URL = config('DATABASE_URL')
-    logger.info("Successfully loaded DATABASE_URL.")
-except Exception as e:
-    logger.critical("❌ Critical Failure: Could not load 'DATABASE_URL'. Ensure a .env file exists.")
-    DB_URL = None
+# On Render, this will be loaded from Environment Variables
+DB_URL = os.environ.get('DATABASE_URL')
+if not DB_URL:
+    logger.critical("❌ Critical Failure: 'DATABASE_URL' environment variable not set.")
+
 
 # --- كود الواجهة (HTML & CSS) ---
-# تم دمج الواجهة هنا داخل متغير نصي متعدد الأسطر
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -38,16 +37,19 @@ HTML_TEMPLATE = """
             display: flex; 
             justify-content: center; 
             align-items: center; 
-            height: 100vh; 
-            margin: 0; 
+            min-height: 100vh; 
+            margin: 0;
+            padding: 1rem;
+            box-sizing: border-box;
         }
         .container { 
             background: #fff; 
-            padding: 2rem 3rem; 
+            padding: 2rem; 
             border-radius: 10px; 
             box-shadow: 0 4px 20px rgba(0,0,0,0.1); 
             text-align: center; 
-            max-width: 600px; 
+            max-width: 600px;
+            width: 100%;
         }
         .warning-box { 
             background-color: #fff3cd; 
@@ -69,7 +71,8 @@ HTML_TEMPLATE = """
             padding: 0.3rem 0.6rem; 
             border-radius: 5px; 
             font-weight: bold; 
-            color: #495057; 
+            color: #495057;
+            word-wrap: break-word;
         }
         form { 
             margin-top: 1.5rem; 
@@ -182,7 +185,6 @@ def truncate_tables():
 def render_page_with_messages():
     """تجهيز كود HTML لعرض الرسائل."""
     messages_html = ""
-    # استرجاع الرسائل التي تم إرسالها عبر flash
     flashed_messages = get_flashed_messages(with_categories=True)
     if flashed_messages:
         messages_html += '<ul class="messages">'
@@ -190,7 +192,6 @@ def render_page_with_messages():
             messages_html += f'<li class="{category}">{message}</li>'
         messages_html += '</ul>'
     
-    # استبدال العنصر النائب في القالب بالرسائل الفعلية
     return Markup(HTML_TEMPLATE.replace('{{ messages_placeholder }}', messages_html))
 
 # --- مسارات (Routes) تطبيق الويب ---
@@ -214,7 +215,3 @@ def clear_data():
 
     return redirect(url_for('index'))
 
-if __name__ == '__main__':
-    # للتشغيل المحلي، استخدم هذا الأمر: python app_single_file.py
-    # للنشر، استخدم Gunicorn: gunicorn --workers 3 --bind 0.0.0.0:8000 app_single_file:app
-    app.run(debug=True, port=5001)
