@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v13.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v14.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV13_WaterfallChart')
+logger = logging.getLogger('CryptoBotV14_15mFilter')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -131,10 +131,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V6 - متجاوبة) ----------------------
-def get_dashboard_html_v5():
+# ---------------------- دوال HTML للوحة التحكم (نسخة محسنة V7 - مع فريم 15د) ----------------------
+def get_dashboard_html_v7():
     """
-    لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال) وتصميم متجاوب.
+    لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال) وتصميم متجاوب، مع إضافة فريم 15 دقيقة.
     """
     return """
 <!DOCTYPE html>
@@ -142,7 +142,7 @@ def get_dashboard_html_v5():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V6</title>
+    <title>لوحة تحكم بوت التداول V7</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -182,20 +182,25 @@ def get_dashboard_html_v5():
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             <div class="card lg:col-span-2">
                 <h3 class="font-bold mb-3 text-lg">اتجاه السوق (BTC)</h3>
-                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
                     <div>
                         <h4 class="text-sm font-semibold text-text-secondary">الاتجاه العام</h4>
                         <div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
                     </div>
                     <div>
-                        <h4 class="text-sm font-semibold text-text-secondary">إطار 4 ساعات</h4>
-                        <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                        <div id="tf-4h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار 15 دقيقة</h4>
+                        <div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-15m-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
                     </div>
                     <div>
                         <h4 class="text-sm font-semibold text-text-secondary">إطار ساعة</h4>
                         <div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
                         <div id="tf-1h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
+                    </div>
+                    <div>
+                        <h4 class="text-sm font-semibold text-text-secondary">إطار 4 ساعات</h4>
+                        <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
+                        <div id="tf-4h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
                     </div>
                 </div>
             </div>
@@ -324,7 +329,7 @@ function updateMarketStatus() {
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
         overallDiv.classList.remove('skeleton', 'h-8', 'w-3/4', 'mx-auto', 'mt-1');
 
-        ['4h', '1h'].forEach(tf => {
+        ['15m', '1h', '4h'].forEach(tf => {
             const tfData = state.details[tf];
             const statusDiv = document.getElementById(`tf-${tf}-status`);
             const detailsDiv = document.getElementById(`tf-${tf}-details`);
@@ -678,7 +683,6 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         if last_row['adx'] > 20:
             if ema_fast > ema_slow and last_row['rsi'] > 50: trend = "Uptrend"
             elif ema_fast < ema_slow and last_row['rsi'] < 50: trend = "Downtrend"
-        # FIX: Convert numpy types to native Python types for JSON serialization
         return {"trend": trend, "rsi": float(last_row['rsi']), "adx": float(last_row['adx'])}
     except Exception as e:
         logger.error(f"Error in get_trend_for_timeframe: {e}")
@@ -690,25 +694,33 @@ def determine_market_state():
         if time.time() - last_market_state_check < 300: return
     logger.info("🧠 [Market State] Updating market state...")
     try:
+        df_15m = fetch_historical_data(BTC_SYMBOL, '15m', 2)
         df_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
         df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
+        
+        state_15m = get_trend_for_timeframe(df_15m)
         state_1h = get_trend_for_timeframe(df_1h)
         state_4h = get_trend_for_timeframe(df_4h)
-        trends = [state_1h['trend'], state_4h['trend']]
-        uptrends = trends.count("Uptrend"); downtrends = trends.count("Downtrend")
+        
+        trends = [state_15m['trend'], state_1h['trend'], state_4h['trend']]
+        uptrends = trends.count("Uptrend")
+        downtrends = trends.count("Downtrend")
+        
         overall_regime = "RANGING"
-        if uptrends == 2: overall_regime = "STRONG UPTREND"
-        elif uptrends == 1 and downtrends == 0: overall_regime = "UPTREND"
-        elif downtrends == 2: overall_regime = "STRONG DOWNTREND"
-        elif downtrends == 1 and uptrends == 0: overall_regime = "DOWNTREND"
+        if uptrends == 3: overall_regime = "STRONG UPTREND"
+        elif uptrends >= 2 and downtrends == 0: overall_regime = "UPTREND"
+        elif downtrends == 3: overall_regime = "STRONG DOWNTREND"
+        elif downtrends >= 2 and uptrends == 0: overall_regime = "DOWNTREND"
         elif "Uncertain" in trends: overall_regime = "UNCERTAIN"
+        
         with market_state_lock:
             current_market_state = {
-                "overall_regime": overall_regime, "details": {"1h": state_1h, "4h": state_4h},
+                "overall_regime": overall_regime,
+                "details": {"15m": state_15m, "1h": state_1h, "4h": state_4h},
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] New state: {overall_regime}")
+        logger.info(f"✅ [Market State] New state: {overall_regime} (15m: {state_15m['trend']}, 1h: {state_1h['trend']}, 4h: {state_4h['trend']})")
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
@@ -1017,7 +1029,7 @@ def main_loop():
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V5) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (محسنة V7) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1035,7 +1047,7 @@ def check_api_status() -> bool:
     except Exception: return False
 
 @app.route('/')
-def home(): return render_template_string(get_dashboard_html_v5())
+def home(): return render_template_string(get_dashboard_html_v7())
 
 @app.route('/api/market_status')
 def get_market_status():
@@ -1079,7 +1091,6 @@ def get_profit_curve():
         curve_data = []
         cumulative_profit = 0.0
         
-        # Add a starting point
         start_time = (trades[0]['closed_at'] - timedelta(minutes=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
         curve_data.append({"timestamp": start_time, "profit_range": [0.0, 0.0], "profit_change": 0.0})
 
@@ -1182,7 +1193,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info(f"🚀 Starting Trading Bot - Waterfall Chart Version...")
+    logger.info(f"🚀 Starting Trading Bot - Version with 15m Filter...")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
