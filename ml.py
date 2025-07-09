@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v7.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v8.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V7_Ichimoku')
+logger = logging.getLogger('MLTrainer_V8_Momentum')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,7 +51,8 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V7_With_Ichimoku' # <-- تم تحديث اسم النموذج
+# تم تحديث اسم النموذج ليعكس الميزات الجديدة
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
@@ -60,21 +61,16 @@ BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
 ADX_PERIOD: int = 14
-BBANDS_PERIOD: int = 20
 RSI_PERIOD: int = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
 ATR_PERIOD: int = 14
 EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
-STOCH_RSI_PERIOD: int = 14
-STOCH_K: int = 3
-STOCH_D: int = 3
 REL_VOL_PERIOD: int = 30
-RSI_OVERBOUGHT: int = 70
-RSI_OVERSOLD: int = 30
-STOCH_RSI_OVERBOUGHT: int = 80
-STOCH_RSI_OVERSOLD: int = 20
+# New Momentum and Velocity Parameters
+MOMENTUM_PERIOD: int = 12
+EMA_SLOPE_PERIOD: int = 5
+
 
 # Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
@@ -183,166 +179,15 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
-def fetch_sr_levels(symbol: str, db_conn: psycopg2.extensions.connection) -> pd.DataFrame:
-    logger.info(f"🔍 [S/R Fetch] Fetching S/R levels for {symbol} from database...")
-    query = "SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s"
-    try:
-        with db_conn.cursor() as cur:
-            cur.execute(query, (symbol,))
-            levels = cur.fetchall()
-            if not levels:
-                logger.warning(f"⚠️ [S/R Fetch] No S/R levels found for {symbol}.")
-                return pd.DataFrame()
-            df_levels = pd.DataFrame(levels)
-            logger.info(f"✅ [S/R Fetch] Found {len(df_levels)} levels for {symbol}.")
-            return df_levels
-    except Exception as e:
-        logger.error(f"❌ [S/R Fetch] Could not fetch S/R levels for {symbol}: {e}")
-        db_conn.rollback()
-        return pd.DataFrame()
-
-# --- ✨ دالة جديدة لجلب بيانات إيشيموكو ✨ ---
-def fetch_ichimoku_features(symbol: str, timeframe: str, db_conn: psycopg2.extensions.connection) -> pd.DataFrame:
-    """
-    Fetches pre-calculated Ichimoku features for a given symbol from the database.
-    """
-    logger.info(f"🔍 [Ichimoku Fetch] Fetching Ichimoku features for {symbol} on {timeframe}...")
-    query = """
-        SELECT timestamp, tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b, chikou_span
-        FROM ichimoku_features
-        WHERE symbol = %s AND timeframe = %s
-        ORDER BY timestamp;
-    """
-    try:
-        # Use a non-dictionary cursor for this specific query to simplify DataFrame creation
-        with db_conn.cursor() as cur:
-            cur.execute(query, (symbol, timeframe))
-            features = cur.fetchall()
-            if not features:
-                logger.warning(f"⚠️ [Ichimoku Fetch] No Ichimoku features found for {symbol}.")
-                return pd.DataFrame()
-            
-            # Fetch column names from cursor description
-            colnames = [desc[0] for desc in cur.description]
-            df_ichimoku = pd.DataFrame(features, columns=colnames)
-            
-            # Convert timestamp and set as index
-            df_ichimoku['timestamp'] = pd.to_datetime(df_ichimoku['timestamp'], utc=True)
-            df_ichimoku.set_index('timestamp', inplace=True)
-            
-            logger.info(f"✅ [Ichimoku Fetch] Found {len(df_ichimoku)} Ichimoku records for {symbol}.")
-            return df_ichimoku
-    except Exception as e:
-        logger.error(f"❌ [Ichimoku Fetch] Could not fetch Ichimoku features for {symbol}: {e}")
-        if db_conn: db_conn.rollback()
-        return pd.DataFrame()
-
-def calculate_sr_features(df: pd.DataFrame, sr_levels_df: pd.DataFrame) -> pd.DataFrame:
-    if sr_levels_df.empty:
-        df['dist_to_support'] = 0.0
-        df['dist_to_resistance'] = 0.0
-        df['score_of_support'] = 0.0
-        df['score_of_resistance'] = 0.0
-        return df
-
-    supports = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence')]['level_price'].sort_values().to_numpy()
-    resistances = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence')]['level_price'].sort_values().to_numpy()
-    
-    # Create dictionaries for scores to handle potential duplicate level_price values
-    support_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('support|poc|confluence')].set_index('level_price')['score'].to_dict()
-    resistance_scores = sr_levels_df[sr_levels_df['level_type'].str.contains('resistance|poc|confluence')].set_index('level_price')['score'].to_dict()
-
-
-    def get_sr_info(price):
-        dist_support, score_support, dist_resistance, score_resistance = 1.0, 0.0, 1.0, 0.0
-
-        if supports.size > 0:
-            idx = np.searchsorted(supports, price, side='right') - 1
-            if idx >= 0:
-                nearest_support_price = supports[idx]
-                dist_support = (price - nearest_support_price) / price if price > 0 else 0
-                score_support = support_scores.get(nearest_support_price, 0)
-
-        if resistances.size > 0:
-            idx = np.searchsorted(resistances, price, side='left')
-            if idx < len(resistances):
-                nearest_resistance_price = resistances[idx]
-                dist_resistance = (nearest_resistance_price - price) / price if price > 0 else 0
-                score_resistance = resistance_scores.get(nearest_resistance_price, 0)
-        
-        return dist_support, score_support, dist_resistance, score_resistance
-
-    results = df['close'].apply(get_sr_info)
-    df[['dist_to_support', 'score_of_support', 'dist_to_resistance', 'score_of_resistance']] = pd.DataFrame(results.tolist(), index=df.index)
-
-    return df
-
-# --- ✨ دالة جديدة لهندسة ميزات إيشيموكو ✨ ---
-def calculate_ichimoku_based_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Engineers features from raw Ichimoku data. Assumes Ichimoku columns are already in the df.
-    """
-    df['price_vs_tenkan'] = (df['close'] - df['tenkan_sen']) / df['tenkan_sen']
-    df['price_vs_kijun'] = (df['close'] - df['kijun_sen']) / df['kijun_sen']
-    df['tenkan_vs_kijun'] = (df['tenkan_sen'] - df['kijun_sen']) / df['kijun_sen']
-
-    # Kumo (Cloud) features
-    df['price_vs_kumo_a'] = (df['close'] - df['senkou_span_a']) / df['senkou_span_a']
-    df['price_vs_kumo_b'] = (df['close'] - df['senkou_span_b']) / df['senkou_span_b']
-    df['kumo_thickness'] = (df['senkou_span_a'] - df['senkou_span_b']).abs() / df['close']
-
-    # Price position relative to Kumo
-    kumo_high = df[['senkou_span_a', 'senkou_span_b']].max(axis=1)
-    kumo_low = df[['senkou_span_a', 'senkou_span_b']].min(axis=1)
-    df['price_above_kumo'] = (df['close'] > kumo_high).astype(int)
-    df['price_below_kumo'] = (df['close'] < kumo_low).astype(int)
-    df['price_in_kumo'] = ((df['close'] >= kumo_low) & (df['close'] <= kumo_high)).astype(int)
-
-    # Chikou Span features
-    df['chikou_above_kumo'] = (df['chikou_span'] > kumo_high).astype(int)
-    df['chikou_below_kumo'] = (df['chikou_span'] < kumo_low).astype(int)
-
-    # Tenkan/Kijun Cross
-    df['tenkan_kijun_cross'] = 0
-    cross_up = (df['tenkan_sen'].shift(1) < df['kijun_sen'].shift(1)) & (df['tenkan_sen'] > df['kijun_sen'])
-    cross_down = (df['tenkan_sen'].shift(1) > df['kijun_sen'].shift(1)) & (df['tenkan_sen'] < df['kijun_sen'])
-    df.loc[cross_up, 'tenkan_kijun_cross'] = 1
-    df.loc[cross_down, 'tenkan_kijun_cross'] = -1
-
-    return df
-
-def calculate_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
-    df_patterns = df.copy()
-    op, hi, lo, cl = df_patterns['open'], df_patterns['high'], df_patterns['low'], df_patterns['close']
-    body = abs(cl - op)
-    candle_range = hi - lo
-    candle_range[candle_range == 0] = 1e-9
-    upper_wick = hi - pd.concat([op, cl], axis=1).max(axis=1)
-    lower_wick = pd.concat([op, cl], axis=1).min(axis=1) - lo
-    
-    df_patterns['candlestick_pattern'] = 0
-    
-    is_bullish_marubozu = (cl > op) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-    is_bearish_marubozu = (op > cl) & (body / candle_range > 0.95) & (upper_wick < body * 0.1) & (lower_wick < body * 0.1)
-    is_bullish_engulfing = (cl.shift(1) < op.shift(1)) & (cl > op) & (cl >= op.shift(1)) & (op <= cl.shift(1)) & (body > body.shift(1))
-    is_bearish_engulfing = (cl.shift(1) > op.shift(1)) & (cl < op) & (op >= cl.shift(1)) & (cl <= op.shift(1)) & (body > body.shift(1))
-    is_hammer = (body > candle_range * 0.1) & (lower_wick >= body * 2) & (upper_wick < body)
-    is_shooting_star = (body > candle_range * 0.1) & (upper_wick >= body * 2) & (lower_wick < body)
-    is_doji = (body / candle_range) < 0.05
-
-    df_patterns.loc[is_doji, 'candlestick_pattern'] = 3
-    df_patterns.loc[is_hammer, 'candlestick_pattern'] = 2
-    df_patterns.loc[is_shooting_star, 'candlestick_pattern'] = -2
-    df_patterns.loc[is_bullish_engulfing, 'candlestick_pattern'] = 1
-    df_patterns.loc[is_bearish_engulfing, 'candlestick_pattern'] = -1
-    df_patterns.loc[is_bullish_marubozu, 'candlestick_pattern'] = 4
-    df_patterns.loc[is_bearish_marubozu, 'candlestick_pattern'] = -4
-
-    return df_patterns
 
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Function to calculate all technical analysis features for the model.
+    Includes new features: Momentum (ROC), Velocity (ROC Acceleration), and Market Direction (EMA Slope).
+    """
     df_calc = df.copy()
 
+    # --- Existing Features ---
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -353,8 +198,8 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr']
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
     
@@ -362,47 +207,30 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-
-    ema_fast = df_calc['close'].ewm(span=MACD_FAST, adjust=False).mean()
-    ema_slow = df_calc['close'].ewm(span=MACD_SLOW, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
-    df_calc['macd_hist'] = macd_line - signal_line
-    df_calc['macd_cross'] = 0
-    df_calc.loc[(df_calc['macd_hist'].shift(1) < 0) & (df_calc['macd_hist'] >= 0), 'macd_cross'] = 1
-    df_calc.loc[(df_calc['macd_hist'].shift(1) > 0) & (df_calc['macd_hist'] <= 0), 'macd_cross'] = -1
-
-    sma = df_calc['close'].rolling(window=BBANDS_PERIOD).mean()
-    std_dev = df_calc['close'].rolling(window=BBANDS_PERIOD).std()
-    upper_band = sma + (std_dev * 2)
-    lower_band = sma - (std_dev * 2)
-    df_calc['bb_width'] = (upper_band - lower_band) / (sma + 1e-9)
-
-    rsi = df_calc['rsi']
-    min_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).min()
-    max_rsi = rsi.rolling(window=STOCH_RSI_PERIOD).max()
-    stoch_rsi_val = (rsi - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_K).mean() * 100
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(window=STOCH_D).mean()
-
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-
-    df_calc['market_condition'] = 0 
-    df_calc.loc[(df_calc['rsi'] > RSI_OVERBOUGHT) | (df_calc['stoch_rsi_k'] > STOCH_RSI_OVERBOUGHT), 'market_condition'] = 1
-    df_calc.loc[(df_calc['rsi'] < RSI_OVERSOLD) | (df_calc['stoch_rsi_k'] < STOCH_RSI_OVERSOLD), 'market_condition'] = -1
-
-    ema_fast_trend = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    ema_slow_trend = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-    df_calc['price_vs_ema50'] = (df_calc['close'] / ema_fast_trend) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / ema_slow_trend) - 1
-    df_calc['returns'] = df_calc['close'].pct_change()
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = merged_df['returns'].rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    df_calc['hour_of_day'] = df_calc.index.hour
     
-    df_calc = calculate_candlestick_patterns(df_calc)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    
+    # --- ✨ New Features: Momentum, Velocity, and Market Direction ---
+    
+    # 1. Momentum (Rate of Change)
+    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    
+    # 2. Velocity (Acceleration of Momentum)
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
+    
+    # 3. Market Direction (Short-term EMA Slope)
+    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+
+    df_calc['hour_of_day'] = df_calc.index.hour
 
     return df_calc.astype('float32', errors='ignore')
+
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     labels = pd.Series(0, index=prices.index)
@@ -420,29 +248,10 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
                 labels.iloc[i] = -1; break
     return labels
 
-# --- ✨ دالة إعداد البيانات المحدثة ✨ ---
-def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, sr_levels: pd.DataFrame, ichimoku_data: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df_15m, btc_df)
     
-    # --- Integration of S/R and Ichimoku ---
-    df_featured = calculate_sr_features(df_featured, sr_levels)
-    
-    # Define Ichimoku feature columns to handle cases where data is missing
-    ichi_cols = [
-        'price_vs_tenkan', 'price_vs_kijun', 'tenkan_vs_kijun', 'price_vs_kumo_a',
-        'price_vs_kumo_b', 'kumo_thickness', 'price_above_kumo', 'price_below_kumo',
-        'price_in_kumo', 'chikou_above_kumo', 'chikou_below_kumo', 'tenkan_kijun_cross'
-    ]
-
-    if not ichimoku_data.empty:
-        df_featured = df_featured.join(ichimoku_data, how='left')
-        df_featured = calculate_ichimoku_based_features(df_featured)
-    else:
-        # Add empty columns if no ichimoku data is found to avoid errors
-        for col in ichi_cols:
-            df_featured[col] = 0.0
-
     # --- MTF Features ---
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -458,20 +267,15 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     # --- Target Labeling ---
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # --- ✨ قائمة الميزات المحدثة ✨ ---
+    # --- ✨ Updated Feature List ---
     feature_columns = [
-        'rsi', 'macd_hist', 'atr', 'relative_volume', 'hour_of_day',
+        'rsi', 'adx', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
-        'stoch_rsi_k', 'stoch_rsi_d', 'macd_cross', 'market_condition',
-        'bb_width', 'adx', 'candlestick_pattern',
         'rsi_4h', 'price_vs_ema50_4h',
-        # S/R Features
-        'dist_to_support', 'dist_to_resistance',
-        'score_of_support', 'score_of_resistance',
-        # Ichimoku Features
-        'price_vs_tenkan', 'price_vs_kijun', 'tenkan_vs_kijun', 'price_vs_kumo_a',
-        'price_vs_kumo_b', 'kumo_thickness', 'price_above_kumo', 'price_below_kumo',
-        'price_in_kumo', 'chikou_above_kumo', 'chikou_below_kumo', 'tenkan_kijun_cross'
+        # New Features
+        f'roc_{MOMENTUM_PERIOD}', 
+        'roc_acceleration', 
+        f'ema_slope_{EMA_SLOPE_PERIOD}'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -602,7 +406,6 @@ def send_telegram_message(text: str):
     try: requests.post(url, json={'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'Markdown'}, timeout=10)
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- ✨ دالة التدريب الرئيسية المحدثة ✨ ---
 def run_training_job():
     logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
     init_db()
@@ -634,13 +437,8 @@ def run_training_job():
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
-            # Fetch S/R and Ichimoku data
-            sr_levels = fetch_sr_levels(symbol, conn)
-            ichimoku_features = fetch_ichimoku_features(symbol, SIGNAL_GENERATION_TIMEFRAME, conn)
-            
-            # Pass all data to the preparation function
-            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, sr_levels, ichimoku_features, symbol)
-            del df_15m, df_4h, sr_levels, ichimoku_features; gc.collect()
+            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
+            del df_15m, df_4h; gc.collect()
 
             if prepared_data is None:
                 failed_models += 1; continue
@@ -684,7 +482,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Ichimoku features) service is running and healthy.", 200
+    return "ML Trainer (with Momentum features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
