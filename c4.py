@@ -65,7 +65,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -276,7 +276,6 @@ const TF_STATUS_STYLES = {
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
-    if (num === Infinity) return '∞';
     return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
@@ -294,9 +293,19 @@ function showTab(tabName, element) {
 async function apiFetch(url) {
     try {
         const response = await fetch(url);
-        if (!response.ok) { console.error(`API Error ${response.status}`); return null; }
+        if (!response.ok) { 
+            console.error(`API Error ${response.status}`); 
+            try {
+                return await response.json(); // Try to get error message from body
+            } catch (e) {
+                return { error: `HTTP Error ${response.status}` };
+            }
+        }
         return await response.json();
-    } catch (error) { console.error(`Fetch error for ${url}:`, error); return null; }
+    } catch (error) { 
+        console.error(`Fetch error for ${url}:`, error); 
+        return { error: "Network or fetch error" };
+    }
 }
 
 function getFngColor(value) {
@@ -325,7 +334,7 @@ function renderFearGreedGauge(value, classification) {
 
 function updateMarketStatus() {
     apiFetch('/api/market_status').then(data => {
-        if (!data) return;
+        if (!data || data.error) return;
         document.getElementById('db-status-light').className = `w-3 h-3 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
         document.getElementById('api-status-light').className = `w-3 h-3 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
         
@@ -356,21 +365,28 @@ function updateMarketStatus() {
 
 function updateStats() {
     apiFetch('/api/stats').then(data => {
+        const stat_ids = ['open-trades-value', 'net-profit-usdt', 'win-rate', 'profit-factor'];
         if (!data || data.error) {
             console.error("Failed to fetch stats:", data ? data.error : "No data");
-            // Optionally indicate error on the UI
-            ['open-trades-value', 'net-profit-usdt', 'win-rate', 'profit-factor'].forEach(id => {
+            stat_ids.forEach(id => {
                 const el = document.getElementById(id);
-                if (el) el.textContent = 'Error';
+                if (el) {
+                    el.textContent = 'خطأ';
+                    el.classList.remove('skeleton');
+                }
             });
             return;
         }
+
+        const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor);
+
         const fields = {
-            'open-trades-value': data.open_trades_count,
+            'open-trades-value': formatNumber(data.open_trades_count, 0),
             'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
             'win-rate': `${formatNumber(data.win_rate)}%`,
-            'profit-factor': formatNumber(data.profit_factor)
+            'profit-factor': profitFactorDisplay
         };
+
         for (const [id, value] of Object.entries(fields)) {
             const el = document.getElementById(id);
             if (el) {
@@ -385,22 +401,25 @@ function updateStats() {
 }
 
 function updateProfitChart() {
+    const chartCard = document.getElementById('profit-chart-card');
+    const canvas = document.getElementById('profitChart');
+
     apiFetch('/api/profit_curve').then(data => {
-        const chartCard = document.getElementById('profit-chart-card');
-        const canvas = document.getElementById('profitChart');
-        if (!data) { chartCard.innerHTML += '<p>فشل تحميل بيانات الرسم البياني.</p>'; return; }
+        const existingMsg = chartCard.querySelector('.no-data-msg, .error-msg');
+        if(existingMsg) existingMsg.remove();
+
+        if (!data || data.error) { 
+            canvas.style.display = 'none'; 
+            chartCard.insertAdjacentHTML('beforeend', '<p class="error-msg text-center text-text-secondary mt-8">حدث خطأ أثناء تحميل بيانات الرسم البياني.</p>');
+            return; 
+        }
         if (data.length <= 1) { 
             canvas.style.display = 'none'; 
-            if (!chartCard.querySelector('.no-data-msg')) {
-                chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض الرسم البياني.</p>');
-            }
+            chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض الرسم البياني.</p>');
             return;
         }
         
         canvas.style.display = 'block';
-        const noDataMsg = chartCard.querySelector('.no-data-msg');
-        if (noDataMsg) noDataMsg.remove();
-
         const ctx = canvas.getContext('2d');
         const labels = data.map((d, i) => `صفقة ${i}`);
         const chartData = data.map(d => d.profit_range);
@@ -428,36 +447,22 @@ function updateProfitChart() {
                 }]
             },
             options: {
-                responsive: true,
-                maintainAspectRatio: false,
+                responsive: true, maintainAspectRatio: false,
                 scales: {
-                    x: {
-                        ticks: { display: false },
-                        grid: { display: false }
-                    },
-                    y: {
-                        beginAtZero: false,
-                        ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' },
-                        grid: { color: '#37415180' }
-                    }
+                    x: { ticks: { display: false }, grid: { display: false } },
+                    y: { beginAtZero: false, ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' }, grid: { color: '#37415180' } }
                 },
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        mode: 'index',
-                        intersect: false,
-                        backgroundColor: 'var(--bg-card)',
-                        titleFont: { weight: 'bold' },
-                        bodyFont: { family: 'Cairo' },
+                        mode: 'index', intersect: false, backgroundColor: 'var(--bg-card)',
+                        titleFont: { weight: 'bold' }, bodyFont: { family: 'Cairo' },
                         callbacks: {
                             label: (ctx) => {
                                 const tradeData = data[ctx.dataIndex];
                                 const profit = tradeData.profit_change;
                                 const cumulative = tradeData.profit_range[1];
-                                return [
-                                    `ربح الصفقة: ${formatNumber(profit)}%`,
-                                    `الربح التراكمي: ${formatNumber(cumulative)}%`
-                                ];
+                                return [`ربح الصفقة: ${formatNumber(profit)}%`, `الربح التراكمي: ${formatNumber(cumulative)}%`];
                             }
                         }
                     }
@@ -489,7 +494,7 @@ function renderProgressBar(signal) {
 function updateSignals() {
     apiFetch('/api/signals').then(data => {
         const tableBody = document.getElementById('signals-table');
-        if (!data) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
+        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
         if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
         tableBody.innerHTML = data.map(signal => {
             const pnlPct = signal.status === 'open' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
@@ -507,7 +512,7 @@ function updateSignals() {
 
 function updateList(endpoint, listId, formatter) {
     apiFetch(endpoint).then(data => {
-        if (!data) return;
+        if (!data || data.error) return;
         document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="p-4 text-center text-text-secondary">لا توجد بيانات.</div>`;
     });
 }
@@ -526,9 +531,8 @@ function refreshData() {
     updateStats();
     updateProfitChart();
     updateSignals();
-    // --- ✨ Date Format Fix ---
     const dateLocaleOptions = { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
-    const locale = 'fr-CA'; // Using 'fr-CA' for YYYY-MM-DD format, which is unambiguous and uses standard numerals.
+    const locale = 'fr-CA';
     updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString(locale, dateLocaleOptions)}] ${n.message}</div>`);
     updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
@@ -1184,67 +1188,54 @@ def get_market_status():
 
 @app.route('/api/stats')
 def get_stats():
-    """
-    دالة محسّنة وموثوقة لحساب وعرض إحصائيات التداول.
-    تقوم بحساب جميع المقاييس مباشرة من قاعدة البيانات لضمان الدقة.
-    """
     if not check_db_connection() or not conn:
         logger.error("❌ [API Stats] DB connection check failed.")
         return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            # جلب جميع البيانات اللازمة في استعلام واحد
             cur.execute("SELECT status, profit_percentage FROM signals;")
             all_signals = cur.fetchall()
 
-        # --- أصبحت الحسابات الآن مكتفية ذاتيًا ---
-
-        # 1. عدد الصفقات المفتوحة
-        # حساب موثوق من بيانات قاعدة البيانات المحدثة، وليس من الذاكرة المؤقتة.
         open_trades_count = sum(1 for s in all_signals if s.get('status') == 'open')
-
-        # 2. بيانات الصفقات المغلقة
         closed_trades = [s for s in all_signals if s.get('status') != 'open' and s.get('profit_percentage') is not None]
 
-        # 3. صافي الربح (USDT)
         total_net_profit_usdt = 0.0
+        win_rate = 0.0
+        profit_factor_val = 0.0
+
         if closed_trades:
+            # صافي الربح
             total_net_profit_usdt = sum(
                 ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
                 for t in closed_trades
             )
-
-        # 4. نسبة النجاح
-        win_rate = 0.0
-        if closed_trades:
+            # نسبة النجاح
             wins = sum(1 for s in closed_trades if float(s['profit_percentage']) > 0)
-            win_rate = (wins / len(closed_trades) * 100) if len(closed_trades) > 0 else 0.0
-
-        # 5. عامل الربح
-        profit_factor = 0.0  # القيمة الافتراضية هي 0
-        if closed_trades:
+            win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0.0
+            
+            # عامل الربح
             total_profit_from_wins = sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0)
             total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0))
             
             if total_loss_from_losses > 0:
-                profit_factor = total_profit_from_wins / total_loss_from_losses
+                profit_factor_val = total_profit_from_wins / total_loss_from_losses
             elif total_profit_from_wins > 0:
-                profit_factor = float('inf')  # حالة وجود أرباح وعدم وجود خسائر
-
+                profit_factor_val = "Infinity" # إرسال كنص لتجنب خطأ JSON
+        
         return jsonify({
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
             "win_rate": win_rate,
-            "profit_factor": profit_factor
+            "profit_factor": profit_factor_val
         })
     except Exception as e:
-        logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
+        return jsonify({"error": "An internal error occurred while calculating stats."}), 500
 
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
-    if not check_db_connection(): return jsonify([]), 500
+    if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT closed_at, profit_percentage FROM signals WHERE status != 'open' AND profit_percentage IS NOT NULL AND closed_at IS NOT NULL ORDER BY closed_at ASC;")
@@ -1270,7 +1261,7 @@ def get_profit_curve():
         return jsonify(curve_data)
     except Exception as e:
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
-        return jsonify([]), 500
+        return jsonify({"error": "Error fetching profit curve data"}), 500
 
 @app.route('/api/signals')
 def get_signals():
