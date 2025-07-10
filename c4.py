@@ -1179,10 +1179,21 @@ def main_loop():
                     df_features = strategy.get_features(df_15m, df_4h, btc_data)
                     if df_features is None or df_features.empty: continue
                     signal_info = strategy.generate_signal(df_features)
-                    if not signal_info or not redis_client: continue
-                    current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                    if not current_price_str: continue
-                    current_price = float(current_price_str)
+                    
+                    if not signal_info or not client: continue
+
+                    # =================================================================================
+                    # === CRITICAL FIX: Always fetch the latest price directly from the API         ===
+                    # === before generating a signal to ensure the entry price is 100% accurate.    ===
+                    # === إصلاح حاسم: احصل دائماً على السعر الأحدث مباشرة من الواجهة البرمجية (API)  ===
+                    # === قبل إنشاء أي إشارة لضمان دقة سعر الدخول بنسبة 100%.                       ===
+                    # =================================================================================
+                    try:
+                        current_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    except Exception as api_price_err:
+                        logger.warning(f"⚠️ [{symbol}] Could not fetch live price from API for signal generation. Skipping. Error: {api_price_err}")
+                        continue
+                    
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
                     
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
@@ -1191,7 +1202,6 @@ def main_loop():
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                             
-                            # ✨ FIX: Robustly convert old_confidence to a float to handle legacy string data
                             old_confidence = 0.0
                             try:
                                 if isinstance(old_confidence_raw, str):
@@ -1260,20 +1270,9 @@ def main_loop():
                                 if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
                                     log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
                             
-                            # --- MODIFICATION START: Send alert immediately, then save to DB in background ---
-                            # --- تعديل: إرسال الإشعار فوراً، ثم الحفظ في قاعدة البيانات في الخلفية ---
                             logger.info(f"🚀 [{symbol}] Signal passed all filters. Sending alert immediately.")
-                            
-                            # 1. Send the alert to the user instantly.
-                            #    إرسال الإشعار للمستخدم على الفور
                             send_new_signal_alert(new_signal)
-                            
-                            # 2. Start a background thread to save the signal to the database.
-                            #    This prevents the main loop from waiting for the DB operation.
-                            #    بدء thread في الخلفية لحفظ الإشارة في قاعدة البيانات
-                            #    هذا يمنع الحلقة الرئيسية من انتظار عملية الحفظ
                             Thread(target=save_and_cache_signal, args=(new_signal,)).start()
-                            # --- MODIFICATION END ---
 
                     time.sleep(2)
                 except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
