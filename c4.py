@@ -88,7 +88,7 @@ MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
-ATR_FALLBACK_TP_MULTIPLIER: float = 2.0
+ATR_FALLBACK_TP_MULTIPLIER: float = 2.5
 SL_BUFFER_ATR_PERCENT: float = 0.25
 
 # --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
