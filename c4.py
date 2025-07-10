@@ -131,10 +131,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V16) ----------------------
+# ---------------------- ✨ [مُحدّث] دالة HTML للوحة التحكم الاحترافية ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم V16 مع دعم لحالة "تم تحديثها".
+    لوحة تحكم احترافية V17 مع مخطط أرباح تراكمي متقدم.
     """
     return """
 <!DOCTYPE html>
@@ -142,113 +142,119 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V16</title>
+    <title>لوحة تحكم التداول الاحترافية V17</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-dark: #111827; --bg-card: #1F2937; --border-color: #374151;
-            --text-primary: #F9FAFB; --text-secondary: #9CA3AF;
-            --accent-blue: #3B82F6; --accent-green: #22C55E; --accent-red: #EF4444; --accent-yellow: #EAB308;
+            --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D;
+            --text-primary: #E6EDF3; --text-secondary: #848D97;
+            --accent-blue: #58A6FF; --accent-green: #3FB950; --accent-red: #F85149; --accent-yellow: #D29922;
         }
-        body { font-family: 'Cairo', sans-serif; background-color: var(--bg-dark); color: var(--text-primary); }
-        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.75rem; transition: all 0.3s ease-in-out; padding: 1rem; }
-        .card:hover { transform: translateY(-4px); box-shadow: 0 8px 25px rgba(0,0,0,0.2); border-color: var(--accent-blue); }
-        .skeleton { animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; background-color: #374151; border-radius: 0.5rem; }
-        @keyframes pulse { 50% { opacity: .5; } }
-        .progress-bar-container { position: relative; width: 100%; height: 1.25rem; background-color: #374151; border-radius: 0.5rem; overflow: hidden; display: flex; align-items: center; }
-        .progress-bar { height: 100%; transition: width 0.5s ease-in-out; }
-        .progress-point { position: absolute; top: 50%; transform: translateY(-50%); width: 8px; height: 8px; border-radius: 50%; border: 2px solid white; }
-        .entry-point { background-color: var(--accent-blue); }
-        .current-point { background-color: var(--accent-yellow); }
-        .progress-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); padding: 0 2px; margin-top: 2px; }
+        body { font-family: 'Tajawal', sans-serif; background-color: var(--bg-main); color: var(--text-primary); }
+        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; transition: all 0.3s ease; }
+        .card:hover { border-color: var(--accent-blue); }
+        .skeleton { animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite; background-color: #21262d; border-radius: 0.5rem; }
+        @keyframes pulse { 50% { opacity: .6; } }
+        .progress-bar-container { position: relative; width: 100%; height: 0.75rem; background-color: #30363d; border-radius: 999px; overflow: hidden; }
+        .progress-bar { height: 100%; transition: width 0.5s ease-in-out; border-radius: 999px; }
+        .progress-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); padding: 0 2px; margin-top: 4px; }
         #needle { transition: transform 1s cubic-bezier(0.68, -0.55, 0.27, 1.55); }
-        .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--text-primary); }
+        .tab-btn { position: relative; transition: color 0.2s ease; }
+        .tab-btn.active { color: var(--text-primary); }
+        .tab-btn.active::after { content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; background-color: var(--accent-blue); border-radius: 2px; }
+        .table-row:hover { background-color: #1a2029; }
     </style>
 </head>
 <body class="p-4 md:p-6">
-    <div class="container mx-auto max-w-7xl">
+    <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-3xl md:text-4xl font-black text-white">لوحة تحكم التداول (V16 - Reinforcement)</h1>
-            <div id="connection-status" class="flex items-center gap-2 text-sm">
-                <div id="db-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">DB</span>
-                <div id="api-status-light" class="w-3 h-3 rounded-full bg-gray-500 animate-pulse"></div><span class="text-text-secondary">API</span>
+            <h1 class="text-2xl md:text-3xl font-extrabold text-white">
+                <span class="text-accent-blue">لوحة التحكم</span>
+                <span class="text-text-secondary font-medium">V17</span>
+            </h1>
+            <div id="connection-status" class="flex items-center gap-3 text-sm">
+                <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
+                <div class="flex items-center gap-2"><div id="api-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">API</span></div>
             </div>
         </header>
 
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div class="card lg:col-span-2">
-                <h3 class="font-bold mb-3 text-lg">اتجاه السوق (BTC)</h3>
+            <div class="card p-4 lg:col-span-2">
+                <h3 class="font-bold mb-3 text-lg text-text-secondary">اتجاه السوق (BTC)</h3>
                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
                     <div>
-                        <h4 class="text-sm font-semibold text-text-secondary">الاتجاه العام</h4>
+                        <h4 class="text-sm font-medium text-text-secondary">الاتجاه العام</h4>
                         <div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
                     </div>
                     <div>
-                        <h4 class="text-sm font-semibold text-text-secondary">إطار 15 دقيقة</h4>
+                        <h4 class="text-sm font-medium text-text-secondary">15 دقيقة</h4>
                         <div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                        <div id="tf-15m-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
                     </div>
                     <div>
-                        <h4 class="text-sm font-semibold text-text-secondary">إطار ساعة</h4>
+                        <h4 class="text-sm font-medium text-text-secondary">ساعة</h4>
                         <div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                        <div id="tf-1h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
                     </div>
                     <div>
-                        <h4 class="text-sm font-semibold text-text-secondary">إطار 4 ساعات</h4>
+                        <h4 class="text-sm font-medium text-text-secondary">4 ساعات</h4>
                         <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                        <div id="tf-4h-details" class="text-xs text-text-secondary skeleton h-4 w-1/2 mx-auto mt-1"></div>
                     </div>
                 </div>
             </div>
-            <div class="card flex flex-col justify-center items-center">
-                 <h3 class="font-bold mb-2 text-lg">مؤشر الخوف والطمع</h3>
-                 <div id="fear-greed-gauge" class="relative w-full max-w-[180px] aspect-square"></div>
-                 <div id="fear-greed-value" class="text-3xl font-bold mt-[-25px] skeleton h-10 w-1/2"></div>
+            <div class="card p-4 flex flex-col justify-center items-center">
+                 <h3 class="font-bold mb-2 text-lg text-text-secondary">الخوف والطمع</h3>
+                 <div id="fear-greed-gauge" class="relative w-full max-w-[150px] aspect-square"></div>
+                 <div id="fear-greed-value" class="text-3xl font-bold mt-[-20px] skeleton h-10 w-1/2"></div>
                  <div id="fear-greed-text" class="text-md text-text-secondary skeleton h-6 w-3/4 mt-1"></div>
             </div>
-            <div class="card flex flex-col justify-center items-center text-center">
+            <div class="card p-4 flex flex-col justify-center items-center text-center">
                 <h3 class="font-bold text-text-secondary text-lg">صفقات مفتوحة</h3>
                 <div id="open-trades-value" class="text-5xl font-black text-accent-blue mt-2 skeleton h-12 w-1/2"></div>
             </div>
         </section>
 
         <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <div id="profit-chart-card" class="card lg:col-span-2">
-                <h3 class="font-bold mb-3">أداء الصفقات (الربح التراكمي %)</h3>
+            <div id="profit-chart-card" class="card lg:col-span-2 p-4">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="font-bold text-lg text-text-secondary">منحنى الربح التراكمي (%)</h3>
+                    <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-1/3"></div>
+                </div>
                 <div class="relative h-80 md:h-96">
                     <canvas id="profitChart"></canvas>
+                    <div id="profit-chart-loader" class="absolute inset-0 flex items-center justify-center bg-bg-card z-10"><div class="skeleton w-full h-full"></div></div>
                 </div>
             </div>
-            <div id="other-stats-container" class="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-1 gap-4">
-                <div class="card text-center flex flex-col justify-center">
-                    <div class="text-sm text-text-secondary mb-1">صافي الربح (USDT)</div>
-                    <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto"></div>
-                </div>
-                <div class="card text-center flex flex-col justify-center">
+            <div id="other-stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
+                <div class="card text-center p-4 flex flex-col justify-center">
                     <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
-                    <div id="win-rate" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                    <div id="win-rate" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
                 </div>
-                <div class="card text-center flex flex-col justify-center">
+                <div class="card text-center p-4 flex flex-col justify-center">
                     <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
-                    <div id="profit-factor" class="text-2xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                    <div id="profit-factor" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
+                </div>
+                 <div class="card text-center p-4 flex flex-col justify-center">
+                    <div class="text-sm text-text-secondary mb-1">إجمالي الصفقات</div>
+                    <div id="total-trades" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
                 </div>
             </div>
         </section>
 
         <div class="mb-4 border-b border-border-color">
-            <nav class="flex space-x-4 -mb-px" aria-label="Tabs">
-                <button onclick="showTab('signals', this)" class="tab-btn active text-white border-b-2 py-3 px-4 font-semibold">الصفقات</button>
-                <button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الإشعارات</button>
-                <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-4">الصفقات المرفوضة</button>
+            <nav class="flex space-x-6 -mb-px" aria-label="Tabs">
+                <button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button>
+                <button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button>
+                <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button>
             </nav>
         </div>
 
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[35%]">التقدم نحو الهدف</th><th class="p-4 font-semibold">الدخول / الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold text-text-secondary">العملة</th><th class="p-4 font-semibold text-text-secondary">الحالة</th><th class="p-4 font-semibold text-text-secondary">الربح/الخسارة</th><th class="p-4 font-semibold text-text-secondary w-[30%]">التقدم</th><th class="p-4 font-semibold text-text-secondary">الدخول/الحالي</th><th class="p-4 font-semibold text-text-secondary">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
@@ -275,32 +281,22 @@ function formatNumber(num, digits = 2) {
 function showTab(tabName, element) {
     document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
     document.getElementById(`${tabName}-tab`).classList.remove('hidden');
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('active', 'text-white', 'border-accent-blue', 'font-semibold');
-        btn.classList.add('text-text-secondary', 'border-transparent');
-    });
-    element.classList.add('active', 'text-white', 'border-accent-blue', 'font-semibold');
-    element.classList.remove('text-text-secondary', 'border-transparent');
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active', 'text-white'));
+    element.classList.add('active', 'text-white');
 }
 
 async function apiFetch(url) {
     try {
         const response = await fetch(url);
-        if (!response.ok) { 
-            console.error(`API Error ${response.status}`); 
-            return { error: `HTTP Error ${response.status}` };
-        }
+        if (!response.ok) { console.error(`API Error ${response.status}`); return { error: `HTTP Error ${response.status}` }; }
         return await response.json();
-    } catch (error) { 
-        console.error(`Fetch error for ${url}:`, error); 
-        return { error: "Network or fetch error" };
-    }
+    } catch (error) { console.error(`Fetch error for ${url}:`, error); return { error: "Network or fetch error" }; }
 }
 
 function getFngColor(value) {
-    if (value < 25) return '#EF4444'; if (value < 45) return '#F97316';
-    if (value < 55) return '#EAB308'; if (value < 75) return '#84CC16';
-    return '#22C55E';
+    if (value < 25) return 'var(--accent-red)'; if (value < 45) return '#F97316';
+    if (value < 55) return 'var(--accent-yellow)'; if (value < 75) return '#84CC16';
+    return 'var(--accent-green)';
 }
 
 function renderFearGreedGauge(value, classification) {
@@ -318,14 +314,14 @@ function renderFearGreedGauge(value, classification) {
     const angle = -90 + (value / 100) * 180;
     const color = getFngColor(value);
     valueEl.style.color = color;
-    container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#EF4444"/><stop offset="50%" stop-color="#EAB308"/><stop offset="100%" stop-color="#22C55E"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`;
+    container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#F85149"/><stop offset="50%" stop-color="#D29922"/><stop offset="100%" stop-color="#3FB950"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`;
 }
 
 function updateMarketStatus() {
     apiFetch('/api/market_status').then(data => {
         if (!data || data.error) return;
-        document.getElementById('db-status-light').className = `w-3 h-3 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
-        document.getElementById('api-status-light').className = `w-3 h-3 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        document.getElementById('db-status-light').className = `w-2.5 h-2.5 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
+        document.getElementById('api-status-light').className = `w-2.5 h-2.5 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
         
         const state = data.market_state;
         const overallRegime = state.overall_regime || "UNCERTAIN";
@@ -333,19 +329,16 @@ function updateMarketStatus() {
         const overallDiv = document.getElementById('overall-regime');
         overallDiv.textContent = regimeStyle.text;
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
-        overallDiv.classList.remove('skeleton', 'h-8', 'w-3/4', 'mx-auto', 'mt-1');
-
+        
         ['15m', '1h', '4h'].forEach(tf => {
             const tfData = state.details[tf];
             const statusDiv = document.getElementById(`tf-${tf}-status`);
-            const detailsDiv = document.getElementById(`tf-${tf}-details`);
-            [statusDiv, detailsDiv].forEach(el => el.classList.remove('skeleton', 'h-7', 'w-2/3', 'h-4', 'w-1/2', 'mx-auto', 'mt-1'));
+            statusDiv.classList.remove('skeleton', 'h-7', 'w-2/3', 'mx-auto', 'mt-1');
             if (tfData) {
                 const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
                 statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
-                detailsDiv.textContent = `RSI: ${formatNumber(tfData.rsi, 1)} | ADX: ${formatNumber(tfData.adx, 1)}`;
             } else {
-                statusDiv.textContent = 'N/A'; detailsDiv.textContent = '';
+                statusDiv.textContent = 'N/A';
             }
         });
         renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
@@ -354,22 +347,22 @@ function updateMarketStatus() {
 
 function updateStats() {
     apiFetch('/api/stats').then(data => {
-        if (!data || data.error) {
-            console.error("Failed to fetch stats:", data ? data.error : "No data");
-            return;
-        }
+        if (!data || data.error) { console.error("Failed to fetch stats:", data ? data.error : "No data"); return; }
+        
         const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor);
         const fields = {
             'open-trades-value': formatNumber(data.open_trades_count, 0),
             'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
             'win-rate': `${formatNumber(data.win_rate)}%`,
-            'profit-factor': profitFactorDisplay
+            'profit-factor': profitFactorDisplay,
+            'total-trades': formatNumber(data.total_closed_trades, 0)
         };
+
         for (const [id, value] of Object.entries(fields)) {
             const el = document.getElementById(id);
             if (el) {
                 el.textContent = value;
-                el.classList.remove('skeleton', 'h-12', 'h-8', 'w-1/2', 'w-3/4', 'mx-auto');
+                el.classList.remove('skeleton', 'h-12', 'h-8', 'w-1/2', 'w-3/4', 'w-1/3', 'mx-auto');
                 if (id === 'net-profit-usdt') {
                     el.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
                 }
@@ -379,78 +372,97 @@ function updateStats() {
 }
 
 function updateProfitChart() {
-    const chartCard = document.getElementById('profit-chart-card');
+    const loader = document.getElementById('profit-chart-loader');
     const canvas = document.getElementById('profitChart');
+    const chartCard = document.getElementById('profit-chart-card');
+    
     apiFetch('/api/profit_curve').then(data => {
-        const existingMsg = chartCard.querySelector('.no-data-msg, .error-msg');
+        loader.style.display = 'none';
+        const existingMsg = chartCard.querySelector('.no-data-msg');
         if(existingMsg) existingMsg.remove();
-        if (!data || data.error) { 
-            canvas.style.display = 'none'; 
-            chartCard.insertAdjacentHTML('beforeend', '<p class="error-msg text-center text-text-secondary mt-8">حدث خطأ.</p>');
+
+        if (!data || data.error || data.length <= 1) { 
+            canvas.style.display = 'none';
+            if (!existingMsg) {
+                chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض المنحنى.</p>');
+            }
             return; 
         }
-        if (data.length <= 1) { 
-            canvas.style.display = 'none'; 
-            chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية.</p>');
-            return;
-        }
+        
         canvas.style.display = 'block';
         const ctx = canvas.getContext('2d');
-        const labels = data.map((d, i) => i > 0 ? `صفقة ${i}` : 'البداية');
-        const chartData = data.map(d => d.profit_range);
+        const chartData = data.map(d => ({
+            x: luxon.DateTime.fromISO(d.timestamp).valueOf(),
+            y: d.cumulative_profit
+        }));
+
+        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
+        const lastProfit = chartData[chartData.length - 1].y;
+        if (lastProfit >= 0) {
+            gradient.addColorStop(0, 'rgba(63, 185, 80, 0.4)');
+            gradient.addColorStop(1, 'rgba(63, 185, 80, 0)');
+        } else {
+            gradient.addColorStop(0, 'rgba(248, 81, 73, 0.4)');
+            gradient.addColorStop(1, 'rgba(248, 81, 73, 0)');
+        }
+
         const config = {
-            type: 'bar',
+            type: 'line',
             data: {
-                labels: labels,
                 datasets: [{
-                    label: 'الربح/الخسارة للصفقة', data: chartData,
-                    backgroundColor: (ctx) => {
-                        if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
-                        const [start, end] = ctx.raw;
-                        return end >= start ? 'rgba(34, 197, 94, 0.7)' : 'rgba(239, 68, 68, 0.7)';
-                    },
-                    borderColor: (ctx) => {
-                        if (ctx.raw === null || ctx.raw === undefined) return 'var(--border-color)';
-                        const [start, end] = ctx.raw;
-                        return end >= start ? 'var(--accent-green)' : 'var(--accent-red)';
-                    },
-                    borderWidth: 1, barPercentage: 0.8, categoryPercentage: 0.9, borderSkipped: false
+                    label: 'الربح التراكمي %',
+                    data: chartData,
+                    borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+                    backgroundColor: gradient,
+                    fill: true,
+                    tension: 0.4,
+                    pointRadius: 0,
+                    pointHoverRadius: 6,
+                    pointBackgroundColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
                 }]
             },
             options: {
                 responsive: true, maintainAspectRatio: false,
                 scales: {
-                    x: { ticks: { display: false }, grid: { display: false } },
-                    y: { beginAtZero: false, ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' }, grid: { color: '#37415180' } }
+                    x: {
+                        type: 'time',
+                        time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy HH:mm' },
+                        grid: { display: false },
+                        ticks: { color: 'var(--text-secondary)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 }
+                    },
+                    y: {
+                        position: 'right',
+                        beginAtZero: true,
+                        grid: { color: 'var(--border-color)', drawBorder: false },
+                        ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' }
+                    }
                 },
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        mode: 'index', intersect: false, backgroundColor: 'var(--bg-card)',
-                        titleFont: { weight: 'bold' }, bodyFont: { family: 'Cairo' },
+                        mode: 'index', intersect: false,
+                        backgroundColor: '#0D1117', titleFont: { weight: 'bold', family: 'Tajawal' },
+                        bodyFont: { family: 'Tajawal' }, displayColors: false,
                         callbacks: {
-                            title: (ctx) => ctx[0] ? ctx[0].label : '',
-                            label: (ctx) => {
-                                if (ctx.dataIndex === 0) return `البداية: ${formatNumber(ctx.raw[1])}%`;
-                                const tradeData = data[ctx.dataIndex];
-                                const profit = tradeData.profit_change;
-                                const cumulative = tradeData.profit_range[1];
-                                return [`ربح الصفقة: ${formatNumber(profit)}%`, `الربح التراكمي: ${formatNumber(cumulative)}%`];
-                            }
+                            label: (ctx) => `الربح التراكمي: ${formatNumber(ctx.raw.y)}%`
                         }
                     }
-                }
+                },
+                interaction: { mode: 'index', intersect: false }
             }
         };
+
         if (profitChartInstance) {
-            profitChartInstance.data.labels = labels;
             profitChartInstance.data.datasets[0].data = chartData;
+            profitChartInstance.data.datasets[0].borderColor = lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+            profitChartInstance.data.datasets[0].backgroundColor = gradient;
             profitChartInstance.update('none');
         } else {
             profitChartInstance = new Chart(ctx, config);
         }
     });
 }
+
 
 function renderProgressBar(signal) {
     const { entry_price, stop_loss, target_price, current_price } = signal;
@@ -459,27 +471,25 @@ function renderProgressBar(signal) {
     const totalDist = tp - sl;
     if (totalDist <= 0) return '<span>بيانات غير صالحة</span>';
     const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
-    const entryPointPct = Math.max(0, Math.min(100, ((entry - sl) / totalDist) * 100));
-    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div><div class="progress-point entry-point" style="left: ${entryPointPct}%" title="الدخول: ${entry.toFixed(4)}"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
+    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
 }
 
-// ✨ [مُحدّث] لدعم حالة "updated"
 function updateSignals() {
     apiFetch('/api/signals').then(data => {
         const tableBody = document.getElementById('signals-table');
-        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">فشل تحميل الصفقات.</td></tr>'; return; }
-        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center">لا توجد صفقات لعرضها.</td></tr>'; return; }
+        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; }
+        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; }
         tableBody.innerHTML = data.map(signal => {
             const pnlPct = signal.status === 'open' || signal.status === 'updated' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
             const statusClass = signal.status === 'open' ? 'text-yellow-400' : (signal.status === 'updated' ? 'text-blue-400' : 'text-gray-400');
             const statusText = signal.status === 'updated' ? 'تم تحديثها' : (signal.status === 'open' ? 'مفتوحة' : signal.status);
-            return `<tr class="border-b border-border-color hover:bg-gray-800/50 transition-colors">
+            return `<tr class="table-row border-b border-border-color">
                     <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
                     <td class="p-4 font-bold ${statusClass}">${statusText}</td>
                     <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
                     <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? renderProgressBar(signal) : '-'}</td>
                     <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
-                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600/80 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
                 </tr>`;
         }).join('');
     });
@@ -512,7 +522,7 @@ function refreshData() {
     updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
 
-setInterval(refreshData, 3000);
+setInterval(refreshData, 5000);
 window.onload = refreshData;
 </script>
 </body>
@@ -1219,7 +1229,7 @@ def main_loop():
         except (KeyboardInterrupt, SystemExit): break
         except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V16) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V17) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1277,32 +1287,48 @@ def get_stats():
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
             "win_rate": win_rate,
-            "profit_factor": profit_factor_val
+            "profit_factor": profit_factor_val,
+            "total_closed_trades": len(closed_trades)
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred"}), 500
 
+# ✨ [مُحدّث] نقطة النهاية لمنحنى الربح التراكمي
 @app.route('/api/profit_curve')
 def get_profit_curve():
-    if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
+    if not check_db_connection(): 
+        return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT closed_at, profit_percentage FROM signals WHERE status NOT IN ('open', 'updated') AND profit_percentage IS NOT NULL AND closed_at IS NOT NULL ORDER BY closed_at ASC;")
+            cur.execute("""
+                SELECT closed_at, profit_percentage 
+                FROM signals 
+                WHERE status NOT IN ('open', 'updated') 
+                AND profit_percentage IS NOT NULL 
+                AND closed_at IS NOT NULL 
+                ORDER BY closed_at ASC;
+            """)
             trades = cur.fetchall()
         
-        curve_data = [{"timestamp": (trades[0]['closed_at'] - timedelta(minutes=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat(), "profit_range": [0.0, 0.0], "profit_change": 0.0}]
+        # Start with a point at time zero with zero profit.
+        # If there are trades, start just before the first trade.
+        start_time = (trades[0]['closed_at'] - timedelta(seconds=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
+        curve_data = [{"timestamp": start_time, "cumulative_profit": 0.0}]
+
         cumulative_profit = 0.0
         for trade in trades:
-            profit_change = float(trade['profit_percentage'])
-            start_profit = cumulative_profit
-            end_profit = cumulative_profit + profit_change
-            curve_data.append({"timestamp": trade['closed_at'].isoformat(), "profit_range": [start_profit, end_profit], "profit_change": profit_change})
-            cumulative_profit = end_profit
+            cumulative_profit += float(trade['profit_percentage'])
+            curve_data.append({
+                "timestamp": trade['closed_at'].isoformat(),
+                "cumulative_profit": cumulative_profit
+            })
+            
         return jsonify(curve_data)
     except Exception as e:
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
         return jsonify({"error": "Error fetching profit curve"}), 500
+
 
 @app.route('/api/signals')
 def get_signals():
@@ -1400,7 +1426,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V16 - Reinforcement) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V17 - Professional) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
