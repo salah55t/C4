@@ -178,6 +178,12 @@ def get_dashboard_html():
         .progress-labels { display: flex; justify-content: space-between; font-size: 0.7rem; color: var(--text-secondary); padding: 0 2px; margin-top: 2px; }
         #needle { transition: transform 1s cubic-bezier(0.68, -0.55, 0.27, 1.55); }
         .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--text-primary); }
+        
+        /* --- Modal Styles --- */
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(17, 24, 39, 0.8); display: flex; align-items: center; justify-content: center; z-index: 50; opacity: 0; transition: opacity 0.3s ease; pointer-events: none; }
+        .modal-overlay.visible { opacity: 1; pointer-events: auto; }
+        .modal-content { background-color: var(--bg-card); padding: 2rem; border-radius: 0.75rem; text-align: center; max-width: 400px; width: 90%; transform: scale(0.95); transition: transform 0.3s ease; }
+        .modal-overlay.visible .modal-content { transform: scale(1); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -263,6 +269,17 @@ def get_dashboard_html():
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
+    </div>
+
+    <!-- Modal for Confirmations and Alerts -->
+    <div id="app-modal" class="modal-overlay">
+        <div class="modal-content">
+            <h3 id="modal-title" class="text-xl font-bold mb-4"></h3>
+            <p id="modal-message" class="text-text-secondary mb-6"></p>
+            <div id="modal-actions" class="flex justify-center gap-4">
+                <!-- Buttons will be injected here -->
+            </div>
+        </div>
     </div>
 
 <script>
@@ -513,7 +530,7 @@ function updateSignals() {
                     <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
                     <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? renderProgressBar(signal) : '-'}</td>
                     <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
-                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="promptManualClose(${signal.id}, '${signal.symbol}')" class="bg-red-600 hover:bg-red-700 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
                 </tr>`;
         }).join('');
     });
@@ -526,13 +543,66 @@ function updateList(endpoint, listId, formatter) {
     });
 }
 
+// --- NEW MODAL FUNCTIONS ---
+const modal = document.getElementById('app-modal');
+const modalTitle = document.getElementById('modal-title');
+const modalMessage = document.getElementById('modal-message');
+const modalActions = document.getElementById('modal-actions');
+
+function showModal({ title, message, actions }) {
+    modalTitle.textContent = title;
+    modalMessage.textContent = message;
+    modalActions.innerHTML = '';
+    actions.forEach(action => {
+        const button = document.createElement('button');
+        button.textContent = action.text;
+        button.className = action.class;
+        button.onclick = () => {
+            hideModal();
+            if(action.onClick) action.onClick();
+        };
+        modalActions.appendChild(button);
+    });
+    modal.classList.add('visible');
+}
+
+function hideModal() {
+    modal.classList.remove('visible');
+}
+
+function showInfoModal(message) {
+     showModal({
+        title: 'معلومات',
+        message: message,
+        actions: [{ text: 'حسناً', class: 'bg-accent-blue hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg' }]
+    });
+}
+
+function promptManualClose(signalId, symbol) {
+    showModal({
+        title: 'تأكيد الإغلاق اليدوي',
+        message: `هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} (${symbol}) يدوياً؟`,
+        actions: [
+            { 
+                text: 'نعم، قم بالإغلاق', 
+                class: 'bg-accent-red hover:bg-red-700 text-white font-bold py-2 px-6 rounded-lg',
+                onClick: () => manualCloseSignal(signalId)
+            },
+            {
+                text: 'إلغاء',
+                class: 'bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-lg'
+            }
+        ]
+    });
+}
+
 function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
-        fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
-            alert(data.message || data.error);
+    fetch(`/api/close/${signalId}`, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+            showInfoModal(data.message || data.error);
             refreshData();
         });
-    }
 }
 
 function refreshData() {
@@ -545,6 +615,13 @@ function refreshData() {
     updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString(locale, dateLocaleOptions)}] ${n.message}</div>`);
     updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
+
+// Close modal on escape key
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal.classList.contains('visible')) {
+        hideModal();
+    }
+});
 
 setInterval(refreshData, 2000);
 window.onload = refreshData;
