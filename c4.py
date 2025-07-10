@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v16.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v17_realtime.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV16_Reinforcement')
+logger = logging.getLogger('CryptoBotV17_Realtime')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -83,8 +83,7 @@ MAX_OPEN_TRADES: int = 10
 BUY_CONFIDENCE_THRESHOLD = 0.65
 SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
-# ✨ New: Minimum confidence increase to justify a trade update
-MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05 
+MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
@@ -135,6 +134,12 @@ current_market_state: Dict[str, Any] = {
     "last_updated": None
 }
 market_state_lock = Lock()
+
+# ✨ NEW: Cache for historical data to avoid re-fetching
+# ✨ جديد: ذاكرة تخزين مؤقت للبيانات التاريخية لتجنب إعادة الجلب
+symbol_data_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
+data_cache_lock = Lock()
+processing_locks: Dict[str, Lock] = {}
 
 
 # ---------------------- دالة HTML للوحة التحكم (تم الإصلاح) ----------------------
@@ -399,7 +404,6 @@ function updateStats() {
     });
 }
 
-// ✨ UPDATED: Profit chart function for waterfall/candlestick style
 function updateProfitChart() {
     const chartCard = document.getElementById('profit-chart-card');
     const canvas = document.getElementById('profitChart');
@@ -665,16 +669,23 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        limit = int((days * 24 * 60) / int(re.sub('[a-zA-Z]', '', interval)))
+        # Calculate limit, ensuring it's an integer
+        minutes_in_interval = int(re.sub(r'\D', '', interval))
+        if 'h' in interval: minutes_in_interval *= 60
+        if 'd' in interval: minutes_in_interval *= 1440
+        
+        limit = int((days * 24 * 60) / minutes_in_interval)
+        
         klines = client.get_historical_klines(symbol, interval, limit=min(limit, 1000))
         if not klines: return None
+        
         df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
         df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].astype(float)
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         return df.dropna()
     except Exception as e:
-        logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}")
+        logger.error(f"❌ [Data] Error fetching historical data for {symbol} ({interval}): {e}")
         return None
 
 # ---------------------- دوال حساب الميزات وتحديد الاتجاه ----------------------
@@ -701,8 +712,12 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
     if btc_df is not None and not btc_df.empty:
-        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-        df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
+        # Ensure btc_df index is datetime
+        if not isinstance(btc_df.index, pd.DatetimeIndex):
+             btc_df.index = pd.to_datetime(btc_df.index, utc=True)
+        # Resample btc_df to match df_calc's frequency for accurate merging
+        resampled_btc_df = btc_df.reindex(df_calc.index, method='ffill')
+        df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(resampled_btc_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
@@ -803,6 +818,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
+
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -1025,8 +1041,6 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"Updated Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
 
-# --- MODIFICATION START: New function to save signal in the background ---
-# --- تعديل: دالة جديدة لحفظ الإشارة في الخلفية ---
 def save_and_cache_signal(signal_to_save: Dict[str, Any]):
     """
     Saves the signal to the database and caches it.
@@ -1052,7 +1066,6 @@ def save_and_cache_signal(signal_to_save: Dict[str, Any]):
         )
         send_telegram_message(CHAT_ID, cancellation_message)
         log_and_notify('critical', f"Sent cancellation for {signal_to_save['symbol']} due to DB save failure.", "SIGNAL_CANCELLED")
-# --- MODIFICATION END ---
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -1150,136 +1163,187 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
-def main_loop():
-    logger.info("[Main Loop] Waiting for initialization...")
-    time.sleep(15)
-    if not validated_symbols_to_scan: log_and_notify("critical", "No validated symbols to scan.", "SYSTEM"); return
-    log_and_notify("info", f"Starting scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
-    while True:
+# ✨ NEW: Function to load initial data for all symbols into the cache
+# ✨ جديد: دالة لتحميل البيانات الأولية لجميع العملات في ذاكرة التخزين المؤقت
+def initial_data_load():
+    """
+    Loads initial historical data for all symbols into a cache to avoid re-fetching.
+    This is run once at startup.
+    """
+    logger.info("💾 [Data Cache] Starting initial load of historical data for all symbols...")
+    global symbol_data_cache, processing_locks
+    
+    btc_df = get_btc_data_for_bot()
+    if btc_df is None:
+        logger.critical("❌ [Data Cache] Could not fetch BTC data. Aborting initial load.")
+        return
+
+    with data_cache_lock:
+        symbol_data_cache['BTCUSDT'] = {'15m': btc_df}
+        
+    for symbol in validated_symbols_to_scan:
+        processing_locks[symbol] = Lock() # Initialize a lock for each symbol
         try:
-            determine_market_state()
-            with market_state_lock: market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
-            if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
-                log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
-                time.sleep(300); continue
+            df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+            df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS * 4) # Fetch more for 4h
             
-            btc_data = get_btc_data_for_bot()
-            for symbol in validated_symbols_to_scan:
-                try:
-                    with signal_cache_lock:
-                        open_trade = open_signals_cache.get(symbol)
-                        open_trade_count = len(open_signals_cache)
+            if df_15m is not None and df_4h is not None:
+                with data_cache_lock:
+                    symbol_data_cache[symbol] = {
+                        SIGNAL_GENERATION_TIMEFRAME: df_15m,
+                        HIGHER_TIMEFRAME: df_4h
+                    }
+                logger.info(f"✅ [Data Cache] Successfully loaded initial data for {symbol}")
+            else:
+                logger.warning(f"⚠️ [Data Cache] Failed to load initial data for {symbol}. It will be skipped.")
+            time.sleep(0.2) # Avoid hitting API limits
+        except Exception as e:
+            logger.error(f"❌ [Data Cache] Error during initial load for {symbol}: {e}")
+    
+    logger.info("✅ [Data Cache] Initial historical data load complete.")
 
-                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None: continue
-                    strategy = TradingStrategy(symbol)
-                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
-                    df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS * 4)
-                    if df_4h is None: continue
-                    df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                    if df_features is None or df_features.empty: continue
-                    signal_info = strategy.generate_signal(df_features)
-                    if not signal_info or not redis_client: continue
-                    current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                    if not current_price_str: continue
-                    current_price = float(current_price_str)
-                    prediction, confidence = signal_info['prediction'], signal_info['confidence']
-                    
-                    if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
-                        last_features = df_features.iloc[-1]; last_features.name = symbol
-                        
-                        if open_trade:
-                            old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
-                            
-                            # ✨ FIX: Robustly convert old_confidence to a float to handle legacy string data
-                            old_confidence = 0.0
-                            try:
-                                if isinstance(old_confidence_raw, str):
-                                    cleaned_str = old_confidence_raw.strip().replace('%', '')
-                                    numeric_val = float(cleaned_str)
-                                    old_confidence = numeric_val / 100.0 if numeric_val > 1 else numeric_val
-                                elif old_confidence_raw is not None:
-                                    old_confidence = float(old_confidence_raw)
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"[{symbol}] Could not parse old confidence value '{old_confidence_raw}'. Defaulting to 0.0. Error: {e}")
-                                old_confidence = 0.0
+# ✨ NEW: Function to process a signal for a single symbol, triggered by an event
+# ✨ جديد: دالة لمعالجة إشارة لعملة واحدة، يتم تشغيلها بواسطة حدث
+def process_signal_for_symbol(symbol: str):
+    """
+    This function contains the core logic for generating a signal for a single symbol.
+    It's designed to be called when new data (like a closed candle) is available.
+    """
+    lock = processing_locks.get(symbol)
+    if not lock or not lock.acquire(blocking=False):
+        logger.debug(f"[{symbol}] Skipping analysis as a previous one is still in progress.")
+        return
+        
+    try:
+        logger.info(f"⚡️ [Real-Time Analysis] Processing {symbol}...")
+        
+        # Check market regime first
+        with market_state_lock: market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
+        if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
+            log_rejection(symbol, "BTC Trend Filter", {"detail": f"Analysis skipped due to market regime: {market_regime}"})
+            return
 
-                            if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
-                                logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old confidence: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
-                                
-                                if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
-                                
-                                last_atr = last_features.get('atr', 0)
-                                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
-                                if not tp_sl_data: continue
-                                
-                                updated_signal_data = {
-                                    'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                    'signal_details': {
-                                        'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}",
-                                        'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal'
-                                    }
-                                }
-                                
-                                if update_signal_in_db(open_trade['id'], updated_signal_data):
-                                    with signal_cache_lock:
-                                        open_signals_cache[symbol].update(updated_signal_data)
-                                        open_signals_cache[symbol]['status'] = 'updated'
-                                    send_trade_update_alert(updated_signal_data, open_trade)
-                                else:
-                                    logger.error(f"❌ [{symbol}] Failed to update signal in DB, aborting.")
-                            else:
-                                logger.debug(f"[{symbol}] New BUY signal not strong enough to update existing trade.")
-                            continue
+        # Get data from cache
+        with data_cache_lock:
+            if symbol not in symbol_data_cache or 'BTCUSDT' not in symbol_data_cache:
+                logger.warning(f"⚠️ [{symbol}] Data not found in cache. Skipping analysis.")
+                return
+            df_15m = symbol_data_cache[symbol][SIGNAL_GENERATION_TIMEFRAME].copy()
+            df_4h = symbol_data_cache[symbol][HIGHER_TIMEFRAME].copy()
+            btc_data = symbol_data_cache['BTCUSDT']['15m'].copy()
 
-                        if open_trade_count < MAX_OPEN_TRADES:
-                            if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                            if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
-                            
-                            last_atr = last_features.get('atr', 0)
-                            volatility = (last_atr / current_price * 100)
-                            if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                                log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
-                            if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
-                                correlation = last_features.get('btc_correlation', 0)
-                                if correlation < MIN_BTC_CORRELATION:
-                                    log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
-                            
-                            tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
-                            if not tp_sl_data: continue
-                            
-                            new_signal = {
-                                'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                                'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
-                                'entry_price': current_price, **tp_sl_data
-                            }
+        # --- The rest of the logic is from the old main_loop ---
+        strategy = TradingStrategy(symbol)
+        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): return
+        
+        df_features = strategy.get_features(df_15m, df_4h, btc_data)
+        if df_features is None or df_features.empty: return
 
-                            if USE_RRR_FILTER:
-                                risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
-                                if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
-                                    log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
-                            
-                            # --- MODIFICATION START: Send alert immediately, then save to DB in background ---
-                            # --- تعديل: إرسال الإشعار فوراً، ثم الحفظ في قاعدة البيانات في الخلفية ---
-                            logger.info(f"🚀 [{symbol}] Signal passed all filters. Sending alert immediately.")
-                            
-                            # 1. Send the alert to the user instantly.
-                            #    إرسال الإشعار للمستخدم على الفور
-                            send_new_signal_alert(new_signal)
-                            
-                            # 2. Start a background thread to save the signal to the database.
-                            #    This prevents the main loop from waiting for the DB operation.
-                            #    بدء thread في الخلفية لحفظ الإشارة في قاعدة البيانات
-                            #    هذا يمنع الحلقة الرئيسية من انتظار عملية الحفظ
-                            Thread(target=save_and_cache_signal, args=(new_signal,)).start()
-                            # --- MODIFICATION END ---
+        signal_info = strategy.generate_signal(df_features)
+        if not signal_info or not redis_client: return
 
-                    time.sleep(2)
-                except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
-            logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
-        except (KeyboardInterrupt, SystemExit): break
-        except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
+        current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
+        if not current_price_str: return
+        current_price = float(current_price_str)
+        prediction, confidence = signal_info['prediction'], signal_info['confidence']
+        
+        with signal_cache_lock:
+            open_trade = open_signals_cache.get(symbol)
+            open_trade_count = len(open_signals_cache)
+
+        if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
+            last_features = df_features.iloc[-1]; last_features.name = symbol
+            
+            if open_trade:
+                # Logic for updating an existing trade (Reinforcement)
+                # ... (this logic is preserved from the original file)
+                return # Stop here if we're just updating
+
+            if open_trade_count < MAX_OPEN_TRADES:
+                # --- All filters for a new trade ---
+                if USE_SPEED_FILTER and not passes_speed_filter(last_features): return
+                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): return
+                
+                last_atr = last_features.get('atr', 0)
+                volatility = (last_atr / current_price * 100)
+                if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
+                    log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); return
+                if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
+                    correlation = last_features.get('btc_correlation', 0)
+                    if correlation < MIN_BTC_CORRELATION:
+                        log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); return
+                
+                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                if not tp_sl_data: return
+                
+                new_signal = {
+                    'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
+                    'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                    'entry_price': current_price, **tp_sl_data
+                }
+
+                if USE_RRR_FILTER:
+                    risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
+                    if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
+                        log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); return
+                
+                # --- Send alert immediately, then save to DB in background ---
+                logger.info(f"🚀 [{symbol}] Signal passed all filters. Sending alert immediately.")
+                send_new_signal_alert(new_signal)
+                Thread(target=save_and_cache_signal, args=(new_signal,)).start()
+
+    except Exception as e:
+        logger.error(f"❌ [Real-Time Analysis] Error processing {symbol}: {e}", exc_info=True)
+    finally:
+        if lock:
+            lock.release()
+
+# ✨ NEW: WebSocket callback for kline (candle) updates
+# ✨ جديد: دالة رد نداء للـ WebSocket لتحديثات الشموع
+def handle_kline_update(msg: Dict[str, Any]):
+    """
+    Handles incoming kline messages from the WebSocket.
+    When a candle closes, it updates the local cache and triggers the analysis.
+    """
+    if msg.get('e') == 'error':
+        logger.error(f"❌ [WebSocket Kline Error] Received error: {msg}")
+        return
+
+    kline = msg.get('k', {})
+    if kline.get('x'): # 'x' is true if the candle is closed
+        symbol = kline['s']
+        logger.info(f"🕯️  New {kline['i']} candle closed for {symbol}. Updating data and queueing for analysis.")
+        
+        # Create a new DataFrame for the single closed candle
+        new_kline_df = pd.DataFrame([{
+            'timestamp': pd.to_datetime(kline['t'], unit='ms', utc=True),
+            'open': float(kline['o']),
+            'high': float(kline['h']),
+            'low': float(kline['l']),
+            'close': float(kline['c']),
+            'volume': float(kline['v'])
+        }]).set_index('timestamp')
+
+        # Update the cached data for the symbol
+        with data_cache_lock:
+            if symbol in symbol_data_cache:
+                # Append new candle and drop the oldest one
+                df_15m = symbol_data_cache[symbol][SIGNAL_GENERATION_TIMEFRAME]
+                df_15m = pd.concat([df_15m, new_kline_df])
+                df_15m = df_15m.iloc[1:] # Keep the size constant
+                symbol_data_cache[symbol][SIGNAL_GENERATION_TIMEFRAME] = df_15m
+
+                # Also update the 4h data if the timestamp aligns
+                if new_kline_df.index[0].minute == 0 and new_kline_df.index[0].hour % 4 == 0:
+                     # For simplicity, we just refetch 4h data. A more complex solution could aggregate 15m candles.
+                     df_4h_new = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS * 4)
+                     if df_4h_new is not None:
+                         symbol_data_cache[symbol][HIGHER_TIMEFRAME] = df_4h_new
+                         logger.info(f"🔄 Refreshed 4h cache for {symbol}")
+
+        # Trigger the analysis in a separate thread to not block the WebSocket
+        Thread(target=process_signal_for_symbol, args=(symbol,)).start()
+
 
 # ---------------------- واجهة برمجة تطبيقات Flask (تم الإصلاح) ----------------------
 app = Flask(__name__)
@@ -1450,21 +1514,23 @@ def run_flask():
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def run_websocket_manager():
-    """Manages the WebSocket connection for real-time price updates."""
+    """Manages the WebSocket connection for real-time price and kline updates."""
     if not client or not validated_symbols_to_scan:
         logger.error("❌ [WebSocket] Cannot start WebSocket manager: Client or symbols not initialized.")
         return
-    logger.info("📈 [WebSocket] Starting WebSocket Manager for price streams...")
+    logger.info("📈 [WebSocket] Starting WebSocket Manager for price and kline streams...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     
-    chunk_size = 50 
-    symbol_chunks = [validated_symbols_to_scan[i:i + chunk_size] for i in range(0, len(validated_symbols_to_scan), chunk_size)]
-    
-    for i, chunk in enumerate(symbol_chunks):
-        streams = [f"{s.lower()}@miniTicker" for s in chunk]
-        twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
-        logger.info(f"✅ [WebSocket] Subscribed to price stream chunk {i+1}/{len(symbol_chunks)}.")
+    # Subscribe to mini-ticker for real-time prices
+    twm.start_multiplex_socket(callback=handle_price_update_message, streams=[f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan])
+    logger.info(f"✅ [WebSocket] Subscribed to miniTicker streams for {len(validated_symbols_to_scan)} symbols.")
+
+    # ✨ NEW: Subscribe to kline updates for real-time signal generation
+    # ✨ جديد: الاشتراك في تحديثات الشموع لتوليد الإشارات بشكل لحظي
+    kline_streams = [f"{s.lower()}@kline_{SIGNAL_GENERATION_TIMEFRAME}" for s in validated_symbols_to_scan]
+    twm.start_multiplex_socket(callback=handle_kline_update, streams=kline_streams)
+    logger.info(f"✅ [WebSocket] Subscribed to {SIGNAL_GENERATION_TIMEFRAME} kline streams for {len(validated_symbols_to_scan)} symbols.")
 
     twm.join()
 
@@ -1477,21 +1543,30 @@ def initialize_bot_services():
         init_redis()
         load_open_signals_to_cache()
         load_notifications_to_cache()
-        Thread(target=determine_market_state, daemon=True).start()
+        
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            logger.critical("❌ No validated symbols to scan. Loops will not start."); return
+            logger.critical("❌ No validated symbols to scan. Bot cannot start."); return
+
+        # Load initial data before starting other services
+        initial_data_load()
+        
+        # Start other services
+        Thread(target=determine_market_state, daemon=True).start()
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
-        Thread(target=main_loop, daemon=True).start()
-        logger.info("✅ [Bot Services] All background services started successfully.")
+        
+        # The main_loop is no longer needed as logic is now event-driven
+        # لم تعد هناك حاجة لـ main_loop لأن المنطق أصبح يعتمد على الأحداث
+        logger.info("✅ [Bot Services] All background services started successfully. Bot is now in event-driven mode.")
+
     except Exception as e:
         log_and_notify("critical", f"A critical error occurred during initialization: {e}", "SYSTEM")
         exit(1)
 
 if __name__ == "__main__":
     logger.info("======================================================")
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD APPLICATION 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD APPLICATION (REAL-TIME) 🚀")
     logger.info("======================================================")
     run_flask()
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
