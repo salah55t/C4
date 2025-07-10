@@ -9,6 +9,7 @@ import psycopg2
 import pickle
 import redis
 import re
+import gc  # <-- تم التأكد من استيراد جامع القمامة
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -24,23 +25,21 @@ from typing import List, Dict, Optional, Any, Set
 from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
-import gc
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-
-# ---------------------- إعداد نظام التسجيل (Logging) - V16 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V18 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v16_reinforcement.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v18_memory_sync.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV16_Reinforcement')
+logger = logging.getLogger('CryptoBotV18')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +54,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V16 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V18 ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -64,7 +63,7 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -77,9 +76,8 @@ MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
-MAX_OPEN_TRADES: int = 5
-BUY_CONFIDENCE_THRESHOLD = 0.80
-# ✨ [جديد] الحد الأدنى لزيادة الثقة لتبرير تحديث الصفقة
+MAX_OPEN_TRADES: int = 10
+BUY_CONFIDENCE_THRESHOLD = 0.65
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
@@ -91,9 +89,9 @@ USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
-PEAK_UPDATE_COOLDOWN: int = 60 # Cooldown in seconds for DB updates
+PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- ✨ [مُحدّث] إعدادات الفلاتر المحسّنة ---
+# --- إعدادات الفلاتر المحسّنة ---
 USE_BTC_TREND_FILTER: bool = True
 BTC_SYMBOL: str = 'BTCUSDT'
 USE_SPEED_FILTER: bool = True
@@ -103,9 +101,7 @@ USE_BTC_CORRELATION_FILTER: bool = True
 MIN_BTC_CORRELATION: float = 0.1
 USE_MIN_VOLATILITY_FILTER: bool = True
 MIN_VOLATILITY_PERCENT: float = 0.3
-# ✨ [جديد] تفعيل فلتر الزخم
 USE_MOMENTUM_FILTER: bool = True
-
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -131,10 +127,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- ✨ [مُحدّث] دالة HTML للوحة التحكم الاحترافية ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V18) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V17 مع مخطط أرباح تراكمي متقدم.
+    لوحة تحكم احترافية V18.
     """
     return """
 <!DOCTYPE html>
@@ -142,7 +138,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول الاحترافية V17</title>
+    <title>لوحة تحكم التداول الاحترافية V18</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -176,7 +172,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V17</span>
+                <span class="text-text-secondary font-medium">V18</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -821,7 +817,6 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# ✨ [جديد] فلتر الزخم
 def passes_momentum_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
@@ -842,7 +837,7 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 40.0, 85.0)
+    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
     elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
     else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
@@ -920,7 +915,8 @@ def trade_monitoring_loop():
                     try: price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception: pass
                 if not price and redis_prices.get(symbol):
-                    price = float(redis_prices[symbol])
+                    try: price = float(redis_prices[symbol])
+                    except (ValueError, TypeError): continue
                 if not price: continue
                 
                 with signal_cache_lock:
@@ -990,7 +986,6 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
 
-# ✨ [جديد] دالة إشعار لتحديث الصفقة
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
     old_target = float(old_signal_data['target_price'])
@@ -1027,7 +1022,6 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if conn: conn.rollback()
         return None
 
-# ✨ [جديد] دالة لتحديث الصفقة في قاعدة البيانات
 def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
     if not check_db_connection() or not conn: return False
     try:
@@ -1052,7 +1046,6 @@ def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
         if conn: conn.rollback()
         return False
 
-# ✨ [مُحدّث] لدعم إغلاق الصفقات المحدثة
 def close_signal(signal: Dict, status: str, closing_price: float):
     signal_id = signal.get('id'); symbol = signal.get('symbol')
     logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
@@ -1080,7 +1073,6 @@ def close_signal(signal: Dict, status: str, closing_price: float):
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
 
-# ✨ [مُحدّث] لتحميل الصفقات المفتوحة والمحدثة
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -1110,21 +1102,60 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
-# ✨ [مُحدّث] حلقة العمل الرئيسية مع منطق التعزيز
+# ✨ [جديد] دالة تنظيف الذاكرة و Redis
+def perform_end_of_cycle_cleanup():
+    """
+    Performs cleanup tasks at the end of a scan cycle.
+    Clears the Redis price cache and runs the Python garbage collector.
+    """
+    logger.info("🧹 [Cleanup] Starting end-of-cycle cleanup...")
+    try:
+        if redis_client:
+            # مسح ذاكرة التخزين المؤقت لأسعار Redis
+            deleted_keys = redis_client.delete(REDIS_PRICES_HASH_NAME)
+            logger.info(f"🧹 [Cleanup] Cleared Redis price cache '{REDIS_PRICES_HASH_NAME}'. Keys deleted: {deleted_keys}.")
+        
+        # مسح ذاكرة التخزين المؤقت لنماذج التعلم الآلي في الذاكرة
+        model_cache_size = len(ml_models_cache)
+        ml_models_cache.clear()
+        logger.info(f"🧹 [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
+
+        # تشغيل جامع القمامة بشكل صريح لتحرير ذاكرة الوصول العشوائي
+        collected = gc.collect()
+        logger.info(f"🧹 [Cleanup] Garbage collector ran. Collected {collected} objects.")
+        
+        logger.info("✅ [Cleanup] End-of-cycle cleanup finished successfully.")
+
+    except Exception as e:
+        logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
+
+
+# ✨ [مُحدّث] حلقة العمل الرئيسية مع منطق مزامنة الأسعار والتنظيف
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
-    if not validated_symbols_to_scan: log_and_notify("critical", "No validated symbols to scan.", "SYSTEM"); return
-    log_and_notify("info", f"Starting scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
+    if not validated_symbols_to_scan: 
+        log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM")
+        return
+    log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
+    
     while True:
         try:
+            # 1. تحديث حالة السوق
             determine_market_state()
-            with market_state_lock: market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
+            with market_state_lock: 
+                market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
+            
+            # 2. فلتر اتجاه البيتكوين
             if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
                 log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
-                time.sleep(300); continue
+                time.sleep(300)
+                continue
             
+            # 3. جلب بيانات البيتكوين للدورة الحالية
             btc_data = get_btc_data_for_bot()
+            
+            # 4. بدء دورة فحص العملات
             for symbol in validated_symbols_to_scan:
                 try:
                     with signal_cache_lock:
@@ -1132,28 +1163,35 @@ def main_loop():
                         open_trade_count = len(open_signals_cache)
 
                     strategy = TradingStrategy(symbol)
-                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
+                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): 
+                        continue
 
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None: continue
+                    if df_15m is None or df_15m.empty: continue
                     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_4h is None: continue
+                    if df_4h is None or df_4h.empty: continue
                     
                     df_features = strategy.get_features(df_15m, df_4h, btc_data)
                     if df_features is None or df_features.empty: continue
                     
                     signal_info = strategy.generate_signal(df_features)
-                    if not signal_info or not redis_client: continue
-                    
-                    current_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                    if not current_price_str: continue
-                    current_price = float(current_price_str)
+                    if not signal_info: continue
                     
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
                     
+                    # التحقق من إشارة الشراء
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
-                        last_features = df_features.iloc[-1]; last_features.name = symbol
+                        last_features = df_features.iloc[-1]
+                        last_features.name = symbol
                         
+                        # ✨ [مُحدّث] جلب السعر الفوري مباشرة قبل اتخاذ القرار
+                        try:
+                            entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                            logger.info(f"✅ [{symbol}] Fresh entry price fetched via API: {entry_price}")
+                        except Exception as e:
+                            logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
+                            continue
+
                         # --- منطق تعزيز الصفقة ---
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
@@ -1167,20 +1205,15 @@ def main_loop():
 
                             if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
                                 logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
-                                
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                                 if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
-                                
                                 last_atr = last_features.get('atr', 0)
-                                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                                tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr) # استخدام السعر الفوري
                                 if not tp_sl_data: continue
                                 
                                 updated_signal_data = {
                                     'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                    'signal_details': {
-                                        'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}",
-                                        'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal'
-                                    }
+                                    'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal' }
                                 }
                                 
                                 if update_signal_in_db(open_trade['id'], updated_signal_data):
@@ -1196,25 +1229,27 @@ def main_loop():
                             if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                             
                             last_atr = last_features.get('atr', 0)
-                            volatility = (last_atr / current_price * 100) if current_price > 0 else 0
+                            volatility = (last_atr / entry_price * 100) if entry_price > 0 else 0
                             if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
                                 log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
+                            
                             if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
                                 correlation = last_features.get('btc_correlation', 0)
                                 if correlation < MIN_BTC_CORRELATION:
                                     log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
                             
-                            tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                            tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr) # استخدام السعر الفوري
                             if not tp_sl_data: continue
                             
                             new_signal = {
                                 'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
                                 'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
-                                'entry_price': current_price, **tp_sl_data
+                                'entry_price': entry_price, **tp_sl_data # استخدام السعر الفوري
                             }
 
                             if USE_RRR_FILTER:
-                                risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
+                                risk = entry_price - float(new_signal['stop_loss'])
+                                reward = float(new_signal['target_price']) - entry_price
                                 if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
                                     log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
                             
@@ -1223,13 +1258,26 @@ def main_loop():
                                 with signal_cache_lock:
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
                                 send_new_signal_alert(saved_signal)
-                    time.sleep(2)
-                except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
-            logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
-        except (KeyboardInterrupt, SystemExit): break
-        except Exception as main_err: log_and_notify("error", f"Error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
+                    
+                    time.sleep(2) # تأخير بسيط بين كل عملة وأخرى
+                except Exception as e: 
+                    logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
+            
+            # 5. نهاية الدورة: تنفيذ التنظيف والانتظار
+            logger.info("✅ [End of Cycle] Scan cycle finished.")
+            perform_end_of_cycle_cleanup()
+            logger.info(f"⏳ [End of Cycle] Waiting for 300 seconds before next cycle...")
+            time.sleep(300)
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V17) ----------------------
+        except (KeyboardInterrupt, SystemExit): 
+            log_and_notify("info", "Bot is shutting down by user request.", "SYSTEM")
+            break
+        except Exception as main_err: 
+            log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM")
+            time.sleep(120)
+
+
+# ---------------------- واجهة برمجة تطبيقات Flask (V18) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1294,7 +1342,6 @@ def get_stats():
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred"}), 500
 
-# ✨ [مُحدّث] نقطة النهاية لمنحنى الربح التراكمي
 @app.route('/api/profit_curve')
 def get_profit_curve():
     if not check_db_connection(): 
@@ -1311,8 +1358,6 @@ def get_profit_curve():
             """)
             trades = cur.fetchall()
         
-        # Start with a point at time zero with zero profit.
-        # If there are trades, start just before the first trade.
         start_time = (trades[0]['closed_at'] - timedelta(seconds=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
         curve_data = [{"timestamp": start_time, "cumulative_profit": 0.0}]
 
@@ -1416,7 +1461,7 @@ def initialize_bot_services():
         Thread(target=determine_market_state, daemon=True).start()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
-            logger.critical("❌ No validated symbols to scan. Loops will not start."); return
+            logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
@@ -1426,7 +1471,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V17 - Professional) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V18 - Memory & Price Sync) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
