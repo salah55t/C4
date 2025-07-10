@@ -63,7 +63,7 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -77,7 +77,7 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
-BUY_CONFIDENCE_THRESHOLD = 0.65
+BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
