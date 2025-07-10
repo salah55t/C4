@@ -542,7 +542,7 @@ function refreshData() {
     updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
 
-setInterval(refreshData, 8000);
+setInterval(refreshData, 2000);
 window.onload = refreshData;
 </script>
 </body>
