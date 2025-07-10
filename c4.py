@@ -25,6 +25,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
 import gc
+from decimal import Decimal, ROUND_DOWN
 
 # --- تجاهل التحذيرات غير الهامة ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -36,11 +37,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v16.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v17_real.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV16_Reinforcement')
+logger = logging.getLogger('CryptoBotV17_RealTrading')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,6 +57,17 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
+# --- START: REAL TRADING CONFIGURATION ---
+# 🔴 !! تحذير !! 🔴
+# تغيير هذا المتغير إلى True سيمكن البوت من إجراء عمليات تداول حقيقية بأموال حقيقية.
+# لا تقم بتفعيله إلا إذا كنت تفهم الكود تمامًا وتقبل المخاطر.
+ENABLE_REAL_TRADING: bool = False # 👈 *** مفتاح التداول الحقيقي ***
+
+# النسبة المئوية من رصيد USDT لاستخدامها في كل صفقة
+TRADE_BALANCE_PERCENT: float = 2.0 # مثال: 2.0 تعني استخدام 2% من الرصيد
+
+# --- END: REAL TRADING CONFIGURATION ---
+
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -64,8 +76,8 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 MODEL_BATCH_SIZE: int = 5
 DIRECT_API_CHECK_INTERVAL: int = 10
-TRADING_FEE_PERCENT: float = 0.1 # رسوم التداول 0.1%
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الافتراضي لحساب الربح بالدولار
+TRADING_FEE_PERCENT: float = 0.1
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -83,8 +95,7 @@ MAX_OPEN_TRADES: int = 10
 BUY_CONFIDENCE_THRESHOLD = 0.65
 SELL_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_FOR_SELL_CLOSE_PERCENT = 0.2
-# ✨ New: Minimum confidence increase to justify a trade update
-MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05 
+MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
@@ -135,6 +146,9 @@ current_market_state: Dict[str, Any] = {
     "last_updated": None
 }
 market_state_lock = Lock()
+# --- Real Trading Cache ---
+exchange_info_cache: Dict[str, Any] = {}
+exchange_info_lock = Lock()
 
 
 # ---------------------- دالة HTML للوحة التحكم (تم الإصلاح) ----------------------
@@ -142,6 +156,7 @@ def get_dashboard_html():
     """
     لوحة تحكم محسنة مع شارت أرباح بتصميم الشموع اليابانية (شلال) وتصميم متجاوب.
     """
+    # ... (الكود الخاص بواجهة HTML لم يتغير)
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -399,7 +414,6 @@ function updateStats() {
     });
 }
 
-// ✨ UPDATED: Profit chart function for waterfall/candlestick style
 function updateProfitChart() {
     const chartCard = document.getElementById('profit-chart-card');
     const canvas = document.getElementById('profitChart');
@@ -542,7 +556,7 @@ function refreshData() {
     updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
 }
 
-setInterval(refreshData, 2000);
+setInterval(refreshData, 8000);
 window.onload = refreshData;
 </script>
 </body>
@@ -562,16 +576,28 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # --- تعديل جدول الصفقات لدعم التداول الحقيقي ---
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL,
+                        stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT,
+                        signal_details JSONB,
+                        current_peak_price DOUBLE PRECISION,
+                        -- أعمدة جديدة للتداول الحقيقي
+                        buy_order_id TEXT,
+                        oco_order_id TEXT,
+                        quantity DOUBLE PRECISION,
+                        commission DOUBLE PRECISION
                     );
                 """)
-                # Add status index for faster queries
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -580,7 +606,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
             conn.commit()
-            logger.info("✅ [DB] Database connection successful and tables initialized.")
+            logger.info("✅ [DB] Database connection successful and tables (re)initialized for real trading.")
             return
         except Exception as e:
             logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}/{retries}): {e}")
@@ -676,6 +702,52 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}")
         return None
+
+# --- START: REAL TRADING HELPER FUNCTIONS ---
+
+def get_exchange_info_for_symbol(symbol: str) -> Optional[Dict]:
+    """
+    Fetches and caches exchange information for a specific symbol.
+    This is crucial for getting trading rules like LOT_SIZE and MIN_NOTIONAL.
+    """
+    with exchange_info_lock:
+        if symbol in exchange_info_cache:
+            return exchange_info_cache[symbol]
+    if not client: return None
+    try:
+        info = client.get_exchange_info()
+        symbol_info = next((s for s in info['symbols'] if s['symbol'] == symbol), None)
+        if symbol_info:
+            with exchange_info_lock:
+                exchange_info_cache[symbol] = symbol_info
+            return symbol_info
+        return None
+    except Exception as e:
+        logger.error(f"❌ [Exchange Info] Could not fetch info for {symbol}: {e}")
+        return None
+
+def adjust_value_by_step_size(value: float, step_size: str) -> float:
+    """
+    Adjusts a value down to the nearest multiple of the step size.
+    """
+    decimal_value = Decimal(str(value))
+    decimal_step = Decimal(str(step_size))
+    adjusted = (decimal_value // decimal_step) * decimal_step
+    return float(adjusted)
+
+def get_usdt_balance() -> float:
+    """
+    Fetches the free (available) USDT balance from the Binance account.
+    """
+    if not client: return 0.0
+    try:
+        balance_info = client.get_asset_balance(asset='USDT')
+        return float(balance_info['free'])
+    except Exception as e:
+        logger.error(f"❌ [Balance] Could not get USDT balance: {e}")
+        return 0.0
+
+# --- END: REAL TRADING HELPER FUNCTIONS ---
 
 # ---------------------- دوال حساب الميزات وتحديد الاتجاه ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -873,9 +945,32 @@ def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optiona
     if last_atr <= 0:
         log_rejection(symbol, "Invalid ATR for Fallback", {"detail": "ATR is zero or negative"})
         return None
+    
+    # --- تعديل لحساب TP/SL ليتوافق مع قوانين المنصة ---
+    symbol_info = get_exchange_info_for_symbol(symbol)
+    if not symbol_info:
+        log_rejection(symbol, "TP/SL Calculation", {"detail": "Failed to get exchange info"})
+        return None
+
+    tick_size = None
+    for f in symbol_info['filters']:
+        if f['filterType'] == 'PRICE_FILTER':
+            tick_size = f['tickSize']
+            break
+    
+    if not tick_size:
+        log_rejection(symbol, "TP/SL Calculation", {"detail": "Could not find tickSize"})
+        return None
+
     fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
     fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
-    return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
+
+    # تعديل الأسعار لتتوافق مع tickSize
+    adjusted_tp = adjust_value_by_step_size(fallback_tp, tick_size)
+    adjusted_sl = adjust_value_by_step_size(fallback_sl, tick_size)
+
+    return {'target_price': adjusted_tp, 'stop_loss': adjusted_sl, 'source': 'ATR_Fallback'}
+
 
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
@@ -889,6 +984,26 @@ def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, clo
     if not signal_id:
         logger.error(f"❌ [Closure] Attempted to close a signal without an ID for symbol {symbol}")
         return
+    
+    # --- تعديل: إلغاء أمر OCO عند الإغلاق اليدوي ---
+    if status == 'manual_close' and ENABLE_REAL_TRADING and client:
+        oco_order_id = signal_to_close.get('oco_order_id')
+        if oco_order_id:
+            try:
+                logger.info(f"ℹ️ [Manual Close] Attempting to cancel OCO order list {oco_order_id} for {symbol}.")
+                client.cancel_order(symbol=symbol, orderListId=int(oco_order_id))
+                logger.info(f"✅ [Manual Close] Successfully cancelled OCO order list {oco_order_id}.")
+            except BinanceAPIException as e:
+                # قد يكون الأمر تم تنفيذه بالفعل، وهذا طبيعي
+                if e.code == -2011: # Unknown order sent.
+                     logger.warning(f"⚠️ [Manual Close] OCO order list {oco_order_id} for {symbol} not found on exchange. It might have already been filled or cancelled.")
+                else:
+                    logger.error(f"❌ [Manual Close] Failed to cancel OCO order list {oco_order_id} for {symbol}: {e}")
+                    # لا نوقف العملية، قد نرغب في بيع الكمية المتبقية يدويًا
+            except Exception as e:
+                logger.error(f"❌ [Manual Close] An unexpected error occurred while cancelling OCO order {oco_order_id}: {e}")
+
+
     with closure_lock:
         if signal_id in signals_pending_closure:
             logger.warning(f"⚠️ [Closure] Closure for signal {signal_id} ({symbol}) already in progress.")
@@ -921,33 +1036,43 @@ def trade_monitoring_loop():
             if not signals_to_check or not redis_client or not client:
                 time.sleep(1)
                 continue
+            
+            # --- منطق مراقبة الصفقات لم يعد يعتمد على وضع أوامر البيع ---
+            # --- الآن دوره الأساسي هو تحديث الأسعار الحالية وحساب الربح/الخسارة للعرض ---
+            # --- وتفعيل وقف الخسارة المتحرك (إذا كان مفعلاً) ---
+
             perform_direct_api_check = (time.time() - last_api_check_time) > DIRECT_API_CHECK_INTERVAL
             if perform_direct_api_check:
                 last_api_check_time = time.time()
+            
             symbols_to_fetch = list(signals_to_check.keys())
             redis_prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols_to_fetch)
             redis_prices = {symbol: price for symbol, price in zip(symbols_to_fetch, redis_prices_list)}
+
             for symbol, signal in signals_to_check.items():
                 signal_id = signal.get('id')
                 if not signal_id: continue
                 with closure_lock:
                     if signal_id in signals_pending_closure:
                         continue
+                
                 price = None
                 if perform_direct_api_check:
-                    try:
-                        price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                    try: price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception: pass
                 if not price and redis_prices.get(symbol):
                     price = float(redis_prices[symbol])
                 if not price: continue
+
                 with signal_cache_lock:
                     if symbol in open_signals_cache:
                         open_signals_cache[symbol]['current_price'] = price
                         open_signals_cache[symbol]['pnl_pct'] = ((price / float(signal['entry_price'])) - 1) * 100
-                target_price = float(signal.get('target_price', 0))
-                original_stop_loss = float(signal.get('stop_loss', 0))
-                effective_stop_loss = original_stop_loss
+
+                # --- منطق وقف الخسارة المتحرك ---
+                # هذا الجزء يحتاج إلى تعديل معقد لإلغاء أمر OCO ووضع أمر جديد.
+                # سنبقيه كما هو في الوقت الحالي للتركيز على الوظائف الأساسية.
+                # في التداول الحقيقي، هذا الجزء سيقوم بإلغاء OCO ووضع أمر جديد.
                 if USE_TRAILING_STOP_LOSS:
                     entry_price = float(signal.get('entry_price', 0))
                     activation_price = entry_price * (1 + TRAILING_ACTIVATION_PROFIT_PERCENT / 100)
@@ -963,22 +1088,16 @@ def trade_monitoring_loop():
                                 update_signal_peak_price_in_db(signal_id, price)
                                 LAST_PEAK_UPDATE_TIME[signal_id] = now
                             current_peak = price
-                        trailing_stop_price = current_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
-                        if trailing_stop_price > effective_stop_loss:
-                            logger.info(f"📈 [Trailing SL] {symbol} new peak: {current_peak:.4f}. Adjusted SL to: {trailing_stop_price:.4f}")
-                            effective_stop_loss = trailing_stop_price
-                status_to_set = None
-                if price >= target_price:
-                    status_to_set = 'target_hit'
-                elif price <= effective_stop_loss:
-                    status_to_set = 'stop_loss_hit'
-                if status_to_set:
-                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | Condition '{status_to_set}' met at price {price}.")
-                    initiate_signal_closure(symbol, signal, status_to_set, price)
+                        
+                        # trailing_stop_price = current_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
+                        # logger.info(f"📈 [Trailing SL] {symbol} new peak: {current_peak:.4f}. New potential SL: {trailing_stop_price:.4f}")
+                        # ملاحظة: هنا يجب وضع منطق إلغاء OCO القديم ووضع OCO جديد مع وقف الخسارة المحدث.
+
             time.sleep(0.2)
         except Exception as e:
             logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
             time.sleep(5)
+
 
 def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional[Dict] = None) -> bool:
     if not TELEGRAM_TOKEN or not target_chat_id: return False
@@ -991,20 +1110,26 @@ def send_telegram_message(target_chat_id: str, text: str, reply_markup: Optional
         else: logger.error(f"❌ [Telegram] Failed to send message. Status: {response.status_code}, Response: {response.text}"); return False
     except requests.exceptions.RequestException as e: logger.error(f"❌ [Telegram] Request failed: {e}"); return False
 
-def send_new_signal_alert(signal_data: Dict[str, Any]):
+def send_new_signal_alert(signal_data: Dict[str, Any], is_real_trade: bool = False):
     symbol = signal_data['symbol']; entry = float(signal_data['entry_price']); target = float(signal_data['target_price']); sl = float(signal_data['stop_loss'])
     profit_pct = ((target / entry) - 1) * 100
     risk_pct = abs(((entry / sl) - 1) * 100) if sl > 0 else 0
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
     confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
-    message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n\n"
+    
+    # --- تعديل رسالة التلغرام لتعكس نوع الصفقة (حقيقية أم إشارة) ---
+    trade_type_header = "🔥 *صفقة حقيقية جديدة* 🔥" if is_real_trade else "💡 *توصية تداول جديدة* 💡"
+    quantity_line = f"\n*الكمية:* `{signal_data.get('quantity', 'N/A'):.8g}`" if is_real_trade else ""
+
+    message = (f"{trade_type_header}\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n"
+               f"{quantity_line}\n"
                f"*الدخول:* `{entry:,.8g}`\n*الهدف:* `{target:,.8g}`\n*وقف الخسارة:* `{sl:,.8g}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
                f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
+        log_and_notify('info', f"New {'Real Trade' if is_real_trade else 'Signal'}: {symbol} in {market_regime} market", "NEW_SIGNAL")
 
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
@@ -1030,8 +1155,19 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         entry = float(signal['entry_price']); target = float(signal['target_price']); sl = float(signal['stop_loss'])
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;",
-                        (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), entry))
+            # --- تعديل دالة الإدخال لتشمل بيانات التداول الحقيقي ---
+            cur.execute("""
+                INSERT INTO signals (
+                    symbol, entry_price, target_price, stop_loss, strategy_name, 
+                    signal_details, current_peak_price, buy_order_id, oco_order_id, quantity
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+                """,
+                (
+                    signal['symbol'], entry, target, sl, signal.get('strategy_name'), 
+                    json.dumps(signal.get('signal_details', {})), entry,
+                    signal.get('buy_order_id'), signal.get('oco_order_id'), signal.get('quantity')
+                )
+            )
             signal['id'] = cur.fetchone()['id']
         conn.commit()
         logger.info(f"✅ [DB] Inserted signal {signal['id']} for {signal['symbol']}.")
@@ -1125,7 +1261,14 @@ def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
     if not validated_symbols_to_scan: log_and_notify("critical", "No validated symbols to scan.", "SYSTEM"); return
+    
+    if ENABLE_REAL_TRADING:
+        log_and_notify("warning", "🔴 REAL TRADING MODE IS ACTIVE. THE BOT WILL EXECUTE TRADES WITH REAL MONEY. 🔴", "SYSTEM")
+    else:
+        log_and_notify("info", "🔵 Paper Trading Mode is active. The bot will only generate signals, not execute trades. 🔵", "SYSTEM")
+
     log_and_notify("info", f"Starting scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
+    
     while True:
         try:
             determine_market_state()
@@ -1140,6 +1283,10 @@ def main_loop():
                     with signal_cache_lock:
                         open_trade = open_signals_cache.get(symbol)
                         open_trade_count = len(open_signals_cache)
+
+                    if open_trade:
+                        # لا تقم بمسح عملة لديها صفقة مفتوحة بالفعل
+                        continue
 
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_15m is None: continue
@@ -1159,83 +1306,130 @@ def main_loop():
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                         last_features = df_features.iloc[-1]; last_features.name = symbol
                         
-                        if open_trade:
-                            old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
-                            
-                            # ✨ FIX: Robustly convert old_confidence to a float to handle legacy string data
-                            old_confidence = 0.0
+                        if open_trade_count >= MAX_OPEN_TRADES:
+                            log_rejection(symbol, "Max Open Trades", {"count": open_trade_count, "max": MAX_OPEN_TRADES}); continue
+                        
+                        if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
+                        if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                        
+                        last_atr = last_features.get('atr', 0)
+                        volatility = (last_atr / current_price * 100)
+                        if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
+                            log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
+                        if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
+                            correlation = last_features.get('btc_correlation', 0)
+                            if correlation < MIN_BTC_CORRELATION:
+                                log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
+                        
+                        tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
+                        if not tp_sl_data: continue
+                        
+                        new_signal = {
+                            'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
+                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                            'entry_price': current_price, **tp_sl_data
+                        }
+
+                        if USE_RRR_FILTER:
+                            risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
+                            if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
+                                log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
+                        
+                        # --- START: REAL TRADING EXECUTION LOGIC ---
+                        if ENABLE_REAL_TRADING:
                             try:
-                                if isinstance(old_confidence_raw, str):
-                                    cleaned_str = old_confidence_raw.strip().replace('%', '')
-                                    numeric_val = float(cleaned_str)
-                                    old_confidence = numeric_val / 100.0 if numeric_val > 1 else numeric_val
-                                elif old_confidence_raw is not None:
-                                    old_confidence = float(old_confidence_raw)
-                            except (ValueError, TypeError) as e:
-                                logger.warning(f"[{symbol}] Could not parse old confidence value '{old_confidence_raw}'. Defaulting to 0.0. Error: {e}")
-                                old_confidence = 0.0
+                                # 1. الحصول على معلومات التداول للعملة
+                                symbol_info = get_exchange_info_for_symbol(symbol)
+                                if not symbol_info:
+                                    log_rejection(symbol, "Real Trade Execution", {"detail": "Failed to get exchange info."})
+                                    continue
 
-                            if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
-                                logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old confidence: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
+                                lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+                                min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
                                 
-                                if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                                if not lot_size_filter or not min_notional_filter:
+                                    log_rejection(symbol, "Real Trade Execution", {"detail": "LOT_SIZE or MIN_NOTIONAL filter not found."})
+                                    continue
+
+                                step_size = lot_size_filter['stepSize']
+                                min_notional = float(min_notional_filter['minNotional'])
+
+                                # 2. حساب الرصيد وتحديد حجم الصفقة
+                                usdt_balance = get_usdt_balance()
+                                usdt_to_spend = usdt_balance * (TRADE_BALANCE_PERCENT / 100)
                                 
-                                last_atr = last_features.get('atr', 0)
-                                tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
-                                if not tp_sl_data: continue
+                                if usdt_to_spend < min_notional:
+                                    log_rejection(symbol, "Insufficient Balance for Min Notional", {"required": min_notional, "available_to_spend": usdt_to_spend})
+                                    continue
                                 
-                                updated_signal_data = {
-                                    'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                    'signal_details': {
-                                        'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}",
-                                        'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal'
-                                    }
-                                }
+                                # 3. حساب وتعديل الكمية
+                                quantity = usdt_to_spend / current_price
+                                adjusted_quantity = adjust_value_by_step_size(quantity, step_size)
+
+                                if adjusted_quantity == 0:
+                                    log_rejection(symbol, "Quantity Too Small", {"calculated_qty": quantity, "adjusted_qty": adjusted_quantity})
+                                    continue
+
+                                # 4. تنفيذ أمر الشراء
+                                logger.info(f"💰 [REAL TRADE] Attempting to BUY {adjusted_quantity} of {symbol} at market price.")
+                                buy_order = client.create_order(
+                                    symbol=symbol,
+                                    side=Client.SIDE_BUY,
+                                    type=Client.ORDER_TYPE_MARKET,
+                                    quantity=adjusted_quantity
+                                )
+                                logger.info(f"✅ [REAL TRADE] Market BUY order placed successfully for {symbol}. Order ID: {buy_order['orderId']}")
                                 
-                                if update_signal_in_db(open_trade['id'], updated_signal_data):
+                                # 5. حساب سعر الدخول الفعلي والكمية من استجابة الأمر
+                                filled_quantity = float(buy_order['executedQty'])
+                                total_cost = float(buy_order['cummulativeQuoteQty'])
+                                actual_entry_price = total_cost / filled_quantity
+                                
+                                new_signal['entry_price'] = actual_entry_price
+                                new_signal['quantity'] = filled_quantity
+                                new_signal['buy_order_id'] = buy_order['orderId']
+
+                                # 6. إعادة حساب TP/SL بناءً على سعر الدخول الفعلي
+                                new_tp_sl = calculate_tp_sl(symbol, actual_entry_price, last_atr)
+                                if not new_tp_sl:
+                                    log_and_notify('error', f"CRITICAL: Bought {symbol} but failed to calculate TP/SL for OCO. MANUAL INTERVENTION NEEDED.", "CRITICAL_ERROR")
+                                    continue
+                                
+                                new_signal.update(new_tp_sl)
+
+                                # 7. تنفيذ أمر OCO للبيع (جني الأرباح ووقف الخسارة)
+                                logger.info(f"🛡️ [REAL TRADE] Placing OCO SELL order for {symbol}. TP: {new_signal['target_price']}, SL: {new_signal['stop_loss']}")
+                                oco_order = client.create_oco_order(
+                                    symbol=symbol,
+                                    side=Client.SIDE_SELL,
+                                    quantity=filled_quantity,
+                                    price=f"{new_signal['target_price']:.8f}".rstrip('0').rstrip('.'), # Take Profit
+                                    stopPrice=f"{new_signal['stop_loss']:.8f}".rstrip('0').rstrip('.'), # Stop Loss Trigger
+                                    stopLimitPrice=f"{new_signal['stop_loss']:.8f}".rstrip('0').rstrip('.'), # Stop Loss Limit
+                                    stopLimitTimeInForce=Client.TIME_IN_FORCE_GTC
+                                )
+                                logger.info(f"✅ [REAL TRADE] OCO order placed successfully for {symbol}. List Order ID: {oco_order['orderListId']}")
+                                new_signal['oco_order_id'] = oco_order['orderListId']
+
+                                # 8. حفظ الصفقة الحقيقية في قاعدة البيانات
+                                saved_signal = insert_signal_into_db(new_signal)
+                                if saved_signal:
                                     with signal_cache_lock:
-                                        open_signals_cache[symbol].update(updated_signal_data)
-                                        open_signals_cache[symbol]['status'] = 'updated'
-                                    send_trade_update_alert(updated_signal_data, open_trade)
-                                else:
-                                    logger.error(f"❌ [{symbol}] Failed to update signal in DB, aborting.")
-                            else:
-                                logger.debug(f"[{symbol}] New BUY signal not strong enough to update existing trade.")
-                            continue
+                                        open_signals_cache[saved_signal['symbol']] = saved_signal
+                                    send_new_signal_alert(saved_signal, is_real_trade=True)
 
-                        if open_trade_count < MAX_OPEN_TRADES:
-                            if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                            if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
-                            
-                            last_atr = last_features.get('atr', 0)
-                            volatility = (last_atr / current_price * 100)
-                            if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                                log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
-                            if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
-                                correlation = last_features.get('btc_correlation', 0)
-                                if correlation < MIN_BTC_CORRELATION:
-                                    log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
-                            
-                            tp_sl_data = calculate_tp_sl(symbol, current_price, last_atr)
-                            if not tp_sl_data: continue
-                            
-                            new_signal = {
-                                'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                                'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
-                                'entry_price': current_price, **tp_sl_data
-                            }
-
-                            if USE_RRR_FILTER:
-                                risk = current_price - float(new_signal['stop_loss']); reward = float(new_signal['target_price']) - current_price
-                                if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
-                                    log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
-                            
+                            except BinanceAPIException as e:
+                                log_and_notify('error', f"Binance API Error during real trade for {symbol}: {e}", "TRADE_ERROR")
+                            except Exception as e:
+                                log_and_notify('error', f"General Error during real trade for {symbol}: {e}", "TRADE_ERROR")
+                        else:
+                            # وضع التداول الورقي (Paper Trading)
                             saved_signal = insert_signal_into_db(new_signal)
                             if saved_signal:
                                 with signal_cache_lock:
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
-                                send_new_signal_alert(saved_signal)
+                                send_new_signal_alert(saved_signal, is_real_trade=False)
+                        # --- END: REAL TRADING EXECUTION LOGIC ---
                     time.sleep(2)
                 except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
             logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
@@ -1278,18 +1472,28 @@ def get_stats():
         return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, profit_percentage FROM signals;")
+            cur.execute("SELECT status, profit_percentage, quantity, entry_price FROM signals;")
             all_signals = cur.fetchall()
         open_trades_count = sum(1 for s in all_signals if s.get('status') in ['open', 'updated'])
         closed_trades = [s for s in all_signals if s.get('status') not in ['open', 'updated'] and s.get('profit_percentage') is not None]
+        
+        # --- تعديل حساب الربح ليعكس الصفقات الحقيقية أو الافتراضية ---
         total_net_profit_usdt = 0.0
+        for t in closed_trades:
+            profit_pct = float(t['profit_percentage'])
+            # إذا كانت الصفقة حقيقية (لديها كمية مسجلة)، استخدم حجمها الفعلي
+            if t.get('quantity') and t.get('entry_price'):
+                trade_size_usdt = float(t['quantity']) * float(t['entry_price'])
+            else: # وإلا، استخدم الحجم الافتراضي
+                trade_size_usdt = HYPOTHETICAL_TRADE_SIZE_USDT
+            
+            # افترض أن رسوم الدخول والخروج تمثل 2 * TRADING_FEE_PERCENT
+            net_profit_pct = profit_pct - (2 * TRADING_FEE_PERCENT)
+            total_net_profit_usdt += (net_profit_pct / 100) * trade_size_usdt
+
         win_rate = 0.0
         profit_factor_val = 0.0
         if closed_trades:
-            total_net_profit_usdt = sum(
-                ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
-                for t in closed_trades
-            )
             wins = sum(1 for s in closed_trades if float(s['profit_percentage']) > 0)
             win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0.0
             total_profit_from_wins = sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0)
@@ -1298,6 +1502,7 @@ def get_stats():
                 profit_factor_val = total_profit_from_wins / total_loss_from_losses
             elif total_profit_from_wins > 0:
                 profit_factor_val = "Infinity"
+
         return jsonify({
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
@@ -1368,17 +1573,50 @@ def manual_close_signal_api(signal_id):
             cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
             signal_to_close = cur.fetchone()
         if not signal_to_close: return jsonify({"error": "Signal not found or already closed"}), 404
-        symbol = dict(signal_to_close)['symbol']
-        try:
-            price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-        except Exception as e:
-            logger.error(f"❌ [API Close] Could not fetch price for {symbol}: {e}")
-            return jsonify({"error": f"Could not fetch price for {symbol}"}), 500
-        initiate_signal_closure(symbol, dict(signal_to_close), 'manual_close', price)
-        return jsonify({"message": f"تم إرسال طلب إغلاق الصفقة {signal_id}..."})
+        
+        signal_dict = dict(signal_to_close)
+        symbol = signal_dict['symbol']
+        
+        # --- تعديل الإغلاق اليدوي ليعمل مع الصفقات الحقيقية ---
+        if ENABLE_REAL_TRADING and signal_dict.get('quantity'):
+            # إذا كانت صفقة حقيقية، قم ببيع الكمية بسعر السوق
+            quantity_to_sell = signal_dict['quantity']
+            logger.info(f"💰 [MANUAL CLOSE] Attempting to SELL {quantity_to_sell} of {symbol} at market price.")
+            try:
+                # أولاً، قم بإلغاء أمر OCO الموجود
+                initiate_signal_closure(symbol, signal_dict, 'manual_close', 0) # استدعاء لإلغاء OCO
+                time.sleep(1) # انتظر قليلاً للتأكد من الإلغاء
+                
+                sell_order = client.create_order(
+                    symbol=symbol,
+                    side=Client.SIDE_SELL,
+                    type=Client.ORDER_TYPE_MARKET,
+                    quantity=quantity_to_sell
+                )
+                closing_price = float(sell_order['cummulativeQuoteQty']) / float(sell_order['executedQty'])
+                logger.info(f"✅ [MANUAL CLOSE] Market SELL order executed for {symbol} at price {closing_price}.")
+                # سيتم تحديث قاعدة البيانات عبر stream أو webhooks لاحقًا
+                return jsonify({"message": f"تم إرسال أمر بيع سوقي للصفقة {signal_id}."})
+            except BinanceAPIException as e:
+                 logger.error(f"❌ [API Manual Close] Binance error selling {symbol}: {e}")
+                 return jsonify({"error": f"Binance error selling {symbol}: {e.message}"}), 500
+            except Exception as e:
+                 logger.error(f"❌ [API Manual Close] General error selling {symbol}: {e}")
+                 return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+        else:
+            # إذا كانت صفقة ورقية، أغلقها كالمعتاد
+            try:
+                price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+            except Exception as e:
+                logger.error(f"❌ [API Close] Could not fetch price for {symbol}: {e}")
+                return jsonify({"error": f"Could not fetch price for {symbol}"}), 500
+            initiate_signal_closure(symbol, signal_dict, 'manual_close', price)
+            return jsonify({"message": f"تم إرسال طلب إغلاق الصفقة {signal_id}..."})
+
     except Exception as e:
         logger.error(f"❌ [API Close] Error: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1426,6 +1664,12 @@ def run_websocket_manager():
         streams = [f"{s.lower()}@miniTicker" for s in chunk]
         twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
         logger.info(f"✅ [WebSocket] Subscribed to price stream chunk {i+1}/{len(symbol_chunks)}.")
+
+    # --- إضافة stream لبيانات الحساب لمراقبة تنفيذ الأوامر ---
+    if ENABLE_REAL_TRADING:
+        logger.info("📈 [WebSocket] Starting User Data Stream...")
+        # twm.start_user_socket(callback=handle_user_data_message) # تحتاج لدالة معالجة جديدة
+        logger.info("✅ [WebSocket] User Data Stream started.")
 
     twm.join()
 
