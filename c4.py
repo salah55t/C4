@@ -30,16 +30,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V19 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V20 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v19_dashboard_fix.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v20_logic_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV19')
+logger = logging.getLogger('CryptoBotV20')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -54,7 +54,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V19 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V20 ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -63,7 +63,7 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0
+HYPOTHETICAL_TRADE_SIZE_USDT: float = 100.0
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14
@@ -77,7 +77,7 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 10
-BUY_CONFIDENCE_THRESHOLD = 0.85
+BUY_CONFIDENCE_THRESHOLD = 0.65
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
@@ -127,10 +127,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V19) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V20) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V19 مع إصلاح منطق عرض البيانات.
+    لوحة تحكم احترافية V20.
     """
     return """
 <!DOCTYPE html>
@@ -138,7 +138,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول الاحترافية V19</title>
+    <title>لوحة تحكم التداول الاحترافية V20</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -172,7 +172,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V19</span>
+                <span class="text-text-secondary font-medium">V20</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -987,13 +987,14 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
     confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n\n"
-               f"*الدخول:* `{entry:,.8g}`\n*الهدف:* `{target:,.8g}`\n*وقف الخسارة:* `{sl:,.8g}`\n\n"
+               f"*الدخول:* `{entry:.8f}`\n*الهدف:* `{target:.8f}`\n*وقف الخسارة:* `{sl:.8f}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
                f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
 
+# ✨ [مُحدّث] إصلاح تنسيق الأرقام في رسالة التحديث
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
     old_target = float(old_signal_data['target_price'])
@@ -1006,8 +1007,8 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
     message = (f"🔄 *تحديث صفقة (تعزيز)* 🔄\n\n"
                f"*العملة:* `{symbol}`\n\n"
                f"*الثقة:* `{old_conf}` ⬅️ `{new_conf}`\n"
-               f"*الهدف:* `{old_target:,.8g}` ⬅️ `{new_target:,.8g}`\n"
-               f"*الوقف:* `{old_sl:,.8g}` ⬅️ `{new_sl:,.8g}`\n\n"
+               f"*الهدف:* `{old_target:.8f}` ⬅️ `{new_target:.8f}`\n"
+               f"*الوقف:* `{old_sl:.8f}` ⬅️ `{new_sl:.8f}`\n\n"
                f"تم تحديث الصفقة بناءً على إشارة شراء أقوى.")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
@@ -1134,6 +1135,7 @@ def perform_end_of_cycle_cleanup():
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
 
+# ✨ [مُحدّث] حلقة العمل الرئيسية مع إصلاح منطق التعزيز
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1184,11 +1186,11 @@ def main_loop():
                         
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                            logger.info(f"✅ [{symbol}] Fresh entry price fetched via API: {entry_price}")
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
                             continue
 
+                        # --- ✨ [مُصلح] منطق التعزيز مع التحقق من التغيير ---
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                             old_confidence = 0.0
@@ -1199,16 +1201,34 @@ def main_loop():
                                     old_confidence = float(old_confidence_raw)
                             except (ValueError, TypeError): pass
 
+                            logger.info(f"ℹ️ [{symbol}] Checking for reinforcement. New Confidence: {confidence:.6f}, Old Confidence: {old_confidence:.6f}")
+                            
                             if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
-                                logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
+                                logger.info(f"✅ [{symbol}] Reinforcement condition met. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
+                                
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                                 if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                                
                                 last_atr = last_features.get('atr', 0)
                                 tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                                 if not tp_sl_data: continue
+
+                                old_target = float(open_trade['target_price'])
+                                old_sl = float(open_trade['stop_loss'])
+                                new_target = tp_sl_data['target_price']
+                                new_sl = tp_sl_data['stop_loss']
+
+                                is_target_same = np.isclose(new_target, old_target, rtol=1e-8, atol=1e-8)
+                                is_sl_same = np.isclose(new_sl, old_sl, rtol=1e-8, atol=1e-8)
+
+                                if is_target_same and is_sl_same:
+                                    logger.info(f"ℹ️ [{symbol}] Reinforcement signal resulted in identical TP/SL. No update needed.")
+                                    continue 
+
+                                logger.info(f"✅ [{symbol}] Meaningful change detected. Old TP/SL: {old_target}/{old_sl}, New TP/SL: {new_target}/{new_sl}. Proceeding with update.")
                                 
                                 updated_signal_data = {
-                                    'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
+                                    'symbol': symbol, 'target_price': new_target, 'stop_loss': new_sl,
                                     'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Original_Confidence': old_confidence, 'Update_Reason': 'Reinforcement Signal' }
                                 }
                                 
@@ -1219,6 +1239,7 @@ def main_loop():
                                     send_trade_update_alert(updated_signal_data, open_trade)
                             continue
 
+                        # --- منطق فتح صفقة جديدة ---
                         if open_trade_count < MAX_OPEN_TRADES:
                             if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                             if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
@@ -1271,7 +1292,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V19) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V20) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1368,7 +1389,6 @@ def get_profit_curve():
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
         return jsonify({"error": "Error fetching profit curve"}), 500
 
-# ✨ [مُحدّث] نقطة نهاية API مع منطق احتياطي لجلب الأسعار
 @app.route('/api/signals')
 def get_signals():
     if not check_db_connection() or not redis_client: 
@@ -1383,26 +1403,22 @@ def get_signals():
         if open_signals_to_process:
             symbols = [s['symbol'] for s in open_signals_to_process]
             
-            # 1. حاول الحصول على الأسعار من Redis أولاً
             prices_from_redis_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols)
             redis_prices = {symbol: p for symbol, p in zip(symbols, prices_from_redis_list)}
 
-            # 2. قم بتحديث الأسعار في قائمة الإشارات
             for s in all_signals:
                 if s['status'] in ('open', 'updated'):
                     symbol = s['symbol']
                     price = None
-                    s['current_price'] = None # القيمة الافتراضية
-                    s['pnl_pct'] = None       # القيمة الافتراضية
+                    s['current_price'] = None
+                    s['pnl_pct'] = None
 
-                    # استخدم سعر Redis إذا كان موجودًا
                     if redis_prices.get(symbol):
                         try:
                             price = float(redis_prices[symbol])
                         except (ValueError, TypeError):
                             price = None
                     
-                    # 3. إذا لم يكن السعر في Redis، استخدم API كحل بديل
                     if price is None and client:
                         logger.warning(f"⚠️ [API Signals] Price for {symbol} not in Redis. Fetching via API.")
                         try:
@@ -1411,7 +1427,6 @@ def get_signals():
                             logger.error(f"❌ [API Signals] Fallback API fetch failed for {symbol}: {e}")
                             price = None
 
-                    # 4. قم بتعيين السعر وحساب الربح/الخسارة إذا أمكن
                     s['current_price'] = price
                     if price and s.get('entry_price'):
                         s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
@@ -1499,7 +1514,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V19 - Dashboard Fix) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V20 - Reinforcement Logic Fix) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
