@@ -9,7 +9,7 @@ import psycopg2
 import pickle
 import redis
 import re
-import gc  # <-- تم التأكد من استيراد جامع القمامة
+import gc
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -30,16 +30,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V18 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V19 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v18_memory_sync.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v19_dashboard_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV18')
+logger = logging.getLogger('CryptoBotV19')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -54,7 +54,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V18 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V19 ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -76,8 +76,8 @@ MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
-MAX_OPEN_TRADES: int = 5
-BUY_CONFIDENCE_THRESHOLD = 0.75
+MAX_OPEN_TRADES: int = 10
+BUY_CONFIDENCE_THRESHOLD = 0.85
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
@@ -127,10 +127,10 @@ current_market_state: Dict[str, Any] = {
 market_state_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V18) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V19) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V18.
+    لوحة تحكم احترافية V19 مع إصلاح منطق عرض البيانات.
     """
     return """
 <!DOCTYPE html>
@@ -138,7 +138,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول الاحترافية V18</title>
+    <title>لوحة تحكم التداول الاحترافية V19</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -172,7 +172,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V18</span>
+                <span class="text-text-secondary font-medium">V19</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -462,10 +462,12 @@ function updateProfitChart() {
 
 function renderProgressBar(signal) {
     const { entry_price, stop_loss, target_price, current_price } = signal;
-    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null)) return '<span>لا تتوفر بيانات</span>';
+    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null || v === undefined)) {
+        return '<span class="text-xs text-text-secondary">لا تتوفر بيانات</span>';
+    }
     const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat);
     const totalDist = tp - sl;
-    if (totalDist <= 0) return '<span>بيانات غير صالحة</span>';
+    if (totalDist <= 0) return '<span class="text-xs text-text-secondary">بيانات غير صالحة</span>';
     const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
     return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
 }
@@ -475,21 +477,27 @@ function updateSignals() {
         const tableBody = document.getElementById('signals-table');
         if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; }
         if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; }
+        
         tableBody.innerHTML = data.map(signal => {
-            const pnlPct = signal.status === 'open' || signal.status === 'updated' ? (signal.pnl_pct || 0) : (signal.profit_percentage || 0);
+            const pnlPct = (signal.status === 'open' || signal.status === 'updated') ? signal.pnl_pct : signal.profit_percentage;
+            const pnlDisplay = pnlPct !== null && pnlPct !== undefined ? `${formatNumber(pnlPct)}%` : 'N/A';
+            const pnlColor = pnlPct === null || pnlPct === undefined ? 'text-text-secondary' : (pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red');
+            
             const statusClass = signal.status === 'open' ? 'text-yellow-400' : (signal.status === 'updated' ? 'text-blue-400' : 'text-gray-400');
             const statusText = signal.status === 'updated' ? 'تم تحديثها' : (signal.status === 'open' ? 'مفتوحة' : signal.status);
+            
             return `<tr class="table-row border-b border-border-color">
                     <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
                     <td class="p-4 font-bold ${statusClass}">${statusText}</td>
-                    <td class="p-4 font-mono font-bold ${pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'}">${formatNumber(pnlPct)}%</td>
-                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? renderProgressBar(signal) : '-'}</td>
-                    <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${signal.current_price ? formatNumber(signal.current_price, 5) : 'N/A'}</div></td>
-                    <td class="p-4">${signal.status === 'open' || signal.status === 'updated' ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600/80 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
+                    <td class="p-4 font-mono font-bold ${pnlColor}">${pnlDisplay}</td>
+                    <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? renderProgressBar(signal) : '-'}</td>
+                    <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${formatNumber(signal.current_price, 5)}</div></td>
+                    <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600/80 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
                 </tr>`;
         }).join('');
     });
 }
+
 
 function updateList(endpoint, listId, formatter) {
     apiFetch(endpoint).then(data => {
@@ -1102,7 +1110,6 @@ def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
-# ✨ [جديد] دالة تنظيف الذاكرة و Redis
 def perform_end_of_cycle_cleanup():
     """
     Performs cleanup tasks at the end of a scan cycle.
@@ -1111,16 +1118,13 @@ def perform_end_of_cycle_cleanup():
     logger.info("🧹 [Cleanup] Starting end-of-cycle cleanup...")
     try:
         if redis_client:
-            # مسح ذاكرة التخزين المؤقت لأسعار Redis
             deleted_keys = redis_client.delete(REDIS_PRICES_HASH_NAME)
             logger.info(f"🧹 [Cleanup] Cleared Redis price cache '{REDIS_PRICES_HASH_NAME}'. Keys deleted: {deleted_keys}.")
         
-        # مسح ذاكرة التخزين المؤقت لنماذج التعلم الآلي في الذاكرة
         model_cache_size = len(ml_models_cache)
         ml_models_cache.clear()
         logger.info(f"🧹 [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
 
-        # تشغيل جامع القمامة بشكل صريح لتحرير ذاكرة الوصول العشوائي
         collected = gc.collect()
         logger.info(f"🧹 [Cleanup] Garbage collector ran. Collected {collected} objects.")
         
@@ -1130,7 +1134,6 @@ def perform_end_of_cycle_cleanup():
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
 
-# ✨ [مُحدّث] حلقة العمل الرئيسية مع منطق مزامنة الأسعار والتنظيف
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1141,21 +1144,17 @@ def main_loop():
     
     while True:
         try:
-            # 1. تحديث حالة السوق
             determine_market_state()
             with market_state_lock: 
                 market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
             
-            # 2. فلتر اتجاه البيتكوين
             if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
                 log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused due to market regime: {market_regime}"})
                 time.sleep(300)
                 continue
             
-            # 3. جلب بيانات البيتكوين للدورة الحالية
             btc_data = get_btc_data_for_bot()
             
-            # 4. بدء دورة فحص العملات
             for symbol in validated_symbols_to_scan:
                 try:
                     with signal_cache_lock:
@@ -1179,12 +1178,10 @@ def main_loop():
                     
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
                     
-                    # التحقق من إشارة الشراء
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
                         last_features = df_features.iloc[-1]
                         last_features.name = symbol
                         
-                        # ✨ [مُحدّث] جلب السعر الفوري مباشرة قبل اتخاذ القرار
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                             logger.info(f"✅ [{symbol}] Fresh entry price fetched via API: {entry_price}")
@@ -1192,7 +1189,6 @@ def main_loop():
                             logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
                             continue
 
-                        # --- منطق تعزيز الصفقة ---
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                             old_confidence = 0.0
@@ -1208,7 +1204,7 @@ def main_loop():
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                                 if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                                 last_atr = last_features.get('atr', 0)
-                                tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr) # استخدام السعر الفوري
+                                tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                                 if not tp_sl_data: continue
                                 
                                 updated_signal_data = {
@@ -1223,7 +1219,6 @@ def main_loop():
                                     send_trade_update_alert(updated_signal_data, open_trade)
                             continue
 
-                        # --- منطق فتح صفقة جديدة ---
                         if open_trade_count < MAX_OPEN_TRADES:
                             if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                             if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
@@ -1238,13 +1233,13 @@ def main_loop():
                                 if correlation < MIN_BTC_CORRELATION:
                                     log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
                             
-                            tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr) # استخدام السعر الفوري
+                            tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                             if not tp_sl_data: continue
                             
                             new_signal = {
                                 'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
                                 'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
-                                'entry_price': entry_price, **tp_sl_data # استخدام السعر الفوري
+                                'entry_price': entry_price, **tp_sl_data
                             }
 
                             if USE_RRR_FILTER:
@@ -1259,11 +1254,10 @@ def main_loop():
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
                                 send_new_signal_alert(saved_signal)
                     
-                    time.sleep(2) # تأخير بسيط بين كل عملة وأخرى
+                    time.sleep(2)
                 except Exception as e: 
                     logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
             
-            # 5. نهاية الدورة: تنفيذ التنظيف والانتظار
             logger.info("✅ [End of Cycle] Scan cycle finished.")
             perform_end_of_cycle_cleanup()
             logger.info(f"⏳ [End of Cycle] Waiting for 300 seconds before next cycle...")
@@ -1277,7 +1271,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V18) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V19) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1374,25 +1368,59 @@ def get_profit_curve():
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
         return jsonify({"error": "Error fetching profit curve"}), 500
 
-
+# ✨ [مُحدّث] نقطة نهاية API مع منطق احتياطي لجلب الأسعار
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not redis_client: return jsonify({"error": "Service connection failed"}), 500
+    if not check_db_connection() or not redis_client: 
+        return jsonify({"error": "Service connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status IN ('open', 'updated') THEN 0 ELSE 1 END, id DESC;")
             all_signals = [dict(s) for s in cur.fetchall()]
-        open_symbols = [s['symbol'] for s in all_signals if s['status'] in ('open', 'updated')]
-        if open_symbols:
-            prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_symbols)
-            current_prices = {symbol: float(p) if p else None for symbol, p in zip(open_symbols, prices_list)}
+        
+        open_signals_to_process = [s for s in all_signals if s['status'] in ('open', 'updated')]
+        
+        if open_signals_to_process:
+            symbols = [s['symbol'] for s in open_signals_to_process]
+            
+            # 1. حاول الحصول على الأسعار من Redis أولاً
+            prices_from_redis_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols)
+            redis_prices = {symbol: p for symbol, p in zip(symbols, prices_from_redis_list)}
+
+            # 2. قم بتحديث الأسعار في قائمة الإشارات
             for s in all_signals:
                 if s['status'] in ('open', 'updated'):
-                    price = current_prices.get(s['symbol'])
+                    symbol = s['symbol']
+                    price = None
+                    s['current_price'] = None # القيمة الافتراضية
+                    s['pnl_pct'] = None       # القيمة الافتراضية
+
+                    # استخدم سعر Redis إذا كان موجودًا
+                    if redis_prices.get(symbol):
+                        try:
+                            price = float(redis_prices[symbol])
+                        except (ValueError, TypeError):
+                            price = None
+                    
+                    # 3. إذا لم يكن السعر في Redis، استخدم API كحل بديل
+                    if price is None and client:
+                        logger.warning(f"⚠️ [API Signals] Price for {symbol} not in Redis. Fetching via API.")
+                        try:
+                            price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                        except Exception as e:
+                            logger.error(f"❌ [API Signals] Fallback API fetch failed for {symbol}: {e}")
+                            price = None
+
+                    # 4. قم بتعيين السعر وحساب الربح/الخسارة إذا أمكن
                     s['current_price'] = price
-                    if price and s.get('entry_price'): s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
+                    if price and s.get('entry_price'):
+                        s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
+
         return jsonify(all_signals)
-    except Exception as e: return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        logger.error(f"❌ [API Signals] Critical error in get_signals: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal_api(signal_id):
@@ -1471,7 +1499,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V18 - Memory & Price Sync) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V19 - Dashboard Fix) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
