@@ -1004,7 +1004,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
                f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
+        log_and_notify('info', f"New Signal Alert Sent: {symbol} in {market_regime} market", "NEW_SIGNAL")
 
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
@@ -1024,6 +1024,35 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"Updated Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
+
+# --- MODIFICATION START: New function to save signal in the background ---
+# --- تعديل: دالة جديدة لحفظ الإشارة في الخلفية ---
+def save_and_cache_signal(signal_to_save: Dict[str, Any]):
+    """
+    Saves the signal to the database and caches it.
+    If it fails, sends a cancellation alert.
+    This is designed to be run in a background thread.
+    
+    تقوم بحفظ الإشارة في قاعدة البيانات وذاكرة التخزين المؤقت.
+    إذا فشلت العملية، ترسل إشعار إلغاء.
+    مصممة للعمل في thread منفصل في الخلفية.
+    """
+    saved_signal = insert_signal_into_db(signal_to_save)
+    if saved_signal:
+        with signal_cache_lock:
+            open_signals_cache[saved_signal['symbol']] = saved_signal
+        logger.info(f"✅ [DB Save] Successfully saved and cached signal ID {saved_signal.get('id')} for {saved_signal['symbol']}")
+    else:
+        logger.critical(f"❌ [DB Save] FAILED to save signal for {signal_to_save['symbol']} after alert was sent. Sending cancellation.")
+        cancellation_message = (
+            f"⚠️ *إلغاء توصية - خطأ فني* ⚠️\n\n"
+            f"*العملة:* `{signal_to_save['symbol']}`\n\n"
+            f"حدث خطأ فني أثناء حفظ التوصية في قاعدة البيانات. "
+            f"يرجى تجاهل الإشعار السابق لهذه العملة."
+        )
+        send_telegram_message(CHAT_ID, cancellation_message)
+        log_and_notify('critical', f"Sent cancellation for {signal_to_save['symbol']} due to DB save failure.", "SIGNAL_CANCELLED")
+# --- MODIFICATION END ---
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -1231,11 +1260,21 @@ def main_loop():
                                 if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
                                     log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
                             
-                            saved_signal = insert_signal_into_db(new_signal)
-                            if saved_signal:
-                                with signal_cache_lock:
-                                    open_signals_cache[saved_signal['symbol']] = saved_signal
-                                send_new_signal_alert(saved_signal)
+                            # --- MODIFICATION START: Send alert immediately, then save to DB in background ---
+                            # --- تعديل: إرسال الإشعار فوراً، ثم الحفظ في قاعدة البيانات في الخلفية ---
+                            logger.info(f"🚀 [{symbol}] Signal passed all filters. Sending alert immediately.")
+                            
+                            # 1. Send the alert to the user instantly.
+                            #    إرسال الإشعار للمستخدم على الفور
+                            send_new_signal_alert(new_signal)
+                            
+                            # 2. Start a background thread to save the signal to the database.
+                            #    This prevents the main loop from waiting for the DB operation.
+                            #    بدء thread في الخلفية لحفظ الإشارة في قاعدة البيانات
+                            #    هذا يمنع الحلقة الرئيسية من انتظار عملية الحفظ
+                            Thread(target=save_and_cache_signal, args=(new_signal,)).start()
+                            # --- MODIFICATION END ---
+
                     time.sleep(2)
                 except Exception as e: logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
             logger.info("ℹ️ [End of Cycle] Scan cycle finished. Waiting..."); time.sleep(300)
