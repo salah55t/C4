@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V21 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V21.1 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v21_real_trading.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21_db_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV21')
+logger = logging.getLogger('CryptoBotV21.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,11 +55,11 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V21 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.1 ----------------------
 # --- إعدادات التداول الحقيقي ---
-is_trading_enabled: bool = False # المفتاح الرئيسي للتداول الحقيقي، ابدأ به وهو مغلق
+is_trading_enabled: bool = False 
 trading_status_lock = Lock()
-RISK_PER_TRADE_PERCENT: float = 1.0 # المخاطرة بـ 1% من رصيد USDT في كل صفقة
+RISK_PER_TRADE_PERCENT: float = 1.0 
 
 # --- ثوابت عامة ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
@@ -70,7 +70,7 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة المستخدم فقط لحساب الإحصائيات في الوضع الافتراضي
+STATS_TRADE_SIZE_USDT: float = 10.0
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
@@ -164,7 +164,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V21 - Real Trading</span>
+                <span class="text-text-secondary font-medium">V21.1 - DB Fix</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -549,31 +549,32 @@ window.onload = refreshData;
 </html>
     """
 
-# ---------------------- دوال قاعدة البيانات (مع تعديل الجدول) ----------------------
+# ---------------------- دوال قاعدة البيانات (مع إصلاح الترقية) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
+    """
+    [مُعدّل] تهيئة قاعدة البيانات مع التحقق من الأعمدة وإضافتها إذا لزم الأمر.
+    """
     global conn
     logger.info("[DB] Initializing database connection...")
     db_url_to_use = DB_URL
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         separator = '&' if '?' in db_url_to_use else '?'
         db_url_to_use += f"{separator}sslmode=require"
+    
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
-            conn.autocommit = False
+            conn.autocommit = False # مهم جداً للتحكم بالترانزكشن
+            
             with conn.cursor() as cur:
-                # --- تعديل جدول الصفقات ---
+                # خطوة 1: إنشاء الجداول الأساسية إذا لم تكن موجودة
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
                         target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION,
-                        -- حقول جديدة للتداول الحقيقي
-                        is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION,
-                        order_id TEXT
+                        current_peak_price DOUBLE PRECISION
                     );
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
@@ -583,14 +584,42 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-            conn.commit()
-            logger.info("✅ [DB] Database connection successful and tables (V21) initialized.")
+                
+                # خطوة 2: منطق الترقية (Migration)
+                logger.info("[DB Migration] Checking for necessary schema upgrades...")
+                
+                # جلب الأعمدة الموجودة في جدول signals
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'signals' AND table_schema = 'public';
+                """)
+                existing_columns = [row['column_name'] for row in cur.fetchall()]
+                
+                # تحديد الأعمدة الجديدة المطلوبة مع أنواعها
+                required_columns = {
+                    'is_real_trade': 'BOOLEAN DEFAULT FALSE',
+                    'quantity': 'DOUBLE PRECISION',
+                    'order_id': 'TEXT'
+                }
+                
+                # إضافة الأعمدة الناقصة
+                for col_name, col_type in required_columns.items():
+                    if col_name not in existing_columns:
+                        logger.warning(f"[DB Migration] Column '{col_name}' is missing. Adding it now...")
+                        cur.execute(sql.SQL("ALTER TABLE signals ADD COLUMN {} {}").format(
+                            sql.Identifier(col_name), sql.SQL(col_type)
+                        ))
+                        logger.info(f"[DB Migration] Successfully added column '{col_name}'.")
+                
+            conn.commit() # تنفيذ كل التغييرات
+            logger.info("✅ [DB] Database connection and schema are up-to-date.")
             return
+
         except Exception as e:
-            logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}/{retries}): {e}")
-            if conn: conn.rollback()
+            logger.error(f"❌ [DB] Error during initialization/migration (Attempt {attempt + 1}/{retries}): {e}")
+            if conn: conn.rollback() # التراجع عن أي تغييرات جزئية في حالة حدوث خطأ
             if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [DB] Failed to connect to the database after multiple retries.")
+            else: logger.critical("❌ [DB] Failed to connect/migrate the database after multiple retries.")
 
 
 def check_db_connection() -> bool:
@@ -650,9 +679,6 @@ def init_redis() -> None:
 
 # ---------------------- دوال Binance والبيانات (مع تعديلات للتداول الحقيقي) ----------------------
 def get_exchange_info_map() -> None:
-    """
-    [جديد] جلب وتخزين معلومات التداول (مثل حجم اللوت) لكل العملات.
-    """
     global exchange_info_map
     if not client: return
     logger.info("ℹ️ [Exchange Info] Fetching exchange trading rules...")
@@ -672,7 +698,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         
-        # نستخدم exchange_info_map الذي جلبناه مسبقاً
         if not exchange_info_map: get_exchange_info_map()
 
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
@@ -828,9 +853,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
 # ---------------------- دوال الاستراتيجية والتداول الحقيقي ----------------------
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
-    """
-    [جديد] تعديل الكمية لتتوافق مع فلتر LOT_SIZE (stepSize).
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
@@ -842,58 +864,47 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
                 step_size_str = f['stepSize']
                 step_size = Decimal(step_size_str)
                 
-                # تحويل الكمية إلى Decimal وتعديلها
                 quantity_dec = Decimal(str(quantity))
                 adjusted_quantity = (quantity_dec // step_size) * step_size
                 
                 logger.debug(f"[{symbol}] Adjusted quantity from {quantity} to {adjusted_quantity} with step size {step_size}")
                 return adjusted_quantity
-        return Decimal(str(quantity)) # إذا لم يوجد فلتر، أرجع الكمية كما هي
+        return Decimal(str(quantity))
     except Exception as e:
         logger.error(f"[{symbol}] Error adjusting quantity to lot size: {e}")
         return None
 
 def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
-    """
-    [جديد] حساب حجم الصفقة بناءً على المخاطرة ورصيد الحساب وقواعد المنصة.
-    """
     if not client: return None
     try:
-        # 1. جلب رصيد USDT
         balance_response = client.get_asset_balance(asset='USDT')
         available_balance = Decimal(balance_response['free'])
         logger.info(f"[{symbol}] Available USDT balance: {available_balance:.2f}")
 
-        # 2. حساب المبلغ المراد المخاطرة به
         risk_amount_usdt = available_balance * (Decimal(str(RISK_PER_TRADE_PERCENT)) / Decimal('100'))
         
-        # 3. حساب المخاطرة لكل وحدة من العملة
         risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
         if risk_per_coin <= 0:
             log_rejection(symbol, "Invalid Position Size", {"detail": "Stop loss must be below entry price."})
             return None
             
-        # 4. حساب الكمية الأولية
         initial_quantity = risk_amount_usdt / risk_per_coin
         
-        # 5. تعديل الكمية حسب فلتر LOT_SIZE
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
         if adjusted_quantity is None or adjusted_quantity <= 0:
             log_rejection(symbol, "Lot Size Adjustment Failed", {"detail": f"Adjusted quantity is zero or invalid: {adjusted_quantity}"})
             return None
 
-        # 6. التحقق من فلتر MIN_NOTIONAL
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             for f in symbol_info['filters']:
-                if f['filterType'] == 'MIN_NOTIONAL' or f['filterType'] == 'NOTIONAL': # Binance uses both
+                if f['filterType'] == 'MIN_NOTIONAL' or f['filterType'] == 'NOTIONAL':
                     min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
                     if notional_value < min_notional:
                         log_rejection(symbol, "Min Notional Filter", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
                         return None
         
-        # 7. التأكد من أن قيمة الصفقة لا تتجاوز الرصيد المتاح
         if notional_value > available_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance:.2f}"})
             return None
@@ -909,9 +920,6 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         return None
 
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
-    """
-    [جديد] تنفيذ أمر حقيقي على منصة Binance.
-    """
     if not client: return None
     logger.info(f"➡️ [{symbol}] Attempting to place a REAL {side} order for {quantity} units.")
     try:
@@ -1164,9 +1172,6 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
 
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    [معدّل] إضافة الصفقة إلى قاعدة البيانات مع بيانات التداول الحقيقي.
-    """
     if not check_db_connection() or not conn: return None
     try:
         entry = float(signal['entry_price']); target = float(signal['target_price']); sl = float(signal['stop_loss'])
@@ -1214,13 +1219,9 @@ def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
         return False
 
 def close_signal(signal: Dict, status: str, closing_price: float):
-    """
-    [معدّل] إغلاق الصفقة: تنفيذ أمر بيع (إذا كانت حقيقية) ثم تحديث قاعدة البيانات.
-    """
     signal_id = signal.get('id'); symbol = signal.get('symbol')
     logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
     
-    # --- خطوة 1: تنفيذ أمر البيع إذا كانت الصفقة حقيقية ---
     is_real = signal.get('is_real_trade', False)
     quantity_to_sell = signal.get('quantity')
     
@@ -1233,12 +1234,9 @@ def close_signal(signal: Dict, status: str, closing_price: float):
         if not sell_order:
             logger.critical(f"🚨 CRITICAL: FAILED TO PLACE SELL ORDER FOR REAL TRADE {signal_id} ({symbol}). THE POSITION REMAINS OPEN. MANUAL INTERVENTION REQUIRED.")
             log_and_notify('critical', f"CRITICAL: FAILED TO SELL {symbol} for signal {signal_id}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
-            # لا نخرج من الدالة، سنقوم بتسجيل الإغلاق في نظامنا على أي حال بالسعر الحالي
-            # ولكن مع تسجيل خطأ فادح.
     elif is_real and not is_enabled:
         logger.warning(f"⚠️ [{symbol}] Real trade signal {signal_id} triggered closure, but master trading switch is OFF. Closing virtually.")
 
-    # --- خطوة 2: تحديث قاعدة البيانات ---
     try:
         if not check_db_connection() or not conn: raise OperationalError("DB connection failed.")
         db_closing_price = float(closing_price); entry_price = float(signal['entry_price'])
@@ -1370,7 +1368,6 @@ def main_loop():
                             logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
                             continue
 
-                        # --- منطق التعزيز (لا يفتح صفقات حقيقية، فقط يحدث الافتراضية) ---
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                             try:
@@ -1398,7 +1395,6 @@ def main_loop():
                                     send_trade_update_alert(updated_signal_data, open_trade)
                             continue
 
-                        # --- منطق فتح صفقة جديدة (حقيقية أو افتراضية) ---
                         if open_trade_count >= MAX_OPEN_TRADES:
                             log_rejection(symbol, "Max Open Trades", {"count": open_trade_count, "max": MAX_OPEN_TRADES}); continue
 
@@ -1430,7 +1426,6 @@ def main_loop():
                             if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
                                 log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
                         
-                        # --- هنا يتم اتخاذ قرار التداول الحقيقي ---
                         with trading_status_lock:
                             is_enabled = is_trading_enabled
 
@@ -1440,7 +1435,6 @@ def main_loop():
                             if quantity and quantity > 0:
                                 order_result = place_order(symbol, Client.SIDE_BUY, quantity)
                                 if order_result:
-                                    # نستخدم السعر الفعلي من الأمر المنفذ
                                     actual_entry_price = float(order_result['fills'][0]['price']) if order_result.get('fills') else entry_price
                                     new_signal['entry_price'] = actual_entry_price
                                     new_signal['is_real_trade'] = True
@@ -1448,7 +1442,7 @@ def main_loop():
                                     new_signal['order_id'] = order_result['orderId']
                                 else:
                                     logger.error(f"[{symbol}] Failed to place real order. Skipping signal.")
-                                    continue # ننتقل للعملة التالية
+                                    continue
                             else:
                                 logger.warning(f"[{symbol}] Could not calculate a valid position size. Skipping real trade.")
                                 continue
@@ -1479,7 +1473,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V21) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V21.1) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1523,7 +1517,8 @@ def get_stats():
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, profit_percentage, is_real_trade FROM signals;")
+            # تم تعديل الاستعلام ليشمل الأعمدة الجديدة بشكل آمن
+            cur.execute("SELECT status, profit_percentage, is_real_trade, quantity, entry_price FROM signals;")
             all_signals = cur.fetchall()
         
         open_trades_count = sum(1 for s in all_signals if s.get('status') in ['open', 'updated'])
@@ -1536,11 +1531,11 @@ def get_stats():
             # حساب الربح بالدولار يعتمد على الصفقات الحقيقية والافتراضية
             total_net_profit_usdt = sum(
                 (((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT))
-                for t in closed_trades
+                for t in closed_trades if t.get('profit_percentage') is not None
             )
             
-            wins_list = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0]
-            losses_list = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0]
+            wins_list = [float(s['profit_percentage']) for s in closed_trades if s.get('profit_percentage') is not None and float(s['profit_percentage']) > 0]
+            losses_list = [float(s['profit_percentage']) for s in closed_trades if s.get('profit_percentage') is not None and float(s['profit_percentage']) < 0]
             
             win_rate = (len(wins_list) / len(closed_trades) * 100) if closed_trades else 0.0
             avg_win = sum(wins_list) / len(wins_list) if wins_list else 0.0
@@ -1565,7 +1560,9 @@ def get_stats():
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred"}), 500
+        # التأكد من أن الاتصال يتم التراجع عنه وإغلاقه بشكل صحيح في حالة حدوث خطأ
+        if conn: conn.rollback()
+        return jsonify({"error": "An internal error occurred in stats"}), 500
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
@@ -1589,6 +1586,7 @@ def get_profit_curve():
         return jsonify(curve_data)
     except Exception as e:
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": "Error fetching profit curve"}), 500
 
 @app.route('/api/signals')
@@ -1625,6 +1623,7 @@ def get_signals():
         return jsonify(all_signals)
     except Exception as e:
         logger.error(f"❌ [API Signals] Critical error in get_signals: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
@@ -1648,9 +1647,9 @@ def manual_close_signal_api(signal_id):
         return jsonify({"message": f"تم إرسال طلب إغلاق الصفقة {signal_id}..."})
     except Exception as e:
         logger.error(f"❌ [API Close] Error: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
 
-# --- [جديد] API للتحكم بحالة التداول ---
 @app.route('/api/trading/status', methods=['GET'])
 def get_trading_status():
     with trading_status_lock:
@@ -1705,7 +1704,7 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         init_db()
         init_redis()
-        get_exchange_info_map() # جلب قواعد التداول عند البدء
+        get_exchange_info_map()
         load_open_signals_to_cache()
         load_notifications_to_cache()
         Thread(target=determine_market_state, daemon=True).start()
@@ -1721,7 +1720,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21 - REAL TRADING ENABLED) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.1 - DB FIX) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
