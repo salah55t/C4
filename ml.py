@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_smc_v1.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v8.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_SMC_V1')
+logger = logging.getLogger('MLTrainer_V8_Momentum')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,28 +51,38 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_SMC_V1' # <-- اسم النموذج الجديد
-MODEL_FOLDER: str = 'SMC_V1' # <-- مجلد النموذج الجديد
+# تم تحديث اسم النموذج ليعكس الميزات الجديدة
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 10 # زيادة عدد المحاولات لتحسين أفضل
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
-# --- مؤشرات فنية (تُستخدم الآن فقط للمساعدة في تحديد الهدف) ---
+# --- Indicator & Feature Parameters ---
+ADX_PERIOD: int = 14
+RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
+EMA_SLOW_PERIOD: int = 200
+EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+REL_VOL_PERIOD: int = 30
+# New Momentum and Velocity Parameters
+MOMENTUM_PERIOD: int = 12
+EMA_SLOPE_PERIOD: int = 5
 
-# --- معلمات طريقة الحاجز الثلاثي (Triple-Barrier) ---
+
+# Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
 SL_ATR_MULTIPLIER: float = 1.5
-MAX_HOLD_PERIOD: int = 24 # عدد الشموع كحد أقصى للصفقة
+MAX_HOLD_PERIOD: int = 24
 
 # Global variables
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 btc_data_cache: Optional[pd.DataFrame] = None
 
-# --- دوال الاتصال والتحقق (بدون تغيير) ---
+# --- دوال الاتصال والتحقق ---
 def init_db():
     global conn
     try:
@@ -161,163 +171,118 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol} على إطار {interval}: {e}"); return None
 
-# --- ✨ دوال حساب ميزات SMC الجديدة ✨ ---
-def find_swing_highs_lows(data: pd.DataFrame, n: int = 5) -> pd.DataFrame:
-    """Finds swing highs and lows using a simple n-period rule."""
-    data['sh'] = data['high'][(data['high'].shift(n) < data['high']) & (data['high'].shift(-n) < data['high'])]
-    data['sl'] = data['low'][(data['low'].shift(n) > data['low']) & (data['low'].shift(-n) > data['low'])]
-    return data
+def fetch_and_cache_btc_data():
+    global btc_data_cache
+    logger.info("ℹ️ [BTC Data] جاري جلب بيانات البيتكوين وتخزينها...")
+    btc_data_cache = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, DATA_LOOKBACK_DAYS_FOR_TRAINING)
+    if btc_data_cache is None:
+        logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
+    btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
-def identify_order_blocks(data: pd.DataFrame) -> pd.DataFrame:
-    """Identifies potential bullish and bearish order blocks."""
-    data['bullish_ob'] = np.nan
-    data['bearish_ob'] = np.nan
-    
-    is_up_trend = data['close'] > data['open']
-    is_down_trend = data['close'] < data['open']
-    
-    # Bullish OB: Last down candle before an up move
-    bullish_ob_indices = data.index[is_down_trend & is_up_trend.shift(-1)]
-    if not bullish_ob_indices.empty:
-        bullish_ob_values = data.loc[bullish_ob_indices, ['low', 'high']]
-        data.loc[bullish_ob_indices, 'bullish_ob'] = bullish_ob_values.to_json(orient='records')
 
-    # Bearish OB: Last up candle before a down move
-    bearish_ob_indices = data.index[is_up_trend & is_down_trend.shift(-1)]
-    if not bearish_ob_indices.empty:
-        bearish_ob_values = data.loc[bearish_ob_indices, ['low', 'high']]
-        data.loc[bearish_ob_indices, 'bearish_ob'] = bearish_ob_values.to_json(orient='records')
-
-    return data
-
-def identify_fvg(data: pd.DataFrame) -> pd.DataFrame:
-    """Identifies Fair Value Gaps (Imbalances)."""
-    # Bullish FVG: gap between high of candle i-2 and low of candle i
-    bullish_fvg_mask = data['low'] > data['high'].shift(2)
-    data.loc[bullish_fvg_mask, 'bullish_fvg'] = data['high'].shift(2)
-    data.loc[bullish_fvg_mask, 'bullish_fvg_top'] = data['low']
-
-    # Bearish FVG: gap between low of candle i-2 and high of candle i
-    bearish_fvg_mask = data['high'] < data['low'].shift(2)
-    data.loc[bearish_fvg_mask, 'bearish_fvg'] = data['low'].shift(2)
-    data.loc[bearish_fvg_mask, 'bearish_fvg_top'] = data['high']
-    
-    return data
-
-def calculate_smc_features(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calculates all SMC features and engineers them for the model.
+    Function to calculate all technical analysis features for the model.
+    Includes new features: Momentum (ROC), Velocity (ROC Acceleration), and Market Direction (EMA Slope).
     """
-    df_smc = df.copy()
-    
-    # 1. Market Structure (Swing Points)
-    df_smc = find_swing_highs_lows(df_smc, n=5)
-    
-    # ✨ FIX: Create forward-filled series for the last known swing points
-    last_sh_series = df_smc['sh'].ffill()
-    last_sl_series = df_smc['sl'].ffill()
+    df_calc = df.copy()
 
-    # 2. BOS/CHoCH (Break of Structure / Change of Character)
-    df_smc['bos'] = 0
-    df_smc['choch'] = 0
-
-    # ✨ FIX: Find previous swing points by looking for changes in the ffilled series
-    # This creates a series of the SH/SL *before* the current one.
-    prev_sh_series = last_sh_series.where(last_sh_series.diff() != 0).ffill().shift(1)
-    prev_sl_series = last_sl_series.where(last_sl_series.diff() != 0).ffill().shift(1)
-    
-    # ✨ FIX: Compare against the shifted, forward-filled series to avoid index mismatch
-    # Bullish BOS: Current high breaks above the last known swing high
-    df_smc.loc[df_smc['high'] > last_sh_series.shift(1), 'bos'] = 1
-    # Bearish BOS: Current low breaks below the last known swing low
-    df_smc.loc[df_smc['low'] < last_sl_series.shift(1), 'bos'] = -1
-
-    # Bullish CHoCH: In a downtrend (last SH < prev SH), price breaks the last SH
-    is_downtrend_structure = last_sh_series < prev_sh_series
-    df_smc.loc[(df_smc['high'] > last_sh_series.shift(1)) & is_downtrend_structure, 'choch'] = 1
-
-    # Bearish CHoCH: In an uptrend (last SL > prev SL), price breaks the last SL
-    is_uptrend_structure = last_sl_series > prev_sl_series
-    df_smc.loc[(df_smc['low'] < last_sl_series.shift(1)) & is_uptrend_structure, 'choch'] = -1
-
-    # 3. Order Blocks and FVG
-    df_smc = identify_order_blocks(df_smc)
-    df_smc = identify_fvg(df_smc)
-
-    # 4. Feature Engineering from SMC concepts
-    df_smc['is_in_bullish_fvg'] = ((df_smc['low'] < df_smc['bullish_fvg_top'].ffill()) & (df_smc['high'] > df_smc['bullish_fvg'].ffill())).astype(int)
-    df_smc['is_in_bearish_fvg'] = ((df_smc['low'] < df_smc['bearish_fvg'].ffill()) & (df_smc['high'] > df_smc['bearish_fvg_top'].ffill())).astype(int)
-    
-    last_price = df_smc['close']
-    
-    bull_ob_level = pd.Series(df_smc['bullish_ob'].ffill().apply(lambda x: json.loads(x)[0]['low'] if pd.notna(x) else np.nan))
-    bear_ob_level = pd.Series(df_smc['bearish_ob'].ffill().apply(lambda x: json.loads(x)[0]['high'] if pd.notna(x) else np.nan))
-    bull_fvg_level = df_smc['bullish_fvg'].ffill()
-    bear_fvg_level = df_smc['bearish_fvg'].ffill()
-
-    df_smc['dist_to_bull_ob'] = (last_price - bull_ob_level) / last_price
-    df_smc['dist_to_bear_ob'] = (bear_ob_level - last_price) / last_price
-    df_smc['dist_to_bull_fvg'] = (last_price - bull_fvg_level) / last_price
-    df_smc['dist_to_bear_fvg'] = (bear_fvg_level - last_price) / last_price
-
-    df_smc['liquidity_highs_nearby'] = df_smc['sh'].rolling(window=20, min_periods=1).count()
-    df_smc['liquidity_lows_nearby'] = df_smc['sl'].rolling(window=20, min_periods=1).count()
-    
-    high_low = df_smc['high'] - df_smc['low']
-    high_close = (df_smc['high'] - df_smc['close'].shift()).abs()
-    low_close = (df_smc['low'] - df_smc['close'].shift()).abs()
+    # --- Existing Features ---
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df_smc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
 
-    return df_smc
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    
+    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    
+    # --- ✨ New Features: Momentum, Velocity, and Market Direction ---
+    
+    # 1. Momentum (Rate of Change)
+    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    
+    # 2. Velocity (Acceleration of Momentum)
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
+    
+    # 3. Market Direction (Short-term EMA Slope)
+    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+
+    df_calc['hour_of_day'] = df_calc.index.hour
+
+    return df_calc.astype('float32', errors='ignore')
+
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
-    labels = pd.Series(0, index=prices.index, dtype=int)
+    labels = pd.Series(0, index=prices.index)
     for i in tqdm(range(len(prices) - MAX_HOLD_PERIOD), desc="Labeling", leave=False):
         entry_price = prices.iloc[i]
         current_atr = atr.iloc[i]
         if pd.isna(current_atr) or current_atr == 0: continue
-        
         upper_barrier = entry_price + (current_atr * TP_ATR_MULTIPLIER)
         lower_barrier = entry_price - (current_atr * SL_ATR_MULTIPLIER)
-        
         for j in range(1, MAX_HOLD_PERIOD + 1):
             if i + j >= len(prices): break
-            future_price = prices.iloc[i + j]
-            if future_price >= upper_barrier:
-                labels.iloc[i] = 1
-                break
-            if future_price <= lower_barrier:
-                labels.iloc[i] = 0
-                break
+            if prices.iloc[i + j] >= upper_barrier:
+                labels.iloc[i] = 1; break
+            if prices.iloc[i + j] <= lower_barrier:
+                labels.iloc[i] = -1; break
     return labels
 
-def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing SMC data for {symbol}...")
+def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
+    df_featured = calculate_features(df_15m, btc_df)
     
-    df_featured_15m = calculate_smc_features(df_15m)
-    df_featured_4h = calculate_smc_features(df_4h)
-    df_featured_4h = df_featured_4h.rename(columns=lambda c: f"{c}_4h")
+    # --- MTF Features ---
+    delta_4h = df_4h['close'].diff()
+    gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+    ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
     
-    df_combined = df_featured_15m.join(df_featured_4h, how='outer')
-    df_combined.ffill(inplace=True)
+    mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
+    df_featured = df_featured.join(mtf_features)
+    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
     
-    df_combined['target'] = get_triple_barrier_labels(df_combined['close'], df_combined['atr'])
+    # --- Target Labeling ---
+    df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
+    # --- ✨ Updated Feature List ---
     feature_columns = [
-        'bos', 'choch', 'is_in_bullish_fvg', 'is_in_bearish_fvg',
-        'dist_to_bull_ob', 'dist_to_bear_ob', 'dist_to_bull_fvg', 'dist_to_bear_fvg',
-        'liquidity_highs_nearby', 'liquidity_lows_nearby', 'atr',
-        'bos_4h', 'choch_4h', 'is_in_bullish_fvg_4h', 'is_in_bearish_fvg_4h',
-        'dist_to_bull_ob_4h', 'dist_to_bear_ob_4h', 'dist_to_bull_fvg_4h', 'dist_to_bear_fvg_4h',
-        'liquidity_highs_nearby_4h', 'liquidity_lows_nearby_4h', 'atr_4h'
+        'rsi', 'adx', 'atr', 'relative_volume', 'hour_of_day',
+        'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
+        'rsi_4h', 'price_vs_ema50_4h',
+        # New Features
+        f'roc_{MOMENTUM_PERIOD}', 
+        'roc_acceleration', 
+        f'ema_slope_{EMA_SLOPE_PERIOD}'
     ]
     
-    df_cleaned = df_combined.dropna(subset=feature_columns + ['target']).copy()
+    df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
+    
+    # Replace any remaining infinite values with NaN and then drop them
     df_cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_cleaned.dropna(subset=feature_columns, inplace=True)
-
-    df_cleaned = df_cleaned[df_cleaned['target'].isin([0, 1])]
 
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after cleaning. Skipping.")
@@ -332,23 +297,19 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, symbol: str) 
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
 
-    # --- Get column names once to use them later ---
-    feature_names = X.columns.tolist()
-
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
-            'objective': 'binary', 'metric': 'auc',
-            'verbosity': -1, 'boosting_type': 'gbdt',
-            'is_unbalance': True,
+            'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
+            'verbosity': -1, 'boosting_type': 'gbdt', 'class_weight': 'balanced',
             'random_state': 42,
-            'n_estimators': trial.suggest_int('n_estimators', 200, 1000, step=100),
+            'n_estimators': trial.suggest_int('n_estimators', 200, 800, step=100),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
             'num_leaves': trial.suggest_int('num_leaves', 20, 150),
-            'max_depth': trial.suggest_int('max_depth', 4, 12),
+            'max_depth': trial.suggest_int('max_depth', 4, 10),
             'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
             'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-            'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
             'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
         }
 
@@ -359,16 +320,15 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler()
-            # --- FIX: Convert scaled data back to DataFrame to preserve feature names ---
-            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=feature_names)
-            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=feature_names)
+            X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+            X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
             
             model = lgb.LGBMClassifier(**params)
-            model.fit(X_train_scaled, y_train,
-                      eval_set=[(X_test_scaled, y_test)],
-                      callbacks=[lgb.early_stopping(25, verbose=False)])
+            model.fit(X_train_scaled_df, y_train,
+                      eval_set=[(X_test_scaled_df, y_test)],
+                      callbacks=[lgb.early_stopping(20, verbose=False)])
             
-            y_pred = model.predict(X_test_scaled)
+            y_pred = model.predict(X_test_scaled_df)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
 
@@ -382,16 +342,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     
     logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
     final_model_params = {
-        'objective': 'binary', 'metric': 'auc', 'is_unbalance': True,
+        'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
         'random_state': 42, 'verbosity': -1, **best_params
     }
-    
-    final_scaler = StandardScaler()
-    # --- FIX: Convert scaled data back to DataFrame ---
-    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=feature_names)
-    
-    final_model = lgb.LGBMClassifier(**final_model_params)
-    final_model.fit(X_scaled_full, y)
     
     all_preds_final, all_true_final = [], []
     tscv_final = TimeSeriesSplit(n_splits=5)
@@ -400,13 +353,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         scaler = StandardScaler()
-        # --- FIX: Convert scaled data back to DataFrame ---
-        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=feature_names)
-        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=feature_names)
+        X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+        X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
 
         model = lgb.LGBMClassifier(**final_model_params)
-        model.fit(X_train_scaled, y_train)
-        y_pred = model.predict(X_test_scaled)
+        model.fit(X_train_scaled_df, y_train)
+        y_pred = model.predict(X_test_scaled_df)
         all_preds_final.extend(y_pred)
         all_true_final.extend(y_test)
         
@@ -416,35 +368,37 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         'precision_class_1': final_report.get('1', {}).get('precision', 0),
         'recall_class_1': final_report.get('1', {}).get('recall', 0),
         'f1_score_class_1': final_report.get('1', {}).get('f1-score', 0),
+        'precision_class_-1': final_report.get('-1', {}).get('precision', 0),
         'num_samples_trained': len(X),
         'best_hyperparameters': json.dumps(best_params)
     }
+    
+    final_scaler = StandardScaler()
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), columns=X.columns, index=X.index)
+    
+    final_model = lgb.LGBMClassifier(**final_model_params)
+    final_model.fit(X_scaled_full, y)
     
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
     logger.info(f"📊 [ML Train] Final Walk-Forward Performance: {metrics_log_str}")
 
     return final_model, final_scaler, final_metrics
 
-def save_ml_model_to_folder(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
-    """Saves the model bundle to a local folder."""
-    logger.info(f"💾 [File Save] Saving model bundle '{model_name}' to local folder...")
+def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
+    logger.info(f"ℹ️ [DB Save] Saving model bundle '{model_name}'...")
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
-        if not os.path.exists(model_dir_path):
-            os.makedirs(model_dir_path)
-        
-        model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
-        with open(model_path, 'wb') as f:
-            pickle.dump(model_bundle, f)
-            
-        metrics_path = os.path.join(model_dir_path, f"{model_name}_metrics.json")
-        with open(metrics_path, 'w', encoding='utf-8') as f:
-            json.dump(metrics, f, indent=4)
-            
-        logger.info(f"✅ [File Save] Model bundle '{model_name}' saved successfully to '{model_dir_path}'.")
+        model_binary = pickle.dumps(model_bundle)
+        metrics_json = json.dumps(metrics)
+        with conn.cursor() as db_cur:
+            db_cur.execute("""
+                INSERT INTO ml_models (model_name, model_data, trained_at, metrics) 
+                VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET 
+                model_data = EXCLUDED.model_data, trained_at = NOW(), metrics = EXCLUDED.metrics;
+            """, (model_name, model_binary, metrics_json))
+        conn.commit()
+        logger.info(f"✅ [DB Save] Model bundle '{model_name}' saved successfully.")
     except Exception as e:
-        logger.error(f"❌ [File Save] Error saving model bundle: {e}")
+        logger.error(f"❌ [DB Save] Error saving model bundle: {e}"); conn.rollback()
 
 def send_telegram_message(text: str):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -453,17 +407,25 @@ def send_telegram_message(text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def run_training_job():
-    logger.info(f"🚀 Starting SMC ML model training job ({BASE_ML_MODEL_NAME})...")
+    logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
+    init_db()
     get_binance_client()
+    fetch_and_cache_btc_data()
     
     all_valid_symbols = get_validated_symbols(filename='crypto_list.txt')
     if not all_valid_symbols:
         logger.critical("❌ [Main] لم يتم العثور على رموز صالحة. سيتم الخروج."); return
     
-    symbols_to_train = all_valid_symbols
+    trained_symbols = get_trained_symbols_from_db()
+    symbols_to_train = [s for s in all_valid_symbols if s not in trained_symbols]
     
-    logger.info(f"ℹ️ [Main] Will attempt to train/retrain SMC models for {len(symbols_to_train)} symbols.")
-    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} symbols.")
+    if not symbols_to_train:
+        logger.info("✅ [Main] جميع الرموز مدربة بالفعل ومحدثة.");
+        if conn: conn.close()
+        return
+
+    logger.info(f"ℹ️ [Main] Total: {len(all_valid_symbols)}. Trained: {len(trained_symbols)}. To Train: {len(symbols_to_train)}.")
+    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} new symbols.")
     
     successful_models, failed_models = 0, 0
     for symbol in symbols_to_train:
@@ -475,7 +437,7 @@ def run_training_job():
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
-            prepared_data = prepare_data_for_ml(df_15m, df_4h, symbol)
+            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
             del df_15m, df_4h; gc.collect()
 
             if prepared_data is None:
@@ -489,21 +451,21 @@ def run_training_job():
                  continue
             final_model, final_scaler, model_metrics = training_result
             
-            if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.45:
+            if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-                save_ml_model_to_folder(model_bundle, model_name, model_metrics)
+                save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
-                precision = model_metrics.get('precision_class_1', 0)
-                logger.warning(f"⚠️ [Main] النموذج الخاص بـ {symbol} غير مفيد (Precision: {precision:.2f} < 0.45). سيتم تجاهله."); failed_models += 1
+                logger.warning(f"⚠️ [Main] النموذج الخاص بـ {symbol} غير مفيد (Precision < 0.35). سيتم تجاهله."); failed_models += 1
             
             del X, y, prepared_data, training_result, final_model, final_scaler, model_metrics; gc.collect()
 
         except Exception as e:
             logger.critical(f"❌ [Main] حدث خطأ فادح للرمز {symbol}: {e}", exc_info=True); failed_models += 1
             gc.collect()
-        
+
+        keep_db_alive()
         time.sleep(1)
 
     completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
@@ -513,13 +475,14 @@ def run_training_job():
     send_telegram_message(completion_message)
     logger.info(completion_message)
 
+    if conn: conn.close()
     logger.info("👋 [Main] انتهت مهمة تدريب النماذج.")
 
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "SMC ML Trainer service is running and healthy.", 200
+    return "ML Trainer (with Momentum features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
