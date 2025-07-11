@@ -332,6 +332,9 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, symbol: str) 
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
 
+    # --- Get column names once to use them later ---
+    feature_names = X.columns.tolist()
+
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
             'objective': 'binary', 'metric': 'auc',
@@ -356,8 +359,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+            # --- FIX: Convert scaled data back to DataFrame to preserve feature names ---
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=feature_names)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=feature_names)
             
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train,
@@ -383,7 +387,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     }
     
     final_scaler = StandardScaler()
-    X_scaled_full = final_scaler.fit_transform(X)
+    # --- FIX: Convert scaled data back to DataFrame ---
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=feature_names)
     
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
@@ -395,8 +400,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        # --- FIX: Convert scaled data back to DataFrame ---
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=feature_names)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=feature_names)
 
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
