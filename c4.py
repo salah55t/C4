@@ -10,6 +10,7 @@ import pickle
 import redis
 import re
 import gc
+from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -21,7 +22,7 @@ from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timedelta, timezone
 from decouple import config
-from typing import List, Dict, Optional, Any, Set, Tuple
+from typing import List, Dict, Optional, Any, Set
 from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
@@ -30,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - SMC V1 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V21.1 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_smc_v1.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21_db_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotSMC_V1')
+logger = logging.getLogger('CryptoBotV21.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -54,78 +55,71 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - SMC V1 ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_SMC_V1' # <-- اسم النموذج الجديد
-MODEL_FOLDER: str = 'SMC_V1' # <-- مجلد النموذج الجديد
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.1 ----------------------
+# --- إعدادات التداول الحقيقي ---
+is_trading_enabled: bool = False 
+trading_status_lock = Lock()
+RISK_PER_TRADE_PERCENT: float = 1.0 
+
+# --- ثوابت عامة ---
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
+MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
-REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_smc_v1"
+REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
-HYPOTHETICAL_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 10.0
 
-# --- مؤشرات فنية (تُستخدم الآن بشكل أساسي للفلاتر) ---
-ADX_PERIOD: int = 14
-RSI_PERIOD: int = 14
-ATR_PERIOD: int = 14
+# --- مؤشرات فنية ---
+ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
+EMA_FAST_PERIOD: int = 50; EMA_SLOW_PERIOD: int = 200
+REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
-MAX_OPEN_TRADES: int = 10
-BUY_CONFIDENCE_THRESHOLD = 0.80 # يمكن تعديلها حسب أداء نموذج SMC
+MAX_OPEN_TRADES: int = 4
+BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
-# --- إعدادات الهدف ووقف الخسارة (مع خيار احتياطي ATR) ---
+# --- إعدادات الهدف ووقف الخسارة ---
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.0
 
-# --- إعدادات وقف الخسارة المتحرك (Trailing Stop-Loss) ---
+# --- إعدادات وقف الخسارة المتحرك ---
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- إعدادات الفلاتر (تم الإبقاء عليها) ---
-USE_BTC_TREND_FILTER: bool = True
-BTC_SYMBOL: str = 'BTCUSDT'
-USE_SPEED_FILTER: bool = True
-USE_RRR_FILTER: bool = True
-MIN_RISK_REWARD_RATIO: float = 1.1
-USE_BTC_CORRELATION_FILTER: bool = True
-MIN_BTC_CORRELATION: float = 0.1
-USE_MIN_VOLATILITY_FILTER: bool = True
-MIN_VOLATILITY_PERCENT: float = 0.3
-USE_MOMENTUM_FILTER: bool = True # يمكن استخدامه كفلتر تأكيد إضافي
+# --- إعدادات الفلاتر ---
+USE_BTC_TREND_FILTER: bool = True; BTC_SYMBOL: str = 'BTCUSDT'
+USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.1
+USE_BTC_CORRELATION_FILTER: bool = True; MIN_BTC_CORRELATION: float = 0.1
+USE_MIN_VOLATILITY_FILTER: bool = True; MIN_VOLATILITY_PERCENT: float = 0.3
+USE_MOMENTUM_FILTER: bool = True
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 redis_client: Optional[redis.Redis] = None
-ml_models_cache: Dict[str, Any] = {}
+ml_models_cache: Dict[str, Any] = {}; exchange_info_map: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
-open_signals_cache: Dict[str, Dict] = {}
-signal_cache_lock = Lock()
-notifications_cache = deque(maxlen=50)
-notifications_lock = Lock()
-signals_pending_closure: Set[int] = set()
-closure_lock = Lock()
+open_signals_cache: Dict[str, Dict] = {}; signal_cache_lock = Lock()
+notifications_cache = deque(maxlen=50); notifications_lock = Lock()
+signals_pending_closure: Set[int] = set(); closure_lock = Lock()
 last_api_check_time = time.time()
-rejection_logs_cache = deque(maxlen=100)
-rejection_logs_lock = Lock()
+rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
-current_market_state: Dict[str, Any] = {
-    "overall_regime": "INITIALIZING",
-    "details": {},
-    "last_updated": None
-}
+current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
 market_state_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (بدون تغيير) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V21) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V19 مع إصلاح منطق عرض البيانات.
+    لوحة تحكم احترافية V21 مع التحكم بالتداول الحقيقي.
     """
     return """
 <!DOCTYPE html>
@@ -133,7 +127,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMC Bot - V1 | لوحة تحكم التداول</title>
+    <title>لوحة تحكم التداول V21 - تداول حقيقي</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -160,14 +154,17 @@ def get_dashboard_html():
         .tab-btn.active { color: var(--text-primary); }
         .tab-btn.active::after { content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px; background-color: var(--accent-blue); border-radius: 2px; }
         .table-row:hover { background-color: #1a2029; }
+        .toggle-bg:after { content: ''; position: absolute; top: 2px; left: 2px; background: white; border-radius: 9999px; height: 1.25rem; width: 1.25rem; transition: transform 0.2s ease-in-out; }
+        input:checked + .toggle-bg:after { transform: translateX(100%); }
+        input:checked + .toggle-bg { background-color: var(--accent-green); }
     </style>
 </head>
 <body class="p-4 md:p-6">
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
-                <span class="text-accent-blue">لوحة تحكم SMC</span>
-                <span class="text-text-secondary font-medium">V1</span>
+                <span class="text-accent-blue">لوحة التحكم</span>
+                <span class="text-text-secondary font-medium">V21.1 - DB Fix</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -175,27 +172,36 @@ def get_dashboard_html():
             </div>
         </header>
 
-        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div class="card p-4 lg:col-span-2">
-                <h3 class="font-bold mb-3 text-lg text-text-secondary">اتجاه السوق (BTC)</h3>
-                <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
-                    <div>
-                        <h4 class="text-sm font-medium text-text-secondary">الاتجاه العام</h4>
-                        <div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
-                    </div>
-                    <div>
-                        <h4 class="text-sm font-medium text-text-secondary">15 دقيقة</h4>
-                        <div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                    </div>
-                    <div>
-                        <h4 class="text-sm font-medium text-text-secondary">ساعة</h4>
-                        <div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                    </div>
-                    <div>
-                        <h4 class="text-sm font-medium text-text-secondary">4 ساعات</h4>
-                        <div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div>
-                    </div>
+        <!-- قسم التحكم بالتداول -->
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div class="card p-4 md:col-span-2">
+                 <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
+                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                     <div><h4 class="text-sm font-medium text-text-secondary">الاتجاه العام</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">15 دقيقة</h4><div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">ساعة</h4><div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">4 ساعات</h4><div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
+                 </div>
+            </div>
+            <div class="card p-4 flex flex-col justify-center items-center">
+                <h3 class="font-bold text-lg text-text-secondary mb-2">التحكم بالتداول الحقيقي</h3>
+                <div class="flex items-center space-x-3 space-x-reverse">
+                    <span id="trading-status-text" class="font-bold text-lg text-accent-red">غير مُفعّل</span>
+                    <label for="trading-toggle" class="flex items-center cursor-pointer">
+                        <div class="relative">
+                            <input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()">
+                            <div class="toggle-bg block bg-accent-red w-12 h-7 rounded-full"></div>
+                        </div>
+                    </label>
                 </div>
+                 <div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono skeleton w-20 inline-block"></span></div>
+            </div>
+        </section>
+
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+            <div class="card p-4 flex flex-col justify-center items-center text-center">
+                <h3 class="font-bold text-text-secondary text-lg">صفقات مفتوحة</h3>
+                <div id="open-trades-value" class="text-5xl font-black text-accent-blue mt-2 skeleton h-12 w-1/2"></div>
             </div>
             <div class="card p-4 flex flex-col justify-center items-center">
                  <h3 class="font-bold mb-2 text-lg text-text-secondary">الخوف والطمع</h3>
@@ -203,35 +209,14 @@ def get_dashboard_html():
                  <div id="fear-greed-value" class="text-3xl font-bold mt-[-20px] skeleton h-10 w-1/2"></div>
                  <div id="fear-greed-text" class="text-md text-text-secondary skeleton h-6 w-3/4 mt-1"></div>
             </div>
-            <div class="card p-4 flex flex-col justify-center items-center text-center">
-                <h3 class="font-bold text-text-secondary text-lg">صفقات مفتوحة</h3>
-                <div id="open-trades-value" class="text-5xl font-black text-accent-blue mt-2 skeleton h-12 w-1/2"></div>
-            </div>
-        </section>
-
-        <section class="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-5">
             <div id="profit-chart-card" class="card lg:col-span-2 p-4">
                 <div class="flex justify-between items-center mb-3">
                     <h3 class="font-bold text-lg text-text-secondary">منحنى الربح التراكمي (%)</h3>
                     <div id="net-profit-usdt" class="text-2xl font-bold skeleton h-8 w-1/3"></div>
                 </div>
-                <div class="relative h-80 md:h-96">
+                <div class="relative h-80">
                     <canvas id="profitChart"></canvas>
                     <div id="profit-chart-loader" class="absolute inset-0 flex items-center justify-center bg-bg-card z-10"><div class="skeleton w-full h-full"></div></div>
-                </div>
-            </div>
-            <div id="other-stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-4">
-                <div class="card text-center p-4 flex flex-col justify-center">
-                    <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
-                    <div id="win-rate" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
-                </div>
-                <div class="card text-center p-4 flex flex-col justify-center">
-                    <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
-                    <div id="profit-factor" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
-                </div>
-                 <div class="card text-center p-4 flex flex-col justify-center">
-                    <div class="text-sm text-text-secondary mb-1">إجمالي الصفقات</div>
-                    <div id="total-trades" class="text-3xl font-bold skeleton h-8 w-1/2 mx-auto"></div>
                 </div>
             </div>
         </section>
@@ -239,13 +224,15 @@ def get_dashboard_html():
         <div class="mb-4 border-b border-border-color">
             <nav class="flex space-x-6 -mb-px" aria-label="Tabs">
                 <button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button>
+                <button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button>
                 <button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button>
                 <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button>
             </nav>
         </div>
 
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold text-text-secondary">العملة</th><th class="p-4 font-semibold text-text-secondary">الحالة</th><th class="p-4 font-semibold text-text-secondary">الربح/الخسارة</th><th class="p-4 font-semibold text-text-secondary w-[30%]">التقدم</th><th class="p-4 font-semibold text-text-secondary">الدخول/الحالي</th><th class="p-4 font-semibold text-text-secondary">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold text-text-secondary">العملة</th><th class="p-4 font-semibold text-text-secondary">الحالة</th><th class="p-4 font-semibold text-text-secondary">الكمية</th><th class="p-4 font-semibold text-text-secondary">الربح/الخسارة</th><th class="p-4 font-semibold text-text-secondary w-[25%]">التقدم</th><th class="p-4 font-semibold text-text-secondary">الدخول/الحالي</th><th class="p-4 font-semibold text-text-secondary">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
@@ -276,9 +263,9 @@ function showTab(tabName, element) {
     element.classList.add('active', 'text-white');
 }
 
-async function apiFetch(url) {
+async function apiFetch(url, options = {}) {
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, options);
         if (!response.ok) { console.error(`API Error ${response.status}`); return { error: `HTTP Error ${response.status}` }; }
         return await response.json();
     } catch (error) { console.error(`Fetch error for ${url}:`, error); return { error: "Network or fetch error" }; }
@@ -328,12 +315,57 @@ function updateMarketStatus() {
             if (tfData) {
                 const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
                 statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
-            } else {
-                statusDiv.textContent = 'N/A';
-            }
+            } else { statusDiv.textContent = 'N/A'; }
         });
         renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
+        
+        const usdtBalanceEl = document.getElementById('usdt-balance');
+        usdtBalanceEl.textContent = data.usdt_balance ? `$${formatNumber(data.usdt_balance, 2)}` : 'N/A';
+        usdtBalanceEl.classList.remove('skeleton', 'w-20');
     });
+}
+
+function updateTradingStatus() {
+    apiFetch('/api/trading/status').then(data => {
+        if (!data || data.error) return;
+        const toggle = document.getElementById('trading-toggle');
+        const text = document.getElementById('trading-status-text');
+        const bg = toggle.nextElementSibling;
+        
+        toggle.checked = data.is_enabled;
+        if (data.is_enabled) {
+            text.textContent = 'مُفعّل';
+            text.className = 'font-bold text-lg text-accent-green';
+            bg.classList.remove('bg-accent-red');
+            bg.classList.add('bg-accent-green');
+        } else {
+            text.textContent = 'غير مُفعّل';
+            text.className = 'font-bold text-lg text-accent-red';
+            bg.classList.remove('bg-accent-green');
+            bg.classList.add('bg-accent-red');
+        }
+    });
+}
+
+function toggleTrading() {
+    const toggle = document.getElementById('trading-toggle');
+    const confirmationMessage = toggle.checked 
+        ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟ هذا الإجراء يحمل مخاطر."
+        : "هل أنت متأكد من إيقاف التداول الحقيقي؟ لن يتم فتح أو إغلاق أي صفقات جديدة.";
+
+    if (confirm(confirmationMessage)) {
+        apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => {
+            if (data.message) {
+                alert(data.message);
+                updateTradingStatus();
+            } else if (data.error) {
+                alert(`خطأ: ${data.error}`);
+                updateTradingStatus(); // Revert UI to actual state
+            }
+        });
+    } else {
+        toggle.checked = !toggle.checked; // Revert the checkbox if user cancels
+    }
 }
 
 function updateStats() {
@@ -341,24 +373,38 @@ function updateStats() {
         if (!data || data.error) { console.error("Failed to fetch stats:", data ? data.error : "No data"); return; }
         
         const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor);
-        const fields = {
-            'open-trades-value': formatNumber(data.open_trades_count, 0),
-            'net-profit-usdt': `$${formatNumber(data.net_profit_usdt)}`,
-            'win-rate': `${formatNumber(data.win_rate)}%`,
-            'profit-factor': profitFactorDisplay,
-            'total-trades': formatNumber(data.total_closed_trades, 0)
-        };
+        
+        document.getElementById('open-trades-value').textContent = formatNumber(data.open_trades_count, 0);
+        document.getElementById('open-trades-value').classList.remove('skeleton', 'h-12', 'w-1/2');
+        
+        const netProfitEl = document.getElementById('net-profit-usdt');
+        netProfitEl.textContent = `$${formatNumber(data.net_profit_usdt)}`;
+        netProfitEl.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
+        netProfitEl.classList.remove('skeleton', 'h-8', 'w-1/3');
 
-        for (const [id, value] of Object.entries(fields)) {
-            const el = document.getElementById(id);
-            if (el) {
-                el.textContent = value;
-                el.classList.remove('skeleton', 'h-12', 'h-8', 'w-1/2', 'w-3/4', 'w-1/3', 'mx-auto');
-                if (id === 'net-profit-usdt') {
-                    el.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
-                }
-            }
-        }
+        const statsContainer = document.getElementById('stats-container');
+        statsContainer.innerHTML = `
+            <div class="card text-center p-4 flex flex-col justify-center">
+                <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
+                <div class="text-3xl font-bold text-accent-blue">${formatNumber(data.win_rate)}%</div>
+            </div>
+            <div class="card text-center p-4 flex flex-col justify-center">
+                <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
+                <div class="text-3xl font-bold text-accent-yellow">${profitFactorDisplay}</div>
+            </div>
+            <div class="card text-center p-4 flex flex-col justify-center">
+                <div class="text-sm text-text-secondary mb-1">إجمالي الصفقات المغلقة</div>
+                <div class="text-3xl font-bold text-text-primary">${formatNumber(data.total_closed_trades, 0)}</div>
+            </div>
+             <div class="card text-center p-4 flex flex-col justify-center">
+                <div class="text-sm text-text-secondary mb-1">متوسط الربح %</div>
+                <div class="text-3xl font-bold text-accent-green">${formatNumber(data.average_win_pct)}%</div>
+            </div>
+             <div class="card text-center p-4 flex flex-col justify-center">
+                <div class="text-sm text-text-secondary mb-1">متوسط الخسارة %</div>
+                <div class="text-3xl font-bold text-accent-red">${formatNumber(data.average_loss_pct)}%</div>
+            </div>
+        `;
     });
 }
 
@@ -382,61 +428,35 @@ function updateProfitChart() {
         
         canvas.style.display = 'block';
         const ctx = canvas.getContext('2d');
-        const chartData = data.map(d => ({
-            x: luxon.DateTime.fromISO(d.timestamp).valueOf(),
-            y: d.cumulative_profit
-        }));
-
-        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
+        const chartData = data.map(d => ({ x: luxon.DateTime.fromISO(d.timestamp).valueOf(), y: d.cumulative_profit }));
         const lastProfit = chartData[chartData.length - 1].y;
+        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
         if (lastProfit >= 0) {
-            gradient.addColorStop(0, 'rgba(63, 185, 80, 0.4)');
-            gradient.addColorStop(1, 'rgba(63, 185, 80, 0)');
+            gradient.addColorStop(0, 'rgba(63, 185, 80, 0.4)'); gradient.addColorStop(1, 'rgba(63, 185, 80, 0)');
         } else {
-            gradient.addColorStop(0, 'rgba(248, 81, 73, 0.4)');
-            gradient.addColorStop(1, 'rgba(248, 81, 73, 0)');
+            gradient.addColorStop(0, 'rgba(248, 81, 73, 0.4)'); gradient.addColorStop(1, 'rgba(248, 81, 73, 0)');
         }
 
         const config = {
             type: 'line',
-            data: {
-                datasets: [{
-                    label: 'الربح التراكمي %',
-                    data: chartData,
-                    borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-                    backgroundColor: gradient,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 0,
-                    pointHoverRadius: 6,
-                    pointBackgroundColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-                }]
-            },
+            data: { datasets: [{
+                label: 'الربح التراكمي %', data: chartData,
+                borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+                backgroundColor: gradient, fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 6,
+                pointBackgroundColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
+            }]},
             options: {
                 responsive: true, maintainAspectRatio: false,
                 scales: {
-                    x: {
-                        type: 'time',
-                        time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy HH:mm' },
-                        grid: { display: false },
-                        ticks: { color: 'var(--text-secondary)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 }
-                    },
-                    y: {
-                        position: 'right',
-                        beginAtZero: true,
-                        grid: { color: 'var(--border-color)', drawBorder: false },
-                        ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' }
-                    }
+                    x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy HH:mm' }, grid: { display: false }, ticks: { color: 'var(--text-secondary)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
+                    y: { position: 'right', beginAtZero: true, grid: { color: 'var(--border-color)', drawBorder: false }, ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' } }
                 },
                 plugins: {
                     legend: { display: false },
                     tooltip: {
-                        mode: 'index', intersect: false,
-                        backgroundColor: '#0D1117', titleFont: { weight: 'bold', family: 'Tajawal' },
+                        mode: 'index', intersect: false, backgroundColor: '#0D1117', titleFont: { weight: 'bold', family: 'Tajawal' },
                         bodyFont: { family: 'Tajawal' }, displayColors: false,
-                        callbacks: {
-                            label: (ctx) => `الربح التراكمي: ${formatNumber(ctx.raw.y)}%`
-                        }
+                        callbacks: { label: (ctx) => `الربح التراكمي: ${formatNumber(ctx.raw.y)}%` }
                     }
                 },
                 interaction: { mode: 'index', intersect: false }
@@ -448,42 +468,43 @@ function updateProfitChart() {
             profitChartInstance.data.datasets[0].borderColor = lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
             profitChartInstance.data.datasets[0].backgroundColor = gradient;
             profitChartInstance.update('none');
-        } else {
-            profitChartInstance = new Chart(ctx, config);
-        }
+        } else { profitChartInstance = new Chart(ctx, config); }
     });
 }
 
-
 function renderProgressBar(signal) {
     const { entry_price, stop_loss, target_price, current_price } = signal;
-    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null || v === undefined)) {
-        return '<span class="text-xs text-text-secondary">لا تتوفر بيانات</span>';
-    }
+    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null || v === undefined)) return '<span class="text-xs text-text-secondary">لا تتوفر بيانات</span>';
     const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat);
     const totalDist = tp - sl;
     if (totalDist <= 0) return '<span class="text-xs text-text-secondary">بيانات غير صالحة</span>';
     const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
-    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toFixed(4)}</span><span title="الهدف">${tp.toFixed(4)}</span></div></div>`;
+    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toPrecision(4)}</span><span title="الهدف">${tp.toPrecision(4)}</span></div></div>`;
 }
 
 function updateSignals() {
     apiFetch('/api/signals').then(data => {
         const tableBody = document.getElementById('signals-table');
-        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; }
-        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="6" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; }
+        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; }
+        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; }
         
         tableBody.innerHTML = data.map(signal => {
             const pnlPct = (signal.status === 'open' || signal.status === 'updated') ? signal.pnl_pct : signal.profit_percentage;
             const pnlDisplay = pnlPct !== null && pnlPct !== undefined ? `${formatNumber(pnlPct)}%` : 'N/A';
             const pnlColor = pnlPct === null || pnlPct === undefined ? 'text-text-secondary' : (pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red');
             
-            const statusClass = signal.status === 'open' ? 'text-yellow-400' : (signal.status === 'updated' ? 'text-blue-400' : 'text-gray-400');
-            const statusText = signal.status === 'updated' ? 'تم تحديثها' : (signal.status === 'open' ? 'مفتوحة' : signal.status);
-            
+            let statusClass = 'text-gray-400';
+            let statusText = signal.status;
+            if (signal.status === 'open') { statusClass = 'text-yellow-400'; statusText = 'مفتوحة'; }
+            else if (signal.status === 'updated') { statusClass = 'text-blue-400'; statusText = 'تم تحديثها'; }
+
+            const quantityDisplay = signal.quantity ? formatNumber(signal.quantity, 4) : '-';
+            const realTradeIndicator = signal.is_real_trade ? '<span class="text-accent-green" title="صفقة حقيقية">●</span>' : '';
+
             return `<tr class="table-row border-b border-border-color">
-                    <td class="p-4 font-mono font-semibold">${signal.symbol}</td>
+                    <td class="p-4 font-mono font-semibold">${realTradeIndicator} ${signal.symbol}</td>
                     <td class="p-4 font-bold ${statusClass}">${statusText}</td>
+                    <td class="p-4 font-mono text-text-secondary">${quantityDisplay}</td>
                     <td class="p-4 font-mono font-bold ${pnlColor}">${pnlDisplay}</td>
                     <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? renderProgressBar(signal) : '-'}</td>
                     <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${formatNumber(signal.current_price, 5)}</div></td>
@@ -493,7 +514,6 @@ function updateSignals() {
     });
 }
 
-
 function updateList(endpoint, listId, formatter) {
     apiFetch(endpoint).then(data => {
         if (!data || data.error) return;
@@ -502,7 +522,7 @@ function updateList(endpoint, listId, formatter) {
 }
 
 function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
+    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟ سيتم بيع الكمية بسعر السوق إذا كان التداول الحقيقي مُفعّلاً.`)) {
         fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
             alert(data.message || data.error);
             refreshData();
@@ -512,6 +532,7 @@ function manualCloseSignal(signalId) {
 
 function refreshData() {
     updateMarketStatus();
+    updateTradingStatus();
     updateStats();
     updateProfitChart();
     updateSignals();
@@ -528,19 +549,25 @@ window.onload = refreshData;
 </html>
     """
 
-# ---------------------- دوال قاعدة البيانات (بدون تغيير) ----------------------
+# ---------------------- دوال قاعدة البيانات (مع إصلاح الترقية) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
+    """
+    [مُعدّل] تهيئة قاعدة البيانات مع التحقق من الأعمدة وإضافتها إذا لزم الأمر.
+    """
     global conn
     logger.info("[DB] Initializing database connection...")
     db_url_to_use = DB_URL
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         separator = '&' if '?' in db_url_to_use else '?'
         db_url_to_use += f"{separator}sslmode=require"
+    
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
-            conn.autocommit = False
+            conn.autocommit = False # مهم جداً للتحكم بالترانزكشن
+            
             with conn.cursor() as cur:
+                # خطوة 1: إنشاء الجداول الأساسية إذا لم تكن موجودة
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -557,14 +584,42 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-            conn.commit()
-            logger.info("✅ [DB] Database connection successful and tables initialized.")
+                
+                # خطوة 2: منطق الترقية (Migration)
+                logger.info("[DB Migration] Checking for necessary schema upgrades...")
+                
+                # جلب الأعمدة الموجودة في جدول signals
+                cur.execute("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'signals' AND table_schema = 'public';
+                """)
+                existing_columns = [row['column_name'] for row in cur.fetchall()]
+                
+                # تحديد الأعمدة الجديدة المطلوبة مع أنواعها
+                required_columns = {
+                    'is_real_trade': 'BOOLEAN DEFAULT FALSE',
+                    'quantity': 'DOUBLE PRECISION',
+                    'order_id': 'TEXT'
+                }
+                
+                # إضافة الأعمدة الناقصة
+                for col_name, col_type in required_columns.items():
+                    if col_name not in existing_columns:
+                        logger.warning(f"[DB Migration] Column '{col_name}' is missing. Adding it now...")
+                        cur.execute(sql.SQL("ALTER TABLE signals ADD COLUMN {} {}").format(
+                            sql.Identifier(col_name), sql.SQL(col_type)
+                        ))
+                        logger.info(f"[DB Migration] Successfully added column '{col_name}'.")
+                
+            conn.commit() # تنفيذ كل التغييرات
+            logger.info("✅ [DB] Database connection and schema are up-to-date.")
             return
+
         except Exception as e:
-            logger.error(f"❌ [DB] Connection error (Attempt {attempt + 1}/{retries}): {e}")
-            if conn: conn.rollback()
+            logger.error(f"❌ [DB] Error during initialization/migration (Attempt {attempt + 1}/{retries}): {e}")
+            if conn: conn.rollback() # التراجع عن أي تغييرات جزئية في حالة حدوث خطأ
             if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [DB] Failed to connect to the database after multiple retries.")
+            else: logger.critical("❌ [DB] Failed to connect/migrate the database after multiple retries.")
 
 
 def check_db_connection() -> bool:
@@ -622,7 +677,18 @@ def init_redis() -> None:
         logger.critical(f"❌ [Redis] Failed to connect to Redis. Error: {e}")
         exit(1)
 
-# ---------------------- دوال Binance والبيانات (بدون تغيير) ----------------------
+# ---------------------- دوال Binance والبيانات (مع تعديلات للتداول الحقيقي) ----------------------
+def get_exchange_info_map() -> None:
+    global exchange_info_map
+    if not client: return
+    logger.info("ℹ️ [Exchange Info] Fetching exchange trading rules...")
+    try:
+        info = client.get_exchange_info()
+        exchange_info_map = {s['symbol']: s for s in info['symbols']}
+        logger.info(f"✅ [Exchange Info] Successfully loaded trading rules for {len(exchange_info_map)} symbols.")
+    except Exception as e:
+        logger.error(f"❌ [Exchange Info] Could not fetch exchange info: {e}")
+
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     if not client: return []
     try:
@@ -631,8 +697,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
-        exchange_info = client.get_exchange_info()
-        active = {s['symbol'] for s in exchange_info['symbols'] if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING'}
+        
+        if not exchange_info_map: get_exchange_info_map()
+
+        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         validated = sorted(list(formatted.intersection(active)))
         logger.info(f"✅ [Validation] Bot will monitor {len(validated)} validated symbols.")
         return validated
@@ -655,122 +723,14 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}")
         return None
 
-# ---------------------- ✨ دوال حساب ميزات SMC وتحديد الاتجاه ✨ ----------------------
-
-def find_swing_highs_lows(data: pd.DataFrame, n: int = 5) -> pd.DataFrame:
-    """Finds swing highs and lows."""
-    data['sh'] = data['high'][(data['high'].shift(n) < data['high']) & (data['high'].shift(-n) < data['high'])]
-    data['sl'] = data['low'][(data['low'].shift(n) > data['low']) & (data['low'].shift(-n) > data['low'])]
-    return data
-
-def identify_order_blocks(data: pd.DataFrame) -> pd.DataFrame:
-    """Identifies bullish and bearish order blocks."""
-    data['bullish_ob'] = np.nan
-    data['bearish_ob'] = np.nan
-    
-    is_up_trend = data['close'] > data['open']
-    is_down_trend = data['close'] < data['open']
-    
-    # Bullish OB: Last down candle before an up move that breaks structure
-    bullish_ob_indices = data.index[is_down_trend & is_up_trend.shift(-1)]
-    if not bullish_ob_indices.empty:
-        bullish_ob_values = data.loc[bullish_ob_indices, ['low', 'high']]
-        data.loc[bullish_ob_indices, 'bullish_ob'] = bullish_ob_values.to_json(orient='records')
-
-    # Bearish OB: Last up candle before a down move that breaks structure
-    bearish_ob_indices = data.index[is_up_trend & is_down_trend.shift(-1)]
-    if not bearish_ob_indices.empty:
-        bearish_ob_values = data.loc[bearish_ob_indices, ['low', 'high']]
-        data.loc[bearish_ob_indices, 'bearish_ob'] = bearish_ob_values.to_json(orient='records')
-
-    return data
-
-def identify_fvg(data: pd.DataFrame) -> pd.DataFrame:
-    """Identifies Fair Value Gaps (Imbalances)."""
-    # Bullish FVG: gap between high of candle i-1 and low of candle i+1
-    bullish_fvg_mask = data['low'] > data['high'].shift(1)
-    data.loc[bullish_fvg_mask, 'bullish_fvg'] = data['high'].shift(1)
-    data.loc[bullish_fvg_mask, 'bullish_fvg_top'] = data['low']
-
-    # Bearish FVG: gap between low of candle i-1 and high of candle i+1
-    bearish_fvg_mask = data['high'] < data['low'].shift(1)
-    data.loc[bearish_fvg_mask, 'bearish_fvg'] = data['low'].shift(1)
-    data.loc[bearish_fvg_mask, 'bearish_fvg_top'] = data['high']
-    
-    return data
-
-def calculate_smc_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates all SMC features."""
-    df_smc = df.copy()
-    
-    # 1. Market Structure
-    df_smc = find_swing_highs_lows(df_smc, n=5)
-    
-    swing_highs = df_smc[df_smc['sh'].notna()]['sh']
-    swing_lows = df_smc[df_smc['sl'].notna()]['sl']
-    
-    # 2. BOS/CHoCH
-    df_smc['bos'] = 0
-    df_smc['choch'] = 0
-    
-    if not swing_highs.empty and not swing_lows.empty:
-        last_sh = swing_highs.iloc[-1] if len(swing_highs) > 0 else np.nan
-        prev_sh = swing_highs.iloc[-2] if len(swing_highs) > 1 else np.nan
-        last_sl = swing_lows.iloc[-1] if len(swing_lows) > 0 else np.nan
-        prev_sl = swing_lows.iloc[-2] if len(swing_lows) > 1 else np.nan
-
-        # Bullish BOS: price breaks above the last swing high
-        if not pd.isna(last_sh) and df_smc['high'].iloc[-1] > last_sh:
-             df_smc.loc[df_smc.index[-1], 'bos'] = 1 
-        # Bearish BOS: price breaks below the last swing low
-        if not pd.isna(last_sl) and df_smc['low'].iloc[-1] < last_sl:
-             df_smc.loc[df_smc.index[-1], 'bos'] = -1
-
-        # Bullish CHoCH: price breaks above the last swing high in a downtrend
-        if not pd.isna(last_sh) and not pd.isna(prev_sh) and last_sh < prev_sh and df_smc['high'].iloc[-1] > last_sh:
-            df_smc.loc[df_smc.index[-1], 'choch'] = 1
-        # Bearish CHoCH: price breaks below the last swing low in an uptrend
-        if not pd.isna(last_sl) and not pd.isna(prev_sl) and last_sl > prev_sl and df_smc['low'].iloc[-1] < last_sl:
-            df_smc.loc[df_smc.index[-1], 'choch'] = -1
-            
-    # 3. Order Blocks and FVG
-    df_smc = identify_order_blocks(df_smc)
-    df_smc = identify_fvg(df_smc)
-
-    # 4. Feature Engineering from SMC concepts
-    # Distance to nearest OB/FVG
-    last_price = df_smc['close'].iloc[-1]
-    
-    bull_ob_series = df_smc['bullish_ob'].dropna().apply(json.loads)
-    bear_ob_series = df_smc['bearish_ob'].dropna().apply(json.loads)
-    
-    nearest_bull_ob = min([ob['low'] for ob in bull_ob_series if ob['low'] < last_price], default=np.nan)
-    nearest_bear_ob = min([ob['low'] for ob in bear_ob_series if ob['low'] > last_price], default=np.nan)
-    
-    df_smc['dist_to_bull_ob'] = (last_price - nearest_bull_ob) / last_price if not pd.isna(nearest_bull_ob) else np.nan
-    df_smc['dist_to_bear_ob'] = (nearest_bear_ob - last_price) / last_price if not pd.isna(nearest_bear_ob) else np.nan
-
-    nearest_bull_fvg = df_smc[df_smc['bullish_fvg'].notna() & (df_smc['bullish_fvg'] < last_price)]['bullish_fvg'].max()
-    nearest_bear_fvg = df_smc[df_smc['bearish_fvg'].notna() & (df_smc['bearish_fvg'] > last_price)]['bearish_fvg'].min()
-    
-    df_smc['dist_to_bull_fvg'] = (last_price - nearest_bull_fvg) / last_price if not pd.isna(nearest_bull_fvg) else np.nan
-    df_smc['dist_to_bear_fvg'] = (nearest_bear_fvg - last_price) / last_price if not pd.isna(nearest_bear_fvg) else np.nan
-
-    # Liquidity (simple version: number of recent swing points)
-    df_smc['liquidity_highs_nearby'] = df_smc['sh'].rolling(window=20).count()
-    df_smc['liquidity_lows_nearby'] = df_smc['sl'].rolling(window=20).count()
-
-    return df_smc
-
-def calculate_filter_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates features needed for filtering, but not for the model itself."""
+# ---------------------- دوال حساب الميزات وتحديد الاتجاه (بدون تغيير) ----------------------
+def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -779,34 +739,47 @@ def calculate_filter_features(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=30, min_periods=1).mean() + 1e-9)
-    
-    btc_data = get_btc_data_for_bot()
-    if btc_data is not None:
-        merged_df = pd.merge(df_calc, btc_data[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    if btc_df is not None and not btc_df.empty:
+        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
-
+    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
+    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+    df_calc['hour_of_day'] = df_calc.index.hour
     return df_calc.astype('float32', errors='ignore')
 
 def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     if df is None or len(df) < 26: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
     try:
-        df_filtered = calculate_filter_features(df)
-        last_row = df_filtered.iloc[-1]
-        rsi = last_row['rsi']
-        adx = last_row['adx']
-        
-        ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
-        ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-        
+        close_series = df['close']
+        delta = close_series.diff()
+        gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+        loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+        rsi = (100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))).iloc[-1]
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - close_series.shift()).abs()
+        low_close = (df['low'] - close_series.shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.ewm(span=ADX_PERIOD, adjust=False).mean()
+        up_move = df['high'].diff(); down_move = -df['low'].diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
+        minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
+        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+        adx = dx.ewm(span=ADX_PERIOD, adjust=False).mean().iloc[-1]
+        ema_fast = close_series.ewm(span=12, adjust=False).mean().iloc[-1]
+        ema_slow = close_series.ewm(span=26, adjust=False).mean().iloc[-1]
         trend = "Ranging"
         if adx > 20:
             if ema_fast > ema_slow and rsi > 50: trend = "Uptrend"
@@ -877,31 +850,113 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
+# ---------------------- دوال الاستراتيجية والتداول الحقيقي ----------------------
+
+def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
+    try:
+        symbol_info = exchange_info_map.get(symbol)
+        if not symbol_info:
+            logger.error(f"[{symbol}] Could not find exchange info for lot size adjustment.")
+            return None
+        
+        for f in symbol_info['filters']:
+            if f['filterType'] == 'LOT_SIZE':
+                step_size_str = f['stepSize']
+                step_size = Decimal(step_size_str)
+                
+                quantity_dec = Decimal(str(quantity))
+                adjusted_quantity = (quantity_dec // step_size) * step_size
+                
+                logger.debug(f"[{symbol}] Adjusted quantity from {quantity} to {adjusted_quantity} with step size {step_size}")
+                return adjusted_quantity
+        return Decimal(str(quantity))
+    except Exception as e:
+        logger.error(f"[{symbol}] Error adjusting quantity to lot size: {e}")
+        return None
+
+def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
+    if not client: return None
+    try:
+        balance_response = client.get_asset_balance(asset='USDT')
+        available_balance = Decimal(balance_response['free'])
+        logger.info(f"[{symbol}] Available USDT balance: {available_balance:.2f}")
+
+        risk_amount_usdt = available_balance * (Decimal(str(RISK_PER_TRADE_PERCENT)) / Decimal('100'))
+        
+        risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
+        if risk_per_coin <= 0:
+            log_rejection(symbol, "Invalid Position Size", {"detail": "Stop loss must be below entry price."})
+            return None
+            
+        initial_quantity = risk_amount_usdt / risk_per_coin
+        
+        adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
+        if adjusted_quantity is None or adjusted_quantity <= 0:
+            log_rejection(symbol, "Lot Size Adjustment Failed", {"detail": f"Adjusted quantity is zero or invalid: {adjusted_quantity}"})
+            return None
+
+        notional_value = adjusted_quantity * Decimal(str(entry_price))
+        symbol_info = exchange_info_map.get(symbol)
+        if symbol_info:
+            for f in symbol_info['filters']:
+                if f['filterType'] == 'MIN_NOTIONAL' or f['filterType'] == 'NOTIONAL':
+                    min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
+                    if notional_value < min_notional:
+                        log_rejection(symbol, "Min Notional Filter", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+                        return None
+        
+        if notional_value > available_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance:.2f}"})
+            return None
+
+        logger.info(f"✅ [{symbol}] Calculated position size: {adjusted_quantity} | Risk: ${risk_amount_usdt:.2f} | Notional: ${notional_value:.2f}")
+        return adjusted_quantity
+
+    except BinanceAPIException as e:
+        logger.error(f"❌ [{symbol}] Binance API error during position size calculation: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] Unexpected error in calculate_position_size: {e}", exc_info=True)
+        return None
+
+def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
+    if not client: return None
+    logger.info(f"➡️ [{symbol}] Attempting to place a REAL {side} order for {quantity} units.")
+    try:
+        order = client.create_order(
+            symbol=symbol,
+            side=side,
+            type=order_type,
+            quantity=float(quantity)
+        )
+        logger.info(f"✅ [{symbol}] REAL {side} order placed successfully! Order ID: {order['orderId']}")
+        log_and_notify('info', f"REAL TRADE: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
+        return order
+    except BinanceAPIException as e:
+        logger.error(f"❌ [{symbol}] Binance API Exception on order placement: {e}")
+        log_and_notify('error', f"REAL TRADE FAILED: {symbol} | {e}", "REAL_TRADE_ERROR")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] Unexpected error on order placement: {e}", exc_info=True)
+        return None
+
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame) -> Optional[pd.DataFrame]:
+    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
-            # Generate SMC features on the primary timeframe
-            df_featured = calculate_smc_features(df_15m)
-            
-            # Generate SMC features on the higher timeframe for context
-            df_4h_smc = calculate_smc_features(df_4h)
-            df_4h_smc = df_4h_smc.rename(columns=lambda c: f"{c}_4h", inplace=False)
-            
-            # Join the features
-            required_4h_cols = [col for col in df_4h_smc.columns if col.endswith('_4h')]
-            df_featured = df_featured.join(df_4h_smc[required_4h_cols], how='outer')
+            df_featured = calculate_features(df_15m, btc_df)
+            df_4h_features = calculate_features(df_4h, None)
+            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h", inplace=False)
+            required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
+            df_featured = df_featured.join(df_4h_features[required_4h_cols], how='outer')
             df_featured.fillna(method='ffill', inplace=True)
-            
-            # Ensure all required model features are present
             for col in self.feature_names:
                 if col not in df_featured.columns: df_featured[col] = 0.0
-            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
@@ -911,34 +966,30 @@ class TradingStrategy:
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty: return None
         try:
-            # Ensure the feature DataFrame is not just NaNs
-            if df_features[self.feature_names].isnull().all().all():
-                logger.warning(f"⚠️ [{self.symbol}] Feature data is all NaN. Cannot generate signal.")
-                return None
-
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
             features_scaled_np = self.scaler.transform(last_row_ordered_df)
             features_scaled_df = pd.DataFrame(features_scaled_np, columns=self.feature_names)
-            
             prediction = self.ml_model.predict(features_scaled_df)[0]
             prediction_proba = self.ml_model.predict_proba(features_scaled_df)
             confidence = float(np.max(prediction_proba[0]))
-            
             logger.info(f"ℹ️ [{self.symbol}] Model predicted '{'BUY' if prediction == 1 else 'SELL/HOLD'}' with {confidence:.2%} confidence.")
             return {'prediction': int(prediction), 'confidence': confidence}
         except Exception as e:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# --- دوال الفلاتر (بدون تغيير جوهري في المنطق) ---
 def passes_momentum_filter(last_features: pd.Series) -> bool:
-    # This filter can be adapted or kept for confirmation
     symbol = last_features.name
-    # Using RSI as a proxy for momentum confirmation
-    rsi = last_features.get('rsi', 50)
-    if rsi > 55:
+    roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
+    accel = last_features.get('roc_acceleration', 0)
+    slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
+    if roc > 0 and accel >= 0 and slope > 0:
         return True
-    log_rejection(symbol, "Momentum Filter", {"RSI": f"{rsi:.2f} (Req: > 55)"})
+    log_rejection(symbol, "Momentum Filter", {
+        "ROC": f"{roc:.2f} (Req: > 0)",
+        "Acceleration": f"{accel:.4f} (Req: >= 0)",
+        "Slope": f"{slope:.6f} (Req: > 0)"
+    })
     return False
 
 def passes_speed_filter(last_features: pd.Series) -> bool:
@@ -955,49 +1006,14 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
     return False
 
-# --- ✨ دالة تحديد الهدف ووقف الخسارة المحسنة بمنطق SMC ✨ ---
-def calculate_tp_sl(symbol: str, entry_price: float, full_df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    Calculates TP/SL using SMC levels (Order Blocks, Liquidity).
-    Falls back to ATR if no clear levels are found.
-    """
-    last_atr = full_df['atr'].iloc[-1]
+def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
     if last_atr <= 0:
-        log_rejection(symbol, "Invalid ATR", {"detail": "ATR is zero or negative"})
+        log_rejection(symbol, "Invalid ATR for Fallback", {"detail": "ATR is zero or negative"})
         return None
-
-    # --- SMC Logic ---
-    # Find nearest Bearish OB above entry for TP
-    bearish_obs = full_df[full_df['bearish_ob'].notna()]
-    potential_tps = [json.loads(ob)['low'] for _, ob in bearish_obs['bearish_ob'].items() if json.loads(ob)['low'] > entry_price]
-    smc_tp = min(potential_tps) if potential_tps else None
-
-    # Find nearest Bullish OB below entry for SL
-    bullish_obs = full_df[full_df['bullish_ob'].notna()]
-    potential_sls = [json.loads(ob)['low'] for _, ob in bullish_obs['bullish_ob'].items() if json.loads(ob)['high'] < entry_price]
-    smc_sl = max(potential_sls) if potential_sls else None
-
-    # --- Fallback Logic ---
     fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
     fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
+    return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
 
-    # --- Final Decision ---
-    final_tp = smc_tp if smc_tp and smc_tp > entry_price else fallback_tp
-    final_sl = smc_sl if smc_sl and smc_sl < entry_price else fallback_sl
-    
-    source = "SMC" if smc_tp and smc_sl else "ATR_Fallback"
-
-    # Sanity check to ensure TP/SL make sense
-    if final_tp <= entry_price or final_sl >= entry_price:
-        logger.warning(f"⚠️ [{symbol}] Invalid TP/SL calculated, using pure ATR. TP: {final_tp}, SL: {final_sl}, Entry: {entry_price}")
-        final_tp = fallback_tp
-        final_sl = fallback_sl
-        source = "ATR_Forced_Fallback"
-
-    return {'target_price': final_tp, 'stop_loss': final_sl, 'source': source}
-
-
-# --- دوال المراقبة والإغلاق والتنبيهات (بدون تغيير) ---
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
     try:
@@ -1123,45 +1139,55 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
     confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
-    tp_sl_source = signal_data['signal_details'].get('TP_SL_Source', 'N/A')
-    message = (f"💡 *توصية SMC جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n\n"
-               f"*الدخول:* `{entry:,.8g}`\n*الهدف:* `{target:,.8g}`\n*وقف الخسارة:* `{sl:,.8g}`\n\n"
+    
+    trade_type_msg = ""
+    if signal_data.get('is_real_trade'):
+        quantity = signal_data.get('quantity')
+        trade_type_msg = f"\n*🔥 صفقة حقيقية 🔥*\n*الكمية:* `{quantity}`\n"
+
+    message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n{trade_type_msg}\n"
+               f"*الدخول:* `{entry:.8f}`\n*الهدف:* `{target:.8f}`\n*وقف الخسارة:* `{sl:.8f}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
-               f"*ثقة النموذج:* `{confidence_display}`\n*مصدر الهدف/الوقف:* `{tp_sl_source}`")
+               f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New SMC Signal: {symbol} in {market_regime} market", "NEW_SIGNAL")
+        log_and_notify('info', f"New Signal: {symbol} in {market_regime} market. Real Trade: {signal_data.get('is_real_trade', False)}", "NEW_SIGNAL")
 
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
-    old_target = float(old_signal_data['target_price'])
-    new_target = float(signal_data['target_price'])
-    old_sl = float(old_signal_data['stop_loss'])
-    new_sl = float(signal_data['stop_loss'])
+    old_target = float(old_signal_data['target_price']); new_target = float(signal_data['target_price'])
+    old_sl = float(old_signal_data['stop_loss']); new_sl = float(signal_data['stop_loss'])
     old_conf = old_signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     new_conf = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     
-    message = (f"🔄 *تحديث صفقة SMC (تعزيز)* 🔄\n\n"
+    message = (f"🔄 *تحديث صفقة (تعزيز)* 🔄\n\n"
                f"*العملة:* `{symbol}`\n\n"
                f"*الثقة:* `{old_conf}` ⬅️ `{new_conf}`\n"
-               f"*الهدف:* `{old_target:,.8g}` ⬅️ `{new_target:,.8g}`\n"
-               f"*الوقف:* `{old_sl:,.8g}` ⬅️ `{new_sl:,.8g}`\n\n"
+               f"*الهدف:* `{old_target:.8f}` ⬅️ `{new_target:.8f}`\n"
+               f"*الوقف:* `{old_sl:.8f}` ⬅️ `{new_sl:.8f}`\n\n"
                f"تم تحديث الصفقة بناءً على إشارة شراء أقوى.")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"Updated SMC Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
+        log_and_notify('info', f"Updated Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
 
-# --- دوال قاعدة البيانات للإشارات (بدون تغيير) ---
+
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
         entry = float(signal['entry_price']); target = float(signal['target_price']); sl = float(signal['stop_loss'])
+        is_real = signal.get('is_real_trade', False)
+        quantity = signal.get('quantity')
+        order_id = signal.get('order_id')
+
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id;",
-                        (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), entry))
+            cur.execute("""
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price, is_real_trade, quantity, order_id) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+                """,
+                (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), entry, is_real, quantity, order_id))
             signal['id'] = cur.fetchone()['id']
         conn.commit()
-        logger.info(f"✅ [DB] Inserted signal {signal['id']} for {signal['symbol']}.")
+        logger.info(f"✅ [DB] Inserted signal {signal['id']} for {signal['symbol']}. Real Trade: {is_real}")
         return signal
     except Exception as e:
         logger.error(f"❌ [Insert] Error inserting signal for {signal['symbol']}: {e}", exc_info=True)
@@ -1193,8 +1219,56 @@ def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
         return False
 
 def close_signal(signal: Dict, status: str, closing_price: float):
-    signal_id = signal.get('id'); symbol = signal.get('symbol')
+    signal_id = signal.get('id')
+    symbol = signal.get('symbol')
     logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
+    
+    is_real = signal.get('is_real_trade', False)
+    
+    with trading_status_lock:
+        is_enabled = is_trading_enabled
+
+    # --- FIX START: Logic to sell the actual available balance ---
+    if is_real and is_enabled:
+        try:
+            # 1. Get the base asset from the symbol (e.g., 'W' from 'WUSDT')
+            base_asset = exchange_info_map.get(symbol, {}).get('baseAsset')
+            if not base_asset or not client:
+                raise ValueError(f"Could not determine base asset for {symbol} or client not ready.")
+
+            # 2. Query the actual free balance of the asset.
+            balance_info = client.get_asset_balance(asset=base_asset)
+            actual_free_balance = float(balance_info['free'])
+            logger.info(f"🔥 [{symbol}] REAL TRADE CLOSURE. Actual free balance for {base_asset}: {actual_free_balance}")
+
+            # 3. Adjust this quantity to the symbol's lot size rules.
+            quantity_to_sell_adjusted = adjust_quantity_to_lot_size(symbol, actual_free_balance)
+
+            if quantity_to_sell_adjusted and quantity_to_sell_adjusted > 0:
+                # 4. Place the sell order with the adjusted, actual balance.
+                sell_order = place_order(symbol, Client.SIDE_SELL, quantity_to_sell_adjusted)
+                if not sell_order:
+                    # This logic is critical for alerting on failure.
+                    logger.critical(f"🚨 CRITICAL: FAILED TO PLACE SELL ORDER FOR REAL TRADE {signal_id} ({symbol}). THE POSITION REMAINS OPEN. MANUAL INTERVENTION REQUIRED.")
+                    log_and_notify('critical', f"CRITICAL: FAILED TO SELL {symbol} for signal {signal_id}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
+            else:
+                logger.warning(f"⚠️ [{symbol}] No sellable balance ({actual_free_balance}) found for asset {base_asset}. The position might have been closed manually or the balance is too small. Closing signal virtually.")
+        
+        except Exception as e:
+            logger.critical(f"🚨 CRITICAL: An exception occurred while preparing the sell order for {symbol}: {e}", exc_info=True)
+            log_and_notify('critical', f"CRITICAL: FAILED TO PREPARE SELL for {symbol} due to error: {e}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
+            # We must not proceed to DB closure if we can't even check the balance, as it could be a temporary API issue.
+            # Re-queue the signal for the monitoring loop to try again.
+            with signal_cache_lock:
+                if symbol not in open_signals_cache:
+                    open_signals_cache[symbol] = signal
+            with closure_lock:
+                signals_pending_closure.discard(signal_id)
+            return # Exit the function to allow for a retry.
+    # --- FIX END ---
+    elif is_real and not is_enabled:
+        logger.warning(f"⚠️ [{symbol}] Real trade signal {signal_id} triggered closure, but master trading switch is OFF. Closing virtually.")
+
     try:
         if not check_db_connection() or not conn: raise OperationalError("DB connection failed.")
         db_closing_price = float(closing_price); entry_price = float(signal['entry_price'])
@@ -1204,20 +1278,26 @@ def close_signal(signal: Dict, status: str, closing_price: float):
                         (status, db_closing_price, profit_pct, signal_id))
             if cur.rowcount == 0: logger.warning(f"⚠️ [DB Close] Signal {signal_id} was already closed or not found."); return
         conn.commit()
-        status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ إغلاق يدوي', 'closed_by_sell_signal': '🔴 إغلاق بإشارة بيع'}
+        
+        status_map = {'target_hit': '✅ تحقق الهدف', 'stop_loss_hit': '🛑 ضرب وقف الخسارة', 'manual_close': '🖐️ إغلاق يدوي'}
         status_message = status_map.get(status, status)
-        alert_msg = (f"*{status_message}*\n*العملة:* `{symbol}`\n*الربح:* `{profit_pct:+.2f}%`")
+        real_trade_tag = "🔥 REAL" if is_real else "👻 VIRTUAL"
+        
+        alert_msg = (f"*{status_message} ({real_trade_tag})*\n*العملة:* `{symbol}`\n*الربح:* `{profit_pct:+.2f}%`")
         send_telegram_message(CHAT_ID, alert_msg)
-        log_and_notify('info', f"{status_message}: {symbol} | Profit: {profit_pct:+.2f}%", 'CLOSE_SIGNAL')
-        logger.info(f"✅ [DB Close] Signal {signal_id} closed successfully.")
+        log_and_notify('info', f"{status_message}: {symbol} | Profit: {profit_pct:+.2f}% | Real: {is_real}", 'CLOSE_SIGNAL')
+        logger.info(f"✅ [DB Close] Signal {signal_id} closed successfully in DB.")
     except Exception as e:
-        logger.error(f"❌ [DB Close] Critical error closing signal {signal_id}: {e}", exc_info=True)
+        logger.error(f"❌ [DB Close] Critical error closing signal {signal_id} in DB: {e}", exc_info=True)
         if conn: conn.rollback()
+        # If DB update fails, we must re-queue the signal to avoid losing track of it.
         if symbol:
             with signal_cache_lock:
                 if symbol not in open_signals_cache: open_signals_cache[symbol] = signal
     finally:
+        # This should only run if the process completes, successfully or not (except for critical sell prep failure).
         with closure_lock: signals_pending_closure.discard(signal_id)
+
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
@@ -1257,16 +1337,18 @@ def perform_end_of_cycle_cleanup():
         
         model_cache_size = len(ml_models_cache)
         ml_models_cache.clear()
-        logger.info(f"🧹 [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
+        logger.info(f"?? [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
 
         collected = gc.collect()
         logger.info(f"🧹 [Cleanup] Garbage collector ran. Collected {collected} objects.")
         
         logger.info("✅ [Cleanup] End-of-cycle cleanup finished successfully.")
+
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
 
+# ---------------------- حلقة العمل الرئيسية (مع منطق التداول الحقيقي) ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1286,6 +1368,8 @@ def main_loop():
                 time.sleep(300)
                 continue
             
+            btc_data = get_btc_data_for_bot()
+            
             for symbol in validated_symbols_to_scan:
                 try:
                     with signal_cache_lock:
@@ -1301,18 +1385,16 @@ def main_loop():
                     df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_4h is None or df_4h.empty: continue
                     
-                    df_features_model = strategy.get_features(df_15m, df_4h)
-                    if df_features_model is None or df_features_model.empty: continue
+                    df_features = strategy.get_features(df_15m, df_4h, btc_data)
+                    if df_features is None or df_features.empty: continue
                     
-                    signal_info = strategy.generate_signal(df_features_model)
+                    signal_info = strategy.generate_signal(df_features)
                     if not signal_info: continue
                     
                     prediction, confidence = signal_info['prediction'], signal_info['confidence']
                     
                     if prediction == 1 and confidence >= BUY_CONFIDENCE_THRESHOLD:
-                        # We need a dataframe with filter features as well
-                        df_with_all_features = calculate_filter_features(df_15m)
-                        last_features = df_with_all_features.iloc[-1]
+                        last_features = df_features.iloc[-1]
                         last_features.name = symbol
                         
                         try:
@@ -1321,20 +1403,24 @@ def main_loop():
                             logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
                             continue
 
-                        # Logic for updating an existing trade
                         if open_trade:
-                            old_confidence = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
+                            old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
+                            try:
+                                old_confidence = float(str(old_confidence_raw).strip().replace('%', '')) / 100.0 if isinstance(old_confidence_raw, str) else float(old_confidence_raw)
+                            except (ValueError, TypeError): old_confidence = 0.0
+                            
                             if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
-                                logger.info(f"🔄 [{symbol}] Stronger BUY signal. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
-                                # Re-check filters for update
+                                logger.info(f"✅ [{symbol}] Reinforcement condition met. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
+                                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                                 
-                                tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_all_features)
+                                last_atr = last_features.get('atr', 0)
+                                tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                                 if not tp_sl_data: continue
-                                
+
                                 updated_signal_data = {
                                     'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                    'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'TP_SL_Source': tp_sl_data['source'], 'Update_Reason': 'Reinforcement Signal' }
+                                    'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Update_Reason': 'Reinforcement Signal' }
                                 }
                                 
                                 if update_signal_in_db(open_trade['id'], updated_signal_data):
@@ -1344,39 +1430,66 @@ def main_loop():
                                     send_trade_update_alert(updated_signal_data, open_trade)
                             continue
 
-                        # Logic for opening a new trade
-                        if open_trade_count < MAX_OPEN_TRADES:
-                            if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                            
-                            volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
-                            if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                                log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
-                            
-                            if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
-                                correlation = last_features.get('btc_correlation', 0)
-                                if correlation < MIN_BTC_CORRELATION:
-                                    log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
-                            
-                            tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_all_features)
-                            if not tp_sl_data: continue
-                            
-                            new_signal = {
-                                'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                                'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'TP_SL_Source': tp_sl_data['source']}, 
-                                'entry_price': entry_price, **tp_sl_data
-                            }
+                        if open_trade_count >= MAX_OPEN_TRADES:
+                            log_rejection(symbol, "Max Open Trades", {"count": open_trade_count, "max": MAX_OPEN_TRADES}); continue
 
-                            if USE_RRR_FILTER:
-                                risk = entry_price - float(new_signal['stop_loss'])
-                                reward = float(new_signal['target_price']) - entry_price
-                                if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
-                                    log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
-                            
-                            saved_signal = insert_signal_into_db(new_signal)
-                            if saved_signal:
-                                with signal_cache_lock:
-                                    open_signals_cache[saved_signal['symbol']] = saved_signal
-                                send_new_signal_alert(saved_signal)
+                        if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
+                        if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                        
+                        last_atr = last_features.get('atr', 0)
+                        volatility = (last_atr / entry_price * 100) if entry_price > 0 else 0
+                        if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
+                            log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
+                        
+                        if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
+                            correlation = last_features.get('btc_correlation', 0)
+                            if correlation < MIN_BTC_CORRELATION:
+                                log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
+                        
+                        tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
+                        if not tp_sl_data: continue
+                        
+                        new_signal = {
+                            'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
+                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                            'entry_price': entry_price, **tp_sl_data
+                        }
+
+                        if USE_RRR_FILTER:
+                            risk = entry_price - float(new_signal['stop_loss'])
+                            reward = float(new_signal['target_price']) - entry_price
+                            if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
+                                log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
+                        
+                        with trading_status_lock:
+                            is_enabled = is_trading_enabled
+
+                        if is_enabled:
+                            logger.info(f"🔥 [{symbol}] Real trading is ENABLED. Calculating position size...")
+                            quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
+                            if quantity and quantity > 0:
+                                order_result = place_order(symbol, Client.SIDE_BUY, quantity)
+                                if order_result:
+                                    actual_entry_price = float(order_result['fills'][0]['price']) if order_result.get('fills') else entry_price
+                                    new_signal['entry_price'] = actual_entry_price
+                                    new_signal['is_real_trade'] = True
+                                    new_signal['quantity'] = float(order_result['executedQty'])
+                                    new_signal['order_id'] = order_result['orderId']
+                                else:
+                                    logger.error(f"[{symbol}] Failed to place real order. Skipping signal.")
+                                    continue
+                            else:
+                                logger.warning(f"[{symbol}] Could not calculate a valid position size. Skipping real trade.")
+                                continue
+                        else:
+                            logger.info(f"👻 [{symbol}] Real trading is DISABLED. Logging as a virtual signal.")
+                            new_signal['is_real_trade'] = False
+
+                        saved_signal = insert_signal_into_db(new_signal)
+                        if saved_signal:
+                            with signal_cache_lock:
+                                open_signals_cache[saved_signal['symbol']] = saved_signal
+                            send_new_signal_alert(saved_signal)
                     
                     time.sleep(2)
                 except Exception as e: 
@@ -1395,7 +1508,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (بدون تغيير) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V21.1) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1412,6 +1525,15 @@ def check_api_status() -> bool:
     try: client.ping(); return True
     except Exception: return False
 
+def get_usdt_balance() -> Optional[float]:
+    if not client: return None
+    try:
+        balance = client.get_asset_balance(asset='USDT')
+        return float(balance['free'])
+    except Exception as e:
+        logger.error(f"❌ Could not fetch USDT balance: {e}")
+        return None
+
 @app.route('/')
 def home():
     return render_template_string(get_dashboard_html())
@@ -1421,7 +1543,8 @@ def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
     return jsonify({
         "fear_and_greed": get_fear_and_greed_index(), "market_state": state_copy,
-        "db_ok": check_db_connection(), "api_ok": check_api_status()
+        "db_ok": check_db_connection(), "api_ok": check_api_status(),
+        "usdt_balance": get_usdt_balance()
     })
 
 @app.route('/api/stats')
@@ -1429,36 +1552,55 @@ def get_stats():
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT status, profit_percentage FROM signals;")
+            # تم تعديل الاستعلام ليشمل الأعمدة الجديدة بشكل آمن
+            cur.execute("SELECT status, profit_percentage, is_real_trade, quantity, entry_price FROM signals;")
             all_signals = cur.fetchall()
+        
         open_trades_count = sum(1 for s in all_signals if s.get('status') in ['open', 'updated'])
         closed_trades = [s for s in all_signals if s.get('status') not in ['open', 'updated'] and s.get('profit_percentage') is not None]
+        
+        # Initialize all variables that will be returned to ensure they always have a value
         total_net_profit_usdt = 0.0
         win_rate = 0.0
         profit_factor_val = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
+
         if closed_trades:
+            # Calculate the total net profit in USDT
             total_net_profit_usdt = sum(
-                ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * HYPOTHETICAL_TRADE_SIZE_USDT
-                for t in closed_trades
+                (((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT))
+                for t in closed_trades if t.get('profit_percentage') is not None
             )
-            wins = sum(1 for s in closed_trades if float(s['profit_percentage']) > 0)
-            win_rate = (wins / len(closed_trades) * 100) if closed_trades else 0.0
-            total_profit_from_wins = sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0)
-            total_loss_from_losses = abs(sum(float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0))
+            
+            wins_list = [float(s['profit_percentage']) for s in closed_trades if s.get('profit_percentage') is not None and float(s['profit_percentage']) > 0]
+            losses_list = [float(s['profit_percentage']) for s in closed_trades if s.get('profit_percentage') is not None and float(s['profit_percentage']) < 0]
+            
+            win_rate = (len(wins_list) / len(closed_trades) * 100) if closed_trades else 0.0
+            avg_win = sum(wins_list) / len(wins_list) if wins_list else 0.0
+            avg_loss = sum(losses_list) / len(losses_list) if losses_list else 0.0
+            
+            total_profit_from_wins = sum(wins_list)
+            total_loss_from_losses = abs(sum(losses_list))
+            
             if total_loss_from_losses > 0:
                 profit_factor_val = total_profit_from_wins / total_loss_from_losses
             elif total_profit_from_wins > 0:
                 profit_factor_val = "Infinity"
+        
         return jsonify({
             "open_trades_count": open_trades_count,
             "net_profit_usdt": total_net_profit_usdt,
             "win_rate": win_rate,
             "profit_factor": profit_factor_val,
-            "total_closed_trades": len(closed_trades)
+            "total_closed_trades": len(closed_trades),
+            "average_win_pct": avg_win,
+            "average_loss_pct": avg_loss
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred"}), 500
+        if conn: conn.rollback()
+        return jsonify({"error": "An internal error occurred in stats"}), 500
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
@@ -1467,29 +1609,22 @@ def get_profit_curve():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT closed_at, profit_percentage 
-                FROM signals 
-                WHERE status NOT IN ('open', 'updated') 
-                AND profit_percentage IS NOT NULL 
-                AND closed_at IS NOT NULL 
+                SELECT closed_at, profit_percentage FROM signals 
+                WHERE status NOT IN ('open', 'updated') AND profit_percentage IS NOT NULL AND closed_at IS NOT NULL 
                 ORDER BY closed_at ASC;
             """)
             trades = cur.fetchall()
         
         start_time = (trades[0]['closed_at'] - timedelta(seconds=1)).isoformat() if trades else datetime.now(timezone.utc).isoformat()
         curve_data = [{"timestamp": start_time, "cumulative_profit": 0.0}]
-
         cumulative_profit = 0.0
         for trade in trades:
             cumulative_profit += float(trade['profit_percentage'])
-            curve_data.append({
-                "timestamp": trade['closed_at'].isoformat(),
-                "cumulative_profit": cumulative_profit
-            })
-            
+            curve_data.append({"timestamp": trade['closed_at'].isoformat(), "cumulative_profit": cumulative_profit})
         return jsonify(curve_data)
     except Exception as e:
         logger.error(f"❌ [API Profit Curve] Error: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": "Error fetching profit curve"}), 500
 
 @app.route('/api/signals')
@@ -1514,30 +1649,20 @@ def get_signals():
                     price = None
                     s['current_price'] = None
                     s['pnl_pct'] = None
-
                     if redis_prices.get(symbol):
-                        try:
-                            price = float(redis_prices[symbol])
-                        except (ValueError, TypeError):
-                            price = None
-                    
+                        try: price = float(redis_prices[symbol])
+                        except (ValueError, TypeError): price = None
                     if price is None and client:
-                        logger.warning(f"⚠️ [API Signals] Price for {symbol} not in Redis. Fetching via API.")
-                        try:
-                            price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                        except Exception as e:
-                            logger.error(f"❌ [API Signals] Fallback API fetch failed for {symbol}: {e}")
-                            price = None
-
+                        try: price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                        except Exception as e: price = None
                     s['current_price'] = price
                     if price and s.get('entry_price'):
                         s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
-
         return jsonify(all_signals)
     except Exception as e:
         logger.error(f"❌ [API Signals] Critical error in get_signals: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal_api(signal_id):
@@ -1560,7 +1685,23 @@ def manual_close_signal_api(signal_id):
         return jsonify({"message": f"تم إرسال طلب إغلاق الصفقة {signal_id}..."})
     except Exception as e:
         logger.error(f"❌ [API Close] Error: {e}", exc_info=True)
+        if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/trading/status', methods=['GET'])
+def get_trading_status():
+    with trading_status_lock:
+        return jsonify({"is_enabled": is_trading_enabled})
+
+@app.route('/api/trading/toggle', methods=['POST'])
+def toggle_trading_status():
+    global is_trading_enabled
+    with trading_status_lock:
+        is_trading_enabled = not is_trading_enabled
+        status_msg = "ENABLED" if is_trading_enabled else "DISABLED"
+        log_and_notify('warning', f"🚨 Real trading status has been manually changed to: {status_msg}", "TRADING_STATUS_CHANGE")
+        return jsonify({"message": f"Trading status set to {status_msg}", "is_enabled": is_trading_enabled})
+
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1601,6 +1742,7 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         init_db()
         init_redis()
+        get_exchange_info_map()
         load_open_signals_to_cache()
         load_notifications_to_cache()
         Thread(target=determine_market_state, daemon=True).start()
@@ -1616,7 +1758,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING SMC TRADING BOT & DASHBOARD (V1) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.1 - DB FIX) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
