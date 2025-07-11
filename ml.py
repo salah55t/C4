@@ -179,7 +179,6 @@ def identify_order_blocks(data: pd.DataFrame) -> pd.DataFrame:
     # Bullish OB: Last down candle before an up move
     bullish_ob_indices = data.index[is_down_trend & is_up_trend.shift(-1)]
     if not bullish_ob_indices.empty:
-        # For simplicity, we store the range [low, high] as a JSON string
         bullish_ob_values = data.loc[bullish_ob_indices, ['low', 'high']]
         data.loc[bullish_ob_indices, 'bullish_ob'] = bullish_ob_values.to_json(orient='records')
 
@@ -193,12 +192,12 @@ def identify_order_blocks(data: pd.DataFrame) -> pd.DataFrame:
 
 def identify_fvg(data: pd.DataFrame) -> pd.DataFrame:
     """Identifies Fair Value Gaps (Imbalances)."""
-    # Bullish FVG: gap between high of candle i-1 and low of candle i+1
+    # Bullish FVG: gap between high of candle i-2 and low of candle i
     bullish_fvg_mask = data['low'] > data['high'].shift(2)
     data.loc[bullish_fvg_mask, 'bullish_fvg'] = data['high'].shift(2)
     data.loc[bullish_fvg_mask, 'bullish_fvg_top'] = data['low']
 
-    # Bearish FVG: gap between low of candle i-1 and high of candle i+1
+    # Bearish FVG: gap between low of candle i-2 and high of candle i
     bearish_fvg_mask = data['high'] < data['low'].shift(2)
     data.loc[bearish_fvg_mask, 'bearish_fvg'] = data['low'].shift(2)
     data.loc[bearish_fvg_mask, 'bearish_fvg_top'] = data['high']
@@ -214,29 +213,32 @@ def calculate_smc_features(df: pd.DataFrame) -> pd.DataFrame:
     # 1. Market Structure (Swing Points)
     df_smc = find_swing_highs_lows(df_smc, n=5)
     
-    swing_highs = df_smc[df_smc['sh'].notna()]['sh'].dropna()
-    swing_lows = df_smc[df_smc['sl'].notna()]['sl'].dropna()
-    
+    # ✨ FIX: Create forward-filled series for the last known swing points
+    last_sh_series = df_smc['sh'].ffill()
+    last_sl_series = df_smc['sl'].ffill()
+
     # 2. BOS/CHoCH (Break of Structure / Change of Character)
     df_smc['bos'] = 0
     df_smc['choch'] = 0
-    
-    if len(swing_highs) > 1 and len(swing_lows) > 1:
-        # Bullish BOS: price breaks above the last swing high
-        bos_bull_mask = df_smc['high'] > swing_highs.rolling(2).max().shift(1)
-        df_smc.loc[bos_bull_mask, 'bos'] = 1
-        
-        # Bearish BOS: price breaks below the last swing low
-        bos_bear_mask = df_smc['low'] < swing_lows.rolling(2).min().shift(1)
-        df_smc.loc[bos_bear_mask, 'bos'] = -1
 
-        # Bullish CHoCH: price breaks a previous swing high after a downtrend
-        choch_bull_mask = (df_smc['low'].shift(1) < swing_lows.shift(1)) & (df_smc['high'] > swing_highs.shift(1))
-        df_smc.loc[choch_bull_mask, 'choch'] = 1
-        
-        # Bearish CHoCH: price breaks a previous swing low after an uptrend
-        choch_bear_mask = (df_smc['high'].shift(1) > swing_highs.shift(1)) & (df_smc['low'] < swing_lows.shift(1))
-        df_smc.loc[choch_bear_mask, 'choch'] = -1
+    # ✨ FIX: Find previous swing points by looking for changes in the ffilled series
+    # This creates a series of the SH/SL *before* the current one.
+    prev_sh_series = last_sh_series.where(last_sh_series.diff() != 0).ffill().shift(1)
+    prev_sl_series = last_sl_series.where(last_sl_series.diff() != 0).ffill().shift(1)
+    
+    # ✨ FIX: Compare against the shifted, forward-filled series to avoid index mismatch
+    # Bullish BOS: Current high breaks above the last known swing high
+    df_smc.loc[df_smc['high'] > last_sh_series.shift(1), 'bos'] = 1
+    # Bearish BOS: Current low breaks below the last known swing low
+    df_smc.loc[df_smc['low'] < last_sl_series.shift(1), 'bos'] = -1
+
+    # Bullish CHoCH: In a downtrend (last SH < prev SH), price breaks the last SH
+    is_downtrend_structure = last_sh_series < prev_sh_series
+    df_smc.loc[(df_smc['high'] > last_sh_series.shift(1)) & is_downtrend_structure, 'choch'] = 1
+
+    # Bearish CHoCH: In an uptrend (last SL > prev SL), price breaks the last SL
+    is_uptrend_structure = last_sl_series > prev_sl_series
+    df_smc.loc[(df_smc['low'] < last_sl_series.shift(1)) & is_uptrend_structure, 'choch'] = -1
 
     # 3. Order Blocks and FVG
     df_smc = identify_order_blocks(df_smc)
@@ -246,10 +248,8 @@ def calculate_smc_features(df: pd.DataFrame) -> pd.DataFrame:
     df_smc['is_in_bullish_fvg'] = ((df_smc['low'] < df_smc['bullish_fvg_top'].ffill()) & (df_smc['high'] > df_smc['bullish_fvg'].ffill())).astype(int)
     df_smc['is_in_bearish_fvg'] = ((df_smc['low'] < df_smc['bearish_fvg'].ffill()) & (df_smc['high'] > df_smc['bearish_fvg_top'].ffill())).astype(int)
     
-    # Distance to nearest OB/FVG
     last_price = df_smc['close']
     
-    # Use ffill to get the last known OB/FVG level
     bull_ob_level = pd.Series(df_smc['bullish_ob'].ffill().apply(lambda x: json.loads(x)[0]['low'] if pd.notna(x) else np.nan))
     bear_ob_level = pd.Series(df_smc['bearish_ob'].ffill().apply(lambda x: json.loads(x)[0]['high'] if pd.notna(x) else np.nan))
     bull_fvg_level = df_smc['bullish_fvg'].ffill()
@@ -260,11 +260,9 @@ def calculate_smc_features(df: pd.DataFrame) -> pd.DataFrame:
     df_smc['dist_to_bull_fvg'] = (last_price - bull_fvg_level) / last_price
     df_smc['dist_to_bear_fvg'] = (bear_fvg_level - last_price) / last_price
 
-    # Liquidity (simple version: number of recent swing points)
     df_smc['liquidity_highs_nearby'] = df_smc['sh'].rolling(window=20, min_periods=1).count()
     df_smc['liquidity_lows_nearby'] = df_smc['sl'].rolling(window=20, min_periods=1).count()
     
-    # Add ATR for labeling and context
     high_low = df_smc['high'] - df_smc['low']
     high_close = (df_smc['high'] - df_smc['close'].shift()).abs()
     low_close = (df_smc['low'] - df_smc['close'].shift()).abs()
@@ -287,35 +285,29 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
             if i + j >= len(prices): break
             future_price = prices.iloc[i + j]
             if future_price >= upper_barrier:
-                labels.iloc[i] = 1  # Buy signal
+                labels.iloc[i] = 1
                 break
             if future_price <= lower_barrier:
-                # We are only predicting buys, so stop loss hit is a neutral event for training
-                labels.iloc[i] = 0 # Neutral signal
+                labels.iloc[i] = 0
                 break
     return labels
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing SMC data for {symbol}...")
     
-    # Calculate features on both timeframes
     df_featured_15m = calculate_smc_features(df_15m)
     df_featured_4h = calculate_smc_features(df_4h)
     df_featured_4h = df_featured_4h.rename(columns=lambda c: f"{c}_4h")
     
-    # Join features
     df_combined = df_featured_15m.join(df_featured_4h, how='outer')
     df_combined.ffill(inplace=True)
     
-    # --- Target Labeling (only on 15m timeframe) ---
     df_combined['target'] = get_triple_barrier_labels(df_combined['close'], df_combined['atr'])
     
-    # --- ✨ Updated SMC Feature List ---
     feature_columns = [
         'bos', 'choch', 'is_in_bullish_fvg', 'is_in_bearish_fvg',
         'dist_to_bull_ob', 'dist_to_bear_ob', 'dist_to_bull_fvg', 'dist_to_bear_fvg',
         'liquidity_highs_nearby', 'liquidity_lows_nearby', 'atr',
-        # 4H features
         'bos_4h', 'choch_4h', 'is_in_bullish_fvg_4h', 'is_in_bearish_fvg_4h',
         'dist_to_bull_ob_4h', 'dist_to_bear_ob_4h', 'dist_to_bull_fvg_4h', 'dist_to_bear_fvg_4h',
         'liquidity_highs_nearby_4h', 'liquidity_lows_nearby_4h', 'atr_4h'
@@ -325,7 +317,6 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, symbol: str) 
     df_cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_cleaned.dropna(subset=feature_columns, inplace=True)
 
-    # We only want to predict 'buy' signals (label 1) vs. 'do nothing' (label 0)
     df_cleaned = df_cleaned[df_cleaned['target'].isin([0, 1])]
 
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
@@ -342,11 +333,10 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
 
     def objective(trial: optuna.trial.Trial) -> float:
-        # We are predicting Buy (1) vs No-Buy (0), so it's a binary classification
         params = {
             'objective': 'binary', 'metric': 'auc',
             'verbosity': -1, 'boosting_type': 'gbdt',
-            'is_unbalance': True, # Handles imbalanced data
+            'is_unbalance': True,
             'random_state': 42,
             'n_estimators': trial.suggest_int('n_estimators', 200, 1000, step=100),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
@@ -379,7 +369,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             all_true.extend(y_test)
 
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
-        # Optimize for precision of the 'buy' class (label 1)
         return report.get('1', {}).get('precision', 0)
 
     study = optuna.create_study(direction='maximize')
@@ -399,7 +388,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
-    # Final evaluation using walk-forward
     all_preds_final, all_true_final = [], []
     tscv_final = TimeSeriesSplit(n_splits=5)
     for train_index, test_index in tscv_final.split(X):
@@ -432,7 +420,7 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     return final_model, final_scaler, final_metrics
 
 def save_ml_model_to_folder(model_bundle: Dict[str, Any], model_name: str, metrics: Dict[str, Any]):
-    """Saves the model bundle to a local folder instead of DB."""
+    """Saves the model bundle to a local folder."""
     logger.info(f"💾 [File Save] Saving model bundle '{model_name}' to local folder...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -466,7 +454,6 @@ def run_training_job():
     if not all_valid_symbols:
         logger.critical("❌ [Main] لم يتم العثور على رموز صالحة. سيتم الخروج."); return
     
-    # For SMC, it's better to retrain all models to ensure consistency
     symbols_to_train = all_valid_symbols
     
     logger.info(f"ℹ️ [Main] Will attempt to train/retrain SMC models for {len(symbols_to_train)} symbols.")
@@ -496,11 +483,9 @@ def run_training_job():
                  continue
             final_model, final_scaler, model_metrics = training_result
             
-            # Set a reasonable precision threshold for the buy signal
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.45:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-                # Save to local folder
                 save_ml_model_to_folder(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
