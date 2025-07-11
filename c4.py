@@ -78,7 +78,7 @@ EMA_FAST_PERIOD: int = 50; EMA_SLOW_PERIOD: int = 200
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
-MAX_OPEN_TRADES: int = 10
+MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
@@ -1219,21 +1219,53 @@ def update_signal_in_db(signal_id: int, new_data: Dict[str, Any]) -> bool:
         return False
 
 def close_signal(signal: Dict, status: str, closing_price: float):
-    signal_id = signal.get('id'); symbol = signal.get('symbol')
+    signal_id = signal.get('id')
+    symbol = signal.get('symbol')
     logger.info(f"Initiating closure for signal {signal_id} ({symbol}) with status '{status}'")
     
     is_real = signal.get('is_real_trade', False)
-    quantity_to_sell = signal.get('quantity')
     
     with trading_status_lock:
         is_enabled = is_trading_enabled
 
-    if is_real and quantity_to_sell and is_enabled:
-        logger.info(f"🔥 [{symbol}] This is a REAL trade. Attempting to SELL {quantity_to_sell} units.")
-        sell_order = place_order(symbol, Client.SIDE_SELL, Decimal(str(quantity_to_sell)))
-        if not sell_order:
-            logger.critical(f"🚨 CRITICAL: FAILED TO PLACE SELL ORDER FOR REAL TRADE {signal_id} ({symbol}). THE POSITION REMAINS OPEN. MANUAL INTERVENTION REQUIRED.")
-            log_and_notify('critical', f"CRITICAL: FAILED TO SELL {symbol} for signal {signal_id}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
+    # --- FIX START: Logic to sell the actual available balance ---
+    if is_real and is_enabled:
+        try:
+            # 1. Get the base asset from the symbol (e.g., 'W' from 'WUSDT')
+            base_asset = exchange_info_map.get(symbol, {}).get('baseAsset')
+            if not base_asset or not client:
+                raise ValueError(f"Could not determine base asset for {symbol} or client not ready.")
+
+            # 2. Query the actual free balance of the asset.
+            balance_info = client.get_asset_balance(asset=base_asset)
+            actual_free_balance = float(balance_info['free'])
+            logger.info(f"🔥 [{symbol}] REAL TRADE CLOSURE. Actual free balance for {base_asset}: {actual_free_balance}")
+
+            # 3. Adjust this quantity to the symbol's lot size rules.
+            quantity_to_sell_adjusted = adjust_quantity_to_lot_size(symbol, actual_free_balance)
+
+            if quantity_to_sell_adjusted and quantity_to_sell_adjusted > 0:
+                # 4. Place the sell order with the adjusted, actual balance.
+                sell_order = place_order(symbol, Client.SIDE_SELL, quantity_to_sell_adjusted)
+                if not sell_order:
+                    # This logic is critical for alerting on failure.
+                    logger.critical(f"🚨 CRITICAL: FAILED TO PLACE SELL ORDER FOR REAL TRADE {signal_id} ({symbol}). THE POSITION REMAINS OPEN. MANUAL INTERVENTION REQUIRED.")
+                    log_and_notify('critical', f"CRITICAL: FAILED TO SELL {symbol} for signal {signal_id}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
+            else:
+                logger.warning(f"⚠️ [{symbol}] No sellable balance ({actual_free_balance}) found for asset {base_asset}. The position might have been closed manually or the balance is too small. Closing signal virtually.")
+        
+        except Exception as e:
+            logger.critical(f"🚨 CRITICAL: An exception occurred while preparing the sell order for {symbol}: {e}", exc_info=True)
+            log_and_notify('critical', f"CRITICAL: FAILED TO PREPARE SELL for {symbol} due to error: {e}. MANUAL ACTION NEEDED.", "REAL_TRADE_ERROR")
+            # We must not proceed to DB closure if we can't even check the balance, as it could be a temporary API issue.
+            # Re-queue the signal for the monitoring loop to try again.
+            with signal_cache_lock:
+                if symbol not in open_signals_cache:
+                    open_signals_cache[symbol] = signal
+            with closure_lock:
+                signals_pending_closure.discard(signal_id)
+            return # Exit the function to allow for a retry.
+    # --- FIX END ---
     elif is_real and not is_enabled:
         logger.warning(f"⚠️ [{symbol}] Real trade signal {signal_id} triggered closure, but master trading switch is OFF. Closing virtually.")
 
@@ -1258,11 +1290,14 @@ def close_signal(signal: Dict, status: str, closing_price: float):
     except Exception as e:
         logger.error(f"❌ [DB Close] Critical error closing signal {signal_id} in DB: {e}", exc_info=True)
         if conn: conn.rollback()
+        # If DB update fails, we must re-queue the signal to avoid losing track of it.
         if symbol:
             with signal_cache_lock:
                 if symbol not in open_signals_cache: open_signals_cache[symbol] = signal
     finally:
+        # This should only run if the process completes, successfully or not (except for critical sell prep failure).
         with closure_lock: signals_pending_closure.discard(signal_id)
+
 
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
@@ -1302,7 +1337,7 @@ def perform_end_of_cycle_cleanup():
         
         model_cache_size = len(ml_models_cache)
         ml_models_cache.clear()
-        logger.info(f"🧹 [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
+        logger.info(f"?? [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
 
         collected = gc.collect()
         logger.info(f"🧹 [Cleanup] Garbage collector ran. Collected {collected} objects.")
@@ -1524,11 +1559,15 @@ def get_stats():
         open_trades_count = sum(1 for s in all_signals if s.get('status') in ['open', 'updated'])
         closed_trades = [s for s in all_signals if s.get('status') not in ['open', 'updated'] and s.get('profit_percentage') is not None]
         
-        net_profit_usdt = 0.0; win_rate = 0.0; profit_factor_val = 0.0
-        avg_win = 0.0; avg_loss = 0.0
+        # Initialize all variables that will be returned to ensure they always have a value
+        total_net_profit_usdt = 0.0
+        win_rate = 0.0
+        profit_factor_val = 0.0
+        avg_win = 0.0
+        avg_loss = 0.0
 
         if closed_trades:
-            # حساب الربح بالدولار يعتمد على الصفقات الحقيقية والافتراضية
+            # Calculate the total net profit in USDT
             total_net_profit_usdt = sum(
                 (((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT))
                 for t in closed_trades if t.get('profit_percentage') is not None
@@ -1560,7 +1599,6 @@ def get_stats():
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Critical error: {e}", exc_info=True)
-        # التأكد من أن الاتصال يتم التراجع عنه وإغلاقه بشكل صحيح في حالة حدوث خطأ
         if conn: conn.rollback()
         return jsonify({"error": "An internal error occurred in stats"}), 500
 
