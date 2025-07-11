@@ -1,8 +1,8 @@
 import os
 import logging
-import pickle
+import json
 import io
-from flask import Flask, Response, make_response, render_template_string, send_from_directory
+from flask import Flask, Response, make_response, render_template_string
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from decouple import config
@@ -22,20 +22,13 @@ logger = logging.getLogger('ModelDownloader')
 # إنشاء تطبيق Flask
 app = Flask(__name__)
 
-# --- ✨ إضافة جديدة: تحديد مجلد النماذج المحلي ---
-# تأكد من أن هذا الاسم يطابق المتغير MODEL_FOLDER في سكريبت التدريب
-MODEL_FOLDER = 'SMC_V1'
-MODELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), MODEL_FOLDER)
-
-
 # تحميل رابط قاعدة البيانات من ملف .env
 try:
     DB_URL = config('DATABASE_URL')
     logger.info("✅ تم تحميل رابط قاعدة البيانات بنجاح.")
 except Exception as e:
     logger.critical(f"❌ لم يتم العثور على متغير DATABASE_URL في ملف .env. تأكد من وجود الملف والمتغير. الخطأ: {e}")
-    # لا نخرج من البرنامج، قد يرغب المستخدم في تحميل الملفات المحلية فقط
-    DB_URL = None
+    exit(1)
 
 # ==============================================================================
 # ----------------------------- دوال مساعدة للاتصال -----------------------------
@@ -44,10 +37,8 @@ except Exception as e:
 def get_db_connection():
     """
     تقوم بإنشاء وإرجاع اتصال جديد بقاعدة البيانات.
-    ترجع None في حال فشل الاتصال أو عدم توفر الرابط.
+    ترجع None في حال فشل الاتصال.
     """
-    if not DB_URL:
-        return None
     try:
         conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
         return conn
@@ -59,7 +50,7 @@ def get_db_connection():
 # --------------------------------- واجهة الويب --------------------------------
 # ==============================================================================
 
-# --- ✨ تحديث القالب: لعرض قائمتين للملفات ---
+# --- ✨ تحديث القالب: لعرض روابط للملفات والنماذج ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -69,63 +60,49 @@ HTML_TEMPLATE = """
     <title>تحميل النماذج وملفات الاختبار</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; line-height: 1.6; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }
-        .container { max-width: 900px; margin: 20px auto; background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        h1 { color: #2c3e50; text-align: center; margin-bottom: 20px; }
-        h2 { color: #34495e; border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-top: 30px; }
-        ul { list-style-type: none; padding: 0; }
-        li { background-color: #ecf0f1; margin-bottom: 10px; border-radius: 5px; transition: all 0.3s ease; display: flex; align-items: center; }
-        li:hover { background-color: #bdc3c7; transform: translateX(5px); }
-        a { display: block; padding: 15px 20px; color: #2980b9; text-decoration: none; font-weight: 500; font-size: 1.1em; flex-grow: 1; }
-        a:hover { color: #1c587f; }
-        .file-icon { margin-right: 15px; font-size: 1.2em; }
-        .json-icon { color: #f1c40f; }
-        .pkl-icon { color: #3498db; }
+        .container { max-width: 800px; margin: 20px auto; background: #fff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        .model-entry { background-color: #ecf0f1; margin-bottom: 15px; border-radius: 5px; padding: 15px 20px; transition: all 0.3s ease; }
+        .model-entry:hover { background-color: #dfe6e9; }
+        .model-name { font-weight: bold; font-size: 1.2em; color: #2c3e50; margin-bottom: 10px; }
+        .download-links a {
+            display: inline-block;
+            margin-left: 10px;
+            margin-top: 5px;
+            padding: 8px 15px;
+            background-color: #3498db;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            font-size: 0.9em;
+            transition: background-color 0.2s;
+        }
+        .download-links a.metrics-link { background-color: #f39c12; }
+        .download-links a:hover { background-color: #2980b9; }
+        .download-links a.metrics-link:hover { background-color: #e67e22; }
         .error { color: #c0392b; background-color: #f2dede; border: 1px solid #ebccd1; padding: 15px; border-radius: 5px; }
         .empty { color: #7f8c8d; text-align: center; font-size: 1.2em; padding: 40px 0; }
-        .info { background-color: #eaf2f8; border: 1px solid #aed6f1; padding: 15px; border-radius: 5px; color: #2874a6; margin-bottom: 20px;}
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>لوحة تحميل النماذج</h1>
-        
-        <!-- قسم النماذج من قاعدة البيانات -->
-        <h2><span class="file-icon">🗄️</span>نماذج من قاعدة البيانات</h2>
-        {% if db_error %}
-            <p class="error"><b>خطأ في قاعدة البيانات:</b> {{ db_error }}</p>
-        {% elif db_models %}
-            <ul>
-                {% for model in db_models %}
-                <li>
-                    <span class="file-icon pkl-icon">📦</span>
-                    <a href="/download_db/{{ model.model_name }}" download>{{ model.model_name }}</a>
-                </li>
-                {% endfor %}
-            </ul>
-        {% else %}
-            <p class="empty">لا توجد نماذج في قاعدة البيانات أو تعذر الاتصال.</p>
-        {% endif %}
-
-        <!-- قسم الملفات المحلية -->
-        <h2><span class="file-icon">🖥️</span>ملفات محلية من مجلد ({{ model_folder_name }})</h2>
-        {% if local_files_error %}
-             <p class="error"><b>خطأ في الملفات المحلية:</b> {{ local_files_error }}</p>
-        {% elif local_files %}
-            <p class="info">تم العثور على {{ local_files|length }} ملف محلي.</p>
-            <ul>
-                {% for file in local_files %}
-                <li>
-                    {% if file.endswith('.json') %}
-                        <span class="file-icon json-icon">📊</span>
-                    {% else %}
-                         <span class="file-icon pkl-icon">📦</span>
+        <h1>النماذج المتاحة للتحميل من قاعدة البيانات</h1>
+        {% if error %}
+            <p class="error"><b>خطأ:</b> {{ error }}</p>
+        {% elif models %}
+            {% for model in models %}
+            <div class="model-entry">
+                <div class="model-name">{{ model.model_name }}</div>
+                <div class="download-links">
+                    <a href="/download_model/{{ model.model_name }}" download>📦 تحميل النموذج (.pkl)</a>
+                    {% if model.has_metrics %}
+                    <a href="/download_metrics/{{ model.model_name }}" class="metrics-link" download>📊 تحميل ملف الاختبار (.json)</a>
                     {% endif %}
-                    <a href="/download_local/{{ file }}" download>{{ file }}</a>
-                </li>
-                {% endfor %}
-            </ul>
+                </div>
+            </div>
+            {% endfor %}
         {% else %}
-            <p class="empty">لم يتم العثور على ملفات في المجلد المحلي.</p>
+            <p class="empty">لا توجد نماذج في قاعدة البيانات.</p>
         {% endif %}
     </div>
 </body>
@@ -135,58 +112,38 @@ HTML_TEMPLATE = """
 @app.route('/')
 def index():
     """
-    الصفحة الرئيسية التي تعرض قائمة بالملفات من قاعدة البيانات والملفات المحلية.
+    الصفحة الرئيسية التي تعرض قائمة بجميع النماذج وملفات الاختبار المتاحة.
     """
-    # --- جلب النماذج من قاعدة البيانات ---
-    db_models_list = []
-    db_error_msg = None
     conn = get_db_connection()
-    if conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT DISTINCT ON (model_name) model_name
-                    FROM ml_models ORDER BY model_name, trained_at DESC;
-                """)
-                db_models_list = cur.fetchall()
-                logger.info(f"✅ [DB] تم العثور على {len(db_models_list)} نموذج فريد في قاعدة البيانات.")
-        except Exception as e:
-            logger.error(f"❌ [DB] خطأ أثناء جلب قائمة النماذج: {e}")
-            db_error_msg = str(e)
-        finally:
-            conn.close()
-    else:
-        db_error_msg = "لم يتم تكوين رابط قاعدة البيانات (DATABASE_URL)."
+    if not conn:
+        return render_template_string(HTML_TEMPLATE, error="فشل الاتصال بقاعدة البيانات.")
 
-    # --- ✨ إضافة جديدة: جلب الملفات المحلية ---
-    local_files_list = []
-    local_files_error_msg = None
+    models_list = []
     try:
-        if os.path.exists(MODELS_PATH):
-            # جلب كل ملفات .pkl و .json
-            files = [f for f in os.listdir(MODELS_PATH) if f.endswith(('.pkl', '.json'))]
-            local_files_list = sorted(files)
-            logger.info(f"✅ [Local] تم العثور على {len(local_files_list)} ملف في المجلد '{MODEL_FOLDER}'.")
-        else:
-            local_files_error_msg = f"المجلد '{MODEL_FOLDER}' غير موجود."
-            logger.warning(f"⚠️ [Local] {local_files_error_msg}")
+        with conn.cursor() as cur:
+            # جلب أحدث نسخة من كل نموذج مع التحقق من وجود حقل المقاييس
+            cur.execute("""
+                SELECT DISTINCT ON (model_name) 
+                       model_name, 
+                       (metrics IS NOT NULL AND metrics::text != 'null') as has_metrics
+                FROM ml_models
+                ORDER BY model_name, trained_at DESC;
+            """)
+            models_list = cur.fetchall()
+            logger.info(f"✅ تم العثور على {len(models_list)} نموذج فريد في قاعدة البيانات.")
     except Exception as e:
-        local_files_error_msg = f"خطأ أثناء قراءة المجلد المحلي: {e}"
-        logger.error(f"❌ [Local] {local_files_error_msg}")
+        logger.error(f"❌ خطأ أثناء جلب قائمة النماذج: {e}")
+        return render_template_string(HTML_TEMPLATE, error=str(e))
+    finally:
+        if conn:
+            conn.close()
 
-    return render_template_string(
-        HTML_TEMPLATE,
-        db_models=db_models_list,
-        db_error=db_error_msg,
-        local_files=local_files_list,
-        local_files_error=local_files_error_msg,
-        model_folder_name=MODEL_FOLDER
-    )
+    return render_template_string(HTML_TEMPLATE, models=models_list)
 
-@app.route('/download_db/<model_name>')
-def download_db_model(model_name):
+@app.route('/download_model/<model_name>')
+def download_model(model_name):
     """
-    تقوم بتحميل بيانات النموذج المحدد من قاعدة البيانات وإرسالها كملف.
+    تقوم بتحميل بيانات النموذج (ملف pkl) المحدد من قاعدة البيانات.
     """
     conn = get_db_connection()
     if not conn:
@@ -201,11 +158,11 @@ def download_db_model(model_name):
             result = cur.fetchone()
 
             if not result or 'model_data' not in result:
-                logger.warning(f"⚠️ [DB] لم يتم العثور على النموذج '{model_name}'.")
-                return f"Model '{model_name}' not found in database.", 404
+                logger.warning(f"⚠️ لم يتم العثور على بيانات النموذج '{model_name}'.")
+                return f"Model data for '{model_name}' not found.", 404
 
             model_data = result['model_data']
-            logger.info(f"✅ [DB] بدء تحميل النموذج '{model_name}'.")
+            logger.info(f"✅ بدء تحميل النموذج '{model_name}'.")
             
             response = make_response(model_data)
             response.headers.set('Content-Type', 'application/octet-stream')
@@ -213,34 +170,55 @@ def download_db_model(model_name):
             return response
 
     except Exception as e:
-        logger.error(f"❌ [DB] خطأ أثناء تحميل النموذج '{model_name}': {e}")
+        logger.error(f"❌ خطأ أثناء تحميل النموذج '{model_name}': {e}")
         return "حدث خطأ أثناء معالجة طلبك.", 500
     finally:
         if conn:
             conn.close()
 
-# --- ✨ إضافة جديدة: مسار لتحميل الملفات المحلية ---
-@app.route('/download_local/<path:filename>')
-def download_local_file(filename):
+# --- ✨ إضافة جديدة: مسار لتحميل ملفات الاختبار (Metrics) ---
+@app.route('/download_metrics/<model_name>')
+def download_metrics(model_name):
     """
-    تقوم بتحميل ملف محلي من مجلد النماذج.
+    تقوم بتحميل بيانات الاختبار (ملف json) للنموذج المحدد من قاعدة البيانات.
     """
-    logger.info(f"✅ [Local] بدء تحميل الملف '{filename}'.")
-    return send_from_directory(MODELS_PATH, filename, as_attachment=True)
+    conn = get_db_connection()
+    if not conn:
+        return "خطأ: فشل الاتصال بقاعدة البيانات.", 500
 
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT metrics FROM ml_models WHERE model_name = %s ORDER BY trained_at DESC LIMIT 1;",
+                (model_name,)
+            )
+            result = cur.fetchone()
+
+            if not result or 'metrics' not in result or result['metrics'] is None:
+                logger.warning(f"⚠️ لم يتم العثور على بيانات الاختبار للنموذج '{model_name}'.")
+                return f"Metrics for '{model_name}' not found.", 404
+
+            metrics_data = result['metrics']
+            metrics_json_string = json.dumps(metrics_data, indent=4, ensure_ascii=False)
+            
+            logger.info(f"✅ بدء تحميل ملف الاختبار للنموذج '{model_name}'.")
+            
+            response = make_response(metrics_json_string)
+            response.headers.set('Content-Type', 'application/json; charset=utf-8')
+            response.headers.set('Content-Disposition', 'attachment', filename=f"{model_name}_metrics.json")
+            return response
+
+    except Exception as e:
+        logger.error(f"❌ خطأ أثناء تحميل ملف الاختبار للنموذج '{model_name}': {e}")
+        return "حدث خطأ أثناء معالجة طلبك.", 500
+    finally:
+        if conn:
+            conn.close()
 
 # ==============================================================================
 # --------------------------------- نقطة البداية --------------------------------
 # ==============================================================================
 if __name__ == '__main__':
-    # التأكد من وجود المجلد المحلي
-    if not os.path.exists(MODELS_PATH):
-        logger.warning(f"⚠️ المجلد المحلي '{MODEL_FOLDER}' غير موجود. سيتم إنشاؤه.")
-        try:
-            os.makedirs(MODELS_PATH)
-        except Exception as e:
-            logger.error(f"❌ فشل في إنشاء المجلد المحلي: {e}")
-
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"🌍 لبدء التحميل، افتح الرابط التالي في متصفحك: http://127.0.0.1:{port}")
     app.run(host='0.0.0.0', port=port, debug=True)
