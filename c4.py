@@ -95,9 +95,9 @@ PEAK_UPDATE_COOLDOWN: int = 60
 
 # --- إعدادات الفلاتر ---
 USE_BTC_TREND_FILTER: bool = True; BTC_SYMBOL: str = 'BTCUSDT'
-USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.1
-USE_BTC_CORRELATION_FILTER: bool = True; MIN_BTC_CORRELATION: float = 0.1
-USE_MIN_VOLATILITY_FILTER: bool = True; MIN_VOLATILITY_PERCENT: float = 0.3
+USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.5
+USE_BTC_CORRELATION_FILTER: bool = True; MIN_BTC_CORRELATION: float = 0.2
+USE_MIN_VOLATILITY_FILTER: bool = True; MIN_VOLATILITY_PERCENT: float = 0.5
 USE_MOMENTUM_FILTER: bool = True
 
 # --- المتغيرات العامة وقفل العمليات ---
@@ -998,9 +998,9 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 85.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (22.0, 0.5, 40.0, 80.0)
-    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (18.0, 0.2, 30.0, 80.0)
+    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (30.0, 0.7, 50.0, 75.0)
+    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.6, 45.0, 75.0)
+    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (20.0, 0.3, 35.0, 65.0)
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
     log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
