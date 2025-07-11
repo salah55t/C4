@@ -983,7 +983,7 @@ def passes_momentum_filter(last_features: pd.Series) -> bool:
     roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
     accel = last_features.get('roc_acceleration', 0)
     slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-    if roc > 0 and accel >= 0 and slope > 0:
+    if roc > 1.0 and accel >= 0.5 and slope > 0.2:
         return True
     log_rejection(symbol, "Momentum Filter", {
         "ROC": f"{roc:.2f} (Req: > 0)",
