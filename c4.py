@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22 SMC ----------------------
+# ---------------------- [معدل] إعداد نظام التسجيل (Logging) - V3 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_smc_v1.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_smc_v3.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotSMC_V1')
+logger = logging.getLogger('CryptoBotSMC_V3')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,19 +55,19 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22 SMC ----------------------
+# ---------------------- [معدل] إعداد الثوابت والمتغيرات العامة - V3 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
 
-# --- [MODIFIED] ثوابت عامة لاستخدام نموذج SMC ---
-BASE_ML_MODEL_NAME: str = 'SMC_Scalping_V1_With_Momentum'
-MODEL_FOLDER: str = 'V9_SMC' # مجلد جديد لنماذج SMC
+# --- ثوابت عامة لاستخدام النموذج الجديد ---
+BASE_ML_MODEL_NAME: str = 'SMC_Scalping_V3_With_SR_Sentiment_OB'
+MODEL_FOLDER: str = 'V10_SMC_SR_OB' # [معدل] مجلد جديد للنماذج المتقدمة
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
-REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_smc_v1"
+REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_smc_v3"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
@@ -79,7 +79,7 @@ REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.75 # يمكن تعديل هذه العتبة بناءً على أداء نموذج SMC
+BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
@@ -114,9 +114,10 @@ rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
 market_state_lock = Lock()
+fg_data_cache: Optional[pd.DataFrame] = None # [جديد] ذاكرة تخزين لمؤشر الخوف والطمع
+last_fg_fetch_time: float = 0 # [جديد] وقت آخر جلب لمؤشر الخوف والطمع
 
-
-# ---------------------- دالة HTML للوحة التحكم (V22) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (مع تحديث العنوان) ----------------------
 def get_dashboard_html():
     return """
 <!DOCTYPE html>
@@ -124,7 +125,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22 - نموذج SMC</title>
+    <title>لوحة تحكم التداول V3 - نموذج متقدم</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -161,13 +162,14 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22 - SMC Model</span>
+                <span class="text-text-secondary font-medium">V3 - Advanced Model</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
                 <div class="flex items-center gap-2"><div id="api-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">API</span></div>
             </div>
         </header>
+        <!-- بقية محتوى HTML للوحة التحكم يبقى كما هو -->
         <section class="mb-6 grid grid-cols-1 md:grid-cols-3 gap-5">
             <div class="card p-4 md:col-span-2">
                  <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
@@ -229,284 +231,36 @@ def get_dashboard_html():
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
     </div>
-<script>
-let profitChartInstance;
-const REGIME_STYLES = {
-    "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
-    "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
-    "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
-    "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" }
-};
-const TF_STATUS_STYLES = {
-    "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" }, "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" },
-    "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" }, "Uncertain": { text: "غير واضح", icon: "?", color: "text-text-secondary" }
-};
-function formatNumber(num, digits = 2) {
-    if (num === null || num === undefined || isNaN(num)) return 'N/A';
-    return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
-function showTab(tabName, element) {
-    document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
-    document.getElementById(`${tabName}-tab`).classList.remove('hidden');
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active', 'text-white'));
-    element.classList.add('active', 'text-white');
-}
-async function apiFetch(url, options = {}) {
-    try {
-        const response = await fetch(url, options);
-        if (!response.ok) { console.error(`API Error ${response.status}`); return { error: `HTTP Error ${response.status}` }; }
-        return await response.json();
-    } catch (error) { console.error(`Fetch error for ${url}:`, error); return { error: "Network or fetch error" }; }
-}
-function getFngColor(value) {
-    if (value < 25) return 'var(--accent-red)'; if (value < 45) return '#F97316';
-    if (value < 55) return 'var(--accent-yellow)'; if (value < 75) return '#84CC16';
-    return 'var(--accent-green)';
-}
-function renderFearGreedGauge(value, classification) {
-    const container = document.getElementById('fear-greed-gauge');
-    const valueEl = document.getElementById('fear-greed-value');
-    const textEl = document.getElementById('fear-greed-text');
-    [valueEl, textEl].forEach(el => el.classList.remove('skeleton', 'h-10', 'w-1/2', 'h-6', 'w-3/4'));
-    if (value === -1) {
-        container.innerHTML = `<div class="text-center text-text-secondary">خطأ</div>`;
-        valueEl.textContent = 'N/A'; textEl.textContent = 'فشل التحميل';
-        return;
-    }
-    valueEl.textContent = value; textEl.textContent = classification;
-    const angle = -90 + (value / 100) * 180;
-    const color = getFngColor(value);
-    valueEl.style.color = color;
-    container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#F85149"/><stop offset="50%" stop-color="#D29922"/><stop offset="100%" stop-color="#3FB950"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`;
-}
-function updateMarketStatus() {
-    apiFetch('/api/market_status').then(data => {
-        if (!data || data.error) return;
-        document.getElementById('db-status-light').className = `w-2.5 h-2.5 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
-        document.getElementById('api-status-light').className = `w-2.5 h-2.5 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
-        const state = data.market_state;
-        const overallRegime = state.overall_regime || "UNCERTAIN";
-        const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
-        const overallDiv = document.getElementById('overall-regime');
-        overallDiv.textContent = regimeStyle.text;
-        overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
-        ['15m', '1h', '4h'].forEach(tf => {
-            const tfData = state.details[tf];
-            const statusDiv = document.getElementById(`tf-${tf}-status`);
-            statusDiv.classList.remove('skeleton', 'h-7', 'w-2/3', 'mx-auto', 'mt-1');
-            if (tfData) {
-                const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
-                statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
-            } else { statusDiv.textContent = 'N/A'; }
-        });
-        renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
-        const usdtBalanceEl = document.getElementById('usdt-balance');
-        usdtBalanceEl.textContent = data.usdt_balance ? `$${formatNumber(data.usdt_balance, 2)}` : 'N/A';
-        usdtBalanceEl.classList.remove('skeleton', 'w-20');
-    });
-}
-function updateTradingStatus() {
-    apiFetch('/api/trading/status').then(data => {
-        if (!data || data.error) return;
-        const toggle = document.getElementById('trading-toggle');
-        const text = document.getElementById('trading-status-text');
-        const bg = toggle.nextElementSibling;
-        toggle.checked = data.is_enabled;
-        if (data.is_enabled) {
-            text.textContent = 'مُفعّل';
-            text.className = 'font-bold text-lg text-accent-green';
-            bg.classList.remove('bg-accent-red');
-            bg.classList.add('bg-accent-green');
-        } else {
-            text.textContent = 'غير مُفعّل';
-            text.className = 'font-bold text-lg text-accent-red';
-            bg.classList.remove('bg-accent-green');
-            bg.classList.add('bg-accent-red');
-        }
-    });
-}
-function toggleTrading() {
-    const toggle = document.getElementById('trading-toggle');
-    const confirmationMessage = toggle.checked 
-        ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟ هذا الإجراء يحمل مخاطر."
-        : "هل أنت متأكد من إيقاف التداول الحقيقي؟ لن يتم فتح أو إغلاق أي صفقات جديدة.";
-    if (confirm(confirmationMessage)) {
-        apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => {
-            if (data.message) {
-                alert(data.message);
-                updateTradingStatus();
-            } else if (data.error) {
-                alert(`خطأ: ${data.error}`);
-                updateTradingStatus();
-            }
-        });
-    } else {
-        toggle.checked = !toggle.checked;
-    }
-}
-function updateStats() {
-    apiFetch('/api/stats').then(data => {
-        if (!data || data.error) { console.error("Failed to fetch stats:", data ? data.error : "No data"); return; }
-        const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor);
-        document.getElementById('open-trades-value').textContent = formatNumber(data.open_trades_count, 0);
-        document.getElementById('open-trades-value').classList.remove('skeleton', 'h-12', 'w-1/2');
-        const netProfitEl = document.getElementById('net-profit-usdt');
-        netProfitEl.textContent = `$${formatNumber(data.net_profit_usdt)}`;
-        netProfitEl.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`;
-        netProfitEl.classList.remove('skeleton', 'h-8', 'w-1/3');
-        const statsContainer = document.getElementById('stats-container');
-        statsContainer.innerHTML = `
-            <div class="card text-center p-4 flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div>
-                <div class="text-3xl font-bold text-accent-blue">${formatNumber(data.win_rate)}%</div>
-            </div>
-            <div class="card text-center p-4 flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">عامل الربح</div>
-                <div class="text-3xl font-bold text-accent-yellow">${profitFactorDisplay}</div>
-            </div>
-            <div class="card text-center p-4 flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">إجمالي الصفقات المغلقة</div>
-                <div class="text-3xl font-bold text-text-primary">${formatNumber(data.total_closed_trades, 0)}</div>
-            </div>
-             <div class="card text-center p-4 flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">متوسط الربح %</div>
-                <div class="text-3xl font-bold text-accent-green">${formatNumber(data.average_win_pct)}%</div>
-            </div>
-             <div class="card text-center p-4 flex flex-col justify-center">
-                <div class="text-sm text-text-secondary mb-1">متوسط الخسارة %</div>
-                <div class="text-3xl font-bold text-accent-red">${formatNumber(data.average_loss_pct)}%</div>
-            </div>
-        `;
-    });
-}
-function updateProfitChart() {
-    const loader = document.getElementById('profit-chart-loader');
-    const canvas = document.getElementById('profitChart');
-    const chartCard = document.getElementById('profit-chart-card');
-    apiFetch('/api/profit_curve').then(data => {
-        loader.style.display = 'none';
-        const existingMsg = chartCard.querySelector('.no-data-msg');
-        if(existingMsg) existingMsg.remove();
-        if (!data || data.error || data.length <= 1) { 
-            canvas.style.display = 'none';
-            if (!existingMsg) {
-                chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض المنحنى.</p>');
-            }
-            return; 
-        }
-        canvas.style.display = 'block';
-        const ctx = canvas.getContext('2d');
-        const chartData = data.map(d => ({ x: luxon.DateTime.fromISO(d.timestamp).valueOf(), y: d.cumulative_profit }));
-        const lastProfit = chartData[chartData.length - 1].y;
-        const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height);
-        if (lastProfit >= 0) {
-            gradient.addColorStop(0, 'rgba(63, 185, 80, 0.4)'); gradient.addColorStop(1, 'rgba(63, 185, 80, 0)');
-        } else {
-            gradient.addColorStop(0, 'rgba(248, 81, 73, 0.4)'); gradient.addColorStop(1, 'rgba(248, 81, 73, 0)');
-        }
-        const config = {
-            type: 'line',
-            data: { datasets: [{
-                label: 'الربح التراكمي %', data: chartData,
-                borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-                backgroundColor: gradient, fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 6,
-                pointBackgroundColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)',
-            }]},
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                scales: {
-                    x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy HH:mm' }, grid: { display: false }, ticks: { color: 'var(--text-secondary)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } },
-                    y: { position: 'right', beginAtZero: true, grid: { color: 'var(--border-color)', drawBorder: false }, ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' } }
-                },
-                plugins: {
-                    legend: { display: false },
-                    tooltip: {
-                        mode: 'index', intersect: false, backgroundColor: '#0D1117', titleFont: { weight: 'bold', family: 'Tajawal' },
-                        bodyFont: { family: 'Tajawal' }, displayColors: false,
-                        callbacks: { label: (ctx) => `الربح التراكمي: ${formatNumber(ctx.raw.y)}%` }
-                    }
-                },
-                interaction: { mode: 'index', intersect: false }
-            }
-        };
-        if (profitChartInstance) {
-            profitChartInstance.data.datasets[0].data = chartData;
-            profitChartInstance.data.datasets[0].borderColor = lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
-            profitChartInstance.data.datasets[0].backgroundColor = gradient;
-            profitChartInstance.update('none');
-        } else { profitChartInstance = new Chart(ctx, config); }
-    });
-}
-function renderProgressBar(signal) {
-    const { entry_price, stop_loss, target_price, current_price } = signal;
-    if ([entry_price, stop_loss, target_price, current_price].some(v => v === null || v === undefined)) return '<span class="text-xs text-text-secondary">لا تتوفر بيانات</span>';
-    const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat);
-    const totalDist = tp - sl;
-    if (totalDist <= 0) return '<span class="text-xs text-text-secondary">بيانات غير صالحة</span>';
-    const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100));
-    return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toPrecision(4)}</span><span title="الهدف">${tp.toPrecision(4)}</span></div></div>`;
-}
-function updateSignals() {
-    apiFetch('/api/signals').then(data => {
-        const tableBody = document.getElementById('signals-table');
-        if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; }
-        if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; }
-        tableBody.innerHTML = data.map(signal => {
-            const pnlPct = (signal.status === 'open' || signal.status === 'updated') ? signal.pnl_pct : signal.profit_percentage;
-            const pnlDisplay = pnlPct !== null && pnlPct !== undefined ? `${formatNumber(pnlPct)}%` : 'N/A';
-            const pnlColor = pnlPct === null || pnlPct === undefined ? 'text-text-secondary' : (pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red');
-            let statusClass = 'text-gray-400';
-            let statusText = signal.status;
-            if (signal.status === 'open') { statusClass = 'text-yellow-400'; statusText = 'مفتوحة'; }
-            else if (signal.status === 'updated') { statusClass = 'text-blue-400'; statusText = 'تم تحديثها'; }
-            const quantityDisplay = signal.quantity ? formatNumber(signal.quantity, 4) : '-';
-            const realTradeIndicator = signal.is_real_trade ? '<span class="text-accent-green" title="صفقة حقيقية">●</span>' : '';
-            return `<tr class="table-row border-b border-border-color">
-                    <td class="p-4 font-mono font-semibold">${realTradeIndicator} ${signal.symbol}</td>
-                    <td class="p-4 font-bold ${statusClass}">${statusText}</td>
-                    <td class="p-4 font-mono text-text-secondary">${quantityDisplay}</td>
-                    <td class="p-4 font-mono font-bold ${pnlColor}">${pnlDisplay}</td>
-                    <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? renderProgressBar(signal) : '-'}</td>
-                    <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${formatNumber(signal.current_price, 5)}</div></td>
-                    <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600/80 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td>
-                </tr>`;
-        }).join('');
-    });
-}
-function updateList(endpoint, listId, formatter) {
-    apiFetch(endpoint).then(data => {
-        if (!data || data.error) return;
-        document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="p-4 text-center text-text-secondary">لا توجد بيانات.</div>`;
-    });
-}
-function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟ سيتم بيع الكمية بسعر السوق إذا كان التداول الحقيقي مُفعّلاً.`)) {
-        fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
-            alert(data.message || data.error);
-            refreshData();
-        });
-    }
-}
-function refreshData() {
-    updateMarketStatus();
-    updateTradingStatus();
-    updateStats();
-    updateProfitChart();
-    updateSignals();
-    const dateLocaleOptions = { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false };
-    const locale = 'fr-CA';
-    updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString(locale, dateLocaleOptions)}] ${n.message}</div>`);
-    updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`);
-}
-setInterval(refreshData, 5000);
-window.onload = refreshData;
-</script>
+    <script>
+        // كود JavaScript للوحة التحكم يبقى كما هو
+        let profitChartInstance;
+        const REGIME_STYLES = { "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" }, "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" }, "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" }, "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" } };
+        const TF_STATUS_STYLES = { "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" }, "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" }, "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" }, "Uncertain": { text: "غير واضح", icon: "?", color: "text-text-secondary" } };
+        function formatNumber(num, digits = 2) { if (num === null || num === undefined || isNaN(num)) return 'N/A'; return num.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }); }
+        function showTab(tabName, element) { document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden')); document.getElementById(`${tabName}-tab`).classList.remove('hidden'); document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active', 'text-white')); element.classList.add('active', 'text-white'); }
+        async function apiFetch(url, options = {}) { try { const response = await fetch(url, options); if (!response.ok) { console.error(`API Error ${response.status}`); return { error: `HTTP Error ${response.status}` }; } return await response.json(); } catch (error) { console.error(`Fetch error for ${url}:`, error); return { error: "Network or fetch error" }; } }
+        function getFngColor(value) { if (value < 25) return 'var(--accent-red)'; if (value < 45) return '#F97316'; if (value < 55) return 'var(--accent-yellow)'; if (value < 75) return '#84CC16'; return 'var(--accent-green)'; }
+        function renderFearGreedGauge(value, classification) { const container = document.getElementById('fear-greed-gauge'); const valueEl = document.getElementById('fear-greed-value'); const textEl = document.getElementById('fear-greed-text'); [valueEl, textEl].forEach(el => el.classList.remove('skeleton', 'h-10', 'w-1/2', 'h-6', 'w-3/4')); if (value === -1) { container.innerHTML = `<div class="text-center text-text-secondary">خطأ</div>`; valueEl.textContent = 'N/A'; textEl.textContent = 'فشل التحميل'; return; } valueEl.textContent = value; textEl.textContent = classification; const angle = -90 + (value / 100) * 180; const color = getFngColor(value); valueEl.style.color = color; container.innerHTML = `<svg viewBox="0 0 100 57" class="w-full h-full"><defs><linearGradient id="g"><stop offset="0%" stop-color="#F85149"/><stop offset="50%" stop-color="#D29922"/><stop offset="100%" stop-color="#3FB950"/></linearGradient></defs><path d="M10 50 A 40 40 0 0 1 90 50" stroke="url(#g)" stroke-width="10" fill="none" stroke-linecap="round"/><g transform="rotate(${angle} 50 50)"><path d="M50 45 L 47 15 Q 50 10 53 15 L 50 45" fill="${color}" id="needle"/></g><circle cx="50" cy="50" r="4" fill="${color}"/></svg>`; }
+        function updateMarketStatus() { apiFetch('/api/market_status').then(data => { if (!data || data.error) return; document.getElementById('db-status-light').className = `w-2.5 h-2.5 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`; document.getElementById('api-status-light').className = `w-2.5 h-2.5 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`; const state = data.market_state; const overallRegime = state.overall_regime || "UNCERTAIN"; const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"]; const overallDiv = document.getElementById('overall-regime'); overallDiv.textContent = regimeStyle.text; overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`; ['15m', '1h', '4h'].forEach(tf => { const tfData = state.details[tf]; const statusDiv = document.getElementById(`tf-${tf}-status`); statusDiv.classList.remove('skeleton', 'h-7', 'w-2/3', 'mx-auto', 'mt-1'); if (tfData) { const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"]; statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`; } else { statusDiv.textContent = 'N/A'; } }); renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification); const usdtBalanceEl = document.getElementById('usdt-balance'); usdtBalanceEl.textContent = data.usdt_balance ? `$${formatNumber(data.usdt_balance, 2)}` : 'N/A'; usdtBalanceEl.classList.remove('skeleton', 'w-20'); }); }
+        function updateTradingStatus() { apiFetch('/api/trading/status').then(data => { if (!data || data.error) return; const toggle = document.getElementById('trading-toggle'); const text = document.getElementById('trading-status-text'); const bg = toggle.nextElementSibling; toggle.checked = data.is_enabled; if (data.is_enabled) { text.textContent = 'مُفعّل'; text.className = 'font-bold text-lg text-accent-green'; bg.classList.remove('bg-accent-red'); bg.classList.add('bg-accent-green'); } else { text.textContent = 'غير مُفعّل'; text.className = 'font-bold text-lg text-accent-red'; bg.classList.remove('bg-accent-green'); bg.classList.add('bg-accent-red'); } }); }
+        function toggleTrading() { const toggle = document.getElementById('trading-toggle'); const confirmationMessage = toggle.checked ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟ هذا الإجراء يحمل مخاطر." : "هل أنت متأكد من إيقاف التداول الحقيقي؟ لن يتم فتح أو إغلاق أي صفقات جديدة."; if (confirm(confirmationMessage)) { apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => { if (data.message) { alert(data.message); updateTradingStatus(); } else if (data.error) { alert(`خطأ: ${data.error}`); updateTradingStatus(); } }); } else { toggle.checked = !toggle.checked; } }
+        function updateStats() { apiFetch('/api/stats').then(data => { if (!data || data.error) { console.error("Failed to fetch stats:", data ? data.error : "No data"); return; } const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor); document.getElementById('open-trades-value').textContent = formatNumber(data.open_trades_count, 0); document.getElementById('open-trades-value').classList.remove('skeleton', 'h-12', 'w-1/2'); const netProfitEl = document.getElementById('net-profit-usdt'); netProfitEl.textContent = `$${formatNumber(data.net_profit_usdt)}`; netProfitEl.className = `text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}`; netProfitEl.classList.remove('skeleton', 'h-8', 'w-1/3'); const statsContainer = document.getElementById('stats-container'); statsContainer.innerHTML = ` <div class="card text-center p-4 flex flex-col justify-center"> <div class="text-sm text-text-secondary mb-1">نسبة النجاح</div> <div class="text-3xl font-bold text-accent-blue">${formatNumber(data.win_rate)}%</div> </div> <div class="card text-center p-4 flex flex-col justify-center"> <div class="text-sm text-text-secondary mb-1">عامل الربح</div> <div class="text-3xl font-bold text-accent-yellow">${profitFactorDisplay}</div> </div> <div class="card text-center p-4 flex flex-col justify-center"> <div class="text-sm text-text-secondary mb-1">إجمالي الصفقات المغلقة</div> <div class="text-3xl font-bold text-text-primary">${formatNumber(data.total_closed_trades, 0)}</div> </div> <div class="card text-center p-4 flex flex-col justify-center"> <div class="text-sm text-text-secondary mb-1">متوسط الربح %</div> <div class="text-3xl font-bold text-accent-green">${formatNumber(data.average_win_pct)}%</div> </div> <div class="card text-center p-4 flex flex-col justify-center"> <div class="text-sm text-text-secondary mb-1">متوسط الخسارة %</div> <div class="text-3xl font-bold text-accent-red">${formatNumber(data.average_loss_pct)}%</div> </div> `; }); }
+        function updateProfitChart() { const loader = document.getElementById('profit-chart-loader'); const canvas = document.getElementById('profitChart'); const chartCard = document.getElementById('profit-chart-card'); apiFetch('/api/profit_curve').then(data => { loader.style.display = 'none'; const existingMsg = chartCard.querySelector('.no-data-msg'); if(existingMsg) existingMsg.remove(); if (!data || data.error || data.length <= 1) { canvas.style.display = 'none'; if (!existingMsg) { chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض المنحنى.</p>'); } return; } canvas.style.display = 'block'; const ctx = canvas.getContext('2d'); const chartData = data.map(d => ({ x: luxon.DateTime.fromISO(d.timestamp).valueOf(), y: d.cumulative_profit })); const lastProfit = chartData[chartData.length - 1].y; const gradient = ctx.createLinearGradient(0, 0, 0, ctx.canvas.height); if (lastProfit >= 0) { gradient.addColorStop(0, 'rgba(63, 185, 80, 0.4)'); gradient.addColorStop(1, 'rgba(63, 185, 80, 0)'); } else { gradient.addColorStop(0, 'rgba(248, 81, 73, 0.4)'); gradient.addColorStop(1, 'rgba(248, 81, 73, 0)'); } const config = { type: 'line', data: { datasets: [{ label: 'الربح التراكمي %', data: chartData, borderColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', backgroundColor: gradient, fill: true, tension: 0.4, pointRadius: 0, pointHoverRadius: 6, pointBackgroundColor: lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)', }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { type: 'time', time: { unit: 'day', tooltipFormat: 'MMM dd, yyyy HH:mm' }, grid: { display: false }, ticks: { color: 'var(--text-secondary)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 } }, y: { position: 'right', beginAtZero: true, grid: { color: 'var(--border-color)', drawBorder: false }, ticks: { color: 'var(--text-secondary)', callback: v => formatNumber(v) + '%' } } }, plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false, backgroundColor: '#0D1117', titleFont: { weight: 'bold', family: 'Tajawal' }, bodyFont: { family: 'Tajawal' }, displayColors: false, callbacks: { label: (ctx) => `الربح التراكمي: ${formatNumber(ctx.raw.y)}%` } } }, interaction: { mode: 'index', intersect: false } } }; if (profitChartInstance) { profitChartInstance.data.datasets[0].data = chartData; profitChartInstance.data.datasets[0].borderColor = lastProfit >= 0 ? 'var(--accent-green)' : 'var(--accent-red)'; profitChartInstance.data.datasets[0].backgroundColor = gradient; profitChartInstance.update('none'); } else { profitChartInstance = new Chart(ctx, config); } }); }
+        function renderProgressBar(signal) { const { entry_price, stop_loss, target_price, current_price } = signal; if ([entry_price, stop_loss, target_price, current_price].some(v => v === null || v === undefined)) return '<span class="text-xs text-text-secondary">لا تتوفر بيانات</span>'; const [entry, sl, tp, current] = [entry_price, stop_loss, target_price, current_price].map(parseFloat); const totalDist = tp - sl; if (totalDist <= 0) return '<span class="text-xs text-text-secondary">بيانات غير صالحة</span>'; const progressPct = Math.max(0, Math.min(100, ((current - sl) / totalDist) * 100)); return `<div class="flex flex-col w-full"><div class="progress-bar-container"><div class="progress-bar ${current >= entry ? 'bg-accent-green' : 'bg-accent-red'}" style="width: ${progressPct}%"></div></div><div class="progress-labels"><span title="وقف الخسارة">${sl.toPrecision(4)}</span><span title="الهدف">${tp.toPrecision(4)}</span></div></div>`; }
+        function updateSignals() { apiFetch('/api/signals').then(data => { const tableBody = document.getElementById('signals-table'); if (!data || data.error) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">فشل تحميل الصفقات.</td></tr>'; return; } if (data.length === 0) { tableBody.innerHTML = '<tr><td colspan="7" class="p-8 text-center text-text-secondary">لا توجد صفقات لعرضها.</td></tr>'; return; } tableBody.innerHTML = data.map(signal => { const pnlPct = (signal.status === 'open' || signal.status === 'updated') ? signal.pnl_pct : signal.profit_percentage; const pnlDisplay = pnlPct !== null && pnlPct !== undefined ? `${formatNumber(pnlPct)}%` : 'N/A'; const pnlColor = pnlPct === null || pnlPct === undefined ? 'text-text-secondary' : (pnlPct >= 0 ? 'text-accent-green' : 'text-accent-red'); let statusClass = 'text-gray-400'; let statusText = signal.status; if (signal.status === 'open') { statusClass = 'text-yellow-400'; statusText = 'مفتوحة'; } else if (signal.status === 'updated') { statusClass = 'text-blue-400'; statusText = 'تم تحديثها'; } const quantityDisplay = signal.quantity ? formatNumber(signal.quantity, 4) : '-'; const realTradeIndicator = signal.is_real_trade ? '<span class="text-accent-green" title="صفقة حقيقية">●</span>' : ''; return `<tr class="table-row border-b border-border-color"> <td class="p-4 font-mono font-semibold">${realTradeIndicator} ${signal.symbol}</td> <td class="p-4 font-bold ${statusClass}">${statusText}</td> <td class="p-4 font-mono text-text-secondary">${quantityDisplay}</td> <td class="p-4 font-mono font-bold ${pnlColor}">${pnlDisplay}</td> <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? renderProgressBar(signal) : '-'}</td> <td class="p-4 font-mono text-xs"><div>${formatNumber(signal.entry_price, 5)}</div><div class="text-text-secondary">${formatNumber(signal.current_price, 5)}</div></td> <td class="p-4">${(signal.status === 'open' || signal.status === 'updated') ? `<button onclick="manualCloseSignal(${signal.id})" class="bg-red-600/80 hover:bg-red-600 text-white text-xs py-1 px-3 rounded-md">إغلاق</button>` : ''}</td> </tr>`; }).join(''); }); }
+        function updateList(endpoint, listId, formatter) { apiFetch(endpoint).then(data => { if (!data || data.error) return; document.getElementById(listId).innerHTML = data.map(formatter).join('') || `<div class="p-4 text-center text-text-secondary">لا توجد بيانات.</div>`; }); }
+        function manualCloseSignal(signalId) { if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟ سيتم بيع الكمية بسعر السوق إذا كان التداول الحقيقي مُفعّلاً.`)) { fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => { alert(data.message || data.error); refreshData(); }); } }
+        function refreshData() { updateMarketStatus(); updateTradingStatus(); updateStats(); updateProfitChart(); updateSignals(); const dateLocaleOptions = { timeZone: 'UTC', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }; const locale = 'fr-CA'; updateList('/api/notifications', 'notifications-list', n => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(n.timestamp).toLocaleString(locale, dateLocaleOptions)}] ${n.message}</div>`); updateList('/api/rejection_logs', 'rejections-list', log => `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString(locale, dateLocaleOptions)}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${JSON.stringify(log.details)}</span></div>`); }
+        setInterval(refreshData, 5000);
+        window.onload = refreshData;
+    </script>
 </body>
 </html>
     """
 
 # ---------------------- دوال قاعدة البيانات (مع إصلاح الترقية) ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
+    # ... الكود يبقى كما هو ...
     global conn
     logger.info("[DB] Initializing database connection...")
     db_url_to_use = DB_URL
@@ -566,8 +320,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if attempt < retries - 1: time.sleep(delay)
             else: logger.critical("❌ [DB] Failed to connect/migrate the database after multiple retries.")
 
-
 def check_db_connection() -> bool:
+    # ... الكود يبقى كما هو ...
     global conn
     if conn is None or conn.closed != 0:
         logger.warning("[DB] Connection is closed, attempting to reconnect...")
@@ -588,6 +342,7 @@ def check_db_connection() -> bool:
     return False
 
 def log_and_notify(level: str, message: str, notification_type: str):
+    # ... الكود يبقى كما هو ...
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
     log_methods.get(level.lower(), logger.info)(message)
     if not check_db_connection() or not conn: return
@@ -601,6 +356,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
         if conn: conn.rollback()
 
 def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
+    # ... الكود يبقى كما هو ...
     log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason} | Details: {details or {}}"
     logger.info(log_message)
     with rejection_logs_lock:
@@ -612,6 +368,7 @@ def log_rejection(symbol: str, reason: str, details: Optional[Dict] = None):
         })
 
 def init_redis() -> None:
+    # ... الكود يبقى كما هو ...
     global redis_client
     logger.info("[Redis] Initializing Redis connection...")
     try:
@@ -622,8 +379,9 @@ def init_redis() -> None:
         logger.critical(f"❌ [Redis] Failed to connect to Redis. Error: {e}")
         exit(1)
 
-# ---------------------- دوال Binance والبيانات (مع تعديلات للتداول الحقيقي) ----------------------
+# ---------------------- دوال Binance والبيانات (مع إضافة دوال الميزات الجديدة) ----------------------
 def get_exchange_info_map() -> None:
+    # ... الكود يبقى كما هو ...
     global exchange_info_map
     if not client: return
     logger.info("ℹ️ [Exchange Info] Fetching exchange trading rules...")
@@ -635,6 +393,7 @@ def get_exchange_info_map() -> None:
         logger.error(f"❌ [Exchange Info] Could not fetch exchange info: {e}")
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    # ... الكود يبقى كما هو ...
     if not client: return []
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -654,6 +413,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    # ... الكود يبقى كما هو ...
     if not client: return None
     try:
         limit = int((days * 24 * 60) / int(re.sub('[a-zA-Z]', '', interval)))
@@ -668,8 +428,80 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching historical data for {symbol}: {e}")
         return None
 
-# ---------------------- دوال حساب الميزات وتحديد الاتجاه (بدون تغيير) ----------------------
+# --- [جديد] دوال جلب الميزات الإضافية ---
+def fetch_fear_and_greed_data() -> None:
+    """جلب بيانات مؤشر الخوف والطمع وتخزينها مؤقتاً."""
+    global fg_data_cache, last_fg_fetch_time
+    # تحديث كل ساعة لتجنب استدعاء API بشكل مفرط
+    if time.time() - last_fg_fetch_time < 3600 and fg_data_cache is not None:
+        return
+    
+    logger.info("ℹ️ [F&G] Attempting to fetch Fear & Greed index data...")
+    try:
+        url = "https://api.alternative.me/fng/?limit=90&format=json" # جلب بيانات 90 يوم
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()['data']
+        
+        df = pd.DataFrame(data)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.normalize()
+        df = df[['timestamp', 'value']]
+        df.rename(columns={'value': 'fear_greed_value'}, inplace=True)
+        df['fear_greed_value'] = pd.to_numeric(df['fear_greed_value'])
+        df.set_index('timestamp', inplace=True)
+        
+        fg_data_cache = df
+        last_fg_fetch_time = time.time()
+        logger.info(f"✅ [F&G] Successfully fetched and cached {len(df)} records.")
+    except Exception as e:
+        logger.error(f"❌ [F&G] Failed to fetch Fear & Greed data: {e}")
+        # في حالة الفشل، ننشئ DataFrame فارغ لتجنب تكرار المحاولة فوراً
+        if fg_data_cache is None:
+             fg_data_cache = pd.DataFrame()
+        last_fg_fetch_time = time.time()
+
+def fetch_sr_levels(symbol: str) -> Optional[pd.DataFrame]:
+    """جلب مستويات الدعم والمقاومة لعملة معينة من قاعدة البيانات."""
+    if not check_db_connection() or not conn: return None
+    query = sql.SQL("SELECT level_price, level_type, score FROM support_resistance_levels WHERE symbol = %s AND score > 20;")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (symbol,))
+            levels = cur.fetchall()
+        if not levels: return None
+        df_levels = pd.DataFrame(levels)
+        df_levels['level_price'] = df_levels['level_price'].astype(float)
+        df_levels['score'] = df_levels['score'].astype(float)
+        return df_levels
+    except Exception as e:
+        logger.error(f"❌ [S/R Fetch] Error fetching S/R levels for {symbol}: {e}")
+        if conn: conn.rollback()
+        return None
+
+def calculate_order_book_features(symbol: str) -> Dict[str, float]:
+    """حساب معالم من دفتر الأوامر الحالي للعملة."""
+    default_features = {'bid_ask_spread': 0.0, 'order_book_imbalance': 0.0, 'liquidity_density': 0.0}
+    if not client: return default_features
+    try:
+        order_book = client.get_order_book(symbol=symbol, limit=20)
+        if not order_book or not order_book['bids'] or not order_book['asks']: return default_features
+        bids = pd.DataFrame(order_book['bids'], columns=['price', 'qty'], dtype=float)
+        asks = pd.DataFrame(order_book['asks'], columns=['price', 'qty'], dtype=float)
+        best_bid, best_ask = bids['price'].iloc[0], asks['price'].iloc[0]
+        spread = (best_ask - best_bid) / best_ask if best_ask > 0 else 0.0
+        total_bid_volume = (bids['qty']).sum()
+        total_ask_volume = (asks['qty']).sum()
+        total_volume = total_bid_volume + total_ask_volume
+        imbalance = (total_bid_volume - total_ask_volume) / total_volume if total_volume > 0 else 0.0
+        density = (bids['qty'].sum() + asks['qty'].sum()) / (len(bids) + len(asks))
+        return {'bid_ask_spread': spread, 'order_book_imbalance': imbalance, 'liquidity_density': density}
+    except Exception as e:
+        logger.warning(f"⚠️ [Order Book] Could not calculate order book features for {symbol}: {e}")
+        return default_features
+
+# ---------------------- [معدل] دوال حساب الميزات وتحديد الاتجاه ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    # دالة حساب المؤشرات الفنية الأساسية (تبقى كما هي)
     df_calc = df.copy()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -704,6 +536,7 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     return df_calc.astype('float32', errors='ignore')
 
 def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    # ... الكود يبقى كما هو ...
     if df is None or len(df) < 26: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
     try:
         close_series = df['close']
@@ -735,6 +568,7 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         return {"trend": "Uncertain", "rsi": -1, "adx": -1}
 
 def determine_market_state():
+    # ... الكود يبقى كما هو ...
     global current_market_state, last_market_state_check
     with market_state_lock:
         if time.time() - last_market_state_check < 300: return
@@ -768,6 +602,7 @@ def determine_market_state():
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
+    # ... الكود يبقى كما هو (مع تحديث اسم النموذج والمجلد) ...
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache:
@@ -795,9 +630,9 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for symbol {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- دوال الاستراتيجية والتداول الحقيقي ----------------------
-
+# ---------------------- [معدل] دوال الاستراتيجية والتداول الحقيقي ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
+    # ... الكود يبقى كما هو ...
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
@@ -820,6 +655,7 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         return None
 
 def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
+    # ... الكود يبقى كما هو ...
     if not client: return None
     try:
         balance_response = client.get_asset_balance(asset='USDT')
@@ -865,6 +701,7 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         return None
 
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
+    # ... الكود يبقى كما هو ...
     if not client: return None
     logger.info(f"➡️ [{symbol}] Attempting to place a REAL {side} order for {quantity} units.")
     try:
@@ -892,16 +729,65 @@ class TradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """[معدل] دالة تجميع كل الميزات المطلوبة للنموذج الجديد."""
         if self.feature_names is None: return None
         try:
+            # 1. حساب المؤشرات الفنية
             df_featured = calculate_features(df_15m, btc_df)
+
+            # 2. إضافة معالم الدعم والمقاومة
+            sr_levels = fetch_sr_levels(self.symbol)
+            if sr_levels is not None and not sr_levels.empty:
+                support_prices = np.sort(sr_levels[sr_levels['level_type'].str.contains('support|poc|confluence', case=False, na=False)]['level_price'].unique())
+                resistance_prices = np.sort(sr_levels[sr_levels['level_type'].str.contains('resistance|poc|confluence', case=False, na=False)]['level_price'].unique())
+                price_to_score = sr_levels.set_index('level_price')['score'].to_dict()
+                
+                # حساب المسافة لأقرب دعم ومقاومة
+                last_price = df_featured['close'].iloc[-1]
+                
+                nearest_support_price = support_prices[np.searchsorted(support_prices, last_price) - 1] if np.searchsorted(support_prices, last_price) > 0 else 0
+                dist_to_support = (last_price - nearest_support_price) / last_price if nearest_support_price > 0 else 1.0
+                score_of_support = price_to_score.get(nearest_support_price, 0)
+
+                nearest_resistance_price = resistance_prices[np.searchsorted(resistance_prices, last_price)] if np.searchsorted(resistance_prices, last_price) < len(resistance_prices) else float('inf')
+                dist_to_resistance = (nearest_resistance_price - last_price) / last_price if last_price > 0 else 1.0
+                score_of_resistance = price_to_score.get(nearest_resistance_price, 0)
+                
+                df_featured['dist_to_support'] = dist_to_support
+                df_featured['score_of_support'] = score_of_support
+                df_featured['dist_to_resistance'] = dist_to_resistance
+                df_featured['score_of_resistance'] = score_of_resistance
+            else:
+                df_featured['dist_to_support'] = 1.0; df_featured['score_of_support'] = 0
+                df_featured['dist_to_resistance'] = 1.0; df_featured['score_of_resistance'] = 0
+
+            # 3. إضافة معلم الخوف والطمع
+            if fg_data_cache is not None and not fg_data_cache.empty:
+                # دمج بناءً على التاريخ فقط
+                df_featured = pd.merge(df_featured, fg_data_cache, left_on=df_featured.index.date, right_on=fg_data_cache.index.date, how='left')
+                df_featured.index = df_15m.index # استعادة الفهرس الأصلي
+                df_featured['fear_greed_value'].fillna(method='ffill', inplace=True)
+                df_featured['fear_greed_value'].fillna(method='bfill', inplace=True)
+            df_featured['fear_greed_value'] = df_featured.get('fear_greed_value', 50.0) # قيمة افتراضية
+
+            # 4. إضافة معالم دفتر الأوامر
+            ob_features = calculate_order_book_features(self.symbol)
+            for key, value in ob_features.items():
+                df_featured[key] = value
+
+            # 5. إضافة معالم الفريم الأعلى
             df_4h_features = calculate_features(df_4h, None)
-            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h", inplace=False)
+            df_4h_features = df_4h_features.rename(columns={'rsi': 'rsi_4h', 'price_vs_ema50': 'price_vs_ema50_4h'})
             required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
-            df_featured = df_featured.join(df_4h_features[required_4h_cols], how='outer')
+            df_featured = df_featured.join(df_4h_features[required_4h_cols])
             df_featured.fillna(method='ffill', inplace=True)
+
+            # التأكد من وجود كل الأعمدة المطلوبة
             for col in self.feature_names:
-                if col not in df_featured.columns: df_featured[col] = 0.0
+                if col not in df_featured.columns:
+                    logger.warning(f"[{self.symbol}] Missing feature '{col}', filling with 0.")
+                    df_featured[col] = 0.0
+            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
@@ -909,6 +795,7 @@ class TradingStrategy:
             return None
 
     def generate_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        # ... الكود يبقى كما هو ...
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty: return None
         try:
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
@@ -919,18 +806,19 @@ class TradingStrategy:
             
             confidence = float(np.max(prediction_proba[0]))
             
-            logger.info(f"ℹ️ [{self.symbol}] SMC Model predicted '{'BUY' if prediction == 1 else 'SELL/HOLD'}' with {confidence:.2%} confidence.")
+            logger.info(f"ℹ️ [{self.symbol}] Advanced Model predicted '{'BUY' if prediction == 1 else 'SELL/HOLD'}' with {confidence:.2%} confidence.")
             return {'prediction': int(prediction), 'confidence': confidence}
         except Exception as e:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
+# ... بقية الدوال (الفلاتر، إدارة الصفقات، إلخ) تبقى كما هي ...
 def passes_momentum_filter(last_features: pd.Series) -> bool:
     symbol = last_features.name
     roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
     accel = last_features.get('roc_acceleration', 0)
     slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-    if roc > 1.0 and accel >= 0.5 and slope > 0.2:
+    if roc > 0 and accel >= 0 and slope > 0:
         return True
     log_rejection(symbol, "Momentum Filter", {
         "ROC": f"{roc:.2f} (Req: > 0)",
@@ -1092,13 +980,13 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
         quantity = signal_data.get('quantity')
         trade_type_msg = f"\n*🔥 صفقة حقيقية 🔥*\n*الكمية:* `{quantity}`\n"
 
-    message = (f"💡 *توصية تداول جديدة (SMC)* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n{trade_type_msg}\n"
+    message = (f"💡 *توصية تداول جديدة (Advanced V3)* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n{trade_type_msg}\n"
                f"*الدخول:* `{entry:.8f}`\n*الهدف:* `{target:.8f}`\n*وقف الخسارة:* `{sl:.8f}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
                f"*ثقة النموذج:* `{confidence_display}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"New SMC Signal: {symbol} in {market_regime} market. Real Trade: {signal_data.get('is_real_trade', False)}", "NEW_SIGNAL")
+        log_and_notify('info', f"New Advanced Signal: {symbol} in {market_regime} market. Real Trade: {signal_data.get('is_real_trade', False)}", "NEW_SIGNAL")
 
 def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[str, Any]):
     symbol = signal_data['symbol']
@@ -1107,7 +995,7 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
     old_conf = old_signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     new_conf = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     
-    message = (f"🔄 *تحديث صفقة (تعزيز) - SMC* 🔄\n\n"
+    message = (f"🔄 *تحديث صفقة (تعزيز) - Advanced V3* 🔄\n\n"
                f"*العملة:* `{symbol}`\n\n"
                f"*الثقة:* `{old_conf}` ⬅️ `{new_conf}`\n"
                f"*الهدف:* `{old_target:.8f}` ⬅️ `{new_target:.8f}`\n"
@@ -1115,8 +1003,7 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
                f"تم تحديث الصفقة بناءً على إشارة شراء أقوى.")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
-        log_and_notify('info', f"Updated SMC Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
-
+        log_and_notify('info', f"Updated Advanced Signal: {symbol} due to stronger signal.", "UPDATE_SIGNAL")
 
 def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
@@ -1231,8 +1118,8 @@ def close_signal(signal: Dict, status: str, closing_price: float):
     finally:
         with closure_lock: signals_pending_closure.discard(signal_id)
 
-
 def load_open_signals_to_cache():
+    # ... الكود يبقى كما هو ...
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
@@ -1245,6 +1132,7 @@ def load_open_signals_to_cache():
     except Exception as e: logger.error(f"❌ [Loading] Failed to load open signals: {e}")
 
 def load_notifications_to_cache():
+    # ... الكود يبقى كما هو ...
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
@@ -1257,11 +1145,13 @@ def load_notifications_to_cache():
     except Exception as e: logger.error(f"❌ [Loading] Failed to load notifications: {e}")
 
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
+    # ... الكود يبقى كما هو ...
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
 def perform_end_of_cycle_cleanup():
+    # ... الكود يبقى كما هو ...
     logger.info("🧹 [Cleanup] Starting end-of-cycle cleanup...")
     try:
         if redis_client:
@@ -1280,21 +1170,24 @@ def perform_end_of_cycle_cleanup():
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
-
-# ---------------------- حلقة العمل الرئيسية (مع منطق التداول الحقيقي والتحكم بالذاكرة) ----------------------
+# ---------------------- [معدل] حلقة العمل الرئيسية ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
     if not validated_symbols_to_scan:
         log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM")
         return
-    log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols with SMC model.", "SYSTEM")
+    log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols with Advanced V3 model.", "SYSTEM")
 
     batch_size = 50 
 
     while True:
         try:
             logger.info("🌀 Starting new main cycle...")
+            
+            # [جديد] جلب بيانات الخوف والطمع مرة واحدة في بداية كل دورة
+            fetch_fear_and_greed_data()
+
             symbols_to_process = list(validated_symbols_to_scan)
             
             for i in range(0, len(symbols_to_process), batch_size):
@@ -1325,6 +1218,7 @@ def main_loop():
                             df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                             if df_4h is None or df_4h.empty: continue
                             
+                            # [معدل] استدعاء الدالة الجديدة لتجميع كل الميزات
                             df_features = strategy.get_features(df_15m, df_4h, btc_data)
                             if df_features is None or df_features.empty: continue
                             
@@ -1451,8 +1345,7 @@ def main_loop():
             log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM")
             time.sleep(120)
 
-
-# ---------------------- واجهة برمجة تطبيقات Flask (V22) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (تبقى كما هي) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1643,7 +1536,6 @@ def toggle_trading_status():
         log_and_notify('warning', f"🚨 Real trading status has been manually changed to: {status_msg}", "TRADING_STATUS_CHANGE")
         return jsonify({"message": f"Trading status set to {status_msg}", "is_enabled": is_trading_enabled})
 
-
 @app.route('/api/notifications')
 def get_notifications():
     with notifications_lock: return jsonify(list(notifications_cache))
@@ -1665,6 +1557,7 @@ def run_flask():
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
 def run_websocket_manager():
+    # ... الكود يبقى كما هو ...
     if not client or not validated_symbols_to_scan:
         logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized.")
         return
@@ -1677,6 +1570,7 @@ def run_websocket_manager():
     twm.join()
 
 def initialize_bot_services():
+    # ... الكود يبقى كما هو ...
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
     try:
@@ -1699,7 +1593,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22 - SMC MODEL) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V3 - Advanced Model) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
