@@ -56,7 +56,7 @@ BASE_ML_MODEL_NAME: str = 'SMC_Scalping_V1_With_Momentum'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 25 # يمكن زيادة هذا الرقم للحصول على دقة أفضل
+HYPERPARAM_TUNING_TRIALS: int = 5 # يمكن زيادة هذا الرقم للحصول على دقة أفضل
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
