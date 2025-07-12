@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import pickle
-import lightgbm as lgb
 import optuna
 import warnings
 import gc
@@ -20,6 +19,7 @@ from typing import List, Dict, Optional, Any, Tuple
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v8.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_smc_v1.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V8_Momentum')
+logger = logging.getLogger('MLTrainer_SMC_V1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,12 +51,12 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# تم تحديث اسم النموذج ليعكس الميزات الجديدة
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
+# تم تحديث اسم النموذج ليعكس استخدام نموذج SMC (SVC)
+BASE_ML_MODEL_NAME: str = 'SMC_Scalping_V1_With_Momentum'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 5
+HYPERPARAM_TUNING_TRIALS: int = 25 # يمكن زيادة هذا الرقم للحصول على دقة أفضل
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
@@ -67,10 +67,8 @@ EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
-# New Momentum and Velocity Parameters
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
-
 
 # Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
@@ -181,19 +179,12 @@ def fetch_and_cache_btc_data():
 
 
 def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Function to calculate all technical analysis features for the model.
-    Includes new features: Momentum (ROC), Velocity (ROC Acceleration), and Market Direction (EMA Slope).
-    """
     df_calc = df.copy()
-
-    # --- Existing Features ---
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -202,33 +193,20 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
-    
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
     df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
-    # --- ✨ New Features: Momentum, Velocity, and Market Direction ---
-    
-    # 1. Momentum (Rate of Change)
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    
-    # 2. Velocity (Acceleration of Momentum)
     df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    
-    # 3. Market Direction (Short-term EMA Slope)
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
-
     df_calc['hour_of_day'] = df_calc.index.hour
-
     return df_calc.astype('float32', errors='ignore')
 
 
@@ -251,43 +229,30 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
     df_featured = calculate_features(df_15m, btc_df)
-    
-    # --- MTF Features ---
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
     ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
-    
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-    
-    # --- Target Labeling ---
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
-    
-    # --- ✨ Updated Feature List ---
     feature_columns = [
         'rsi', 'adx', 'atr', 'relative_volume', 'hour_of_day',
         'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'rsi_4h', 'price_vs_ema50_4h',
-        # New Features
         f'roc_{MOMENTUM_PERIOD}', 
         'roc_acceleration', 
         f'ema_slope_{EMA_SLOPE_PERIOD}'
     ]
-    
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
-    
-    # Replace any remaining infinite values with NaN and then drop them
     df_cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_cleaned.dropna(subset=feature_columns, inplace=True)
-
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
         logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after cleaning. Skipping.")
         return None
-        
     logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
@@ -295,22 +260,20 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
 
 
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
-    logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization...")
+    """
+    [MODIFIED] Tunes and trains an SMC model (implemented with sklearn's SVC).
+    """
+    logger.info(f"optimizing_hyperparameters [ML Train] Starting hyperparameter optimization for SMC (SVC)...")
 
     def objective(trial: optuna.trial.Trial) -> float:
+        # Define the hyperparameter space for SVC
         params = {
-            'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
-            'verbosity': -1, 'boosting_type': 'gbdt', 'class_weight': 'balanced',
-            'random_state': 42,
-            'n_estimators': trial.suggest_int('n_estimators', 200, 800, step=100),
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
-            'num_leaves': trial.suggest_int('num_leaves', 20, 150),
-            'max_depth': trial.suggest_int('max_depth', 4, 10),
-            'reg_alpha': trial.suggest_float('reg_alpha', 0.0, 1.0),
-            'reg_lambda': trial.suggest_float('reg_lambda', 0.0, 1.0),
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
-            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-            'min_child_samples': trial.suggest_int('min_child_samples', 5, 100),
+            'C': trial.suggest_float('C', 1e-2, 1e2, log=True),
+            'gamma': trial.suggest_float('gamma', 1e-4, 1e-1, log=True),
+            'kernel': 'rbf',  # RBF is generally the best choice for this kind of data
+            'class_weight': 'balanced',
+            'probability': True,  # Essential for predict_proba
+            'random_state': 42
         }
 
         all_preds, all_true = [], []
@@ -320,30 +283,32 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             
             scaler = StandardScaler()
-            X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
-            X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
             
-            model = lgb.LGBMClassifier(**params)
-            model.fit(X_train_scaled_df, y_train,
-                      eval_set=[(X_test_scaled_df, y_test)],
-                      callbacks=[lgb.early_stopping(20, verbose=False)])
+            model = SVC(**params)
+            model.fit(X_train_scaled, y_train)
             
-            y_pred = model.predict(X_test_scaled_df)
+            y_pred = model.predict(X_test_scaled)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
 
         report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
+        # Optimize for precision of the 'BUY' signal (class 1)
         return report.get('1', {}).get('precision', 0)
 
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=HYPERPARAM_TUNING_TRIALS, show_progress_bar=True)
     best_params = study.best_params
-    logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
+    logger.info(f"🏆 [ML Train] Best hyperparameters found for SMC (SVC): {best_params}")
     
-    logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
+    logger.info("ℹ️ [ML Train] Retraining SMC (SVC) model with best parameters on all data...")
     final_model_params = {
-        'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
-        'random_state': 42, 'verbosity': -1, **best_params
+        'class_weight': 'balanced',
+        'probability': True,
+        'random_state': 42,
+        'kernel': 'rbf',
+        **best_params
     }
     
     all_preds_final, all_true_final = [], []
@@ -353,12 +318,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         scaler = StandardScaler()
-        X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
-        X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
-        model = lgb.LGBMClassifier(**final_model_params)
-        model.fit(X_train_scaled_df, y_train)
-        y_pred = model.predict(X_test_scaled_df)
+        model = SVC(**final_model_params)
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
         all_preds_final.extend(y_pred)
         all_true_final.extend(y_test)
         
@@ -374,13 +339,13 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     }
     
     final_scaler = StandardScaler()
-    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), columns=X.columns, index=X.index)
+    X_scaled_full = final_scaler.fit_transform(X)
     
-    final_model = lgb.LGBMClassifier(**final_model_params)
+    final_model = SVC(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
-    logger.info(f"📊 [ML Train] Final Walk-Forward Performance: {metrics_log_str}")
+    logger.info(f"📊 [ML Train] Final Walk-Forward Performance for SMC (SVC): {metrics_log_str}")
 
     return final_model, final_scaler, final_metrics
 
@@ -407,7 +372,7 @@ def send_telegram_message(text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def run_training_job():
-    logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
+    logger.info(f"🚀 Starting SMC (SVC) model training job ({BASE_ML_MODEL_NAME})...")
     init_db()
     get_binance_client()
     fetch_and_cache_btc_data()
@@ -454,6 +419,7 @@ def run_training_job():
             if final_model and final_scaler and model_metrics.get('precision_class_1', 0) > 0.35:
                 model_bundle = {'model': final_model, 'scaler': final_scaler, 'feature_names': feature_names}
                 model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+                # The model is saved to the database, not a local folder in this script
                 save_ml_model_to_db(model_bundle, model_name, model_metrics)
                 successful_models += 1
             else:
@@ -482,7 +448,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Momentum features) service is running and healthy.", 200
+    return "SMC ML Trainer service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
