@@ -95,10 +95,10 @@ PEAK_UPDATE_COOLDOWN: int = 60
 
 # --- إعدادات الفلاتر ---
 USE_BTC_TREND_FILTER: bool = True; BTC_SYMBOL: str = 'BTCUSDT'
-USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.5
+USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.1
 USE_BTC_CORRELATION_FILTER: bool = True; MIN_BTC_CORRELATION: float = 0.2
 USE_MIN_VOLATILITY_FILTER: bool = True; MIN_VOLATILITY_PERCENT: float = 0.3
-USE_MOMENTUM_FILTER: bool = False
+USE_MOMENTUM_FILTER: bool = True
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
