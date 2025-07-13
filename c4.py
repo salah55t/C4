@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V21.3 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V21.4 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v21.3_final.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21.4_final.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV21.3')
+logger = logging.getLogger('CryptoBotV21.4')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.3 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.4 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -71,7 +71,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
-BTC_SYMBOL: str = 'BTCUSDT' # **تم إصلاح الخطأ هنا**
+BTC_SYMBOL: str = 'BTCUSDT'
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
@@ -142,13 +142,15 @@ FILTER_PROFILES = {
 LONDON_NY_OVERLAP_START_H: int = 13
 LONDON_NY_OVERLAP_END_H: int = 17
 
-# --- ساعات عمل البورصات العالمية (جديد V21.3) ---
+# --- [محسّن V21.4] ساعات وأيام عمل البورصات العالمية بتوقيت UTC ---
+# تم تعديل الهيكل ليشمل أيام العمل (0 = الاثنين, 6 = الأحد)
 EXCHANGE_HOURS_UTC = {
-    "New York": {"open": 13, "close": 22},
-    "London": {"open": 8, "close": 17},
-    "Tokyo": {"open": 0, "close": 6},
-    "Sydney": {"open": 22, "close": 5}
+    "New York": {"open": 13, "close": 22, "days": (0, 1, 2, 3, 4)},  # الاثنين - الجمعة
+    "London":   {"open": 8,  "close": 17, "days": (0, 1, 2, 3, 4)},  # الاثنين - الجمعة
+    "Tokyo":    {"open": 0,  "close": 6,  "days": (0, 1, 2, 3, 4)},  # الاثنين - الجمعة
+    "Sydney":   {"open": 22, "close": 5,  "days": (0, 1, 2, 3, 4, 6)} # تفتح ليل الأحد وتغلق عصر الجمعة
 }
+
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -168,10 +170,10 @@ current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["NORMAL"]
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V21.3) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V21.4) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V21.3 مع عرض البورصات المفتوحة.
+    لوحة تحكم احترافية V21.4 مع عرض البورصات المفتوحة بشكل دقيق.
     """
     return """
 <!DOCTYPE html>
@@ -179,7 +181,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V21.3 - إصلاح وإضافات</title>
+    <title>لوحة تحكم التداول V21.4 - عرض دقيق للبورصات</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -216,7 +218,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V21.3</span>
+                <span class="text-text-secondary font-medium">V21.4</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -932,24 +934,38 @@ def get_current_filter_profile() -> Dict[str, Any]:
     logger.info(f"🕒 [Filter Profile] Set to '{profile_name}' - {current_filter_profile_cache['description']}")
     return current_filter_profile_cache
 
-# --- دالة جديدة لتحديد البورصات المفتوحة (V21.3) ---
+# --- [محسّن V21.4] دالة جديدة لتحديد البورصات المفتوحة بدقة ---
 def get_open_exchanges() -> List[str]:
-    """Checks the current UTC time against exchange hours to see which are open."""
+    """
+    التحقق من الوقت الحالي ويوم الأسبوع مقابل ساعات وأيام عمل البورصات.
+    """
     open_list = []
     now_utc = datetime.now(timezone.utc)
-    hour = now_utc.hour
-    for name, hours in EXCHANGE_HOURS_UTC.items():
+    current_hour = now_utc.hour
+    current_weekday = now_utc.weekday() # 0 = الاثنين, 6 = الأحد
+
+    for name, details in EXCHANGE_HOURS_UTC.items():
+        # الخطوة 1: التحقق إذا كان اليوم الحالي هو يوم عمل للبورصة
+        if current_weekday not in details["days"]:
+            continue # انتقل إلى البورصة التالية إذا كان اليوم عطلة
+
         is_open = False
-        # Handle overnight sessions like Sydney
-        if hours['open'] > hours['close']:
-            if hour >= hours['open'] or hour < hours['close']:
+        open_hour = details["open"]
+        close_hour = details["close"]
+
+        # الخطوة 2: التحقق من التوقيت مع مراعاة الجلسات الليلية
+        # الحالة أ: جلسة ليلية (مثل سيدني، تفتح في يوم وتغلق في اليوم التالي)
+        if open_hour > close_hour:
+            if current_hour >= open_hour or current_hour < close_hour:
                 is_open = True
-        # Handle normal same-day sessions
+        # الحالة ب: جلسة نهارية عادية
         else:
-            if hours['open'] <= hour < hours['close']:
+            if open_hour <= current_hour < close_hour:
                 is_open = True
+        
         if is_open:
             open_list.append(name)
+            
     return open_list
 
 
@@ -1642,7 +1658,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V21.3) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V21.4) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1883,7 +1899,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.3) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.4) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
