@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V21.1 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V21.2 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v21_db_fix.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21_dynamic_filters.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV21.1')
+logger = logging.getLogger('CryptoBotV21.2')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.1 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.2 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -93,12 +93,56 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- إعدادات الفلاتر ---
-USE_BTC_TREND_FILTER: bool = True; BTC_SYMBOL: str = 'BTCUSDT'
-USE_SPEED_FILTER: bool = True; USE_RRR_FILTER: bool = True; MIN_RISK_REWARD_RATIO: float = 1.5
-USE_BTC_CORRELATION_FILTER: bool = True; MIN_BTC_CORRELATION: float = 0.2
-USE_MIN_VOLATILITY_FILTER: bool = True; MIN_VOLATILITY_PERCENT: float = 0.5
-USE_MOMENTUM_FILTER: bool = True
+# --- إعدادات الفلاتر الديناميكية (جديد V21.2) ---
+# تعريف ملفات تعريف مختلفة لمعايير الفلترة
+FILTER_PROFILES = {
+    "STRICT": {
+        "description": "High-volatility session (e.g., London/NY overlap)",
+        "use_btc_trend_filter": True,
+        "use_speed_filter": True,
+        "speed_filter": {"adx": 28.0, "rel_vol": 0.8, "rsi_min": 50.0, "rsi_max": 75.0},
+        "use_momentum_filter": True,
+        "momentum_filter": {"roc": 1.2, "accel": 0.6, "slope": 0.25},
+        "use_rrr_filter": True,
+        "min_risk_reward_ratio": 1.7,
+        "use_btc_correlation_filter": True,
+        "min_btc_correlation": 0.3,
+        "use_min_volatility_filter": True,
+        "min_volatility_percent": 0.6,
+    },
+    "NORMAL": {
+        "description": "Standard trading session",
+        "use_btc_trend_filter": True,
+        "use_speed_filter": True,
+        "speed_filter": {"adx": 22.0, "rel_vol": 0.5, "rsi_min": 45.0, "rsi_max": 70.0},
+        "use_momentum_filter": True,
+        "momentum_filter": {"roc": 1.0, "accel": 0.5, "slope": 0.2},
+        "use_rrr_filter": True,
+        "min_risk_reward_ratio": 1.5,
+        "use_btc_correlation_filter": True,
+        "min_btc_correlation": 0.2,
+        "use_min_volatility_filter": True,
+        "min_volatility_percent": 0.5,
+    },
+    "RELAXED": {
+        "description": "Low-volatility session (e.g., Weekend)",
+        "use_btc_trend_filter": True,
+        "use_speed_filter": True,
+        "speed_filter": {"adx": 20.0, "rel_vol": 0.3, "rsi_min": 40.0, "rsi_max": 65.0},
+        "use_momentum_filter": True,
+        "momentum_filter": {"roc": 0.8, "accel": 0.3, "slope": 0.1},
+        "use_rrr_filter": True,
+        "min_risk_reward_ratio": 1.2,
+        "use_btc_correlation_filter": False, # يتم تخفيف فلتر الارتباط
+        "min_btc_correlation": 0.0,
+        "use_min_volatility_filter": True,
+        "min_volatility_percent": 0.3,
+    }
+}
+# تحديد ساعات تداخل الأسواق (بالتوقيت العالمي UTC)
+LONDON_NY_OVERLAP_START_H: int = 13
+LONDON_NY_OVERLAP_END_H: int = 17
+
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -114,12 +158,14 @@ rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
 market_state_lock = Lock()
+current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["NORMAL"] # القيمة الافتراضية
+last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V21) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V21.2) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V21 مع التحكم بالتداول الحقيقي.
+    لوحة تحكم احترافية V21.2 مع عرض ملف تعريف الفلاتر الديناميكي.
     """
     return """
 <!DOCTYPE html>
@@ -127,7 +173,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V21 - تداول حقيقي</title>
+    <title>لوحة تحكم التداول V21.2 - فلاتر ديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -164,7 +210,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V21.1 - DB Fix</span>
+                <span class="text-text-secondary font-medium">V21.2 - فلاتر ديناميكية</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -174,13 +220,18 @@ def get_dashboard_html():
 
         <!-- قسم التحكم بالتداول -->
         <section class="mb-6 grid grid-cols-1 md:grid-cols-3 gap-5">
-            <div class="card p-4 md:col-span-2">
+            <div class="card p-4 md:col-span-1">
                  <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
-                 <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
+                 <div class="grid grid-cols-2 sm:grid-cols-2 gap-4 text-center">
                      <div><h4 class="text-sm font-medium text-text-secondary">الاتجاه العام</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
-                     <div><h4 class="text-sm font-medium text-text-secondary">15 دقيقة</h4><div id="tf-15m-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
-                     <div><h4 class="text-sm font-medium text-text-secondary">ساعة</h4><div id="tf-1h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
                      <div><h4 class="text-sm font-medium text-text-secondary">4 ساعات</h4><div id="tf-4h-status" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
+                 </div>
+            </div>
+            <div class="card p-4 md:col-span-1">
+                 <h3 class="font-bold mb-3 text-lg text-text-secondary">ملف الفلاتر الحالي</h3>
+                 <div class="text-center">
+                     <div id="filter-profile-name" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div>
+                     <div id="filter-profile-desc" class="text-sm text-text-secondary skeleton h-5 w-full mx-auto mt-2"></div>
                  </div>
             </div>
             <div class="card p-4 flex flex-col justify-center items-center">
@@ -250,6 +301,12 @@ const TF_STATUS_STYLES = {
     "Uptrend": { text: "صاعد", icon: "▲", color: "text-accent-green" }, "Downtrend": { text: "هابط", icon: "▼", color: "text-accent-red" },
     "Ranging": { text: "عرضي", icon: "↔", color: "text-accent-yellow" }, "Uncertain": { text: "غير واضح", icon: "?", color: "text-text-secondary" }
 };
+const PROFILE_STYLES = {
+    "STRICT": { text: "صارم", color: "text-accent-red" },
+    "NORMAL": { text: "عادي", color: "text-accent-blue" },
+    "RELAXED": { text: "متساهل", color: "text-accent-green" }
+};
+
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
@@ -308,15 +365,24 @@ function updateMarketStatus() {
         overallDiv.textContent = regimeStyle.text;
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
         
-        ['15m', '1h', '4h'].forEach(tf => {
-            const tfData = state.details[tf];
-            const statusDiv = document.getElementById(`tf-${tf}-status`);
-            statusDiv.classList.remove('skeleton', 'h-7', 'w-2/3', 'mx-auto', 'mt-1');
-            if (tfData) {
-                const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
-                statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
-            } else { statusDiv.textContent = 'N/A'; }
-        });
+        const tfData = state.details['4h'];
+        const statusDiv = document.getElementById(`tf-4h-status`);
+        statusDiv.classList.remove('skeleton', 'h-7', 'w-2/3', 'mx-auto', 'mt-1');
+        if (tfData) {
+            const style = TF_STATUS_STYLES[tfData.trend] || TF_STATUS_STYLES["Uncertain"];
+            statusDiv.innerHTML = `<span class="${style.color}">${style.icon} ${style.text}</span>`;
+        } else { statusDiv.textContent = 'N/A'; }
+
+        // Update Filter Profile display
+        const profile = data.filter_profile;
+        const profileNameDiv = document.getElementById('filter-profile-name');
+        const profileDescDiv = document.getElementById('filter-profile-desc');
+        const profileStyle = PROFILE_STYLES[profile.name] || PROFILE_STYLES["NORMAL"];
+        profileNameDiv.textContent = profileStyle.text;
+        profileNameDiv.className = `text-2xl font-bold ${profileStyle.color}`;
+        profileDescDiv.textContent = profile.description;
+        profileDescDiv.classList.remove('skeleton', 'h-5', 'w-full');
+
         renderFearGreedGauge(data.fear_and_greed.value, data.fear_and_greed.classification);
         
         const usdtBalanceEl = document.getElementById('usdt-balance');
@@ -822,6 +888,40 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
+# --- دالة جديدة لتحديد ملف تعريف الفلاتر الديناميكي (V21.2) ---
+def get_current_filter_profile() -> Dict[str, Any]:
+    """
+    Determines which filter profile to use based on the current time and day.
+    Caches the result for 1 minute to avoid redundant calculations.
+    """
+    global current_filter_profile_cache, last_profile_check_time
+    
+    # Check cache first
+    if time.time() - last_profile_check_time < 60:
+        return current_filter_profile_cache
+
+    now_utc = datetime.now(timezone.utc)
+    weekday = now_utc.weekday()  # Monday is 0, Sunday is 6
+    hour = now_utc.hour
+
+    profile_name = "NORMAL" # Default profile
+
+    # Condition 1: Weekend (Saturday or Sunday) -> RELAXED
+    if weekday in [5, 6]:
+        profile_name = "RELAXED"
+    # Condition 2: High-volatility market overlap (London/NY) -> STRICT
+    elif LONDON_NY_OVERLAP_START_H <= hour < LONDON_NY_OVERLAP_END_H:
+        profile_name = "STRICT"
+
+    # Update cache
+    current_filter_profile_cache = FILTER_PROFILES[profile_name]
+    current_filter_profile_cache['name'] = profile_name # Add name for logging/UI
+    last_profile_check_time = time.time()
+    
+    logger.info(f"🕒 [Filter Profile] Set to '{profile_name}' - {current_filter_profile_cache['description']}")
+    return current_filter_profile_cache
+
+
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
@@ -978,33 +1078,59 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-def passes_momentum_filter(last_features: pd.Series) -> bool:
+# --- دوال الفلاتر المعدلة (V21.2) ---
+def passes_momentum_filter(last_features: pd.Series, profile: Dict[str, Any]) -> bool:
+    """Dynamic momentum filter based on the current profile."""
     symbol = last_features.name
+    params = profile['momentum_filter']
+    
     roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
     accel = last_features.get('roc_acceleration', 0)
     slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-    if roc > 1.0 and accel >= 0.5 and slope > 0.2:
+    
+    if roc > params['roc'] and accel >= params['accel'] and slope > params['slope']:
         return True
-    log_rejection(symbol, "Momentum Filter", {
-        "ROC": f"{roc:.2f} (Req: > 0)",
-        "Acceleration": f"{accel:.4f} (Req: >= 0)",
-        "Slope": f"{slope:.6f} (Req: > 0)"
+        
+    log_rejection(symbol, f"Momentum Filter ({profile['name']})", {
+        "ROC": f"{roc:.2f} (Req: > {params['roc']})",
+        "Acceleration": f"{accel:.4f} (Req: >= {params['accel']})",
+        "Slope": f"{slope:.6f} (Req: > {params['slope']})"
     })
     return False
 
-def passes_speed_filter(last_features: pd.Series) -> bool:
+def passes_speed_filter(last_features: pd.Series, profile: Dict[str, Any]) -> bool:
+    """Dynamic speed filter based on the current profile and market regime."""
     symbol = last_features.name
-    with market_state_lock: regime = current_market_state.get("overall_regime", "RANGING")
+    params = profile['speed_filter']
+    
+    with market_state_lock: 
+        regime = current_market_state.get("overall_regime", "RANGING")
+
+    # This filter is primarily for bullish conditions
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
+        return True # Bypass filter in bearish markets
+
+    adx_threshold = params['adx']
+    rel_vol_threshold = params['rel_vol']
+    rsi_min = params['rsi_min']
+    rsi_max = params['rsi_max']
+
+    adx = last_features.get('adx', 0)
+    rel_vol = last_features.get('relative_volume', 0)
+    rsi = last_features.get('rsi', 0)
+    
+    if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max):
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.1, 50.0, 75.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (20.0, 0.06, 45.0, 75.0)
-    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (15.0, 0.03, 35.0, 65.0)
-    adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
-    if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
-    log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
+        
+    log_rejection(symbol, f"Speed Filter ({profile['name']})", {
+        "Regime": regime, 
+        "ADX": f"{adx:.2f} (Req: >{adx_threshold})", 
+        "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", 
+        "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
+    })
     return False
+
 
 def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
     if last_atr <= 0:
@@ -1139,13 +1265,14 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
     confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
+    filter_profile_name = signal_data['signal_details'].get('Filter_Profile', 'N/A')
     
     trade_type_msg = ""
     if signal_data.get('is_real_trade'):
         quantity = signal_data.get('quantity')
         trade_type_msg = f"\n*🔥 صفقة حقيقية 🔥*\n*الكمية:* `{quantity}`\n"
 
-    message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n{trade_type_msg}\n"
+    message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n*ملف الفلتر:* `{filter_profile_name}`\n{trade_type_msg}\n"
                f"*الدخول:* `{entry:.8f}`\n*الهدف:* `{target:.8f}`\n*وقف الخسارة:* `{sl:.8f}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
                f"*ثقة النموذج:* `{confidence_display}`")
@@ -1348,7 +1475,7 @@ def perform_end_of_cycle_cleanup():
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
 
-# ---------------------- حلقة العمل الرئيسية (مع منطق التداول الحقيقي والتحكم بالذاكرة) ----------------------
+# ---------------------- حلقة العمل الرئيسية (مع منطق الفلاتر الديناميكية) ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1364,23 +1491,24 @@ def main_loop():
             logger.info("🌀 Starting new main cycle...")
             symbols_to_process = list(validated_symbols_to_scan)
             
+            # --- تحديد ملف تعريف الفلتر مرة واحدة لكل دورة ---
+            filter_profile = get_current_filter_profile()
+
             for i in range(0, len(symbols_to_process), batch_size):
                 symbol_batch = symbols_to_process[i:i + batch_size]
                 logger.info(f"🔹 [Batch Processing] Starting batch {i//batch_size + 1}, symbols {i+1}-{i+len(symbol_batch)} of {len(symbols_to_process)}")
 
-                # يتم تحديد حالة السوق مرة واحدة لكل دفعة لتحسين الأداء
                 determine_market_state()
                 with market_state_lock:
                     market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
 
-                if USE_BTC_TREND_FILTER and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
+                if filter_profile['use_btc_trend_filter'] and market_regime in ["DOWNTREND", "STRONG DOWNTREND"]:
                     log_rejection("ALL", "BTC Trend Filter", {"detail": f"Scan paused for this batch due to market regime: {market_regime}"})
                 else:
                     btc_data = get_btc_data_for_bot()
 
                     for symbol in symbol_batch:
                         try:
-                            # منطق معالجة العملة الواحدة يبقى كما هو
                             with signal_cache_lock:
                                 open_trade = open_signals_cache.get(symbol)
                                 open_trade_count = len(open_signals_cache)
@@ -1420,8 +1548,8 @@ def main_loop():
                                     
                                     if confidence > old_confidence + MIN_CONFIDENCE_INCREASE_FOR_UPDATE:
                                         logger.info(f"✅ [{symbol}] Reinforcement condition met. Old: {old_confidence:.2%}, New: {confidence:.2%}. Evaluating update...")
-                                        if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                                        if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                                        if filter_profile['use_speed_filter'] and not passes_speed_filter(last_features, filter_profile): continue
+                                        if filter_profile['use_momentum_filter'] and not passes_momentum_filter(last_features, filter_profile): continue
                                         
                                         last_atr = last_features.get('atr', 0)
                                         tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
@@ -1429,7 +1557,7 @@ def main_loop():
 
                                         updated_signal_data = {
                                             'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                            'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Update_Reason': 'Reinforcement Signal' }
+                                            'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Update_Reason': 'Reinforcement Signal', 'Filter_Profile': filter_profile['name'] }
                                         }
                                         
                                         if update_signal_in_db(open_trade['id'], updated_signal_data):
@@ -1442,33 +1570,33 @@ def main_loop():
                                 if open_trade_count >= MAX_OPEN_TRADES:
                                     log_rejection(symbol, "Max Open Trades", {"count": open_trade_count, "max": MAX_OPEN_TRADES}); continue
 
-                                if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
-                                if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
+                                if filter_profile['use_speed_filter'] and not passes_speed_filter(last_features, filter_profile): continue
+                                if filter_profile['use_momentum_filter'] and not passes_momentum_filter(last_features, filter_profile): continue
                                 
                                 last_atr = last_features.get('atr', 0)
                                 volatility = (last_atr / entry_price * 100) if entry_price > 0 else 0
-                                if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
-                                    log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
+                                if filter_profile['use_min_volatility_filter'] and volatility < filter_profile['min_volatility_percent']:
+                                    log_rejection(symbol, f"Low Volatility ({filter_profile['name']})", {"volatility": f"{volatility:.2f}%", "min": f"{filter_profile['min_volatility_percent']}%"}); continue
                                 
-                                if USE_BTC_CORRELATION_FILTER and market_regime in ["UPTREND", "STRONG UPTREND"]:
+                                if filter_profile['use_btc_correlation_filter'] and market_regime in ["UPTREND", "STRONG UPTREND"]:
                                     correlation = last_features.get('btc_correlation', 0)
-                                    if correlation < MIN_BTC_CORRELATION:
-                                        log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
+                                    if correlation < filter_profile['min_btc_correlation']:
+                                        log_rejection(symbol, f"BTC Correlation ({filter_profile['name']})", {"corr": f"{correlation:.2f}", "min": f"{filter_profile['min_btc_correlation']}"}); continue
                                 
                                 tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                                 if not tp_sl_data: continue
                                 
                                 new_signal = {
                                     'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                                    'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                                    'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Filter_Profile': filter_profile['name']}, 
                                     'entry_price': entry_price, **tp_sl_data
                                 }
 
-                                if USE_RRR_FILTER:
+                                if filter_profile['use_rrr_filter']:
                                     risk = entry_price - float(new_signal['stop_loss'])
                                     reward = float(new_signal['target_price']) - entry_price
-                                    if risk <= 0 or reward <= 0 or (reward / risk) < MIN_RISK_REWARD_RATIO:
-                                        log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); continue
+                                    if risk <= 0 or reward <= 0 or (reward / risk) < filter_profile['min_risk_reward_ratio']:
+                                        log_rejection(symbol, f"RRR Filter ({filter_profile['name']})", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": filter_profile['min_risk_reward_ratio']}); continue
                                 
                                 with trading_status_lock:
                                     is_enabled = is_trading_enabled
@@ -1504,11 +1632,10 @@ def main_loop():
                         except Exception as e: 
                             logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
                 
-                # يتم التنظيف في نهاية كل دفعة
                 logger.info(f"🧹 [Batch Cleanup] Finished batch {i//batch_size + 1}. Performing cleanup to free memory.")
                 perform_end_of_cycle_cleanup()
                 logger.info(f"⏸️ [Batch Cooldown] Waiting for 10 seconds before next batch...")
-                time.sleep(10) # توقف قصير بين الدفعات
+                time.sleep(10)
 
             logger.info("✅ [End of Cycle] Full scan cycle finished.")
             logger.info(f"⏳ [End of Cycle] Waiting for 300 seconds before next full cycle...")
@@ -1522,7 +1649,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V21.1) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V21.2) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1555,9 +1682,14 @@ def home():
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
+    # Get the latest profile without forcing a re-check unless needed
+    profile_copy = dict(current_filter_profile_cache)
     return jsonify({
-        "fear_and_greed": get_fear_and_greed_index(), "market_state": state_copy,
-        "db_ok": check_db_connection(), "api_ok": check_api_status(),
+        "fear_and_greed": get_fear_and_greed_index(), 
+        "market_state": state_copy,
+        "filter_profile": profile_copy,
+        "db_ok": check_db_connection(), 
+        "api_ok": check_api_status(),
         "usdt_balance": get_usdt_balance()
     })
 
@@ -1760,6 +1892,8 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         Thread(target=determine_market_state, daemon=True).start()
+        # Initialize the filter profile for the first time
+        get_current_filter_profile()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
@@ -1772,7 +1906,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.1 - DB FIX) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.2 - DYNAMIC FILTERS) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
