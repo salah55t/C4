@@ -833,9 +833,9 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     if regime in ["DOWNTREND", "STRONG DOWNTREND"]:
         log_rejection(symbol, "Speed Filter", {"detail": f"Disabled due to market regime: {regime}"})
         return True
-    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (25.0, 0.3, 50.0, 75.0)
-    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (17.0, 0.2, 45.0, 75.0)
-    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (16.0, 0.1, 35.0, 65.0)
+    if regime == "STRONG UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (20.0, 0.1, 50.0, 75.0)
+    elif regime == "UPTREND": adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (17.0, 0.05, 45.0, 75.0)
+    else: adx_threshold, rel_vol_threshold, rsi_min, rsi_max = (16.0, 0.01, 35.0, 65.0)
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     if (adx >= adx_threshold and rel_vol >= rel_vol_threshold and rsi_min <= rsi < rsi_max): return True
     log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
