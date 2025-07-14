@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V23.1 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V23.2 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v23.1_dynamic_filters.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v23.2_batched.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV23.1')
+logger = logging.getLogger('CryptoBotV23.2')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,7 +56,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.1 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.2 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -73,6 +73,9 @@ DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
+# --- [جديد] إعدادات معالجة الدُفعات ---
+SYMBOL_PROCESSING_BATCH_SIZE: int = 50
+
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
@@ -101,13 +104,10 @@ PEAK_CHECK_PERIOD: int = 50
 PULLBACK_THRESHOLD_PCT: float = 0.988
 BREAKOUT_ALLOWANCE_PCT: float = 1.003
 
-# --- [جديد] إعدادات الفلاتر الديناميكية ---
+# --- إعدادات الفلاتر الديناميكية ---
 DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 900 # ثانية (15 دقيقة)
 DYNAMIC_FILTER_SAMPLE_SIZE: int = 40 # عدد العملات في العينة
 DYNAMIC_FILTER_PERCENTILE: int = 35 # النسبة المئوية المستخدمة لتحديد العتبات
-
-# --- [محذوف] تم حذف مصفوفة الفلاتر الثابتة FILTER_PROFILES ---
-# The static FILTER_PROFILES dictionary has been removed.
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -123,16 +123,16 @@ rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
 market_state_lock = Lock()
-# --- [جديد] متغيرات لتخزين الفلتر الديناميكي ---
+# --- متغيرات لتخزين الفلتر الديناميكي ---
 dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V23.1) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V23.2) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V23.1 مع فلاتر ديناميكية وإصلاح بدء التشغيل.
+    لوحة تحكم احترافية V23.2 مع معالجة بالدفعات وفلترة النماذج.
     """
     return """
 <!DOCTYPE html>
@@ -140,7 +140,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V23.1 - فلاتر ديناميكية</title>
+    <title>لوحة تحكم التداول V23.2 - معالجة بالدفعات</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -177,7 +177,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V23.1</span>
+                <span class="text-text-secondary font-medium">V23.2</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -899,7 +899,7 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
-# --- [جديد] دالة تحليل السوق وتوليد الفلاتر الديناميكية ---
+# --- دالة تحليل السوق وتوليد الفلاتر الديناميكية ---
 def analyze_market_and_create_dynamic_profile() -> None:
     """
     Analyzes a sample of the market to generate a dynamic filter profile.
@@ -1013,7 +1013,7 @@ def analyze_market_and_create_dynamic_profile() -> None:
     
     logger.info(f"✅ [Dynamic Filter] New profile '{profile_name}' created. Thresholds: {dynamic_thresholds}")
 
-# --- [معدل] دالة للحصول على ملف الفلتر الحالي ---
+# --- دالة للحصول على ملف الفلتر الحالي ---
 def get_current_filter_profile() -> Dict[str, Any]:
     with dynamic_filter_lock:
         # Return a copy to prevent modification outside the lock
@@ -1036,14 +1036,15 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"📁 Created model directory: {model_dir_path}")
     model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
     if not os.path.exists(model_path):
-        logger.warning(f"⚠️ [ML Model] Model file not found at '{model_path}'.")
+        # This check is now mostly redundant due to pre-filtering, but good for safety
+        logger.debug(f"⚠️ [ML Model] Model file not found at '{model_path}'.")
         return None
     try:
         with open(model_path, 'rb') as f:
             model_bundle = pickle.load(f)
         if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
             ml_models_cache[model_name] = model_bundle
-            logger.info(f"✅ [ML Model] Loaded model '{model_name}' successfully.")
+            logger.debug(f"✅ [ML Model] Loaded model '{model_name}' successfully.")
             return model_bundle
         else:
             logger.error(f"❌ [ML Model] Model bundle at '{model_path}' is incomplete.")
@@ -1180,10 +1181,10 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# --- [معدل] دالة الفلاتر الموحدة لاستخدام الفلتر الديناميكي ---
+# --- دالة الفلاتر الموحدة لاستخدام الفلتر الديناميكي ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    [مُعدل V23.1] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
+    [مُعدّل V23.2] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
     """
     profile_name = profile.get('name', 'Default Dynamic')
     
@@ -1596,7 +1597,7 @@ def perform_end_of_cycle_cleanup():
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
-# ---------------------- حلقة العمل الرئيسية (مع منطق محسن) ----------------------
+# ---------------------- [معدل] حلقة العمل الرئيسية (مع منطق الدُفعات وفلترة النماذج) ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1609,7 +1610,7 @@ def main_loop():
         try:
             logger.info("🌀 Starting new main cycle...")
             
-            # --- [معدل] تحديث حالة السوق والفلاتر الديناميكية في بداية كل دورة ---
+            # --- تحديث حالة السوق والفلاتر الديناميكية في بداية كل دورة ---
             determine_market_state()
             analyze_market_and_create_dynamic_profile()
             
@@ -1621,18 +1622,38 @@ def main_loop():
 
             btc_data = get_btc_data_for_bot()
             
-            # --- [معدل] معالجة العملات بشكل عشوائي لتوزيع الحمل ---
-            symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
+            # --- [جديد] فلترة الرموز التي لها نماذج فقط ---
+            logger.info("🔍 Filtering symbols to find those with existing ML models...")
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
+            
+            symbols_with_models = []
+            for symbol in validated_symbols_to_scan:
+                model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+                model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
+                if os.path.exists(model_path):
+                    symbols_with_models.append(symbol)
+            
+            if not symbols_with_models:
+                logger.warning("⚠️ No symbols with corresponding models found. Skipping scan cycle for now.")
+                time.sleep(300)
+                continue
+                
+            logger.info(f"✅ Found {len(symbols_with_models)} symbols with models. Starting scan...")
+            symbols_to_process = random.sample(symbols_with_models, len(symbols_with_models))
 
+            processed_count = 0
             for symbol in symbols_to_process:
                 try:
+                    # The check for model existence is now implicit, but we can double check
+                    strategy = TradingStrategy(symbol)
+                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                        logger.debug(f"Skipping {symbol} as model bundle is incomplete (should not happen after pre-filtering).")
+                        continue
+
                     with signal_cache_lock:
                         open_trade = open_signals_cache.get(symbol)
                         open_trade_count = len(open_signals_cache)
-
-                    strategy = TradingStrategy(symbol)
-                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                        continue
 
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_15m is None or df_15m.empty: continue
@@ -1730,7 +1751,15 @@ def main_loop():
                             send_new_signal_alert(saved_signal)
                 except Exception as e: 
                     logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
-                    time.sleep(1) 
+                    time.sleep(1)
+                finally:
+                    # --- [جديد] منطق الدُفعات وجامع القمامة ---
+                    processed_count += 1
+                    if processed_count % SYMBOL_PROCESSING_BATCH_SIZE == 0 and processed_count < len(symbols_to_process):
+                        logger.info(f"🗑️ Processed batch of {SYMBOL_PROCESSING_BATCH_SIZE} symbols ({processed_count}/{len(symbols_to_process)}). Running garbage collector...")
+                        gc.collect()
+                        logger.info("🗑️ Garbage collection complete. Continuing to next batch.")
+                        time.sleep(2) # Short pause after GC
             
             logger.info("✅ [End of Cycle] Full scan cycle finished.")
             perform_end_of_cycle_cleanup()
@@ -1745,7 +1774,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V23.1) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V23.2) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1973,14 +2002,13 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         
-        # --- [معدل] تحميل قائمة العملات أولاً لضمان جاهزيتها ---
+        # --- تحميل قائمة العملات أولاً لضمان جاهزيتها ---
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         
-        # --- [معدل] بدء الخدمات الأخرى بعد تحميل قائمة العملات ---
+        # --- بدء الخدمات الأخرى بعد تحميل قائمة العملات ---
         Thread(target=determine_market_state, daemon=True).start()
-        # تم حذف الاستدعاء الأولي لـ analyze_market_and_create_dynamic_profile من هنا لمنع التحذير
         
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
@@ -1991,7 +2019,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.1 - Startup Fix) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.2 - Batched Processing) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
