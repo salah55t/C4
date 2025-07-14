@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22.4 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V22.5 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22.4_pullback_filter.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22.5_relaxed_filters.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22.4')
+logger = logging.getLogger('CryptoBotV22.5')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.4 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.5 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -94,12 +94,12 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- [مُعدل V22.4] فلتر الشراء عند التصحيح (Pullback) ---
+# --- فلتر الشراء عند التصحيح (Pullback) ---
 USE_PEAK_FILTER: bool = True
-PEAK_CHECK_PERIOD: int = 24 # عدد الشموع للتحقق من القمة
-PEAK_THRESHOLD_PCT: float = 0.988 # النسبة التي يجب أن يقل بها السعر عن القمة للسماح بالشراء. 0.988 تعني طلب تصحيح بنسبة 1.2% على الأقل
+PEAK_CHECK_PERIOD: int = 50 
+PEAK_THRESHOLD_PCT: float = 0.988 
 
-# --- مصفوفة الفلاتر الديناميكية (قيم مخففة ومنطقية) ---
+# --- [مُعدل V22.5] مصفوفة الفلاتر الديناميكية (قيم مخففة) ---
 FILTER_PROFILES = {
     "HighVolatility": {
         "Uptrend": {
@@ -117,8 +117,15 @@ FILTER_PROFILES = {
     "Normal": {
         "Uptrend": {
             "description": "جلسة عادية / اتجاه صاعد (شروط مخففة)", "allow_trading": True,
-            "adx": 20, "rel_vol": 0.45, "rsi_range": (45, 80), "roc": 0.5, "accel": -0.2,
-            "slope": 0.0, "min_rrr": 1.4, "min_volatility_pct": 0.4, "min_btc_correlation": 0.05
+            "adx": 20,                  # القيمة الأصلية: 20
+            "rel_vol": 0.45,            # القيمة الأصلية: 0.45
+            "rsi_range": (45, 80),      # القيمة الأصلية: (45, 80)
+            "roc": -0.5,                # تم تخفيفه من 0.5 للسماح بالزخم السلبي الطفيف
+            "accel": -0.4,              # تم تخفيفه من -0.2 للسماح بتباطؤ أكبر
+            "slope": 0.0,               # القيمة الأصلية: 0.0
+            "min_rrr": 1.4,             # القيمة الأصلية: 1.4
+            "min_volatility_pct": 0.4,  # القيمة الأصلية: 0.4
+            "min_btc_correlation": 0.05 # القيمة الأصلية: 0.05
         },
         "Ranging": {
             "description": "جلسة عادية / اتجاه عرضي (شروط مخففة)", "allow_trading": True,
@@ -168,10 +175,10 @@ current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Rangin
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V22.4) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V22.5) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V22.4 مع فلتر الشراء عند التصحيح.
+    لوحة تحكم احترافية V22.5 مع فلاتر مخففة.
     """
     return """
 <!DOCTYPE html>
@@ -179,7 +186,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22.4 - فلتر الشراء عند التصحيح</title>
+    <title>لوحة تحكم التداول V22.5 - فلاتر مخففة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -216,7 +223,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22.4</span>
+                <span class="text-text-secondary font-medium">V22.5</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -1124,7 +1131,7 @@ class TradingStrategy:
 # --- دالة الفلاتر الموحدة ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    [مُعدل V22.4] دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط، مع فلتر الشراء عند التصحيح.
+    [مُعدل V22.5] دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط، مع فلاتر مخففة.
     """
     profile_name = profile.get('name', 'Default')
 
@@ -1176,7 +1183,7 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
         log_rejection(symbol, f"RRR Filter ({profile_name})", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": profile['min_rrr']})
         return False
         
-    # 7. [مُعدل V22.4] فلتر الشراء عند التصحيح (Pullback Filter)
+    # 7. فلتر الشراء عند التصحيح (Pullback Filter)
     if USE_PEAK_FILTER:
         if df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
             # نستبعد الشمعة الحالية قيد التكوين لضمان أن القمة من الشموع المكتملة
@@ -1671,7 +1678,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V22.4) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V22.5) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1912,7 +1919,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.4 - Pullback Filter) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.5 - Relaxed Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
