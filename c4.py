@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22.2 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V22.4 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22.2_optimized.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22.4_pullback_filter.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22.2')
+logger = logging.getLogger('CryptoBotV22.4')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.2 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.4 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -94,76 +94,45 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- [مُعدل V22.2] مصفوفة الفلاتر الديناميكية (قيم مخففة ومنطقية) ---
+# --- [مُعدل V22.4] فلتر الشراء عند التصحيح (Pullback) ---
+USE_PEAK_FILTER: bool = True
+PEAK_CHECK_PERIOD: int = 50 # عدد الشموع للتحقق من القمة
+PEAK_THRESHOLD_PCT: float = 0.988 # النسبة التي يجب أن يقل بها السعر عن القمة للسماح بالشراء. 0.988 تعني طلب تصحيح بنسبة 1.2% على الأقل
+
+# --- مصفوفة الفلاتر الديناميكية (قيم مخففة ومنطقية) ---
 FILTER_PROFILES = {
     "HighVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب عالي / اتجاه صاعد (شروط متوازنة)", "allow_trading": True,
-            "adx": 22,                  # تم تخفيضه من 24
-            "rel_vol": 0.6,             # تم تخفيضه من 0.7
-            "rsi_range": (48, 85),      # تم توسيع النطاق
-            "roc": 0.8,                 # تم تخفيضه من 1.0
-            "accel": 0.1,               # تم تخفيضه بشكل كبير من 0.4
-            "slope": 0.05,              # تم تخفيضه بشكل كبير من 0.15
-            "min_rrr": 1.5,             # تم تخفيضه من 1.7
-            "min_volatility_pct": 0.5,  # تم تخفيضه من 0.6
-            "min_btc_correlation": 0.1  # تم تخفيضه من 0.25
+            "adx": 22, "rel_vol": 0.6, "rsi_range": (48, 85), "roc": 0.8, "accel": 0.1,
+            "slope": 0.05, "min_rrr": 1.5, "min_volatility_pct": 0.5, "min_btc_correlation": 0.1
         },
         "Ranging": {
             "description": "جلسة تذبذب عالي / اتجاه عرضي (شروط متوازنة)", "allow_trading": True,
-            "adx": 25,                  # تم تخفيضه من 28
-            "rel_vol": 0.9,             # تم تخفيضه من 1.1
-            "rsi_range": (40, 70),      # تم توسيع النطاق
-            "roc": 1.0,                 # تم تخفيضه من 1.2
-            "accel": 0.2,               # تم تخفيضه بشكل كبير من 0.6
-            "slope": 0.1,               # تم تخفيضه من 0.2
-            "min_rrr": 1.8,             # تم تخفيضه من 2.0
-            "min_volatility_pct": 0.6,  # تم تخفيضه من 0.7
-            "min_btc_correlation": -0.1 # السماح بالارتباط السلبي الطفيف
+            "adx": 25, "rel_vol": 0.9, "rsi_range": (40, 70), "roc": 1.0, "accel": 0.2,
+            "slope": 0.1, "min_rrr": 1.8, "min_volatility_pct": 0.6, "min_btc_correlation": -0.1
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
     "Normal": {
         "Uptrend": {
             "description": "جلسة عادية / اتجاه صاعد (شروط مخففة)", "allow_trading": True,
-            "adx": 20,                  # تم تخفيضه من 22
-            "rel_vol": 0.45,            # تم تخفيضه من 0.5
-            "rsi_range": (45, 80),      # تم توسيع النطاق
-            "roc": 0.5,                 # تم تخفيضه من 0.8
-            "accel": -0.2,              # السماح بالتباطؤ الطفيف
-            "slope": 0.0,               # السماح بالميل الصفري
-            "min_rrr": 1.4,             # تم تخفيضه من 1.5
-            "min_volatility_pct": 0.4,  # تم تخفيضه من 0.5
-            "min_btc_correlation": 0.05 # تخفيض كبير، شبه محايد
+            "adx": 20, "rel_vol": 0.45, "rsi_range": (45, 80), "roc": 0.5, "accel": -0.2,
+            "slope": 0.0, "min_rrr": 1.4, "min_volatility_pct": 0.4, "min_btc_correlation": 0.05
         },
         "Ranging": {
             "description": "جلسة عادية / اتجاه عرضي (شروط مخففة)", "allow_trading": True,
-            "adx": 22,                  # تم تخفيضه من 25
-            "rel_vol": 0.4,             # تم تخفيضه من 0.5
-            "rsi_range": (38, 62),      # تم توسيع النطاق
-            "roc": 0.6,                 # تم تخفيضه من 0.9
-            "accel": 0.0,               # السماح بالتباطؤ
-            "slope": 0.0,               # السماح بالميل الصفري
-            "min_rrr": 1.6,             # تم تخفيضه من 1.8
-            "min_volatility_pct": 0.35, # تم تخفيضه من 0.4
-            "min_btc_correlation": -0.2 # السماح بالارتباط السلبي
+            "adx": 22, "rel_vol": 0.4, "rsi_range": (38, 62), "roc": 0.6, "accel": 0.0,
+            "slope": 0.0, "min_rrr": 1.6, "min_volatility_pct": 0.35, "min_btc_correlation": -0.2
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
     "LowVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب منخفض / اتجاه صاعد (شروط مخففة جداً)", "allow_trading": True,
-            "adx": 18,                  # تم تخفيضه من 20
-            "rel_vol": 0.3,             # تم تخفيضه من 0.4
-            "rsi_range": (45, 75),      # تم توسيع النطاق
-            "roc": 0.25,                # تم تخفيضه بشكل كبير من 0.6
-            "accel": -0.5,              # السماح بتباطؤ ملحوظ
-            "slope": -0.1,              # السماح بميل سلبي طفيف
-            "min_rrr": 1.2,             # تم تخفيضه من 1.3
-            "min_volatility_pct": 0.25, # تم تخفيضه من 0.3
-            "min_btc_correlation": 0.0  # لا يتطلب ارتباط إيجابي
+            "adx": 18, "rel_vol": 0.3, "rsi_range": (45, 75), "roc": 0.25, "accel": -0.5,
+            "slope": -0.1, "min_rrr": 1.2, "min_volatility_pct": 0.25, "min_btc_correlation": 0.0
         },
-        # يبقى التداول في سوق عرضي ذو تذبذب منخفض محفوفاً بالمخاطر، لذا نتركه معطلاً
         "Ranging": {"description": "التداول محفوف بالمخاطر العالية", "allow_trading": False},
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     }
@@ -199,10 +168,10 @@ current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Rangin
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V22.2) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V22.4) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V22.2 مع فلاتر مُحسّنة.
+    لوحة تحكم احترافية V22.4 مع فلتر الشراء عند التصحيح.
     """
     return """
 <!DOCTYPE html>
@@ -210,7 +179,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22.2 - فلاتر مُحسّنة</title>
+    <title>لوحة تحكم التداول V22.4 - فلتر الشراء عند التصحيح</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -247,7 +216,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22.2</span>
+                <span class="text-text-secondary font-medium">V22.4</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -1153,9 +1122,9 @@ class TradingStrategy:
             return None
 
 # --- دالة الفلاتر الموحدة ---
-def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict) -> bool:
+def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط.
+    [مُعدل V22.4] دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط، مع فلتر الشراء عند التصحيح.
     """
     profile_name = profile.get('name', 'Default')
 
@@ -1207,6 +1176,25 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
         log_rejection(symbol, f"RRR Filter ({profile_name})", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": profile['min_rrr']})
         return False
         
+    # 7. [مُعدل V22.4] فلتر الشراء عند التصحيح (Pullback Filter)
+    if USE_PEAK_FILTER:
+        if df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
+            # نستبعد الشمعة الحالية قيد التكوين لضمان أن القمة من الشموع المكتملة
+            recent_candles = df_15m.iloc[-PEAK_CHECK_PERIOD:-1]
+            if not recent_candles.empty:
+                highest_high = recent_candles['high'].max()
+                # الشرط: يجب أن يكون سعر الدخول أقل من القمة بنسبة معينة
+                pullback_price_limit = highest_high * PEAK_THRESHOLD_PCT
+                
+                if entry_price >= pullback_price_limit:
+                    log_rejection(symbol, "Pullback Not Sufficient", {
+                        "entry_price": f"{entry_price:.4f}",
+                        "recent_peak": f"{highest_high:.4f}",
+                        "required_price_below": f"{pullback_price_limit:.4f}",
+                        "pullback_pct_required": f"{(1-PEAK_THRESHOLD_PCT):.2%}"
+                    })
+                    return False
+
     return True
 
 
@@ -1602,7 +1590,7 @@ def main_loop():
                                     tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                                     if not tp_sl_data: continue
 
-                                    if not passes_all_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data):
+                                    if not passes_all_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m):
                                         continue
 
                                     updated_signal_data = {
@@ -1624,7 +1612,7 @@ def main_loop():
                             tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                             if not tp_sl_data: continue
                             
-                            if not passes_all_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data):
+                            if not passes_all_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m):
                                 continue
                             
                             new_signal = {
@@ -1683,7 +1671,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V22.2) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V22.4) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1924,7 +1912,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.2 - Optimized Filters) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.4 - Pullback Filter) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
