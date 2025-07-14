@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V23.2 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V23.3 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v23.2_batched.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v23.3_market_sessions.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV23.2')
+logger = logging.getLogger('CryptoBotV23.3')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,7 +56,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.2 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.3 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -73,9 +73,7 @@ DIRECT_API_CHECK_INTERVAL: int = 10
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
-# --- [جديد] إعدادات معالجة الدُفعات ---
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
-
 
 # --- مؤشرات فنية ---
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
@@ -129,10 +127,10 @@ last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V23.2) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V23.3) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V23.2 مع معالجة بالدفعات وفلترة النماذج.
+    لوحة تحكم احترافية V23.3 مع فلاتر ديناميكية حسب البورصات العالمية.
     """
     return """
 <!DOCTYPE html>
@@ -140,7 +138,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V23.2 - معالجة بالدفعات</title>
+    <title>لوحة تحكم التداول V23.3 - فلاتر البورصات</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -177,7 +175,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V23.2</span>
+                <span class="text-text-secondary font-medium">V23.3</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -202,8 +200,8 @@ def get_dashboard_html():
                  </div>
             </div>
             <div class="card p-4">
-                 <h3 class="font-bold mb-3 text-lg text-text-secondary">البورصات المفتوحة</h3>
-                 <div id="open-exchanges-list" class="flex flex-wrap gap-2 items-center justify-center pt-2 skeleton h-12 w-full"></div>
+                 <h3 class="font-bold mb-3 text-lg text-text-secondary">البورصات النشطة</h3>
+                 <div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2 skeleton h-12 w-full"></div>
             </div>
             <div class="card p-4 flex flex-col justify-center items-center">
                 <h3 class="font-bold text-lg text-text-secondary mb-2">التحكم بالتداول الحقيقي</h3>
@@ -358,18 +356,20 @@ function updateMarketStatus() {
         profileDescDiv.textContent = profile.description;
         profileDescDiv.classList.remove('skeleton', 'h-5', 'w-full');
 
-        // Update Open Exchanges display
-        const exchanges = data.open_exchanges;
-        const exchangesDiv = document.getElementById('open-exchanges-list');
-        exchangesDiv.innerHTML = ''; // Clear previous content
-        exchangesDiv.classList.remove('skeleton', 'h-12');
-        if (exchanges && exchanges.length > 0) {
-            exchanges.forEach(ex => {
-                const badge = `<span class="bg-accent-blue/20 text-accent-blue text-sm font-semibold px-3 py-1 rounded-full">${ex}</span>`;
-                exchangesDiv.innerHTML += badge;
+        // [جديد] Update Active Market Sessions display
+        const sessions = data.active_sessions;
+        const sessionsDiv = document.getElementById('active-sessions-list');
+        sessionsDiv.innerHTML = ''; 
+        sessionsDiv.classList.remove('skeleton', 'h-12');
+        if (sessions && sessions.length > 0) {
+            const sessionColors = { 'London': 'bg-blue-500/20 text-blue-300', 'New York': 'bg-green-500/20 text-green-300', 'Tokyo': 'bg-red-500/20 text-red-300' };
+            sessions.forEach(session => {
+                const colorClass = sessionColors[session] || 'bg-gray-500/20 text-gray-300';
+                const badge = `<span class="${colorClass} text-sm font-semibold px-3 py-1 rounded-full">${session}</span>`;
+                sessionsDiv.innerHTML += badge;
             });
         } else {
-            exchangesDiv.innerHTML = '<span class="text-text-secondary text-sm">لا توجد بورصات رئيسية مفتوحة</span>';
+            sessionsDiv.innerHTML = '<span class="text-text-secondary text-sm">لا توجد بورصات رئيسية مفتوحة</span>';
         }
 
 
@@ -899,11 +899,33 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
-# --- دالة تحليل السوق وتوليد الفلاتر الديناميكية ---
+# --- [جديد] دالة لتحديد جلسات السوق النشطة ---
+def get_active_market_sessions() -> List[str]:
+    """
+    Checks the current UTC time and returns a list of active major market sessions.
+    """
+    sessions = {
+        "London": (8, 17),
+        "New York": (13, 22),
+        "Tokyo": (0, 9)
+    }
+    active_sessions = []
+    now_utc = datetime.now(timezone.utc)
+    current_hour = now_utc.hour
+    
+    # Check for weekday
+    if now_utc.weekday() >= 5: # Saturday or Sunday
+        return []
+
+    for session, (start, end) in sessions.items():
+        if start <= current_hour < end:
+            active_sessions.append(session)
+    return active_sessions
+
+# --- [معدل] دالة تحليل السوق وتوليد الفلاتر الديناميكية مع وعي بالبورصات ---
 def analyze_market_and_create_dynamic_profile() -> None:
     """
-    Analyzes a sample of the market to generate a dynamic filter profile.
-    This function is the core of the new dynamic filtering mechanism.
+    [V23.3] Analyzes market sample and active sessions to generate a highly adaptive filter profile.
     """
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     
@@ -917,82 +939,97 @@ def analyze_market_and_create_dynamic_profile() -> None:
         logger.warning("⚠️ [Dynamic Filter] Cannot run analysis: Client or symbols not initialized.")
         return
 
-    sample_symbols = random.sample(validated_symbols_to_scan, min(len(validated_symbols_to_scan), DYNAMIC_FILTER_SAMPLE_SIZE))
-    
-    adx_values, roc_values, accel_values, slope_values, volatility_pct_values, rel_vol_values = [], [], [], [], [], []
+    # --- الخطوة 1: تحديد الجلسات النشطة وعامل التقلب ---
+    active_sessions = get_active_market_sessions()
+    num_sessions = len(active_sessions)
+    volatility_multiplier = 1.0  # Default
+    session_desc = "سيولة عادية"
 
+    if num_sessions == 0:
+        logger.warning(" trading is disabled due to no active market sessions (weekend/holiday).")
+        with dynamic_filter_lock:
+            dynamic_filter_profile_cache = {
+                "name": "التداول متوقف", "description": "لا توجد بورصات رئيسية مفتوحة حالياً.",
+                "allow_trading": False, "filters": {}, "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+            last_dynamic_filter_analysis_time = time.time()
+        return
+    elif num_sessions > 1:
+        volatility_multiplier = 0.9  # تخفيف الفلاتر (أسهل)
+        session_desc = f"سيولة عالية ({', '.join(active_sessions)})"
+    else: # num_sessions == 1
+        volatility_multiplier = 1.1  # تشديد الفلاتر (أصعب)
+        session_desc = f"سيولة منخفضة ({active_sessions[0]})"
+
+    # --- الخطوة 2: تحليل عينة السوق (كما في السابق) ---
+    sample_symbols = random.sample(validated_symbols_to_scan, min(len(validated_symbols_to_scan), DYNAMIC_FILTER_SAMPLE_SIZE))
+    adx_values, roc_values, accel_values, slope_values, volatility_pct_values, rel_vol_values = [], [], [], [], [], []
     btc_data = get_btc_data_for_bot()
 
     for symbol in sample_symbols:
         try:
-            df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5) # 5 days is enough for this
-            if df is None or len(df) < max(ADX_PERIOD, MOMENTUM_PERIOD) + 5:
-                continue
-
+            df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
+            if df is None or len(df) < max(ADX_PERIOD, MOMENTUM_PERIOD) + 5: continue
             df_features = calculate_features(df, btc_data)
-            if df_features.empty:
-                continue
-            
+            if df_features.empty: continue
             last_features = df_features.iloc[-1]
-            
             if np.isfinite(last_features.get('adx', np.nan)): adx_values.append(last_features['adx'])
             if np.isfinite(last_features.get(f'roc_{MOMENTUM_PERIOD}', np.nan)): roc_values.append(last_features[f'roc_{MOMENTUM_PERIOD}'])
             if np.isfinite(last_features.get('roc_acceleration', np.nan)): accel_values.append(last_features['roc_acceleration'])
             if np.isfinite(last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', np.nan)): slope_values.append(last_features[f'ema_slope_{EMA_SLOPE_PERIOD}'])
             if np.isfinite(last_features.get('relative_volume', np.nan)): rel_vol_values.append(last_features['relative_volume'])
-            
             last_atr = last_features.get('atr', 0)
             last_price = df['close'].iloc[-1]
             if last_price > 0 and last_atr > 0:
                 volatility_pct = (last_atr / last_price) * 100
-                if np.isfinite(volatility_pct):
-                    volatility_pct_values.append(volatility_pct)
-
+                if np.isfinite(volatility_pct): volatility_pct_values.append(volatility_pct)
         except Exception as e:
             logger.debug(f"⚠️ [Dynamic Filter Analysis] Could not process {symbol}: {e}")
-        time.sleep(0.2) 
+        time.sleep(0.2)
 
     if not roc_values:
         logger.warning("⚠️ [Dynamic Filter] Could not calculate any market values. Skipping dynamic adjustment.")
-        with dynamic_filter_lock:
-            last_dynamic_filter_analysis_time = time.time() # Still update time to avoid retrying immediately
+        with dynamic_filter_lock: last_dynamic_filter_analysis_time = time.time()
         return
 
-    # --- توليد عتبات الفلاتر ---
+    # --- الخطوة 3: توليد العتبات الأساسية وتعديلها بعامل التقلب ---
     dynamic_thresholds = {
-        'adx': float(np.percentile(adx_values, DYNAMIC_FILTER_PERCENTILE)) if adx_values else 18.0,
-        'rel_vol': float(np.percentile(rel_vol_values, DYNAMIC_FILTER_PERCENTILE)) if rel_vol_values else 0.7,
-        'roc': float(np.percentile(roc_values, DYNAMIC_FILTER_PERCENTILE)) if roc_values else 0.1,
-        'accel': float(np.percentile(accel_values, DYNAMIC_FILTER_PERCENTILE)) if accel_values else 0.0,
-        'slope': float(np.percentile(slope_values, DYNAMIC_FILTER_PERCENTILE)) if slope_values else 0.0,
-        'min_volatility_pct': float(np.percentile(volatility_pct_values, DYNAMIC_FILTER_PERCENTILE)) if volatility_pct_values else 0.3,
+        'adx': (np.percentile(adx_values, DYNAMIC_FILTER_PERCENTILE) if adx_values else 18.0) * volatility_multiplier,
+        'rel_vol': (np.percentile(rel_vol_values, DYNAMIC_FILTER_PERCENTILE) if rel_vol_values else 0.7) * volatility_multiplier,
+        'roc': np.percentile(roc_values, DYNAMIC_FILTER_PERCENTILE) if roc_values else 0.1,
+        'accel': np.percentile(accel_values, DYNAMIC_FILTER_PERCENTILE) if accel_values else 0.0,
+        'slope': np.percentile(slope_values, DYNAMIC_FILTER_PERCENTILE) if slope_values else 0.0,
+        'min_volatility_pct': np.percentile(volatility_pct_values, DYNAMIC_FILTER_PERCENTILE) if volatility_pct_values else 0.3,
     }
 
-    # --- تحديد ملف التداول بناءً على حالة السوق ---
-    with market_state_lock:
-        regime = current_market_state.get("overall_regime", "RANGING")
+    # --- الخطوة 4: تحديد ملف التداول النهائي بناءً على حالة السوق والجلسات ---
+    with market_state_lock: regime = current_market_state.get("overall_regime", "RANGING")
     
     profile_name = "Dynamic Ranging"
-    profile_desc = "جلسة عرضية (فلاتر ديناميكية)"
-    allow_trading = True
+    final_filters = {}
     
-    if "UPTREND" in regime:
+    if "STRONG UPTREND" in regime:
+        profile_name = "Dynamic Strong Uptrend"
+        final_filters = {
+            "adx": dynamic_thresholds['adx'] * 0.8, "rel_vol": dynamic_thresholds['rel_vol'] * 0.8,
+            "rsi_range": (40, 95), "roc": dynamic_thresholds['roc'] * 0.8, "accel": dynamic_thresholds['accel'],
+            "slope": dynamic_thresholds['slope'] * 0.8, "min_rrr": 1.1, 
+            "min_volatility_pct": dynamic_thresholds['min_volatility_pct'] * 0.9, "min_btc_correlation": -0.2
+        }
+    elif "UPTREND" in regime:
         profile_name = "Dynamic Uptrend"
-        profile_desc = "جلسة صاعدة (فلاتر ديناميكية)"
-        # Loosen requirements slightly in uptrend
         final_filters = {
             "adx": dynamic_thresholds['adx'] * 0.9, "rel_vol": dynamic_thresholds['rel_vol'] * 0.9,
             "rsi_range": (35, 90), "roc": dynamic_thresholds['roc'], "accel": dynamic_thresholds['accel'],
-            "slope": dynamic_thresholds['slope'] * 0.8, "min_rrr": 1.2, 
+            "slope": dynamic_thresholds['slope'] * 0.9, "min_rrr": 1.2, 
             "min_volatility_pct": dynamic_thresholds['min_volatility_pct'], "min_btc_correlation": -0.1
         }
     elif "DOWNTREND" in regime:
         profile_name = "Dynamic Downtrend"
-        profile_desc = "التداول غير مسموح به في اتجاه هابط"
-        allow_trading = False
-        final_filters = {} # No filters needed if trading is off
-    else: # Ranging
-        # Use tighter requirements for ranging market
+        # Trading is disallowed, but we can set filters for logging/analysis if needed
+        final_filters = {}
+    else: # RANGING
+        profile_name = "Dynamic Ranging"
         final_filters = {
             "adx": dynamic_thresholds['adx'] * 1.1, "rel_vol": dynamic_thresholds['rel_vol'] * 1.1,
             "rsi_range": (30, 70), "roc": dynamic_thresholds['roc'], "accel": dynamic_thresholds['accel'],
@@ -1003,26 +1040,22 @@ def analyze_market_and_create_dynamic_profile() -> None:
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
             "name": profile_name,
-            "description": profile_desc,
-            "allow_trading": allow_trading,
+            "description": session_desc,
+            "allow_trading": "DOWNTREND" not in regime,
             "filters": final_filters,
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "source_metrics": {k: f'{v:.4f}' for k, v in dynamic_thresholds.items()}
         }
         last_dynamic_filter_analysis_time = time.time()
     
-    logger.info(f"✅ [Dynamic Filter] New profile '{profile_name}' created. Thresholds: {dynamic_thresholds}")
+    logger.info(f"✅ [Dynamic Filter] New profile '{profile_name}' created. Session state: {session_desc}")
+
 
 # --- دالة للحصول على ملف الفلتر الحالي ---
 def get_current_filter_profile() -> Dict[str, Any]:
     with dynamic_filter_lock:
         # Return a copy to prevent modification outside the lock
         return dict(dynamic_filter_profile_cache)
-
-def get_open_exchanges() -> List[str]:
-    # This function is not used in the core logic but available for the dashboard
-    return []
-
 
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
@@ -1036,7 +1069,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.info(f"📁 Created model directory: {model_dir_path}")
     model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
     if not os.path.exists(model_path):
-        # This check is now mostly redundant due to pre-filtering, but good for safety
         logger.debug(f"⚠️ [ML Model] Model file not found at '{model_path}'.")
         return None
     try:
@@ -1184,7 +1216,7 @@ class TradingStrategy:
 # --- دالة الفلاتر الموحدة لاستخدام الفلتر الديناميكي ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    [مُعدّل V23.2] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
+    [مُعدّل V23.3] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
     """
     profile_name = profile.get('name', 'Default Dynamic')
     
@@ -1597,7 +1629,7 @@ def perform_end_of_cycle_cleanup():
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
-# ---------------------- [معدل] حلقة العمل الرئيسية (مع منطق الدُفعات وفلترة النماذج) ----------------------
+# ---------------------- حلقة العمل الرئيسية (مع منطق الدُفعات وفلترة النماذج) ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1616,13 +1648,13 @@ def main_loop():
             
             filter_profile = get_current_filter_profile()
             if not filter_profile or not filter_profile.get('allow_trading'):
-                logger.warning(f"🔴 Trading is disallowed by the current dynamic profile: '{filter_profile.get('name')}'. Skipping scan cycle.")
+                logger.warning(f"🔴 Trading is disallowed by the current dynamic profile: '{filter_profile.get('name')} - {filter_profile.get('description')}'. Skipping scan cycle.")
                 time.sleep(300)
                 continue
 
             btc_data = get_btc_data_for_bot()
             
-            # --- [جديد] فلترة الرموز التي لها نماذج فقط ---
+            # --- فلترة الرموز التي لها نماذج فقط ---
             logger.info("🔍 Filtering symbols to find those with existing ML models...")
             script_dir = os.path.dirname(os.path.abspath(__file__))
             model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
@@ -1645,10 +1677,8 @@ def main_loop():
             processed_count = 0
             for symbol in symbols_to_process:
                 try:
-                    # The check for model existence is now implicit, but we can double check
                     strategy = TradingStrategy(symbol)
                     if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                        logger.debug(f"Skipping {symbol} as model bundle is incomplete (should not happen after pre-filtering).")
                         continue
 
                     with signal_cache_lock:
@@ -1716,7 +1746,7 @@ def main_loop():
                         
                         new_signal = {
                             'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Filter_Profile': filter_profile['name']}, 
+                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Filter_Profile': f"{filter_profile['name']} ({filter_profile['description']})"}, 
                             'entry_price': entry_price, **tp_sl_data
                         }
                         
@@ -1753,7 +1783,7 @@ def main_loop():
                     logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
                     time.sleep(1)
                 finally:
-                    # --- [جديد] منطق الدُفعات وجامع القمامة ---
+                    # --- منطق الدُفعات وجامع القمامة ---
                     processed_count += 1
                     if processed_count % SYMBOL_PROCESSING_BATCH_SIZE == 0 and processed_count < len(symbols_to_process):
                         logger.info(f"🗑️ Processed batch of {SYMBOL_PROCESSING_BATCH_SIZE} symbols ({processed_count}/{len(symbols_to_process)}). Running garbage collector...")
@@ -1774,7 +1804,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V23.2) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V23.3) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1812,7 +1842,7 @@ def get_market_status():
         "fear_and_greed": get_fear_and_greed_index(), 
         "market_state": state_copy,
         "filter_profile": profile_copy,
-        "open_exchanges": get_open_exchanges(),
+        "active_sessions": get_active_market_sessions(), # [جديد]
         "db_ok": check_db_connection(), 
         "api_ok": check_api_status(),
         "usdt_balance": get_usdt_balance()
@@ -2019,7 +2049,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.2 - Batched Processing) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.3 - Market Session Awareness) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
