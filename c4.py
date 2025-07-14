@@ -104,19 +104,19 @@ USE_MOMENTUM_FILTER: bool = True
 DYNAMIC_FILTER_SETTINGS = {
     # في الاتجاه الصاعد القوي، يمكن أن نكون أكثر تساهلاً لأن الزخم العام في صالحنا
     "STRONG UPTREND": {
-        "adx": 25.0, "rel_vol": 0.7, "rsi_min": 50.0, "rsi_max": 80.0,
+        "adx": 25.0, "rel_vol": 0.4, "rsi_min": 50.0, "rsi_max": 80.0,
         "roc": 0.8, "roc_accel": 0.4, "ema_slope": 0.15,
         "min_volatility": 0.4, "min_correlation": 0.3, "min_rrr": 1.5
     },
     # في الاتجاه الصاعد، نكون متوازنين
     "UPTREND": {
-        "adx": 20.0, "rel_vol": 0.6, "rsi_min": 45.0, "rsi_max": 75.0,
+        "adx": 20.0, "rel_vol": 0.3, "rsi_min": 40.0, "rsi_max": 75.0,
         "roc": 1.0, "roc_accel": 0.5, "ema_slope": 0.2,
         "min_volatility": 0.5, "min_correlation": 0.2, "min_rrr": 1.7
     },
     # في السوق العرضي، نحتاج إلى شروط أقوى لتجنب الإشارات الكاذبة
     "RANGING": {
-        "adx": 20.0, "rel_vol": 0.5, "rsi_min": 35.0, "rsi_max": 65.0,
+        "adx": 20.0, "rel_vol": 0.2, "rsi_min": 30.0, "rsi_max": 65.0,
         "roc": 1.2, "roc_accel": 0.6, "ema_slope": 0.25,
         "min_volatility": 0.7, "min_correlation": 0.1, "min_rrr": 2.0
     },
