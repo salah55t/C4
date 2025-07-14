@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V21.1 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V21.2 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v21_db_fix.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21_sr_exit.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV21.1')
+logger = logging.getLogger('CryptoBotV21.2_SR_Exit')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.1 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V21.2 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False 
 trading_status_lock = Lock()
@@ -127,7 +127,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V21 - تداول حقيقي</title>
+    <title>لوحة تحكم التداول V21.2 - خروج ذكي</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -164,7 +164,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V21.1 - DB Fix</span>
+                <span class="text-text-secondary font-medium">V21.2 - خروج ذكي</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -1006,13 +1006,71 @@ def passes_speed_filter(last_features: pd.Series) -> bool:
     log_rejection(symbol, "Speed Filter", {"Regime": regime, "ADX": f"{adx:.2f} (Req: >{adx_threshold})", "Volume": f"{rel_vol:.2f} (Req: >{rel_vol_threshold})", "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"})
     return False
 
-def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
+def calculate_tp_sl_atr_fallback(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
+    """
+    الخطة البديلة: حساب الهدف والوقف باستخدام ATR فقط.
+    """
     if last_atr <= 0:
         log_rejection(symbol, "Invalid ATR for Fallback", {"detail": "ATR is zero or negative"})
         return None
     fallback_tp = entry_price + (last_atr * ATR_FALLBACK_TP_MULTIPLIER)
     fallback_sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
     return {'target_price': fallback_tp, 'stop_loss': fallback_sl, 'source': 'ATR_Fallback'}
+
+def calculate_tp_sl_with_sr(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
+    """
+    [مطور] حساب الهدف والوقف باستخدام مستويات الدعم والمقاومة من قاعدة البيانات، مع خطة بديلة.
+    """
+    if not check_db_connection() or not conn:
+        logger.warning(f"⚠️ [{symbol}] لا يوجد اتصال بقاعدة البيانات، سيتم استخدام ATR كخطة بديلة.")
+        return calculate_tp_sl_atr_fallback(symbol, entry_price, last_atr)
+
+    target_price = None
+    stop_loss = None
+
+    try:
+        with conn.cursor() as cur:
+            # البحث عن أقرب مستوى مقاومة (هدف) فوق سعر الدخول
+            cur.execute("""
+                SELECT level_price FROM support_resistance_levels 
+                WHERE symbol = %s AND level_price > %s 
+                AND level_type IN ('resistance', 'confluence', 'fib_resistance', 'poc')
+                ORDER BY level_price ASC, score DESC LIMIT 1;
+            """, (symbol, entry_price))
+            resistance_level = cur.fetchone()
+            if resistance_level:
+                target_price = resistance_level['level_price']
+
+            # البحث عن أقرب مستوى دعم (وقف) تحت سعر الدخول
+            cur.execute("""
+                SELECT level_price FROM support_resistance_levels 
+                WHERE symbol = %s AND level_price < %s
+                AND level_type IN ('support', 'confluence', 'fib_support', 'poc')
+                ORDER BY level_price DESC, score DESC LIMIT 1;
+            """, (symbol, entry_price))
+            support_level = cur.fetchone()
+            if support_level:
+                stop_loss = support_level['level_price']
+        
+        # التحقق من النتائج واللجوء للخطة البديلة إذا لزم الأمر
+        if target_price and stop_loss:
+            # التأكد من أن وقف الخسارة ليس قريباً جداً
+            if (entry_price - stop_loss) / entry_price < 0.002: # أقل من 0.2%
+                 logger.warning(f"⚠️ [{symbol}] مستوى الدعم قريب جداً ({stop_loss}). سيتم استخدام ATR لوقف الخسارة.")
+                 sl_fallback = calculate_tp_sl_atr_fallback(symbol, entry_price, last_atr)
+                 if sl_fallback: stop_loss = sl_fallback['stop_loss']
+
+            logger.info(f"🎯 [{symbol}] تم تحديد الهدف والوقف من قاعدة البيانات: TP={target_price}, SL={stop_loss}")
+            return {'target_price': target_price, 'stop_loss': stop_loss, 'source': 'SR_Levels'}
+        else:
+            logger.warning(f"⚠️ [{symbol}] لم يتم العثور على مستويات دعم/مقاومة كافية. TP found: {bool(target_price)}, SL found: {bool(stop_loss)}. سيتم استخدام ATR كخطة بديلة.")
+            return calculate_tp_sl_atr_fallback(symbol, entry_price, last_atr)
+
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] خطأ أثناء جلب مستويات الدعم/المقاومة: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return calculate_tp_sl_atr_fallback(symbol, entry_price, last_atr)
+
 
 def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
@@ -1139,6 +1197,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     rrr = profit_pct / risk_pct if risk_pct > 0 else 0
     with market_state_lock: market_regime = current_market_state.get('overall_regime', 'N/A')
     confidence_display = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
+    exit_strategy = signal_data['signal_details'].get('Exit_Strategy_Source', 'N/A')
     
     trade_type_msg = ""
     if signal_data.get('is_real_trade'):
@@ -1148,7 +1207,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     message = (f"💡 *توصية تداول جديدة* 💡\n\n*العملة:* `{symbol}`\n*حالة السوق:* `{market_regime}`\n{trade_type_msg}\n"
                f"*الدخول:* `{entry:.8f}`\n*الهدف:* `{target:.8f}`\n*وقف الخسارة:* `{sl:.8f}`\n\n"
                f"*الربح المتوقع:* `{profit_pct:.2f}%`\n*المخاطرة/العائد:* `1:{rrr:.2f}`\n\n"
-               f"*ثقة النموذج:* `{confidence_display}`")
+               f"*ثقة النموذج:* `{confidence_display}`\n*استراتيجية الخروج:* `{exit_strategy}`")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
         log_and_notify('info', f"New Signal: {symbol} in {market_regime} market. Real Trade: {signal_data.get('is_real_trade', False)}", "NEW_SIGNAL")
@@ -1159,12 +1218,14 @@ def send_trade_update_alert(signal_data: Dict[str, Any], old_signal_data: Dict[s
     old_sl = float(old_signal_data['stop_loss']); new_sl = float(signal_data['stop_loss'])
     old_conf = old_signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
     new_conf = signal_data['signal_details'].get('ML_Confidence_Display', 'N/A')
+    exit_strategy = signal_data['signal_details'].get('Exit_Strategy_Source', 'N/A')
     
     message = (f"🔄 *تحديث صفقة (تعزيز)* 🔄\n\n"
                f"*العملة:* `{symbol}`\n\n"
                f"*الثقة:* `{old_conf}` ⬅️ `{new_conf}`\n"
                f"*الهدف:* `{old_target:.8f}` ⬅️ `{new_target:.8f}`\n"
-               f"*الوقف:* `{old_sl:.8f}` ⬅️ `{new_sl:.8f}`\n\n"
+               f"*الوقف:* `{old_sl:.8f}` ⬅️ `{new_sl:.8f}`\n"
+               f"*استراتيجية الخروج:* `{exit_strategy}`\n\n"
                f"تم تحديث الصفقة بناءً على إشارة شراء أقوى.")
     reply_markup = {"inline_keyboard": [[{"text": "📊 فتح لوحة التحكم", "url": WEBHOOK_URL or '#'}]]}
     if send_telegram_message(CHAT_ID, message, reply_markup):
@@ -1337,7 +1398,7 @@ def perform_end_of_cycle_cleanup():
         
         model_cache_size = len(ml_models_cache)
         ml_models_cache.clear()
-        logger.info(f"?? [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
+        logger.info(f"🧹 [Cleanup] Cleared {model_cache_size} ML models from in-memory cache.")
 
         collected = gc.collect()
         logger.info(f"🧹 [Cleanup] Garbage collector ran. Collected {collected} objects.")
@@ -1403,6 +1464,8 @@ def main_loop():
                             logger.error(f"❌ [{symbol}] Could not fetch fresh entry price via API: {e}. Skipping signal.")
                             continue
 
+                        last_atr = last_features.get('atr', 0)
+
                         if open_trade:
                             old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                             try:
@@ -1414,13 +1477,18 @@ def main_loop():
                                 if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                                 if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                                 
-                                last_atr = last_features.get('atr', 0)
-                                tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
+                                # [تعديل] استخدام الدالة الجديدة لتحديث الصفقة
+                                tp_sl_data = calculate_tp_sl_with_sr(symbol, entry_price, last_atr)
                                 if not tp_sl_data: continue
 
                                 updated_signal_data = {
                                     'symbol': symbol, 'target_price': tp_sl_data['target_price'], 'stop_loss': tp_sl_data['stop_loss'],
-                                    'signal_details': { 'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Update_Reason': 'Reinforcement Signal' }
+                                    'signal_details': { 
+                                        'ML_Confidence': confidence, 
+                                        'ML_Confidence_Display': f"{confidence:.2%}", 
+                                        'Update_Reason': 'Reinforcement Signal',
+                                        'Exit_Strategy_Source': tp_sl_data.get('source', 'N/A')
+                                    }
                                 }
                                 
                                 if update_signal_in_db(open_trade['id'], updated_signal_data):
@@ -1436,7 +1504,6 @@ def main_loop():
                         if USE_SPEED_FILTER and not passes_speed_filter(last_features): continue
                         if USE_MOMENTUM_FILTER and not passes_momentum_filter(last_features): continue
                         
-                        last_atr = last_features.get('atr', 0)
                         volatility = (last_atr / entry_price * 100) if entry_price > 0 else 0
                         if USE_MIN_VOLATILITY_FILTER and volatility < MIN_VOLATILITY_PERCENT:
                             log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{MIN_VOLATILITY_PERCENT}%"}); continue
@@ -1446,12 +1513,17 @@ def main_loop():
                             if correlation < MIN_BTC_CORRELATION:
                                 log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{MIN_BTC_CORRELATION}"}); continue
                         
-                        tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
+                        # [تعديل] استخدام الدالة الجديدة لفتح صفقة جديدة
+                        tp_sl_data = calculate_tp_sl_with_sr(symbol, entry_price, last_atr)
                         if not tp_sl_data: continue
                         
                         new_signal = {
                             'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}"}, 
+                            'signal_details': {
+                                'ML_Confidence': confidence, 
+                                'ML_Confidence_Display': f"{confidence:.2%}",
+                                'Exit_Strategy_Source': tp_sl_data.get('source', 'N/A')
+                            }, 
                             'entry_price': entry_price, **tp_sl_data
                         }
 
@@ -1758,7 +1830,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.1 - DB FIX) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V21.2 - SR EXIT) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
