@@ -10,7 +10,7 @@ import pickle
 import redis
 import re
 import gc
-import random # <-- تمت الإضافة
+import random
 from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22.6 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V22.7 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22.6_dynamic_volume.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22.7_full_dynamic.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22.6')
+logger = logging.getLogger('CryptoBotV22.7')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,7 +56,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.6 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.7 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -100,18 +100,18 @@ USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
 PEAK_THRESHOLD_PCT: float = 0.988
 
-# --- [مُعدل V22.6] مصفوفة الفلاتر الديناميكية (قيم مخففة) ---
-# ملاحظة: سيتم الآن تجاوز قيمة "rel_vol" ديناميكيًا بواسطة آلية تحليل السوق
+# --- [مُعدل V22.7] مصفوفة الفلاتر الديناميكية (قيم أساسية) ---
+# ملاحظة: سيتم الآن تجاوز هذه القيم ديناميكيًا بواسطة آلية تحليل السوق
 FILTER_PROFILES = {
     "HighVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب عالي / اتجاه صاعد (شروط متوازنة)", "allow_trading": True,
-            "adx": 22, "rel_vol": 0.8, "rsi_range": (48, 85), "roc": 0.8, "accel": 0.1, # rel_vol قيمة مبدئية
+            "adx": 22, "rel_vol": 0.8, "rsi_range": (48, 85), "roc": 0.8, "accel": 0.1,
             "slope": 0.05, "min_rrr": 1.5, "min_volatility_pct": 0.5, "min_btc_correlation": 0.1
         },
         "Ranging": {
             "description": "جلسة تذبذب عالي / اتجاه عرضي (شروط متوازنة)", "allow_trading": True,
-            "adx": 25, "rel_vol": 1.0, "rsi_range": (40, 70), "roc": 1.0, "accel": 0.2, # rel_vol قيمة مبدئية
+            "adx": 25, "rel_vol": 1.0, "rsi_range": (40, 70), "roc": 1.0, "accel": 0.2,
             "slope": 0.1, "min_rrr": 1.8, "min_volatility_pct": 0.6, "min_btc_correlation": -0.1
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
@@ -119,12 +119,12 @@ FILTER_PROFILES = {
     "Normal": {
         "Uptrend": {
             "description": "جلسة عادية / اتجاه صاعد (شروط مخففة)", "allow_trading": True,
-            "adx": 20, "rel_vol": 0.6, "rsi_range": (45, 80), "roc": -0.5, "accel": -0.4, # rel_vol قيمة مبدئية
+            "adx": 20, "rel_vol": 0.6, "rsi_range": (45, 80), "roc": -0.5, "accel": -0.4,
             "slope": 0.0, "min_rrr": 1.4, "min_volatility_pct": 0.4, "min_btc_correlation": 0.05
         },
         "Ranging": {
             "description": "جلسة عادية / اتجاه عرضي (شروط مخففة)", "allow_trading": True,
-            "adx": 22, "rel_vol": 0.5, "rsi_range": (38, 62), "roc": 0.6, "accel": 0.0, # rel_vol قيمة مبدئية
+            "adx": 22, "rel_vol": 0.5, "rsi_range": (38, 62), "roc": 0.6, "accel": 0.0,
             "slope": 0.0, "min_rrr": 1.6, "min_volatility_pct": 0.35, "min_btc_correlation": -0.2
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
@@ -132,7 +132,7 @@ FILTER_PROFILES = {
     "LowVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب منخفض / اتجاه صاعد (شروط مخففة جداً)", "allow_trading": True,
-            "adx": 18, "rel_vol": 0.4, "rsi_range": (45, 75), "roc": 0.25, "accel": -0.5, # rel_vol قيمة مبدئية
+            "adx": 18, "rel_vol": 0.4, "rsi_range": (45, 75), "roc": 0.25, "accel": -0.5,
             "slope": -0.1, "min_rrr": 1.2, "min_volatility_pct": 0.25, "min_btc_correlation": 0.0
         },
         "Ranging": {"description": "التداول محفوف بالمخاطر العالية", "allow_trading": False},
@@ -170,10 +170,10 @@ current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Rangin
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V22.6) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V22.7) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V22.6 مع فلتر حجم تداول ديناميكي.
+    لوحة تحكم احترافية V22.7 مع فلاتر ديناميكية كاملة.
     """
     return """
 <!DOCTYPE html>
@@ -181,7 +181,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22.6 - فلتر ديناميكي</title>
+    <title>لوحة تحكم التداول V22.7 - فلاتر ديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -218,7 +218,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22.6</span>
+                <span class="text-text-secondary font-medium">V22.7</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -1126,7 +1126,7 @@ class TradingStrategy:
 # --- دالة الفلاتر الموحدة ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    [مُعدل V22.6] دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط.
+    [مُعدل V22.7] دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط والمعدل ديناميكياً.
     """
     profile_name = profile.get('name', 'Default')
 
@@ -1139,11 +1139,10 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
     adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
     rsi_min, rsi_max = profile['rsi_range']
     
-    # لاحظ استخدام profile['rel_vol'] التي تم تحديثها ديناميكيًا
     if not (adx >= profile['adx'] and rel_vol >= profile['rel_vol'] and rsi_min <= rsi < rsi_max):
         log_rejection(symbol, f"Speed Filter ({profile_name})", {
-            "ADX": f"{adx:.2f} (Req: >{profile['adx']})", 
-            "Volume": f"{rel_vol:.2f} (Req: >{profile['rel_vol']:.2f})", # تم تعديل الرسالة لإظهار القيمة الديناميكية
+            "ADX": f"{adx:.2f} (Req: >{profile['adx']:.2f})", 
+            "Volume": f"{rel_vol:.2f} (Req: >{profile['rel_vol']:.2f})",
             "RSI": f"{rsi:.2f} (Req: {rsi_min}-{rsi_max})"
         })
         return False
@@ -1154,9 +1153,9 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
     slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
     if not (roc > profile['roc'] and accel >= profile['accel'] and slope > profile['slope']):
         log_rejection(symbol, f"Momentum Filter ({profile_name})", {
-            "ROC": f"{roc:.2f} (Req: > {profile['roc']})",
-            "Acceleration": f"{accel:.4f} (Req: >= {profile['accel']})",
-            "Slope": f"{slope:.6f} (Req: > {profile['slope']})"
+            "ROC": f"{roc:.2f} (Req: > {profile['roc']:.2f})",
+            "Acceleration": f"{accel:.4f} (Req: >= {profile['accel']:.4f})",
+            "Slope": f"{slope:.6f} (Req: > {profile['slope']:.6f})"
         })
         return False
 
@@ -1164,13 +1163,13 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
     last_atr = last_features.get('atr', 0)
     volatility = (last_atr / entry_price * 100) if entry_price > 0 else 0
     if volatility < profile['min_volatility_pct']:
-        log_rejection(symbol, f"Low Volatility ({profile_name})", {"volatility": f"{volatility:.2f}%", "min": f"{profile['min_volatility_pct']}%"})
+        log_rejection(symbol, f"Low Volatility ({profile_name})", {"volatility": f"{volatility:.2f}%", "min": f"{profile['min_volatility_pct']:.2f}%"})
         return False
 
     # 5. فلتر الارتباط بالبيتكوين
     correlation = last_features.get('btc_correlation', 0)
     if correlation < profile['min_btc_correlation']:
-        log_rejection(symbol, f"BTC Correlation ({profile_name})", {"corr": f"{correlation:.2f}", "min": f"{profile['min_btc_correlation']}"})
+        log_rejection(symbol, f"BTC Correlation ({profile_name})", {"corr": f"{correlation:.2f}", "min": profile['min_btc_correlation']})
         return False
 
     # 6. فلتر نسبة المخاطرة للعائد (RRR)
@@ -1183,11 +1182,9 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
     # 7. فلتر الشراء عند التصحيح (Pullback Filter)
     if USE_PEAK_FILTER:
         if df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
-            # نستبعد الشمعة الحالية قيد التكوين لضمان أن القمة من الشموع المكتملة
             recent_candles = df_15m.iloc[-PEAK_CHECK_PERIOD:-1]
             if not recent_candles.empty:
                 highest_high = recent_candles['high'].max()
-                # الشرط: يجب أن يكون سعر الدخول أقل من القمة بنسبة معينة
                 pullback_price_limit = highest_high * PEAK_THRESHOLD_PCT
                 
                 if entry_price >= pullback_price_limit:
@@ -1525,53 +1522,106 @@ def perform_end_of_cycle_cleanup():
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
-# ---------------------- [جديد] دالة تحليل حجم التداول في السوق ----------------------
+# ---------------------- [جديد V22.7] دوال تحليل السوق الديناميكية ----------------------
 def analyze_market_wide_volume(symbols_to_check: List[str], sample_size: int = 40) -> Optional[float]:
     """
     تحلل عينة من العملات لتحديد القيمة الوسيطة لحجم التداول النسبي في السوق.
-    يساعد هذا في وضع حد ديناميكي لفلتر حجم التداول.
     """
     logger.info(f"🔬 [Volume Analysis] Starting market-wide volume analysis on a sample of {sample_size} symbols...")
     if not client or not symbols_to_check:
         return None
 
-    # نأخذ عينة عشوائية لتسريع العملية
     sample_symbols = random.sample(symbols_to_check, min(len(symbols_to_check), sample_size))
     relative_volumes = []
 
     for symbol in sample_symbols:
         try:
-            # جلب الحد الأدنى من البيانات اللازمة لحساب حجم التداول النسبي
             df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, REL_VOL_PERIOD + 5)
             if df is None or len(df) < REL_VOL_PERIOD:
                 continue
-
-            # حساب حجم التداول النسبي لآخر شمعة
             df['mean_volume'] = df['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean()
-            # تجنب القسمة على صفر
             df['relative_volume'] = df['volume'] / (df['mean_volume'] + 1e-9)
             last_rel_vol = df['relative_volume'].iloc[-1]
             if np.isfinite(last_rel_vol):
                 relative_volumes.append(last_rel_vol)
         except Exception as e:
             logger.debug(f"⚠️ [Volume Analysis] Could not process {symbol} for volume analysis: {e}")
-        time.sleep(0.15) # تأخير بسيط لتجنب الضغط على الـ API
+        time.sleep(0.15) 
 
     if not relative_volumes:
         logger.warning("⚠️ [Volume Analysis] Could not calculate any relative volumes. Using default.")
         return None
 
-    # حساب القيمة الوسيطة (المئين 50) لأنها مقاومة للقيم المتطرفة
     median_rel_vol = float(np.median(relative_volumes))
-    
-    # وضع حدود منطقية لتجنب القيم المنخفضة أو المرتفعة بشكل مفرط
     dynamic_threshold = max(0.35, min(2.5, median_rel_vol))
-
     logger.info(f"✅ [Volume Analysis] Analysis complete. Median RelVol: {median_rel_vol:.2f}. Setting dynamic threshold to: {dynamic_threshold:.2f}")
     return dynamic_threshold
 
+def analyze_market_momentum_and_volatility(symbols_to_check: List[str], sample_size: int = 40) -> Optional[Dict[str, float]]:
+    """
+    [جديد V22.7] تحلل عينة من العملات لتحديد قيم ديناميكية لفلاتر الزخم والتقلب.
+    """
+    logger.info(f"🔬 [Momentum/Volatility Analysis] Starting analysis on a sample of {sample_size} symbols...")
+    if not client or not symbols_to_check:
+        return None
 
-# ---------------------- حلقة العمل الرئيسية (مع منطق الفلاتر الديناميكية) ----------------------
+    sample_symbols = random.sample(symbols_to_check, min(len(symbols_to_check), sample_size))
+    
+    # قوائم لتخزين قيم المؤشرات من العينة
+    adx_values, roc_values, accel_values, slope_values, volatility_pct_values = [], [], [], [], []
+
+    btc_data = get_btc_data_for_bot() # نحتاج بيانات البيتكوين لحساب الميزات بشكل كامل
+
+    for symbol in sample_symbols:
+        try:
+            df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+            if df is None or len(df) < max(ADX_PERIOD, MOMENTUM_PERIOD) + 5:
+                continue
+
+            # حساب كل الميزات للحصول على قيم دقيقة
+            df_features = calculate_features(df, btc_data)
+            if df_features.empty:
+                continue
+            
+            last_features = df_features.iloc[-1]
+            
+            # استخلاص القيم وإضافتها للقوائم
+            if np.isfinite(last_features.get('adx', np.nan)): adx_values.append(last_features['adx'])
+            if np.isfinite(last_features.get(f'roc_{MOMENTUM_PERIOD}', np.nan)): roc_values.append(last_features[f'roc_{MOMENTUM_PERIOD}'])
+            if np.isfinite(last_features.get('roc_acceleration', np.nan)): accel_values.append(last_features['roc_acceleration'])
+            if np.isfinite(last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', np.nan)): slope_values.append(last_features[f'ema_slope_{EMA_SLOPE_PERIOD}'])
+            
+            # حساب التقلب كنسبة مئوية
+            last_atr = last_features.get('atr', 0)
+            last_price = df['close'].iloc[-1]
+            if last_price > 0 and last_atr > 0:
+                volatility_pct = (last_atr / last_price) * 100
+                if np.isfinite(volatility_pct):
+                    volatility_pct_values.append(volatility_pct)
+
+        except Exception as e:
+            logger.debug(f"⚠️ [Momentum Analysis] Could not process {symbol}: {e}")
+        time.sleep(0.2) # تأخير أكبر قليلاً لأن العملية تتطلب حسابات أكثر
+
+    if not roc_values: # التحقق من قائمة واحدة كافٍ
+        logger.warning("⚠️ [Momentum Analysis] Could not calculate any momentum values. Skipping dynamic adjustment.")
+        return None
+
+    # حساب المئين 40 (أكثر تساهلاً من الوسيط) لتحديد الحد الأدنى المقبول في السوق الحالي
+    percentile = 40
+    dynamic_thresholds = {
+        'adx': float(np.percentile(adx_values, percentile)) if adx_values else 20.0,
+        'roc': float(np.percentile(roc_values, percentile)) if roc_values else 0.0,
+        'accel': float(np.percentile(accel_values, percentile)) if accel_values else 0.0,
+        'slope': float(np.percentile(slope_values, percentile)) if slope_values else 0.0,
+        'volatility_pct': float(np.percentile(volatility_pct_values, percentile)) if volatility_pct_values else 0.3
+    }
+    
+    logger.info(f"✅ [Momentum Analysis] Analysis complete. Dynamic thresholds (p{percentile}): { {k: f'{v:.3f}' for k, v in dynamic_thresholds.items()} }")
+    return dynamic_thresholds
+
+
+# ---------------------- حلقة العمل الرئيسية (مع منطق الفلاتر الديناميكية الكاملة) ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1591,18 +1641,50 @@ def main_loop():
                 symbol_batch = symbols_to_process[i:i + batch_size]
                 logger.info(f"🔹 [Batch Processing] Starting batch {i//batch_size + 1}, symbols {i+1}-{i+len(symbol_batch)} of {len(symbols_to_process)}")
 
-                # --- [مُعدّل] تحليل حجم التداول الديناميكي في بداية كل دفعة ---
+                # --- [مُعدّل V22.7] تحليل السوق الشامل في بداية كل دفعة ---
                 dynamic_volume_threshold = analyze_market_wide_volume(symbols_to_process)
+                dynamic_momentum_thresholds = analyze_market_momentum_and_volatility(symbols_to_process)
                 # --- [نهاية التعديل] ---
 
                 determine_market_state()
-                filter_profile = get_current_filter_profile()
+                filter_profile = get_current_filter_profile().copy() # نسخ لتجنب تعديل القاموس الأصلي
 
-                # --- [مُعدّل] تطبيق حد حجم التداول الديناميكي على ملف الفلاتر ---
+                # --- [مُعدّل V22.7] تطبيق التعديلات الديناميكية على ملف الفلاتر ---
+                logger.info("🔧 [Dynamic Filter] Applying dynamic adjustments to filter profile...")
                 if dynamic_volume_threshold is not None:
-                    original_vol = filter_profile.get('rel_vol', 'N/A')
+                    logger.info(f"    - Volume: Original: {filter_profile.get('rel_vol', 'N/A')}, New Req: {dynamic_volume_threshold:.2f}")
                     filter_profile['rel_vol'] = dynamic_volume_threshold
-                    logger.info(f"🔧 [Dynamic Filter] Overriding profile volume filter. Was: {original_vol}, Now: {dynamic_volume_threshold:.2f}")
+                
+                if dynamic_momentum_thresholds:
+                    # نستخدم القيم الديناميكية كأساس ونطبق عليها نسبة من القيمة الأصلية للحفاظ على "شخصية" كل ملف
+                    # هذا يمنع ملف التذبذب المنخفض من أن يصبح متشدداً كملف التذبذب العالي
+                    original_roc = filter_profile['roc']
+                    market_base_roc = dynamic_momentum_thresholds.get('roc', original_roc)
+                    # نجعل المتطلب هو 80% من القيمة الديناميكية للسوق، ليكون أكثر مرونة
+                    new_roc = market_base_roc * 0.80 
+                    logger.info(f"    - ROC: Original: {original_roc:.2f}, Market Base: {market_base_roc:.2f}, New Req: {new_roc:.2f}")
+                    filter_profile['roc'] = new_roc
+
+                    original_accel = filter_profile['accel']
+                    market_base_accel = dynamic_momentum_thresholds.get('accel', original_accel)
+                    # نجعل المتطلب هو 80% من القيمة الديناميكية للسوق
+                    new_accel = market_base_accel * 0.80
+                    logger.info(f"    - Acceleration: Original: {original_accel:.4f}, Market Base: {market_base_accel:.4f}, New Req: {new_accel:.4f}")
+                    filter_profile['accel'] = new_accel
+                    
+                    original_adx = filter_profile['adx']
+                    market_base_adx = dynamic_momentum_thresholds.get('adx', original_adx)
+                    # نطلب ADX أعلى قليلاً من متوسط السوق (110%)
+                    new_adx = market_base_adx * 1.10
+                    logger.info(f"    - ADX: Original: {original_adx:.2f}, Market Base: {market_base_adx:.2f}, New Req: {new_adx:.2f}")
+                    filter_profile['adx'] = new_adx
+
+                    original_vol_pct = filter_profile['min_volatility_pct']
+                    market_base_vol_pct = dynamic_momentum_thresholds.get('volatility_pct', original_vol_pct)
+                    # نطلب حداً أدنى للتقلب يساوي 90% من تقلب السوق
+                    new_vol_pct = market_base_vol_pct * 0.90
+                    logger.info(f"    - Min Volatility %: Original: {original_vol_pct:.2f}%, Market Base: {market_base_vol_pct:.2f}%, New Req: {new_vol_pct:.2f}%")
+                    filter_profile['min_volatility_pct'] = new_vol_pct
                 # --- [نهاية التعديل] ---
 
                 btc_data = get_btc_data_for_bot()
@@ -1732,7 +1814,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V22.6) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V22.7) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1973,7 +2055,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.6 - Dynamic Volume) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.7 - Full Dynamic Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
