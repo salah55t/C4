@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22.0 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V22.1 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22.0_final.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22.1_final.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22.0')
+logger = logging.getLogger('CryptoBotV22.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.0 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.1 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -94,10 +94,8 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- [محسّن V22.0] مصفوفة الفلاتر الديناميكية ---
-# تم إعادة هيكلة الفلاتر بالكامل لتكون أكثر ديناميكية وتكيفاً
+# --- مصفوفة الفلاتر الديناميكية ---
 FILTER_PROFILES = {
-    # جلسة تذبذب عالي (تداخل لندن/نيويورك)
     "HighVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب عالي / اتجاه صاعد", "allow_trading": True,
@@ -113,7 +111,6 @@ FILTER_PROFILES = {
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
-    # جلسة عادية (ساعات عمل عادية)
     "Normal": {
         "Uptrend": {
             "description": "جلسة عادية / اتجاه صاعد", "allow_trading": True,
@@ -129,7 +126,6 @@ FILTER_PROFILES = {
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
-    # جلسة تذبذب منخفض (عطلة نهاية الأسبوع / آسيا)
     "LowVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب منخفض / اتجاه صاعد", "allow_trading": True,
@@ -168,14 +164,14 @@ rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
 market_state_lock = Lock()
-current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Ranging"] # Default
+current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Ranging"]
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V22.0) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V22.1) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V22.0 مع نظام فلاتر ديناميكي.
+    لوحة تحكم احترافية V22.1 مع نظام فلاتر ديناميكي وإصلاح الخطأ البرمجي.
     """
     return """
 <!DOCTYPE html>
@@ -183,7 +179,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22.0 - فلاتر ديناميكية</title>
+    <title>لوحة تحكم التداول V22.1 - فلاتر ديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -220,7 +216,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22.0</span>
+                <span class="text-text-secondary font-medium">V22.1</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -919,7 +915,7 @@ def determine_market_state():
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
 
-# --- [محسّن V22.0] دالة تحديد ملف الفلاتر الديناميكي ---
+# --- دالة تحديد ملف الفلاتر الديناميكي ---
 def get_current_filter_profile() -> Dict[str, Any]:
     global current_filter_profile_cache, last_profile_check_time
     if time.time() - last_profile_check_time < 60:
@@ -1125,7 +1121,7 @@ class TradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] Signal Generation Error: {e}")
             return None
 
-# --- [محسّن V22.0] دالة الفلاتر الموحدة ---
+# --- دالة الفلاتر الموحدة ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict) -> bool:
     """
     دالة موحدة للتحقق من جميع الفلاتر بناءً على ملف التعريف النشط.
@@ -1564,7 +1560,6 @@ def main_loop():
                                 continue
 
                             if open_trade:
-                                # المنطق الخاص بتحديث الصفقات الحالية (التعزيز)
                                 old_confidence_raw = open_trade.get('signal_details', {}).get('ML_Confidence', 0.0)
                                 try:
                                     old_confidence = float(str(old_confidence_raw).strip().replace('%', '')) / 100.0 if isinstance(old_confidence_raw, str) else float(old_confidence_raw)
@@ -1591,7 +1586,6 @@ def main_loop():
                                         send_trade_update_alert(updated_signal_data, open_trade)
                                 continue
 
-                            # منطق فتح صفقة جديدة
                             if open_trade_count >= MAX_OPEN_TRADES:
                                 log_rejection(symbol, "Max Open Trades", {"count": open_trade_count, "max": MAX_OPEN_TRADES}); continue
                             
@@ -1602,7 +1596,6 @@ def main_loop():
                             if not passes_all_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data):
                                 continue
                             
-                            # إذا مرت الإشارة من جميع الفلاتر
                             new_signal = {
                                 'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
                                 'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Filter_Profile': filter_profile['name']}, 
@@ -1638,9 +1631,10 @@ def main_loop():
                                 with signal_cache_lock:
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
                                 send_new_signal_alert(saved_signal)
-                        
-                        except Exception as e: 
-                            logger.error(f"❌ [Processing Error] {symbol}: {e}", exc_info=True)
+                    # [FIXED V22.1] Added the missing except block for the inner try.
+                    except Exception as e: 
+                        logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
+                        time.sleep(1) # Prevent rapid-fire logging on persistent errors
                 
                 logger.info(f"🧹 [Batch Cleanup] Finished batch {i//batch_size + 1}. Performing cleanup to free memory.")
                 perform_end_of_cycle_cleanup()
@@ -1659,7 +1653,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V22.0) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V22.1) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1900,7 +1894,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.0) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.1) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
