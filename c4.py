@@ -79,7 +79,7 @@ REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 
 # --- إدارة الصفقات ---
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80
+BUY_CONFIDENCE_THRESHOLD = 0.70
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
 
 # --- إعدادات الهدف ووقف الخسارة ---
