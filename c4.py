@@ -278,6 +278,7 @@ function getProfileStyle(profileName) {
     if (profileName.includes('Uptrend')) return { text: 'ملف صاعد', color: 'text-accent-green' };
     if (profileName.includes('Ranging')) return { text: 'ملف عرضي', color: 'text-accent-yellow' };
     if (profileName.includes('Downtrend')) return { text: 'ملف هابط', color: 'text-accent-red' };
+    if (profileName.includes('Weekend')) return { text: 'وضع نهاية الأسبوع', color: 'text-accent-blue' };
     return { text: profileName, color: 'text-text-primary' };
 }
 
@@ -916,6 +917,8 @@ def get_active_market_sessions() -> List[str]:
     now_utc = datetime.now(timezone.utc)
     current_hour = now_utc.hour
     
+    # Note: This check is for real-world market hours, not crypto's 24/7 nature.
+    # The user wants to trade on weekends, so we will handle the empty list case.
     if now_utc.weekday() >= 5: # Saturday or Sunday
         return []
 
@@ -926,7 +929,7 @@ def get_active_market_sessions() -> List[str]:
 
 def analyze_market_and_create_dynamic_profile() -> None:
     """
-    [V23.4] Analyzes market sample and active sessions to generate a highly adaptive filter profile.
+    [V23.4 - Weekend Trading] Analyzes market sample and active sessions to generate a highly adaptive filter profile.
     """
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     
@@ -940,21 +943,40 @@ def analyze_market_and_create_dynamic_profile() -> None:
         logger.warning("⚠️ [Dynamic Filter] Cannot run analysis: Client or symbols not initialized.")
         return
 
+    # --- [تعديل] منطق جديد للتعامل مع عطلات نهاية الأسبوع ---
     active_sessions = get_active_market_sessions()
+    if not active_sessions:
+        logger.warning("لا توجد جلسات سوق نشطة. سيتم تطبيق ملف تعريف 'وضع نهاية الأسبوع' بشروط مخففة.")
+        
+        with dynamic_filter_lock:
+            dynamic_filter_profile_cache = {
+                "name": "Weekend Mode (Relaxed)",
+                "description": "سيولة منخفضة جداً (شروط مخففة)",
+                "allow_trading": True,  # <-- السماح بالتداول
+                "filters": {
+                    "adx": 16.0,              # عتبة ADX أقل
+                    "rel_vol": 0.65,            # عتبة حجم التداول النسبي أقل
+                    "rsi_range": (25, 75),    # نطاق RSI أوسع
+                    "roc": 0.05,              # عتبة ROC أقل
+                    "accel": -0.05,           # السماح بتباطؤ بسيط
+                    "slope": 0.0,             # السماح بميل صفري
+                    "min_rrr": 1.2,           # نسبة المخاطرة/العائد أقل
+                    "min_volatility_pct": 0.25, # السماح بتقلبات أقل
+                    "min_btc_correlation": -0.5 # ارتباط أوسع مع البيتكوين
+                },
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            }
+            last_dynamic_filter_analysis_time = time.time()
+        
+        logger.info("✅ [Dynamic Filter] تم إنشاء ملف تعريف 'Weekend Mode'.")
+        return # <-- الخروج من الدالة بعد إنشاء الملف الخاص
+
+    # --- المنطق الأصلي للجلسات النشطة يبدأ هنا ---
     num_sessions = len(active_sessions)
     volatility_multiplier = 1.0
     session_desc = "سيولة عادية"
 
-    if num_sessions == 0:
-        logger.warning(" trading is disabled due to no active market sessions (weekend/holiday).")
-        with dynamic_filter_lock:
-            dynamic_filter_profile_cache = {
-                "name": "التداول متوقف", "description": "لا توجد بورصات رئيسية مفتوحة حالياً.",
-                "allow_trading": False, "filters": {}, "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-            last_dynamic_filter_analysis_time = time.time()
-        return
-    elif num_sessions > 1:
+    if num_sessions > 1:
         volatility_multiplier = 0.9
         session_desc = f"سيولة عالية ({', '.join(active_sessions)})"
     else:
@@ -1742,17 +1764,25 @@ def main_loop():
                     logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
                     time.sleep(1)
                 finally:
-                    # [MEMORY-FIX] Explicitly delete large objects to help GC
+                    # [إصلاح الذاكرة] حذف الكائنات الكبيرة بشكل صريح لمساعدة جامع القمامة
                     del strategy, df_15m, df_4h, df_features, signal_info
                     
                     processed_count += 1
+                    # --- منطق معالجة الدفعات وإدارة الذاكرة ---
+                    # التحقق مما إذا كانت دفعة من 50 رمزًا قد اكتملت
                     if processed_count % SYMBOL_PROCESSING_BATCH_SIZE == 0 and processed_count < len(symbols_to_process):
-                        logger.info(f"🗑️ Processed batch of {SYMBOL_PROCESSING_BATCH_SIZE} symbols. Running memory cleanup...")
-                        # [MEMORY-FIX] Clear model cache after each batch
+                        logger.info(f"🗑️ تم الانتهاء من معالجة دفعة مكونة من {SYMBOL_PROCESSING_BATCH_SIZE} رمزًا. بدء تنظيف الذاكرة...")
+                        
+                        # الخطوة 1: مسح ذاكرة التخزين المؤقت للنماذج المحملة
+                        # هذا يحرر الذاكرة من نماذج الـ 50 رمزًا التي تم تحميلها للتو
                         ml_models_cache.clear()
+                        
+                        # الخطوة 2: استدعاء جامع القمامة (Garbage Collector) بشكل صريح
+                        # هذا يضمن تحرير الذاكرة التي كانت تشغلها النماذج والكائنات الأخرى
                         collected = gc.collect()
-                        logger.info(f"🗑️ Memory cleanup complete. GC collected {collected} objects. Continuing to next batch.")
-                        time.sleep(2)
+                        
+                        logger.info(f"🗑️ اكتمل تنظيف الذاكرة. قام جامع القمامة بجمع {collected} كائنًا. الانتقال إلى الدفعة التالية.")
+                        time.sleep(2) # انتظار قصير قبل البدء في الدفعة التالية
             
             logger.info("✅ [End of Cycle] Full scan cycle finished.")
             perform_end_of_cycle_cleanup()
