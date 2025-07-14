@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V23.0 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V23.1 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v23.0_dynamic_filters.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v23.1_dynamic_filters.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV23.0')
+logger = logging.getLogger('CryptoBotV23.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,7 +56,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.0 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V23.1 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -129,10 +129,10 @@ last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V23.0) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V23.1) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V23.0 مع فلاتر ديناميكية.
+    لوحة تحكم احترافية V23.1 مع فلاتر ديناميكية وإصلاح بدء التشغيل.
     """
     return """
 <!DOCTYPE html>
@@ -140,7 +140,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V23.0 - فلاتر ديناميكية</title>
+    <title>لوحة تحكم التداول V23.1 - فلاتر ديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -177,7 +177,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V23.0</span>
+                <span class="text-text-secondary font-medium">V23.1</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -849,7 +849,7 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = tr.ewm(span=ADX_PERIOD, adjust=False).mean()
         up_move = df['high'].diff(); down_move = -df['low'].diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (down_move > 0), up_move, 0.0), index=df.index)
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
         minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
         plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
         minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
@@ -1183,7 +1183,7 @@ class TradingStrategy:
 # --- [معدل] دالة الفلاتر الموحدة لاستخدام الفلتر الديناميكي ---
 def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     """
-    [مُعدل V23.0] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
+    [مُعدل V23.1] دالة موحدة للتحقق من جميع الفلاتر باستخدام الملف الديناميكي.
     """
     profile_name = profile.get('name', 'Default Dynamic')
     
@@ -1745,7 +1745,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V23.0) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V23.1) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1972,13 +1972,15 @@ def initialize_bot_services():
         get_exchange_info_map()
         load_open_signals_to_cache()
         load_notifications_to_cache()
-        # --- [معدل] تشغيل تحليل الحالة والفلاتر لأول مرة عند الإقلاع ---
-        Thread(target=determine_market_state, daemon=True).start()
-        Thread(target=analyze_market_and_create_dynamic_profile, daemon=True).start()
         
+        # --- [معدل] تحميل قائمة العملات أولاً لضمان جاهزيتها ---
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
+        
+        # --- [معدل] بدء الخدمات الأخرى بعد تحميل قائمة العملات ---
+        Thread(target=determine_market_state, daemon=True).start()
+        # تم حذف الاستدعاء الأولي لـ analyze_market_and_create_dynamic_profile من هنا لمنع التحذير
         
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
@@ -1989,7 +1991,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.0 - Dynamic Filters) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V23.1 - Startup Fix) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
