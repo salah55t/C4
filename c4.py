@@ -31,16 +31,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V22.1 ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V22.2 ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22.1_final.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22.2_optimized.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22.1')
+logger = logging.getLogger('CryptoBotV22.2')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,7 +55,7 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.1 ----------------------
+# ---------------------- إعداد الثوابت والمتغيرات العامة - V22.2 ----------------------
 # --- إعدادات التداول الحقيقي ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
@@ -94,45 +94,76 @@ TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
 
-# --- مصفوفة الفلاتر الديناميكية ---
+# --- [مُعدل V22.2] مصفوفة الفلاتر الديناميكية (قيم مخففة ومنطقية) ---
 FILTER_PROFILES = {
     "HighVolatility": {
         "Uptrend": {
-            "description": "جلسة تذبذب عالي / اتجاه صاعد", "allow_trading": True,
-            "adx": 24, "rel_vol": 0.7, "rsi_range": (50, 80),
-            "roc": 1.0, "accel": 0.4, "slope": 0.15,
-            "min_rrr": 1.7, "min_volatility_pct": 0.6, "min_btc_correlation": 0.25
+            "description": "جلسة تذبذب عالي / اتجاه صاعد (شروط متوازنة)", "allow_trading": True,
+            "adx": 22,                  # تم تخفيضه من 24
+            "rel_vol": 0.6,             # تم تخفيضه من 0.7
+            "rsi_range": (48, 85),      # تم توسيع النطاق
+            "roc": 0.8,                 # تم تخفيضه من 1.0
+            "accel": 0.1,               # تم تخفيضه بشكل كبير من 0.4
+            "slope": 0.05,              # تم تخفيضه بشكل كبير من 0.15
+            "min_rrr": 1.5,             # تم تخفيضه من 1.7
+            "min_volatility_pct": 0.5,  # تم تخفيضه من 0.6
+            "min_btc_correlation": 0.1  # تم تخفيضه من 0.25
         },
         "Ranging": {
-            "description": "جلسة تذبذب عالي / اتجاه عرضي", "allow_trading": True,
-            "adx": 28, "rel_vol": 1.1, "rsi_range": (45, 65),
-            "roc": 1.2, "accel": 0.6, "slope": 0.2,
-            "min_rrr": 2.0, "min_volatility_pct": 0.7, "min_btc_correlation": 0.1
+            "description": "جلسة تذبذب عالي / اتجاه عرضي (شروط متوازنة)", "allow_trading": True,
+            "adx": 25,                  # تم تخفيضه من 28
+            "rel_vol": 0.9,             # تم تخفيضه من 1.1
+            "rsi_range": (40, 70),      # تم توسيع النطاق
+            "roc": 1.0,                 # تم تخفيضه من 1.2
+            "accel": 0.2,               # تم تخفيضه بشكل كبير من 0.6
+            "slope": 0.1,               # تم تخفيضه من 0.2
+            "min_rrr": 1.8,             # تم تخفيضه من 2.0
+            "min_volatility_pct": 0.6,  # تم تخفيضه من 0.7
+            "min_btc_correlation": -0.1 # السماح بالارتباط السلبي الطفيف
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
     "Normal": {
         "Uptrend": {
-            "description": "جلسة عادية / اتجاه صاعد", "allow_trading": True,
-            "adx": 22, "rel_vol": 0.5, "rsi_range": (48, 75),
-            "roc": 0.8, "accel": 0.3, "slope": 0.1,
-            "min_rrr": 1.5, "min_volatility_pct": 0.5, "min_btc_correlation": 0.2
+            "description": "جلسة عادية / اتجاه صاعد (شروط مخففة)", "allow_trading": True,
+            "adx": 20,                  # تم تخفيضه من 22
+            "rel_vol": 0.45,            # تم تخفيضه من 0.5
+            "rsi_range": (45, 80),      # تم توسيع النطاق
+            "roc": 0.5,                 # تم تخفيضه من 0.8
+            "accel": -0.2,              # السماح بالتباطؤ الطفيف
+            "slope": 0.0,               # السماح بالميل الصفري
+            "min_rrr": 1.4,             # تم تخفيضه من 1.5
+            "min_volatility_pct": 0.4,  # تم تخفيضه من 0.5
+            "min_btc_correlation": 0.05 # تخفيض كبير، شبه محايد
         },
         "Ranging": {
-            "description": "جلسة عادية / اتجاه عرضي", "allow_trading": True,
-            "adx": 25, "rel_vol": 0.5, "rsi_range": (40, 60),
-            "roc": 0.9, "accel": 0.4, "slope": 0.1,
-            "min_rrr": 1.8, "min_volatility_pct": 0.4, "min_btc_correlation": 0.0
+            "description": "جلسة عادية / اتجاه عرضي (شروط مخففة)", "allow_trading": True,
+            "adx": 22,                  # تم تخفيضه من 25
+            "rel_vol": 0.4,             # تم تخفيضه من 0.5
+            "rsi_range": (38, 62),      # تم توسيع النطاق
+            "roc": 0.6,                 # تم تخفيضه من 0.9
+            "accel": 0.0,               # السماح بالتباطؤ
+            "slope": 0.0,               # السماح بالميل الصفري
+            "min_rrr": 1.6,             # تم تخفيضه من 1.8
+            "min_volatility_pct": 0.35, # تم تخفيضه من 0.4
+            "min_btc_correlation": -0.2 # السماح بالارتباط السلبي
         },
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     },
     "LowVolatility": {
         "Uptrend": {
-            "description": "جلسة تذبذب منخفض / اتجاه صاعد", "allow_trading": True,
-            "adx": 20, "rel_vol": 0.4, "rsi_range": (50, 70),
-            "roc": 0.6, "accel": 0.2, "slope": 0.05,
-            "min_rrr": 1.3, "min_volatility_pct": 0.3, "min_btc_correlation": 0.15
+            "description": "جلسة تذبذب منخفض / اتجاه صاعد (شروط مخففة جداً)", "allow_trading": True,
+            "adx": 18,                  # تم تخفيضه من 20
+            "rel_vol": 0.3,             # تم تخفيضه من 0.4
+            "rsi_range": (45, 75),      # تم توسيع النطاق
+            "roc": 0.25,                # تم تخفيضه بشكل كبير من 0.6
+            "accel": -0.5,              # السماح بتباطؤ ملحوظ
+            "slope": -0.1,              # السماح بميل سلبي طفيف
+            "min_rrr": 1.2,             # تم تخفيضه من 1.3
+            "min_volatility_pct": 0.25, # تم تخفيضه من 0.3
+            "min_btc_correlation": 0.0  # لا يتطلب ارتباط إيجابي
         },
+        # يبقى التداول في سوق عرضي ذو تذبذب منخفض محفوفاً بالمخاطر، لذا نتركه معطلاً
         "Ranging": {"description": "التداول محفوف بالمخاطر العالية", "allow_trading": False},
         "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
     }
@@ -168,10 +199,10 @@ current_filter_profile_cache: Dict[str, Any] = FILTER_PROFILES["Normal"]["Rangin
 last_profile_check_time: float = 0
 
 
-# ---------------------- دالة HTML للوحة التحكم (V22.1) ----------------------
+# ---------------------- دالة HTML للوحة التحكم (V22.2) ----------------------
 def get_dashboard_html():
     """
-    لوحة تحكم احترافية V22.1 مع نظام فلاتر ديناميكي وإصلاح الخطأ البرمجي.
+    لوحة تحكم احترافية V22.2 مع فلاتر مُحسّنة.
     """
     return """
 <!DOCTYPE html>
@@ -179,7 +210,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V22.1 - فلاتر ديناميكية</title>
+    <title>لوحة تحكم التداول V22.2 - فلاتر مُحسّنة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -216,7 +247,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة التحكم</span>
-                <span class="text-text-secondary font-medium">V22.1</span>
+                <span class="text-text-secondary font-medium">V22.2</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -1631,10 +1662,9 @@ def main_loop():
                                 with signal_cache_lock:
                                     open_signals_cache[saved_signal['symbol']] = saved_signal
                                 send_new_signal_alert(saved_signal)
-                    # [FIXED V22.1] Added the missing except block for the inner try.
                     except Exception as e: 
                         logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
-                        time.sleep(1) # Prevent rapid-fire logging on persistent errors
+                        time.sleep(1) 
                 
                 logger.info(f"🧹 [Batch Cleanup] Finished batch {i//batch_size + 1}. Performing cleanup to free memory.")
                 perform_end_of_cycle_cleanup()
@@ -1653,7 +1683,7 @@ def main_loop():
             time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V22.1) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask (V22.2) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1894,7 +1924,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.1) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V22.2 - Optimized Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
