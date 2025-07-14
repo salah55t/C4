@@ -99,7 +99,7 @@ FILTER_PROFILES = {
     "HighVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب عالي / اتجاه صاعد", "allow_trading": True,
-            "adx": 24, "rel_vol": 0.9, "rsi_range": (50, 80),
+            "adx": 24, "rel_vol": 0.7, "rsi_range": (50, 80),
             "roc": 1.0, "accel": 0.4, "slope": 0.15,
             "min_rrr": 1.7, "min_volatility_pct": 0.6, "min_btc_correlation": 0.25
         },
@@ -114,13 +114,13 @@ FILTER_PROFILES = {
     "Normal": {
         "Uptrend": {
             "description": "جلسة عادية / اتجاه صاعد", "allow_trading": True,
-            "adx": 22, "rel_vol": 0.7, "rsi_range": (48, 75),
+            "adx": 22, "rel_vol": 0.5, "rsi_range": (48, 75),
             "roc": 0.8, "accel": 0.3, "slope": 0.1,
             "min_rrr": 1.5, "min_volatility_pct": 0.5, "min_btc_correlation": 0.2
         },
         "Ranging": {
             "description": "جلسة عادية / اتجاه عرضي", "allow_trading": True,
-            "adx": 25, "rel_vol": 0.9, "rsi_range": (40, 60),
+            "adx": 25, "rel_vol": 0.5, "rsi_range": (40, 60),
             "roc": 0.9, "accel": 0.4, "slope": 0.1,
             "min_rrr": 1.8, "min_volatility_pct": 0.4, "min_btc_correlation": 0.0
         },
@@ -129,7 +129,7 @@ FILTER_PROFILES = {
     "LowVolatility": {
         "Uptrend": {
             "description": "جلسة تذبذب منخفض / اتجاه صاعد", "allow_trading": True,
-            "adx": 20, "rel_vol": 0.5, "rsi_range": (50, 70),
+            "adx": 20, "rel_vol": 0.4, "rsi_range": (50, 70),
             "roc": 0.6, "accel": 0.2, "slope": 0.05,
             "min_rrr": 1.3, "min_volatility_pct": 0.3, "min_btc_correlation": 0.15
         },
