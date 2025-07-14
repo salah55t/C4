@@ -23,7 +23,7 @@ from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timedelta, timezone
 from decouple import config
-from typing import List, Dict, Optional, Any, Set
+from typing import List, Dict, Optional, Any, Set, Tuple
 from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
@@ -55,6 +55,66 @@ try:
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
+
+# ---------------------- [جديد] مركزية إعدادات الفلاتر الديناميكية ----------------------
+# هذا هو المكان المركزي الجديد لتعديل جميع الفلاتر.
+# يمكنك تغيير أي قيمة هنا لتغيير سلوك البوت في أي حالة سوق.
+FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
+    "STRONG_UPTREND": {
+        "description": "اتجاه صاعد قوي",
+        "allow_trading": True,
+        "filters": {
+            "adx": 22.0, "rel_vol": 1.2, "rsi_range": (50, 95), "roc": 0.3, 
+            "accel": 0.1, "slope": 0.01, "min_rrr": 1.5, "min_volatility_pct": 0.4, 
+            "min_btc_correlation": -0.1
+        }
+    },
+    "UPTREND": {
+        "description": "اتجاه صاعد",
+        "allow_trading": True,
+        "filters": {
+            "adx": 20.0, "rel_vol": 1.0, "rsi_range": (45, 90), "roc": 0.2, 
+            "accel": 0.05, "slope": 0.005, "min_rrr": 1.8, "min_volatility_pct": 0.35, 
+            "min_btc_correlation": 0.0
+        }
+    },
+    "RANGING": {
+        "description": "اتجاه عرضي",
+        "allow_trading": True,
+        "filters": {
+            "adx": 18.0, "rel_vol": 0.9, "rsi_range": (40, 70), "roc": 0.1, 
+            "accel": 0.0, "slope": 0.0, "min_rrr": 2.0, "min_volatility_pct": 0.3, 
+            "min_btc_correlation": -0.2
+        }
+    },
+    "DOWNTREND": {
+        "description": "اتجاه هابط",
+        "allow_trading": False, # <-- تغيير هذا إلى True يسمح بالتداول في الاتجاه الهابط
+        "filters": {} # لا فلاتر لأن التداول متوقف
+    },
+    "WEEKEND": {
+        "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
+        "allow_trading": True,
+        "filters": {
+            "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1, 
+            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25, 
+            "min_btc_correlation": -0.4
+        }
+    }
+}
+
+# مضاعفات تعديل الفلاتر بناءً على سيولة السوق (تداخل البورصات)
+SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
+    "HIGH_LIQUIDITY": { # تداخل لندن ونيويورك
+        "adx_mult": 1.1, "rel_vol_mult": 1.1, "rrr_mult": 0.95
+    },
+    "NORMAL_LIQUIDITY": { # بورصة واحدة مفتوحة
+        "adx_mult": 1.0, "rel_vol_mult": 1.0, "rrr_mult": 1.0
+    },
+    "LOW_LIQUIDITY": { # خارج أوقات البورصات الرئيسية (وليس عطلة نهاية الأسبوع)
+        "adx_mult": 0.9, "rel_vol_mult": 0.9, "rrr_mult": 1.1
+    }
+}
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة - V23.4 ----------------------
 # --- إعدادات التداول الحقيقي ---
@@ -104,8 +164,6 @@ BREAKOUT_ALLOWANCE_PCT: float = 1.003
 
 # --- إعدادات الفلاتر الديناميكية ---
 DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 900 # ثانية (15 دقيقة)
-DYNAMIC_FILTER_SAMPLE_SIZE: int = 40 # عدد العملات في العينة
-DYNAMIC_FILTER_PERCENTILE: int = 35 # النسبة المئوية المستخدمة لتحديد العتبات
 
 # --- المتغيرات العامة وقفل العمليات ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -352,7 +410,7 @@ function updateMarketStatus() {
         const profileNameDiv = document.getElementById('filter-profile-name');
         const profileDescDiv = document.getElementById('filter-profile-desc');
         const profileStyle = getProfileStyle(profile.name);
-        profileNameDiv.textContent = profileStyle.text;
+        profileNameDiv.textContent = profile.name; // Use the full name now
         profileNameDiv.className = `text-xl font-bold ${profileStyle.color}`;
         profileDescDiv.textContent = profile.description;
         profileDescDiv.classList.remove('skeleton', 'h-5', 'w-full');
@@ -887,11 +945,11 @@ def determine_market_state():
         uptrends = trends.count("Uptrend")
         downtrends = trends.count("Downtrend")
         overall_regime = "RANGING"
-        if uptrends == 3: overall_regime = "STRONG UPTREND"
+        if uptrends == 3: overall_regime = "STRONG_UPTREND"
         elif uptrends >= 2 and downtrends == 0: overall_regime = "UPTREND"
-        elif downtrends == 3: overall_regime = "STRONG DOWNTREND"
-        elif downtrends >= 2 and uptrends == 0: overall_regime = "DOWNTREND"
-        elif "Uncertain" in trends: overall_regime = "UNCERTAIN"
+        elif downtrends >= 2: overall_regime = "DOWNTREND" # Any significant downtrend presence
+        elif "Uncertain" in trends: overall_regime = "RANGING" # Treat uncertainty as ranging
+        
         with market_state_lock:
             current_market_state = {
                 "overall_regime": overall_regime,
@@ -902,34 +960,39 @@ def determine_market_state():
         logger.info(f"✅ [Market State] New state: {overall_regime} (15m: {state_15m['trend']}, 1h: {state_1h['trend']}, 4h: {state_4h['trend']})")
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
-        with market_state_lock: current_market_state['overall_regime'] = "UNCERTAIN"
+        with market_state_lock: current_market_state['overall_regime'] = "RANGING"
 
-def get_active_market_sessions() -> List[str]:
+def get_session_state() -> Tuple[List[str], str, str]:
     """
-    Checks the current UTC time and returns a list of active major market sessions.
+    [مُعدّل] يحدد جلسات التداول النشطة وحالة السيولة الناتجة.
+    Returns: Tuple (قائمة الجلسات, حالة السيولة, وصف удоح)
     """
-    sessions = {
-        "London": (8, 17),
-        "New York": (13, 22),
-        "Tokyo": (0, 9)
-    }
+    sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
     active_sessions = []
     now_utc = datetime.now(timezone.utc)
     current_hour = now_utc.hour
-    
-    # Note: This check is for real-world market hours, not crypto's 24/7 nature.
-    # The user wants to trade on weekends, so we will handle the empty list case.
-    if now_utc.weekday() >= 5: # Saturday or Sunday
-        return []
+
+    # عطلة نهاية الأسبوع (السبت والأحد)
+    if now_utc.weekday() >= 5:
+        return [], "WEEKEND", "سيولة منخفضة جدا (عطلة نهاية الأسبوع)"
 
     for session, (start, end) in sessions.items():
         if start <= current_hour < end:
             active_sessions.append(session)
-    return active_sessions
+
+    if "London" in active_sessions and "New York" in active_sessions:
+        return active_sessions, "HIGH_LIQUIDITY", "سيولة عالية (تداخل لندن/نيويورك)"
+    elif len(active_sessions) == 1:
+        return active_sessions, "NORMAL_LIQUIDITY", f"سيولة عادية ({active_sessions[0]})"
+    elif len(active_sessions) > 1:
+        return active_sessions, "NORMAL_LIQUIDITY", f"سيولة عادية ({', '.join(active_sessions)})"
+    else:
+        return [], "LOW_LIQUIDITY", "سيولة منخفضة (خارج أوقات الذروة)"
 
 def analyze_market_and_create_dynamic_profile() -> None:
     """
-    [V23.4 - Weekend Trading] Analyzes market sample and active sessions to generate a highly adaptive filter profile.
+    [مُعاد هيكلته بالكامل] ينشئ ملف تعريف مرشح ديناميكي للغاية من خلال الجمع بين
+    اتجاه السوق العام وحالة سيولة الجلسة الحالية.
     """
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     
@@ -937,138 +1000,55 @@ def analyze_market_and_create_dynamic_profile() -> None:
         if time.time() - last_dynamic_filter_analysis_time < DYNAMIC_FILTER_ANALYSIS_INTERVAL:
             return
 
-    logger.info(f"🔬 [Dynamic Filter] Starting market analysis for dynamic profile generation...")
+    logger.info("🔬 [Dynamic Filter] Starting advanced profile generation...")
     
-    if not client or not validated_symbols_to_scan:
-        logger.warning("⚠️ [Dynamic Filter] Cannot run analysis: Client or symbols not initialized.")
-        return
+    # 1. تحديد حالة السوق والسيولة
+    active_sessions, liquidity_state, liquidity_desc = get_session_state()
+    with market_state_lock:
+        market_regime = current_market_state.get("overall_regime", "RANGING")
 
-    # --- [تعديل] منطق جديد للتعامل مع عطلات نهاية الأسبوع ---
-    active_sessions = get_active_market_sessions()
-    if not active_sessions:
-        logger.warning("لا توجد جلسات سوق نشطة. سيتم تطبيق ملف تعريف 'وضع نهاية الأسبوع' بشروط مخففة.")
-        
-        with dynamic_filter_lock:
-            dynamic_filter_profile_cache = {
-                "name": "Weekend Mode (Relaxed)",
-                "description": "سيولة منخفضة جداً (شروط مخففة)",
-                "allow_trading": True,  # <-- السماح بالتداول
-                "filters": {
-                    "adx": 16.0,              # عتبة ADX أقل
-                    "rel_vol": 0.65,            # عتبة حجم التداول النسبي أقل
-                    "rsi_range": (25, 75),    # نطاق RSI أوسع
-                    "roc": 0.05,              # عتبة ROC أقل
-                    "accel": -0.05,           # السماح بتباطؤ بسيط
-                    "slope": 0.0,             # السماح بميل صفري
-                    "min_rrr": 1.2,           # نسبة المخاطرة/العائد أقل
-                    "min_volatility_pct": 0.25, # السماح بتقلبات أقل
-                    "min_btc_correlation": -0.5 # ارتباط أوسع مع البيتكوين
-                },
-                "last_updated": datetime.now(timezone.utc).isoformat(),
-            }
-            last_dynamic_filter_analysis_time = time.time()
-        
-        logger.info("✅ [Dynamic Filter] تم إنشاء ملف تعريف 'Weekend Mode'.")
-        return # <-- الخروج من الدالة بعد إنشاء الملف الخاص
-
-    # --- المنطق الأصلي للجلسات النشطة يبدأ هنا ---
-    num_sessions = len(active_sessions)
-    volatility_multiplier = 1.0
-    session_desc = "سيولة عادية"
-
-    if num_sessions > 1:
-        volatility_multiplier = 0.9
-        session_desc = f"سيولة عالية ({', '.join(active_sessions)})"
+    # 2. اختيار ملف التعريف الأساسي بناءً على اتجاه السوق
+    # إذا كان يوم عطلة، تجاهل اتجاه السوق واستخدم ملف تعريف عطلة نهاية الأسبوع مباشرة
+    if liquidity_state == "WEEKEND":
+        base_profile = FILTER_PROFILES["WEEKEND"].copy()
+        final_profile_name = "Weekend Mode"
+        final_profile_desc = base_profile["description"]
+        final_filters = base_profile["filters"]
+        allow_trading = base_profile["allow_trading"]
     else:
-        volatility_multiplier = 1.1
-        session_desc = f"سيولة منخفضة ({active_sessions[0]})"
+        base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
+        allow_trading = base_profile["allow_trading"]
+        
+        if not allow_trading:
+            # حالة الاتجاه الهابط (أو أي حالة أخرى تم تعطيل التداول فيها)
+            final_profile_name = f"Trading Disabled"
+            final_profile_desc = base_profile["description"]
+            final_filters = {}
+        else:
+            # 3. تطبيق مضاعفات السيولة على ملف التعريف الأساسي
+            multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
+            final_filters = base_profile["filters"].copy()
 
-    sample_symbols = random.sample(validated_symbols_to_scan, min(len(validated_symbols_to_scan), DYNAMIC_FILTER_SAMPLE_SIZE))
-    adx_values, roc_values, accel_values, slope_values, volatility_pct_values, rel_vol_values = [], [], [], [], [], []
-    btc_data = get_btc_data_for_bot()
+            # تطبيق المضاعفات
+            final_filters["adx"] *= multipliers["adx_mult"]
+            final_filters["rel_vol"] *= multipliers["rel_vol_mult"]
+            final_filters["min_rrr"] *= multipliers["rrr_mult"]
+            
+            final_profile_name = f"{base_profile['description']}"
+            final_profile_desc = liquidity_desc
 
-    for symbol in sample_symbols:
-        try:
-            df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
-            if df is None or len(df) < max(ADX_PERIOD, MOMENTUM_PERIOD) + 5: continue
-            df_features = calculate_features(df, btc_data)
-            if df_features.empty: continue
-            last_features = df_features.iloc[-1]
-            if np.isfinite(last_features.get('adx', np.nan)): adx_values.append(last_features['adx'])
-            if np.isfinite(last_features.get(f'roc_{MOMENTUM_PERIOD}', np.nan)): roc_values.append(last_features[f'roc_{MOMENTUM_PERIOD}'])
-            if np.isfinite(last_features.get('roc_acceleration', np.nan)): accel_values.append(last_features['roc_acceleration'])
-            if np.isfinite(last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', np.nan)): slope_values.append(last_features[f'ema_slope_{EMA_SLOPE_PERIOD}'])
-            if np.isfinite(last_features.get('relative_volume', np.nan)): rel_vol_values.append(last_features['relative_volume'])
-            last_atr = last_features.get('atr', 0)
-            last_price = df['close'].iloc[-1]
-            if last_price > 0 and last_atr > 0:
-                volatility_pct = (last_atr / last_price) * 100
-                if np.isfinite(volatility_pct): volatility_pct_values.append(volatility_pct)
-        except Exception as e:
-            logger.debug(f"⚠️ [Dynamic Filter Analysis] Could not process {symbol}: {e}")
-        finally:
-            if 'df' in locals(): del df
-            if 'df_features' in locals(): del df_features
-
-    if not roc_values:
-        logger.warning("⚠️ [Dynamic Filter] Could not calculate any market values. Skipping dynamic adjustment.")
-        with dynamic_filter_lock: last_dynamic_filter_analysis_time = time.time()
-        return
-
-    dynamic_thresholds = {
-        'adx': (np.percentile(adx_values, DYNAMIC_FILTER_PERCENTILE) if adx_values else 18.0) * volatility_multiplier,
-        'rel_vol': (np.percentile(rel_vol_values, DYNAMIC_FILTER_PERCENTILE) if rel_vol_values else 0.7) * volatility_multiplier,
-        'roc': np.percentile(roc_values, DYNAMIC_FILTER_PERCENTILE) if roc_values else 0.1,
-        'accel': np.percentile(accel_values, DYNAMIC_FILTER_PERCENTILE) if accel_values else 0.0,
-        'slope': np.percentile(slope_values, DYNAMIC_FILTER_PERCENTILE) if slope_values else 0.0,
-        'min_volatility_pct': np.percentile(volatility_pct_values, DYNAMIC_FILTER_PERCENTILE) if volatility_pct_values else 0.3,
-    }
-
-    with market_state_lock: regime = current_market_state.get("overall_regime", "RANGING")
-    
-    profile_name = "Dynamic Ranging"
-    final_filters = {}
-    
-    if "STRONG UPTREND" in regime:
-        profile_name = "Dynamic Strong Uptrend"
-        final_filters = {
-            "adx": dynamic_thresholds['adx'] * 0.8, "rel_vol": dynamic_thresholds['rel_vol'] * 0.8,
-            "rsi_range": (40, 95), "roc": dynamic_thresholds['roc'] * 0.8, "accel": dynamic_thresholds['accel'],
-            "slope": dynamic_thresholds['slope'] * 0.8, "min_rrr": 1.1, 
-            "min_volatility_pct": dynamic_thresholds['min_volatility_pct'] * 0.9, "min_btc_correlation": -0.2
-        }
-    elif "UPTREND" in regime:
-        profile_name = "Dynamic Uptrend"
-        final_filters = {
-            "adx": dynamic_thresholds['adx'] * 0.9, "rel_vol": dynamic_thresholds['rel_vol'] * 0.9,
-            "rsi_range": (35, 90), "roc": dynamic_thresholds['roc'], "accel": dynamic_thresholds['accel'],
-            "slope": dynamic_thresholds['slope'] * 0.9, "min_rrr": 1.2, 
-            "min_volatility_pct": dynamic_thresholds['min_volatility_pct'], "min_btc_correlation": -0.1
-        }
-    elif "DOWNTREND" in regime:
-        profile_name = "Dynamic Downtrend"
-        final_filters = {}
-    else: # RANGING
-        profile_name = "Dynamic Ranging"
-        final_filters = {
-            "adx": dynamic_thresholds['adx'] * 1.1, "rel_vol": dynamic_thresholds['rel_vol'] * 1.1,
-            "rsi_range": (30, 70), "roc": dynamic_thresholds['roc'], "accel": dynamic_thresholds['accel'],
-            "slope": dynamic_thresholds['slope'], "min_rrr": 1.4, 
-            "min_volatility_pct": dynamic_thresholds['min_volatility_pct'], "min_btc_correlation": -0.3
-        }
-
+    # 4. تخزين ملف التعريف النهائي المؤقت
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
-            "name": profile_name,
-            "description": session_desc,
-            "allow_trading": "DOWNTREND" not in regime,
+            "name": final_profile_name,
+            "description": final_profile_desc,
+            "allow_trading": allow_trading,
             "filters": final_filters,
             "last_updated": datetime.now(timezone.utc).isoformat(),
-            "source_metrics": {k: f'{v:.4f}' for k, v in dynamic_thresholds.items()}
         }
         last_dynamic_filter_analysis_time = time.time()
     
-    logger.info(f"✅ [Dynamic Filter] New profile '{profile_name}' created. Session state: {session_desc}")
+    logger.info(f"✅ [Dynamic Filter] New profile created: '{final_profile_name}' | Description: '{final_profile_desc}'")
 
 
 def get_current_filter_profile() -> Dict[str, Any]:
@@ -1294,7 +1274,7 @@ def passes_all_filters(symbol: str, last_features: pd.Series, profile: Dict[str,
             if not recent_candles.empty:
                 highest_high = recent_candles['high'].max()
                 
-                is_strong_uptrend = (market_regime == "STRONG UPTREND")
+                is_strong_uptrend = (market_regime == "STRONG_UPTREND")
                 if is_strong_uptrend:
                     price_limit = highest_high * BREAKOUT_ALLOWANCE_PCT
                     condition_met = entry_price <= price_limit
@@ -1738,7 +1718,11 @@ def main_loop():
                         
                         new_signal = {
                             'symbol': symbol, 'strategy_name': BASE_ML_MODEL_NAME, 
-                            'signal_details': {'ML_Confidence': confidence, 'ML_Confidence_Display': f"{confidence:.2%}", 'Filter_Profile': f"{filter_profile['name']} ({filter_profile['description']})"}, 
+                            'signal_details': {
+                                'ML_Confidence': confidence, 
+                                'ML_Confidence_Display': f"{confidence:.2%}", 
+                                'Filter_Profile': f"{filter_profile['name']} ({filter_profile['description']})"
+                            }, 
                             'entry_price': entry_price, **tp_sl_data
                         }
                         
@@ -1764,25 +1748,16 @@ def main_loop():
                     logger.error(f"❌ [Processing Error] An error occurred for symbol {symbol}: {e}", exc_info=True)
                     time.sleep(1)
                 finally:
-                    # [إصلاح الذاكرة] حذف الكائنات الكبيرة بشكل صريح لمساعدة جامع القمامة
+                    # [MEMORY-FIX] Explicitly delete large objects to help GC
                     del strategy, df_15m, df_4h, df_features, signal_info
                     
                     processed_count += 1
-                    # --- منطق معالجة الدفعات وإدارة الذاكرة ---
-                    # التحقق مما إذا كانت دفعة من 50 رمزًا قد اكتملت
                     if processed_count % SYMBOL_PROCESSING_BATCH_SIZE == 0 and processed_count < len(symbols_to_process):
-                        logger.info(f"🗑️ تم الانتهاء من معالجة دفعة مكونة من {SYMBOL_PROCESSING_BATCH_SIZE} رمزًا. بدء تنظيف الذاكرة...")
-                        
-                        # الخطوة 1: مسح ذاكرة التخزين المؤقت للنماذج المحملة
-                        # هذا يحرر الذاكرة من نماذج الـ 50 رمزًا التي تم تحميلها للتو
+                        logger.info(f"🗑️ Processed batch of {SYMBOL_PROCESSING_BATCH_SIZE} symbols. Running memory cleanup...")
                         ml_models_cache.clear()
-                        
-                        # الخطوة 2: استدعاء جامع القمامة (Garbage Collector) بشكل صريح
-                        # هذا يضمن تحرير الذاكرة التي كانت تشغلها النماذج والكائنات الأخرى
                         collected = gc.collect()
-                        
-                        logger.info(f"🗑️ اكتمل تنظيف الذاكرة. قام جامع القمامة بجمع {collected} كائنًا. الانتقال إلى الدفعة التالية.")
-                        time.sleep(2) # انتظار قصير قبل البدء في الدفعة التالية
+                        logger.info(f"🗑️ Memory cleanup complete. GC collected {collected} objects. Continuing to next batch.")
+                        time.sleep(2)
             
             logger.info("✅ [End of Cycle] Full scan cycle finished.")
             perform_end_of_cycle_cleanup()
@@ -1831,11 +1806,12 @@ def home():
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
     profile_copy = get_current_filter_profile()
+    active_sessions, _, _ = get_session_state()
     return jsonify({
         "fear_and_greed": get_fear_and_greed_index(), 
         "market_state": state_copy,
         "filter_profile": profile_copy,
-        "active_sessions": get_active_market_sessions(),
+        "active_sessions": active_sessions,
         "db_ok": check_db_connection(), 
         "api_ok": check_api_status(),
         "usdt_balance": get_usdt_balance()
