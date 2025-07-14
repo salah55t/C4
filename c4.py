@@ -111,13 +111,13 @@ DYNAMIC_FILTER_SETTINGS = {
     },
     # في الاتجاه الصاعد، نكون متوازنين
     "UPTREND": {
-        "adx": 20.0, "rel_vol": 0.3, "rsi_min": 40.0, "rsi_max": 75.0,
+        "adx": 20.0, "rel_vol": 0.2, "rsi_min": 40.0, "rsi_max": 75.0,
         "roc": 1.0, "roc_accel": 0.5, "ema_slope": 0.2,
         "min_volatility": 0.5, "min_correlation": 0.2, "min_rrr": 1.7
     },
     # في السوق العرضي، تم تخفيف الشروط بناءً على طلبك
     "RANGING": {
-        "adx": 20.0, "rel_vol": 0.2, "rsi_min": 30.0, "rsi_max": 65.0,
+        "adx": 20.0, "rel_vol": 0.1, "rsi_min": 30.0, "rsi_max": 65.0,
         "roc": 0.4,          # تم تخفيفه من 1.2
         "roc_accel": 0.3,    # تم تخفيفه من 0.6
         "ema_slope": 0.1,    # تم تخفيفه من 0.25
