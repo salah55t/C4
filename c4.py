@@ -101,18 +101,18 @@ PEAK_CHECK_PERIOD: int = 50
 PULLBACK_THRESHOLD_PCT: float = 0.988 
 BREAKOUT_ALLOWANCE_PCT: float = 1.003
 
-# --- [مُعدل] مصفوفة الفلاتر بقيم متوسطة لتسهيل الشروط ---
+# --- [مُعدل] مصفوفة الفلاتر بقيم مخفضة جداً لتسهيل الشروط ---
 FILTER_PROFILES = {
     "Uptrend": {
-        "description": "جلسة صاعدة (شروط متوسطة)", "allow_trading": True,
-        "adx": 20, "rel_vol": 0.7, "rsi_range": (40, 90), "roc": 0.4, "accel": 0.0,
-        "slope": 0.0, "min_rrr": 1.3, "min_volatility_pct": 0.4, "min_btc_correlation": 0.0
+        "description": "جلسة صاعدة (شروط مرنة جداً)", "allow_trading": True,
+        "adx": 18, "rel_vol": 0.6, "rsi_range": (35, 90), "roc": 0.2, "accel": 0.0,
+        "slope": -0.05, "min_rrr": 1.2, "min_volatility_pct": 0.3, "min_btc_correlation": -0.1
     },
     "Ranging": {
-        "description": "جلسة عرضية (شروط متوسطة ومرنة)", "allow_trading": True,
-        "adx": 18, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.5, "accel": 0.0,
-        "slope": -0.1, 
-        "min_rrr": 1.5, "min_volatility_pct": 0.3, "min_btc_correlation": -0.2
+        "description": "جلسة عرضية (شروط مرنة جداً)", "allow_trading": True,
+        "adx": 15, "rel_vol": 0.7, "rsi_range": (25, 75), "roc": 0.3, "accel": 0.0,
+        "slope": -0.15, 
+        "min_rrr": 1.3, "min_volatility_pct": 0.2, "min_btc_correlation": -0.3
     },
     "Downtrend": {"description": "التداول غير مسموح به في اتجاه هابط", "allow_trading": False}
 }
