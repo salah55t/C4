@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.5 (Arabic Logs) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.6 (Momentum Override) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.5_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.6_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.5')
+logger = logging.getLogger('CryptoBotV26.6')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -119,6 +119,10 @@ SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
 # ---------------------- الثوابت والمتغيرات العامة ----------------------
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
+# --- إضافة جديدة: متغير وقفل للتحكم في فرض استراتيجية الزخم ---
+force_momentum_strategy: bool = False
+force_momentum_lock = Lock()
+# --- نهاية الإضافة ---
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
@@ -166,7 +170,6 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
-# UPDATED: قاموس لترجمة أسباب الرفض إلى العربية
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة",
     "Low Volatility": "تقلب منخفض جداً",
@@ -186,13 +189,14 @@ REJECTION_REASONS_AR = {
 
 # ---------------------- دالة HTML للوحة التحكم ----------------------
 def get_dashboard_html():
+    # --- تعديل: إضافة بطاقة جديدة وعناصر تحكم لاستراتيجية الزخم ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.5 - سجلات عربية</title>
+    <title>لوحة تحكم التداول V26.6</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -239,21 +243,12 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.5</span>
+                <span class="text-text-secondary font-medium">V26.6</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
-                <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة">
-                    <div id="trend-light-15m" class="trend-light skeleton"></div>
-                    <span class="text-sm font-bold text-text-secondary">15د</span>
-                </div>
-                <div class="flex items-center gap-2" title="اتجاه فريم ساعة">
-                    <div id="trend-light-1h" class="trend-light skeleton"></div>
-                    <span class="text-sm font-bold text-text-secondary">1س</span>
-                </div>
-                <div class="flex items-center gap-2" title="اتجاه فريم 4 ساعات">
-                    <div id="trend-light-4h" class="trend-light skeleton"></div>
-                    <span class="text-sm font-bold text-text-secondary">4س</span>
-                </div>
+                <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
+                <div class="flex items-center gap-2" title="اتجاه فريم ساعة"><div id="trend-light-1h" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">1س</span></div>
+                <div class="flex items-center gap-2" title="اتجاه فريم 4 ساعات"><div id="trend-light-4h" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">4س</span></div>
             </div>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -262,7 +257,7 @@ def get_dashboard_html():
         </header>
 
         <!-- قسم التحكم والمعلومات -->
-        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
             <div class="card p-4">
                  <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
                  <div class="grid grid-cols-2 gap-4 text-center">
@@ -286,14 +281,23 @@ def get_dashboard_html():
                 <div class="flex items-center space-x-3 space-x-reverse">
                     <span id="trading-status-text" class="font-bold text-lg text-accent-red">غير مُفعَّل</span>
                     <label for="trading-toggle" class="flex items-center cursor-pointer">
-                        <div class="relative">
-                            <input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()">
-                            <div class="toggle-bg block bg-accent-red w-12 h-7 rounded-full"></div>
-                        </div>
+                        <div class="relative"><input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()"><div class="toggle-bg block bg-accent-red w-12 h-7 rounded-full"></div></div>
                     </label>
                 </div>
                  <div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono skeleton w-20 inline-block"></span></div>
             </div>
+            <!-- --- إضافة جديدة: بطاقة التحكم في الاستراتيجية --- -->
+            <div class="card p-4 flex flex-col justify-center items-center bg-blue-900/20 border-accent-blue">
+                <h3 class="font-bold text-lg text-text-secondary mb-2">التحكم بالاستراتيجية</h3>
+                <div class="flex items-center space-x-3 space-x-reverse">
+                    <span id="force-momentum-text" class="font-bold text-lg text-text-secondary">تلقائي</span>
+                    <label for="force-momentum-toggle" class="flex items-center cursor-pointer">
+                        <div class="relative"><input type="checkbox" id="force-momentum-toggle" class="sr-only" onchange="toggleMomentumStrategy()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div>
+                    </label>
+                </div>
+                 <div id="force-momentum-desc" class="mt-2 text-xs text-text-secondary text-center">فرض استراتيجية الزخم</div>
+            </div>
+            <!-- --- نهاية الإضافة --- -->
         </section>
 
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -349,14 +353,10 @@ const REGIME_STYLES = {
 const STRATEGY_STYLES = {
     "MOMENTUM": { text: "متابعة الزخم", color: "text-accent-blue" },
     "REVERSAL": { text: "بحث عن انعكاس", color: "text-accent-yellow" },
-    "DISABLED": { text: "متوقف", color: "text-text-secondary" }
+    "DISABLED": { text: "متوقف", color: "text-text-secondary" },
+    "FORCED_MOMENTUM": { text: "زخم (يدوي)", color: "text-cyan-400" }
 };
-const TREND_LIGHT_COLORS = {
-    "Uptrend": "light-on-green",
-    "Downtrend": "light-on-red",
-    "Ranging": "light-on-yellow",
-    "Uncertain": "light-off"
-};
+const TREND_LIGHT_COLORS = { "Uptrend": "light-on-green", "Downtrend": "light-on-red", "Ranging": "light-on-yellow", "Uncertain": "light-off" };
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
@@ -408,6 +408,9 @@ function updateMarketStatus() {
         document.getElementById('db-status-light').className = `w-2.5 h-2.5 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
         document.getElementById('api-status-light').className = `w-2.5 h-2.5 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
         
+        // --- تعديل: تحديث حالة زر فرض الزخم ---
+        updateMomentumToggle(data.force_momentum_enabled);
+
         const state = data.market_state;
         const overallRegime = state.overall_regime || "UNCERTAIN";
         const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
@@ -427,7 +430,11 @@ function updateMarketStatus() {
         });
 
         const profile = data.filter_profile;
-        const strategy = profile.strategy || "DISABLED";
+        let strategy = profile.strategy || "DISABLED";
+        // --- تعديل: إظهار حالة الفرض اليدوي في الاستراتيجية الحالية ---
+        if (data.force_momentum_enabled) {
+            strategy = "FORCED_MOMENTUM";
+        }
         const strategyStyle = STRATEGY_STYLES[strategy] || STRATEGY_STYLES["DISABLED"];
         const strategyDiv = document.getElementById('active-strategy');
         strategyDiv.textContent = strategyStyle.text;
@@ -482,37 +489,67 @@ function updateTradingStatus() {
         if (!data || data.error) return;
         const toggle = document.getElementById('trading-toggle');
         const text = document.getElementById('trading-status-text');
-        const bg = toggle.nextElementSibling;
         
         toggle.checked = data.is_enabled;
         if (data.is_enabled) {
             text.textContent = 'مُفعَّل';
             text.className = 'font-bold text-lg text-accent-green';
-            bg.classList.remove('bg-accent-red');
-            bg.classList.add('bg-accent-green');
         } else {
             text.textContent = 'غير مُفعَّل';
             text.className = 'font-bold text-lg text-accent-red';
-            bg.classList.remove('bg-accent-green');
-            bg.classList.add('bg-accent-red');
         }
     });
+}
+
+// --- إضافة جديدة: دالة لتحديث واجهة زر فرض الزخم ---
+function updateMomentumToggle(is_forced) {
+    const toggle = document.getElementById('force-momentum-toggle');
+    const text = document.getElementById('force-momentum-text');
+    const bg = toggle.nextElementSibling;
+
+    toggle.checked = is_forced;
+    if (is_forced) {
+        text.textContent = 'زخم يدوي';
+        text.className = 'font-bold text-lg text-cyan-400';
+        bg.classList.remove('bg-gray-600');
+        bg.classList.add('bg-accent-blue');
+    } else {
+        text.textContent = 'تلقائي';
+        text.className = 'font-bold text-lg text-text-secondary';
+        bg.classList.remove('bg-accent-blue');
+        bg.classList.add('bg-gray-600');
+    }
 }
 
 function toggleTrading() {
     const toggle = document.getElementById('trading-toggle');
     const confirmationMessage = toggle.checked
-        ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟ هذا الإجراء يحمل مخاطر."
-        : "هل أنت متأكد من إيقاف التداول الحقيقي؟ لن يتم فتح أو إغلاق أي صفقات جديدة.";
+        ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟"
+        : "هل أنت متأكد من إيقاف التداول الحقيقي؟";
 
     if (confirm(confirmationMessage)) {
         apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => {
+            if (data.message) { alert(data.message); updateTradingStatus(); } 
+            else if (data.error) { alert(`خطأ: ${data.error}`); updateTradingStatus(); }
+        });
+    } else { toggle.checked = !toggle.checked; }
+}
+
+// --- إضافة جديدة: دالة لتفعيل/إلغاء فرض استراتيجية الزخم ---
+function toggleMomentumStrategy() {
+    const toggle = document.getElementById('force-momentum-toggle');
+    const confirmationMessage = toggle.checked
+        ? "هل أنت متأكد من فرض استراتيجية الزخم؟ سيتجاهل البوت ظروف السوق."
+        : "هل أنت متأكد من العودة إلى الوضع التلقائي لاختيار الاستراتيجية؟";
+
+    if (confirm(confirmationMessage)) {
+        apiFetch('/api/strategy/force_momentum/toggle', { method: 'POST' }).then(data => {
             if (data.message) {
                 alert(data.message);
-                updateTradingStatus();
+                updateMomentumToggle(data.is_forced);
             } else if (data.error) {
                 alert(`خطأ: ${data.error}`);
-                updateTradingStatus();
+                updateMomentumToggle(!toggle.checked); // Revert UI on error
             }
         });
     } else {
@@ -525,7 +562,6 @@ function updateStats() {
         if (!data || data.error) return;
         
         const profitFactorDisplay = data.profit_factor === 'Infinity' ? '∞' : formatNumber(data.profit_factor);
-        
         document.getElementById('open-trades-value').textContent = formatNumber(data.open_trades_count, 0);
         document.getElementById('open-trades-value').classList.remove('skeleton', 'h-12', 'w-1/2');
         
@@ -665,7 +701,7 @@ function updateList(endpoint, listId, formatter) {
 }
 
 function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟ سيتم بيع الكمية بسعر السوق إذا كان التداول الحقيقي مفعَّلاً.`)) {
+    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
         fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
             alert(data.message || data.error);
             refreshData();
@@ -766,9 +802,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
         logger.error(f"❌ [Notify DB] Failed to save notification: {e}")
         if conn: conn.rollback()
 
-# UPDATED: تم تعديل الدالة لاستخدام الترجمة العربية في لوحة التحكم
 def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
-    """يسجل رفض إشارة مع ترجمة السبب للعربية للوحة التحكم."""
     reason_ar = REJECTION_REASONS_AR.get(reason_key, reason_key)
     log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason_key} | Details: {details or {}}"
     logger.info(log_message)
@@ -776,7 +810,7 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
         rejection_logs_cache.appendleft({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
-            "reason": reason_ar,  # استخدام السبب المترجم هنا
+            "reason": reason_ar,
             "details": details or {}
         })
 
@@ -844,14 +878,12 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
     
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
     
-    # ADX
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -861,20 +893,17 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
     
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
     
-    # Keltner Channels (for Reversal Strategy)
     kc_ema = df_calc['close'].ewm(span=20, adjust=False).mean()
     kc_atr = df_calc['atr'].ewm(span=10, adjust=False).mean()
     df_calc['kc_upper'] = kc_ema + (kc_atr * 2)
     df_calc['kc_lower'] = kc_ema - (kc_atr * 2)
     df_calc['kc_middle'] = kc_ema
 
-    # Other features
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
@@ -955,7 +984,6 @@ def determine_market_state():
             current_market_state['overall_regime'] = "RANGING"
             current_market_state['trend_details_by_tf'] = {}
 
-
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
     active_sessions = []
@@ -973,6 +1001,7 @@ def get_session_state() -> Tuple[List[str], str, str]:
     else:
         return [], "LOW_LIQUIDITY", "سيولة منخفضة (خارج أوقات الذروة)"
 
+# --- تعديل: دمج منطق فرض الاستراتيجية اليدوي ---
 def analyze_market_and_create_dynamic_profile() -> None:
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     with dynamic_filter_lock:
@@ -980,14 +1009,23 @@ def analyze_market_and_create_dynamic_profile() -> None:
             return
 
     logger.info("🔬 [Dynamic Filter] Generating profile...")
-    active_sessions, liquidity_state, liquidity_desc = get_session_state()
-    with market_state_lock:
-        market_regime = current_market_state.get("overall_regime", "RANGING")
+    
+    with force_momentum_lock:
+        is_forced = force_momentum_strategy
 
-    if liquidity_state == "WEEKEND":
-        base_profile = FILTER_PROFILES["WEEKEND"].copy()
+    if is_forced:
+        logger.warning(" BOLD [OVERRIDE] Manual momentum strategy is active.")
+        base_profile = FILTER_PROFILES["UPTREND"].copy()
+        liquidity_desc = "استراتيجية الزخم مفروضة يدوياً"
     else:
-        base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
+        active_sessions, liquidity_state, liquidity_desc = get_session_state()
+        with market_state_lock:
+            market_regime = current_market_state.get("overall_regime", "RANGING")
+
+        if liquidity_state == "WEEKEND":
+            base_profile = FILTER_PROFILES["WEEKEND"].copy()
+        else:
+            base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
 
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
@@ -999,7 +1037,8 @@ def analyze_market_and_create_dynamic_profile() -> None:
         }
         last_dynamic_filter_analysis_time = time.time()
     
-    logger.info(f"✅ [Dynamic Filter] New profile: '{base_profile['description']}' | Strategy: '{base_profile['strategy']}'")
+    logger.info(f"✅ [Dynamic Filter] New profile: '{base_profile['description']}' | Strategy: '{base_profile['strategy']}' | Manual Force: {is_forced}")
+# --- نهاية التعديل ---
 
 def get_current_filter_profile() -> Dict[str, Any]:
     with dynamic_filter_lock:
@@ -1667,13 +1706,15 @@ def home(): return render_template_string(get_dashboard_html())
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
+    with force_momentum_lock: is_forced = force_momentum_strategy
     profile_copy = get_current_filter_profile()
     active_sessions, _, _ = get_session_state()
     return jsonify({
         "fear_and_greed": get_fear_and_greed_index(), "market_state": state_copy,
         "filter_profile": profile_copy, "active_sessions": active_sessions,
         "db_ok": check_db_connection(), "api_ok": check_api_status(),
-        "usdt_balance": get_usdt_balance()
+        "usdt_balance": get_usdt_balance(),
+        "force_momentum_enabled": is_forced # --- إضافة: إرسال حالة الفرض اليدوي للواجهة ---
     })
 
 @app.route('/api/stats')
@@ -1735,23 +1776,15 @@ def get_profit_curve():
 
 @app.route('/api/signals')
 def get_signals():
-    # --- بداية الكود المُعدل ---
-    # التأكد من أن الخدمات المطلوبة (قاعدة البيانات، Redis، Binance) متاحة
     if not all([check_db_connection(), redis_client, client]):
         return jsonify({"error": "Service connection failed"}), 500
-    
     try:
-        # جلب جميع الصفقات من قاعدة البيانات
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status IN ('open', 'updated') THEN 0 ELSE 1 END, id DESC;")
             all_signals = [dict(s) for s in cur.fetchall()]
         
-        # تحديد رموز العملات للصفقات المفتوحة
         open_signals_symbols = [s['symbol'] for s in all_signals if s['status'] in ('open', 'updated')]
-        
-        # إذا كانت هناك صفقات مفتوحة، قم بتحديث أسعارها
         if open_signals_symbols:
-            # محاولة جلب الأسعار من Redis أولاً
             prices_from_redis = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_signals_symbols)
             redis_prices_map = {symbol: p for symbol, p in zip(open_signals_symbols, prices_from_redis)}
 
@@ -1760,28 +1793,22 @@ def get_signals():
                     symbol = s['symbol']
                     price = None
                     try:
-                        # جرب تحويل السعر من Redis
                         price = float(redis_prices_map.get(symbol))
                     except (ValueError, TypeError, AttributeError):
-                        # **الآلية الاحتياطية:** إذا فشل Redis، اجلب السعر مباشرة من باينانس
                         try:
                             price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                             logger.info(f"[{symbol}] Fetched price directly from API for dashboard.")
                         except Exception as api_e:
                             logger.warning(f"[{symbol}] Could not fetch price from API for dashboard: {api_e}")
-
-                    # تحديث بيانات الصفقة بالسعر الحالي ونسبة الربح/الخسارة
+                    
                     s['current_price'] = price
                     if price and s.get('entry_price'):
                         s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
-                        
         return jsonify(all_signals)
     except Exception as e:
         logger.error(f"❌ [API Signals] Error: {e}", exc_info=True)
         if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
-    # --- نهاية الكود المُعدل ---
-
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal_api(signal_id):
@@ -1818,6 +1845,19 @@ def toggle_trading_status():
         status_msg = "ENABLED" if is_trading_enabled else "DISABLED"
         log_and_notify('warning', f"🚨 Real trading status changed to: {status_msg}", "TRADING_STATUS_CHANGE")
         return jsonify({"message": f"Trading status set to {status_msg}", "is_enabled": is_trading_enabled})
+
+# --- إضافة جديدة: نقطة API للتحكم في فرض استراتيجية الزخم ---
+@app.route('/api/strategy/force_momentum/toggle', methods=['POST'])
+def toggle_force_momentum():
+    global force_momentum_strategy
+    with force_momentum_lock:
+        force_momentum_strategy = not force_momentum_strategy
+        status_msg = "FORCED MOMENTUM" if force_momentum_strategy else "AUTOMATIC"
+        log_and_notify('warning', f"⚙️ Strategy mode changed to: {status_msg}", "STRATEGY_MODE_CHANGE")
+        # قم بتشغيل التحليل فورًا ليعكس التغيير
+        Thread(target=analyze_market_and_create_dynamic_profile).start()
+        return jsonify({"message": f"Strategy mode set to {status_msg}", "is_forced": force_momentum_strategy})
+# --- نهاية الإضافة ---
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1876,7 +1916,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.5 - Arabic Logs) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.6 - Momentum Override) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
