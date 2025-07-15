@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.1 (Relaxed Filters & UI Update) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.2 (Super Relaxed Filters) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.1_relaxed.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.2_super_relaxed.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.1')
+logger = logging.getLogger('CryptoBotV26.2')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,15 +56,15 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعدادات الفلاتر الديناميكية (مع تخفيف الشروط) ----------------------
+# ---------------------- إعدادات الفلاتر الديناميكية (مع تخفيف كبير للشروط) ----------------------
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 22.0, "rel_vol": 1.1, "rsi_range": (50, 95), "roc": 0.25, 
-            "accel": 0.05, "slope": 0.005, "min_rrr": 1.3, # تم تخفيفه
-            "min_volatility_pct": 0.30, # تم تخفيفه
+            "accel": 0.05, "slope": 0.005, "min_rrr": 1.1, # تم تخفيفه بشكل كبير جداً
+            "min_volatility_pct": 0.30,
             "min_btc_correlation": -0.1
         }
     },
@@ -73,8 +73,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 20.0, "rel_vol": 1.0, "rsi_range": (45, 90), "roc": 0.2, 
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.4, # تم تخفيفه بشكل كبير
-            "min_volatility_pct": 0.25, # تم تخفيفه بشكل كبير
+            "accel": 0.0, "slope": 0.0, "min_rrr": 1.2, # تم تخفيفه بشكل كبير جداً
+            "min_volatility_pct": 0.25,
             "min_btc_correlation": 0.0
         }
     },
@@ -83,7 +83,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 18.0, "rel_vol": 0.9, "rsi_range": (40, 70), "roc": 0.1, 
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.8, # أكثر صرامة في السوق العرضي
+            "accel": 0.0, "slope": 0.0, "min_rrr": 1.3, # تم تخفيفه بشكل كبير جداً
             "min_volatility_pct": 0.3, 
             "min_btc_correlation": -0.2
         }
@@ -123,7 +123,7 @@ RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['1h', '4h', '1d'] # NEW: Timeframes for UI lights
+TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['1h', '4h', '1d']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
@@ -135,10 +135,10 @@ ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_FAST_PERIOD: int = 50; EMA_SLOW_PERIOD: int = 200
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80 # تمت إعادته إلى القيمة الأصلية
+BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
-ATR_FALLBACK_SL_MULTIPLIER: float = 1.5 # تمت إعادته إلى القيمة الأصلية
-ATR_FALLBACK_TP_MULTIPLIER: float = 2.2 # تمت إعادته إلى القيمة الأصلية
+ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
+ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
@@ -175,7 +175,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.1 - شروط مخففة</title>
+    <title>لوحة تحكم التداول V26.2 - شروط مرنة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -216,9 +216,8 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.1</span>
+                <span class="text-text-secondary font-medium">V26.2</span>
             </h1>
-            <!-- NEW: Trend Lights -->
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2">
                     <div id="trend-light-1h" class="w-4 h-4 rounded-full skeleton"></div>
@@ -329,7 +328,6 @@ const STRATEGY_STYLES = {
     "REVERSAL": { text: "بحث عن انعكاس", color: "text-accent-yellow" },
     "DISABLED": { text: "متوقف", color: "text-text-secondary" }
 };
-// NEW: Trend Light Colors
 const TREND_LIGHT_COLORS = {
     "Uptrend": "bg-green-500 light-on-green",
     "Downtrend": "bg-red-500 light-on-red",
@@ -394,7 +392,6 @@ function updateMarketStatus() {
         overallDiv.textContent = regimeStyle.text;
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
         
-        // NEW: Update Trend Lights
         const trendDetails = state.trend_details_by_tf || {};
         ['1h', '4h', '1d'].forEach(tf => {
             const lightEl = document.getElementById(`trend-light-${tf}`);
@@ -909,13 +906,11 @@ def determine_market_state():
     try:
         trend_details = {}
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            # تحديد عدد الأيام بناءً على الإطار الزمني لضمان وجود بيانات كافية
             days_to_fetch = 5 if tf == '1h' else (15 if tf == '4h' else 60)
             df = fetch_historical_data(BTC_SYMBOL, tf, days_to_fetch)
             trend_details[tf] = get_trend_for_timeframe(df)
-            time.sleep(0.2) # لتجنب إغراق الـ API
+            time.sleep(0.2) 
 
-        # يبقى الاتجاه العام معتمداً على 4 ساعات
         overall_regime = trend_details.get('4h', {}).get('trend', 'Uncertain').upper()
         if overall_regime not in ["UPTREND", "DOWNTREND"]:
             overall_regime = "RANGING"
@@ -968,18 +963,7 @@ def analyze_market_and_create_dynamic_profile() -> None:
     else:
         base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
 
-    multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
-    
-    # تطبيق المضاعفات فقط على الفلاتر الموجودة في ملف التعريف
-    if base_profile.get("filters"):
-        current_filters = base_profile["filters"]
-        if "adx" in current_filters:
-            current_filters["adx"] *= multipliers["adx_mult"]
-        if "rel_vol" in current_filters:
-            current_filters["rel_vol"] *= multipliers["rel_vol_mult"]
-        if "min_rrr" in current_filters:
-            current_filters["min_rrr"] *= multipliers["rrr_mult"]
-
+    # The multipliers are now applied inside passes_filters to ensure the log shows the final value
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
             "name": base_profile['description'],
@@ -1168,7 +1152,6 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
         log_rejection(symbol, "Filters Not Loaded", {"profile": profile.get('name')})
         return False
 
-    # تطبيق المضاعفات على نسخة من الفلاتر لتجنب تغيير الأصل
     final_filters = filters.copy()
     _, liquidity_state, _ = get_session_state()
     multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
@@ -1847,7 +1830,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.1 - Relaxed Filters & UI Update) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.2 - Super Relaxed Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
