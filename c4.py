@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V25.0 (Reversal Strategy) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V25.1 (Hotfix) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v25.0_reversal.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v25.1_reversal_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV25.0')
+logger = logging.getLogger('CryptoBotV25.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,12 +56,11 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- [مُعدّل] مركزية إعدادات الفلاتر الديناميكية (مع دعم استراتيجية الانعكاس) ----------------------
-# تم تعديل ملفات تعريف الفلاتر لتضمين استراتيجية جديدة للبحث عن صفقات عند الانعكاس من اتجاه هابط
+# ---------------------- إعدادات الفلاتر الديناميكية ----------------------
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
-        "strategy": "MOMENTUM", # استراتيجية متابعة الزخم
+        "strategy": "MOMENTUM",
         "filters": {
             "adx": 22.0, "rel_vol": 1.2, "rsi_range": (50, 95), "roc": 0.3, 
             "accel": 0.1, "slope": 0.01, "min_rrr": 1.5, "min_volatility_pct": 0.4, 
@@ -88,11 +87,11 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "DOWNTREND": {
         "description": "اتجاه هابط (مراقبة الانعكاس)",
-        "strategy": "REVERSAL", # [جديد] استراتيجية البحث عن انعكاس صاعد
-        "filters": { # [جديد] فلاتر خاصة بالانعكاس
+        "strategy": "REVERSAL",
+        "filters": {
             "min_rrr": 2.0, 
             "min_volatility_pct": 0.4,
-            "min_btc_correlation": -0.5 # تساهل أكبر مع ارتباط البيتكوين عند الانعكاس
+            "min_btc_correlation": -0.5
         }
     },
     "WEEKEND": {
@@ -106,14 +105,13 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     }
 }
 
-# مضاعفات تعديل الفلاتر بناءً على سيولة السوق (تداخل البورصات)
 SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
     "HIGH_LIQUIDITY": { "adx_mult": 1.1, "rel_vol_mult": 1.1, "rrr_mult": 0.95 },
     "NORMAL_LIQUIDITY": { "adx_mult": 1.0, "rel_vol_mult": 1.0, "rrr_mult": 1.0 },
     "LOW_LIQUIDITY": { "adx_mult": 0.9, "rel_vol_mult": 0.9, "rrr_mult": 1.1 }
 }
 
-# ---------------------- إعداد الثوابت والمتغيرات العامة - V25.0 ----------------------
+# ---------------------- الثوابت والمتغيرات العامة ----------------------
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
@@ -164,18 +162,15 @@ last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
 
-# ---------------------- دالة HTML للوحة التحكم (V25.0) ----------------------
+# ---------------------- دالة HTML للوحة التحكم ----------------------
 def get_dashboard_html():
-    """
-    [مُعدّل] لوحة تحكم V25.0 مع دعم عرض استراتيجية الانعكاس.
-    """
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V25.0 - استراتيجية الانعكاس</title>
+    <title>لوحة تحكم التداول V25.1 - استراتيجية الانعكاس</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -212,7 +207,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V25.0</span>
+                <span class="text-text-secondary font-medium">V25.1</span>
             </h1>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
@@ -634,7 +629,7 @@ window.onload = refreshData;
 </html>
     """
 
-# ---------------------- دوال قاعدة البيانات (بدون تغيير عن الإصدار السابق) ----------------------
+# ---------------------- دوال قاعدة البيانات ----------------------
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[DB] Initializing database connection...")
@@ -854,7 +849,6 @@ def determine_market_state():
         df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
         state_4h = get_trend_for_timeframe(df_4h)
         
-        # تبسيط منطق تحديد الاتجاه العام بالاعتماد على الإطار الزمني الأعلى (4 ساعات)
         overall_regime = state_4h['trend'].upper()
         if overall_regime not in ["UPTREND", "DOWNTREND"]:
             overall_regime = "RANGING"
@@ -906,7 +900,6 @@ def analyze_market_and_create_dynamic_profile() -> None:
 
     multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
     
-    # تعديل الفلاتر فقط إذا كانت من نوع الزخم
     if base_profile.get("strategy") == "MOMENTUM" and base_profile.get("filters"):
         base_profile["filters"]["adx"] *= multipliers["adx_mult"]
         base_profile["filters"]["rel_vol"] *= multipliers["rel_vol_mult"]
@@ -950,7 +943,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ [ML Model] Error loading model for {symbol}: {e}", exc_info=True)
         return None
 
-# ---------------------- [مُعدّل] دوال الاستراتيجية والتداول الحقيقي ----------------------
+# ---------------------- دوال الاستراتيجية والتداول الحقيقي ----------------------
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -1057,10 +1050,6 @@ class TradingStrategy:
             return None
 
 def find_bullish_reversal_signal(df_15m: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    [جديد] تبحث هذه الدالة عن إشارة انعكاس صاعد على فريم 15 دقيقة.
-    تعتمد على تقاطع EMA، تأكيد RSI، وتأكيد حجم التداول.
-    """
     try:
         if len(df_15m) < 30: return None
 
@@ -1075,17 +1064,13 @@ def find_bullish_reversal_signal(df_15m: pd.DataFrame) -> Optional[Dict[str, Any
         
         df['volume_ma'] = df['volume'].rolling(window=10).mean()
 
-        # الشرط 1: تقاطع EMA للأعلى
         ema_crossed_up = df['ema_fast'].iloc[-2] < df['ema_slow'].iloc[-2] and \
                          df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1]
         
         if not ema_crossed_up:
             return None
 
-        # الشرط 2: تأكيد RSI
         rsi_confirms = df['rsi'].iloc[-1] > 45
-
-        # الشرط 3: تأكيد حجم التداول
         volume_confirms = df['volume'].iloc[-1] > df['volume_ma'].iloc[-2] * 1.2
 
         if rsi_confirms and volume_confirms:
@@ -1099,15 +1084,11 @@ def find_bullish_reversal_signal(df_15m: pd.DataFrame) -> Optional[Dict[str, Any
 
 
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
-    """
-    [مُعدّل] دالة موحدة للتحقق من الفلاتر بناءً على الاستراتيجية النشطة.
-    """
     filters = profile.get("filters", {})
     if not filters:
         log_rejection(symbol, "Filters Not Loaded", {"profile": profile.get('name')})
         return False
 
-    # فلاتر مشتركة بين كل الاستراتيجيات
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
     if volatility < filters['min_volatility_pct']:
         log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{filters['min_volatility_pct']:.2f}%"})
@@ -1123,7 +1104,6 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
         log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": filters['min_rrr']})
         return False
 
-    # فلاتر خاصة باستراتيجية الزخم فقط
     if profile.get("strategy") == "MOMENTUM":
         adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
         rsi_min, rsi_max = filters['rsi_range']
@@ -1413,7 +1393,7 @@ def perform_end_of_cycle_cleanup():
     except Exception as e:
         logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
 
-# ---------------------- [مُعدّل] حلقة العمل الرئيسية (مع دعم استراتيجية الانعكاس) ----------------------
+# ---------------------- حلقة العمل الرئيسية ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -1465,20 +1445,17 @@ def main_loop():
                     
                     df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_15m is None or df_15m.empty: continue
-                    df_15m.name = symbol # For logging purposes
+                    df_15m.name = symbol
 
                     technical_signal = None
-                    # الخطوة 1: البحث عن إشارة فنية بناءً على الاستراتيجية النشطة
                     if active_strategy_type == "REVERSAL":
                         technical_signal = find_bullish_reversal_signal(df_15m)
                     elif active_strategy_type == "MOMENTUM":
-                        # في استراتيجية الزخم، الإشارة الفنية هي نفسها إشارة النموذج
                         technical_signal = {"signal_type": "MOMENTUM"}
 
                     if not technical_signal:
                         continue
                     
-                    # الخطوة 2: إذا وجدت إشارة فنية، قم بتأكيدها باستخدام نموذج التعلم الآلي
                     strategy = TradingStrategy(symbol)
                     if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
                     
@@ -1495,7 +1472,6 @@ def main_loop():
                             log_rejection(symbol, "Reversal Signal Rejected by ML Model", {"ML_confidence": ml_signal.get('confidence') if ml_signal else 'N/A'})
                         continue
                     
-                    # الخطوة 3: إذا تم تأكيد الإشارة، تحقق من الفلاتر النهائية
                     try:
                         entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception as e:
@@ -1509,7 +1485,6 @@ def main_loop():
                     if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m):
                         continue
                     
-                    # الخطوة 4: فتح الصفقة
                     strategy_name_for_db = f"Reversal_ML" if active_strategy_type == "REVERSAL" else f"Momentum_ML"
                     new_signal = {
                         'symbol': symbol, 'strategy_name': strategy_name_for_db,
@@ -1559,7 +1534,7 @@ def main_loop():
             log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
 
-# ---------------------- واجهة برمجة تطبيقات Flask (V25.0) ----------------------
+# ---------------------- واجهة برمجة تطبيقات Flask ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1737,6 +1712,22 @@ def run_flask():
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
+def run_websocket_manager():
+    """
+    [مُعاد] هذه هي الدالة التي كانت مفقودة.
+    تقوم بتشغيل مدير WebSocket للاستماع لأسعار العملات بشكل فوري.
+    """
+    if not client or not validated_symbols_to_scan:
+        logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized.")
+        return
+    logger.info("📈 [WebSocket] Starting WebSocket Manager...")
+    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
+    twm.start()
+    streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
+    twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
+    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
+    twm.join()
+
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
@@ -1762,7 +1753,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V25.0 - Reversal Strategy) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V25.1 - Reversal Strategy Fix) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
