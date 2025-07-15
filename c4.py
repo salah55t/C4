@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.0 (Crazy Reversal) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.1 (Relaxed Filters & UI Update) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26_crazy_reversal.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.1_relaxed.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.0')
+logger = logging.getLogger('CryptoBotV26.1')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,14 +56,15 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعدادات الفلاتر الديناميكية ----------------------
+# ---------------------- إعدادات الفلاتر الديناميكية (مع تخفيف الشروط) ----------------------
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 22.0, "rel_vol": 1.2, "rsi_range": (50, 95), "roc": 0.3, 
-            "accel": 0.1, "slope": 0.01, "min_rrr": 1.5, "min_volatility_pct": 0.4, 
+            "adx": 22.0, "rel_vol": 1.1, "rsi_range": (50, 95), "roc": 0.25, 
+            "accel": 0.05, "slope": 0.005, "min_rrr": 1.3, # تم تخفيفه
+            "min_volatility_pct": 0.30, # تم تخفيفه
             "min_btc_correlation": -0.1
         }
     },
@@ -72,7 +73,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 20.0, "rel_vol": 1.0, "rsi_range": (45, 90), "roc": 0.2, 
-            "accel": 0.05, "slope": 0.005, "min_rrr": 1.8, "min_volatility_pct": 0.35, 
+            "accel": 0.0, "slope": 0.0, "min_rrr": 1.4, # تم تخفيفه بشكل كبير
+            "min_volatility_pct": 0.25, # تم تخفيفه بشكل كبير
             "min_btc_correlation": 0.0
         }
     },
@@ -81,18 +83,19 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 18.0, "rel_vol": 0.9, "rsi_range": (40, 70), "roc": 0.1, 
-            "accel": 0.0, "slope": 0.0, "min_rrr": 2.0, "min_volatility_pct": 0.3, 
+            "accel": 0.0, "slope": 0.0, "min_rrr": 1.8, # أكثر صرامة في السوق العرضي
+            "min_volatility_pct": 0.3, 
             "min_btc_correlation": -0.2
         }
     },
     "DOWNTREND": {
         "description": "اتجاه هابط (مراقبة الانعكاس)",
-        "strategy": "REVERSAL", # <-- الاستراتيجية المستهدفة
+        "strategy": "REVERSAL",
         "filters": {
-            "min_rrr": 2.2, # زيادة نسبة المخاطرة للعائد في الانعكاسات
-            "min_volatility_pct": 0.5, # تتطلب تقلبات أعلى
+            "min_rrr": 2.0, 
+            "min_volatility_pct": 0.5,
             "min_btc_correlation": -0.5,
-            "min_relative_volume": 1.5 # فلتر حجم التداول النسبي للانعكاس
+            "min_relative_volume": 1.5
         }
     },
     "WEEKEND": {
@@ -100,7 +103,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1, 
-            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25, 
+            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5, 
+            "min_volatility_pct": 0.25, 
             "min_btc_correlation": -0.4
         }
     }
@@ -119,7 +123,7 @@ RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-HIGHER_TIMEFRAME: str = '4h'
+TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['1h', '4h', '1d'] # NEW: Timeframes for UI lights
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
@@ -131,10 +135,10 @@ ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_FAST_PERIOD: int = 50; EMA_SLOW_PERIOD: int = 200
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.82 # زيادة الثقة المطلوبة للانعكاسات
+BUY_CONFIDENCE_THRESHOLD = 0.80 # تمت إعادته إلى القيمة الأصلية
 MIN_CONFIDENCE_INCREASE_FOR_UPDATE = 0.05
-ATR_FALLBACK_SL_MULTIPLIER: float = 1.8 # زيادة المضاعف لوقف الخسارة
-ATR_FALLBACK_TP_MULTIPLIER: float = 2.5 # زيادة المضاعف لجني الأرباح
+ATR_FALLBACK_SL_MULTIPLIER: float = 1.5 # تمت إعادته إلى القيمة الأصلية
+ATR_FALLBACK_TP_MULTIPLIER: float = 2.2 # تمت إعادته إلى القيمة الأصلية
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
@@ -156,7 +160,7 @@ signals_pending_closure: Set[int] = set(); closure_lock = Lock()
 last_api_check_time = time.time()
 rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
-current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "details": {}, "last_updated": None}
+current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
 market_state_lock = Lock()
 dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
@@ -171,7 +175,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.0 - استراتيجية الانعكاس الجنونية</title>
+    <title>لوحة تحكم التداول V26.1 - شروط مخففة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -201,6 +205,10 @@ def get_dashboard_html():
         .toggle-bg:after { content: ''; position: absolute; top: 2px; left: 2px; background: white; border-radius: 9999px; height: 1.25rem; width: 1.25rem; transition: transform 0.2s ease-in-out; }
         input:checked + .toggle-bg:after { transform: translateX(100%); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
+        .trend-light { transition: background-color 0.5s ease, box-shadow 0.5s ease; }
+        .light-on-green { box-shadow: 0 0 8px 2px rgba(63, 185, 80, 0.7); }
+        .light-on-red { box-shadow: 0 0 8px 2px rgba(248, 81, 73, 0.7); }
+        .light-on-yellow { box-shadow: 0 0 8px 2px rgba(210, 153, 34, 0.7); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -208,8 +216,23 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.0</span>
+                <span class="text-text-secondary font-medium">V26.1</span>
             </h1>
+            <!-- NEW: Trend Lights -->
+            <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
+                <div class="flex items-center gap-2">
+                    <div id="trend-light-1h" class="w-4 h-4 rounded-full skeleton"></div>
+                    <span class="text-sm font-bold text-text-secondary">1H</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div id="trend-light-4h" class="w-4 h-4 rounded-full skeleton"></div>
+                    <span class="text-sm font-bold text-text-secondary">4H</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div id="trend-light-1d" class="w-4 h-4 rounded-full skeleton"></div>
+                    <span class="text-sm font-bold text-text-secondary">1D</span>
+                </div>
+            </div>
             <div id="connection-status" class="flex items-center gap-3 text-sm">
                 <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
                 <div class="flex items-center gap-2"><div id="api-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">API</span></div>
@@ -221,7 +244,7 @@ def get_dashboard_html():
             <div class="card p-4">
                  <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
                  <div class="grid grid-cols-2 gap-4 text-center">
-                     <div><h4 class="text-sm font-medium text-text-secondary">الاتجاه العام</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">الاتجاه العام (4H)</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
                      <div><h4 class="text-sm font-medium text-text-secondary">الاستراتيجية الحالية</h4><div id="active-strategy" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
                  </div>
             </div>
@@ -306,6 +329,13 @@ const STRATEGY_STYLES = {
     "REVERSAL": { text: "بحث عن انعكاس", color: "text-accent-yellow" },
     "DISABLED": { text: "متوقف", color: "text-text-secondary" }
 };
+// NEW: Trend Light Colors
+const TREND_LIGHT_COLORS = {
+    "Uptrend": "bg-green-500 light-on-green",
+    "Downtrend": "bg-red-500 light-on-red",
+    "Ranging": "bg-yellow-500 light-on-yellow",
+    "Uncertain": "bg-gray-600"
+};
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
@@ -364,6 +394,18 @@ function updateMarketStatus() {
         overallDiv.textContent = regimeStyle.text;
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
         
+        // NEW: Update Trend Lights
+        const trendDetails = state.trend_details_by_tf || {};
+        ['1h', '4h', '1d'].forEach(tf => {
+            const lightEl = document.getElementById(`trend-light-${tf}`);
+            if (lightEl) {
+                const trendInfo = trendDetails[tf];
+                const trend = trendInfo ? trendInfo.trend : "Uncertain";
+                const colorClass = TREND_LIGHT_COLORS[trend] || TREND_LIGHT_COLORS["Uncertain"];
+                lightEl.className = `w-4 h-4 rounded-full trend-light ${colorClass}`;
+            }
+        });
+
         const profile = data.filter_profile;
         const strategy = profile.strategy || "DISABLED";
         const strategyStyle = STRATEGY_STYLES[strategy] || STRATEGY_STYLES["DISABLED"];
@@ -863,26 +905,35 @@ def determine_market_state():
     global current_market_state, last_market_state_check
     with market_state_lock:
         if time.time() - last_market_state_check < 300: return
-    logger.info("🧠 [Market State] Updating market state...")
+    logger.info("🧠 [Market State] Updating multi-timeframe market state...")
     try:
-        df_4h = fetch_historical_data(BTC_SYMBOL, '4h', 15)
-        state_4h = get_trend_for_timeframe(df_4h)
-        
-        overall_regime = state_4h['trend'].upper()
+        trend_details = {}
+        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
+            # تحديد عدد الأيام بناءً على الإطار الزمني لضمان وجود بيانات كافية
+            days_to_fetch = 5 if tf == '1h' else (15 if tf == '4h' else 60)
+            df = fetch_historical_data(BTC_SYMBOL, tf, days_to_fetch)
+            trend_details[tf] = get_trend_for_timeframe(df)
+            time.sleep(0.2) # لتجنب إغراق الـ API
+
+        # يبقى الاتجاه العام معتمداً على 4 ساعات
+        overall_regime = trend_details.get('4h', {}).get('trend', 'Uncertain').upper()
         if overall_regime not in ["UPTREND", "DOWNTREND"]:
             overall_regime = "RANGING"
 
         with market_state_lock:
             current_market_state = {
                 "overall_regime": overall_regime,
-                "details": {"4h": state_4h},
+                "trend_details_by_tf": trend_details,
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] New state based on 4h TF: {overall_regime}")
+        logger.info(f"✅ [Market State] New state: 1H={trend_details['1h']['trend']}, 4H={trend_details['4h']['trend']}, 1D={trend_details['1d']['trend']}")
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
-        with market_state_lock: current_market_state['overall_regime'] = "RANGING"
+        with market_state_lock: 
+            current_market_state['overall_regime'] = "RANGING"
+            current_market_state['trend_details_by_tf'] = {}
+
 
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
@@ -919,10 +970,15 @@ def analyze_market_and_create_dynamic_profile() -> None:
 
     multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
     
-    if base_profile.get("strategy") == "MOMENTUM" and base_profile.get("filters"):
-        base_profile["filters"]["adx"] *= multipliers["adx_mult"]
-        base_profile["filters"]["rel_vol"] *= multipliers["rel_vol_mult"]
-        base_profile["filters"]["min_rrr"] *= multipliers["rrr_mult"]
+    # تطبيق المضاعفات فقط على الفلاتر الموجودة في ملف التعريف
+    if base_profile.get("filters"):
+        current_filters = base_profile["filters"]
+        if "adx" in current_filters:
+            current_filters["adx"] *= multipliers["adx_mult"]
+        if "rel_vol" in current_filters:
+            current_filters["rel_vol"] *= multipliers["rel_vol_mult"]
+        if "min_rrr" in current_filters:
+            current_filters["min_rrr"] *= multipliers["rrr_mult"]
 
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
@@ -1069,47 +1125,28 @@ class TradingStrategy:
             return None
 
 def find_crazy_reversal_signal(df_featured: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    **استراتيجية الانعكاس الجنونية**
-    تبحث هذه الدالة عن إشارة انعكاس صعودي قوية في اتجاه هابط من خلال دمج 3 مفاهيم:
-    1.  **الانحراف الإيجابي الخفي (Hidden Bullish Divergence)**:
-        - السعر يكون قاعاً أعلى (Higher Low).
-        - مؤشر القوة النسبية (RSI) يكون قاعاً أدنى (Lower Low).
-        - هذا يدل على أن الزخم الصعودي يتزايد سراً.
-    2.  **اختراق قناة كيلتنر (Keltner Channel Breakout)**:
-        - السعر يجب أن يغلق فوق قناة كيلتنر العلوية.
-        - هذا يشير إلى انفجار سعري وبداية حركة قوية.
-    3.  **تأكيد الحجم (Volume Confirmation)**:
-        - حجم التداول في شمعة الاختراق يجب أن يكون أعلى من المتوسط.
-    """
     try:
         if len(df_featured) < 30: return None
         
-        # الشرط الأول: اختراق قناة كيلتنر العلوية
         last_candle = df_featured.iloc[-1]
         if last_candle['close'] <= last_candle['kc_upper']:
             return None
         
-        # الشرط الثاني: البحث عن انحراف إيجابي خفي
-        # البحث عن آخر قاع سعري مهم خلال الـ 25 شمعة الماضية
         lookback_period = 25
-        relevant_data = df_featured.iloc[-lookback_period:-1] # استبعاد الشمعة الحالية
+        relevant_data = df_featured.iloc[-lookback_period:-1]
         
         price_low_idx = relevant_data['low'].idxmin()
         price_low_val = relevant_data.loc[price_low_idx, 'low']
         rsi_at_price_low = relevant_data.loc[price_low_idx, 'rsi']
 
-        # التحقق من أن القاع الحالي للسعر أعلى من القاع السابق
         current_price_low = last_candle['low']
         if current_price_low <= price_low_val:
-            return None # لم يتكون قاع أعلى (Higher Low)
+            return None
 
-        # التحقق من أن RSI الحالي أدنى من RSI عند القاع السابق
         current_rsi = last_candle['rsi']
         if current_rsi >= rsi_at_price_low:
-            return None # لم يتكون انحراف إيجابي خفي
+            return None
 
-        # الشرط الثالث: تأكيد الحجم النسبي
         if last_candle['relative_volume'] < 1.5:
             return None
 
@@ -1131,38 +1168,44 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
         log_rejection(symbol, "Filters Not Loaded", {"profile": profile.get('name')})
         return False
 
+    # تطبيق المضاعفات على نسخة من الفلاتر لتجنب تغيير الأصل
+    final_filters = filters.copy()
+    _, liquidity_state, _ = get_session_state()
+    multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
+    if "adx" in final_filters: final_filters["adx"] *= multipliers["adx_mult"]
+    if "rel_vol" in final_filters: final_filters["rel_vol"] *= multipliers["rel_vol_mult"]
+    if "min_rrr" in final_filters: final_filters["min_rrr"] *= multipliers["rrr_mult"]
+
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
-    if volatility < filters['min_volatility_pct']:
-        log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{filters['min_volatility_pct']:.2f}%"})
+    if volatility < final_filters['min_volatility_pct']:
+        log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{final_filters['min_volatility_pct']:.2f}%"})
         return False
 
     correlation = last_features.get('btc_correlation', 0)
-    if correlation < filters['min_btc_correlation']:
-        log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{filters['min_btc_correlation']}"})
+    if correlation < final_filters['min_btc_correlation']:
+        log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}", "min": f"{final_filters['min_btc_correlation']}"})
         return False
 
     risk, reward = entry_price - float(tp_sl_data['stop_loss']), float(tp_sl_data['target_price']) - entry_price
-    if risk <= 0 or reward <= 0 or (reward / risk) < filters['min_rrr']:
-        log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": filters['min_rrr']})
+    if risk <= 0 or reward <= 0 or (reward / risk) < final_filters['min_rrr']:
+        log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A", "min": f"{final_filters['min_rrr']:.2f}"})
         return False
 
-    # فلاتر خاصة باستراتيجية الانعكاس
     if profile.get("strategy") == "REVERSAL":
         rel_vol = last_features.get('relative_volume', 0)
-        if rel_vol < filters.get('min_relative_volume', 1.5):
-            log_rejection(symbol, "Reversal Volume Filter", {"RelVol": f"{rel_vol:.2f}", "min": filters.get('min_relative_volume', 1.5)})
+        if rel_vol < final_filters.get('min_relative_volume', 1.5):
+            log_rejection(symbol, "Reversal Volume Filter", {"RelVol": f"{rel_vol:.2f}", "min": final_filters.get('min_relative_volume', 1.5)})
             return False
 
-    # فلاتر خاصة باستراتيجية الزخم
     elif profile.get("strategy") == "MOMENTUM":
         adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
-        rsi_min, rsi_max = filters['rsi_range']
-        if not (adx >= filters['adx'] and rel_vol >= filters['rel_vol'] and rsi_min <= rsi < rsi_max):
-            log_rejection(symbol, "Speed Filter", {"ADX": f"{adx:.2f}", "Volume": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}"})
+        rsi_min, rsi_max = final_filters['rsi_range']
+        if not (adx >= final_filters['adx'] and rel_vol >= final_filters['rel_vol'] and rsi_min <= rsi < rsi_max):
+            log_rejection(symbol, "Speed Filter", {"ADX": f"{adx:.2f}", "Volume": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}", "min_ADX": f"{final_filters['adx']:.2f}"})
             return False
 
         roc, accel, slope = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get('roc_acceleration', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-        if not (roc > filters['roc'] and accel >= filters['accel'] and slope > filters['slope']):
+        if not (roc > final_filters['roc'] and accel >= final_filters['accel'] and slope > final_filters['slope']):
             log_rejection(symbol, "Momentum Filter", {"ROC": f"{roc:.2f}", "Accel": f"{accel:.4f}", "Slope": f"{slope:.6f}"})
             return False
         
@@ -1306,7 +1349,7 @@ def send_new_signal_alert(signal_data: Dict[str, Any]):
     strategy_name = signal_data.get('strategy_name', '')
     title = "💡 *توصية شراء جديدة*"
     if 'Reversal' in strategy_name:
-        title = "💫 *توصية شراء (انعكاس جنوني)*"
+        title = "💫 *توصية شراء (انعكاس)*"
 
     signal_details = signal_data.get('signal_details', {})
     confidence_display = signal_details.get('ML_Confidence_Display', 'N/A')
@@ -1497,31 +1540,25 @@ def main_loop():
                     if df_15m is None or df_15m.empty: continue
                     df_15m.name = symbol
 
-                    # --- START: NEW STRATEGY LOGIC ---
-                    # أولاً، نقوم بحساب جميع الميزات بما في ذلك الجديدة (مثل قنوات كيلتنر)
                     df_features_with_indicators = calculate_features(df_15m, btc_data)
                     if df_features_with_indicators is None or df_features_with_indicators.empty: continue
                     df_features_with_indicators.name = symbol
                     
                     technical_signal = None
                     if active_strategy_type == "REVERSAL":
-                        # استخدام دالة الانعكاس الجنونية الجديدة
                         technical_signal = find_crazy_reversal_signal(df_features_with_indicators)
                     elif active_strategy_type == "MOMENTUM":
-                        # استراتيجية الزخم تبقى كما هي كإشارة مبدئية
                         technical_signal = {"signal_type": "MOMENTUM"}
 
                     if not technical_signal:
                         continue
-                    # --- END: NEW STRATEGY LOGIC ---
                     
                     strategy = TradingStrategy(symbol)
                     if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
                     
-                    df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    df_4h = fetch_historical_data(symbol, '4h', SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_4h is None or df_4h.empty: continue
                     
-                    # نمرر البيانات المحسوبة مسبقاً إلى دالة get_features لتجنب إعادة الحساب
                     df_features = strategy.get_features(df_15m, df_4h, btc_data)
                     if df_features is None or df_features.empty: continue
                     
@@ -1545,7 +1582,7 @@ def main_loop():
                     if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m):
                         continue
                     
-                    strategy_name_for_db = f"CrazyReversal_ML" if active_strategy_type == "REVERSAL" else f"Momentum_ML"
+                    strategy_name_for_db = f"Reversal_ML" if active_strategy_type == "REVERSAL" else f"Momentum_ML"
                     new_signal = {
                         'symbol': symbol, 'strategy_name': strategy_name_for_db,
                         'signal_details': { 
@@ -1810,7 +1847,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.0 - Crazy Reversal Strategy) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.1 - Relaxed Filters & UI Update) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
