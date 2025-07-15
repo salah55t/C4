@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.3 (Final Polish) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.4 (Optimized Filters) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.3_final.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.4_optimized.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.3')
+logger = logging.getLogger('CryptoBotV26.4')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -57,12 +57,13 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعدادات الفلاتر الديناميكية (مع تخفيف إضافي للشروط) ----------------------
+# UPDATED: تم تعديل الشروط لتكون أكثر مرونة في الأسواق العرضية
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 21.0, "rel_vol": 1.0, "rsi_range": (50, 95), "roc": 0.2, 
+            "adx": 21.0, "rel_vol": 1.0, "rsi_range": (50, 95), "roc": 0.2,
             "accel": 0.0, "slope": 0.0, "min_rrr": 1.2,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.1
@@ -72,7 +73,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 19.0, "rel_vol": 0.9, "rsi_range": (45, 90), "roc": 0.15, 
+            "adx": 20.0, "rel_vol": 0.9, "rsi_range": (45, 90), "roc": 0.15, # ADX raised slightly
             "accel": 0.0, "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
@@ -82,9 +83,14 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه عرضي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 17.5, "rel_vol": 0.8, "rsi_range": (40, 70), "roc": 0.1, 
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.4,
-            "min_volatility_pct": 0.25, 
+            "adx": 15.0, # Lowered from 17.5
+            "rel_vol": 0.8,
+            "rsi_range": (40, 70),
+            "roc": 0.05, # Lowered from 0.1
+            "accel": -0.05, # Lowered from 0.0
+            "slope": 0.0,
+            "min_rrr": 1.4,
+            "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.2
         }
     },
@@ -92,7 +98,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه هابط (مراقبة الانعكاس)",
         "strategy": "REVERSAL",
         "filters": {
-            "min_rrr": 2.0, 
+            "min_rrr": 2.0,
             "min_volatility_pct": 0.5,
             "min_btc_correlation": -0.5,
             "min_relative_volume": 1.5
@@ -102,13 +108,14 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1, 
-            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5, 
-            "min_volatility_pct": 0.25, 
+            "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1,
+            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5,
+            "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.4
         }
     }
 }
+
 
 SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
     "HIGH_LIQUIDITY": { "adx_mult": 1.05, "rel_vol_mult": 1.05, "rrr_mult": 0.95 },
@@ -175,7 +182,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.3 - شروط مرنة</title>
+    <title>لوحة تحكم التداول V26.4 - شروط محسنة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -205,10 +212,10 @@ def get_dashboard_html():
         .toggle-bg:after { content: ''; position: absolute; top: 2px; left: 2px; background: white; border-radius: 9999px; height: 1.25rem; width: 1.25rem; transition: transform 0.2s ease-in-out; }
         input:checked + .toggle-bg:after { transform: translateX(100%); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
-        .trend-light { 
+        .trend-light {
             width: 1rem; height: 1rem; border-radius: 9999px;
             border: 2px solid rgba(255, 255, 255, 0.1);
-            transition: background-color 0.5s ease, box-shadow 0.5s ease; 
+            transition: background-color 0.5s ease, box-shadow 0.5s ease;
             box-shadow: inset 0 1px 2px rgba(0,0,0,0.3);
         }
         .light-on-green { background-color: var(--accent-green); box-shadow: inset 0 1px 2px rgba(0,0,0,0.3), 0 0 10px 2px rgba(63, 185, 80, 0.6); }
@@ -222,7 +229,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.3</span>
+                <span class="text-text-secondary font-medium">V26.4</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة">
@@ -425,7 +432,7 @@ function updateMarketStatus() {
 
         const sessions = data.active_sessions;
         const sessionsDiv = document.getElementById('active-sessions-list');
-        sessionsDiv.innerHTML = ''; 
+        sessionsDiv.innerHTML = '';
         sessionsDiv.classList.remove('skeleton', 'h-12');
         if (sessions && sessions.length > 0) {
             const sessionColors = { 'London': 'bg-blue-500/20 text-blue-300', 'New York': 'bg-green-500/20 text-green-300', 'Tokyo': 'bg-red-500/20 text-red-300' };
@@ -484,7 +491,7 @@ function updateTradingStatus() {
 
 function toggleTrading() {
     const toggle = document.getElementById('trading-toggle');
-    const confirmationMessage = toggle.checked 
+    const confirmationMessage = toggle.checked
         ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟ هذا الإجراء يحمل مخاطر."
         : "هل أنت متأكد من إيقاف التداول الحقيقي؟ لن يتم فتح أو إغلاق أي صفقات جديدة.";
 
@@ -538,10 +545,10 @@ function updateProfitChart() {
         const existingMsg = chartCard.querySelector('.no-data-msg');
         if(existingMsg) existingMsg.remove();
 
-        if (!data || data.error || data.length <= 1) { 
+        if (!data || data.error || data.length <= 1) {
             canvas.style.display = 'none';
             if (!existingMsg) chartCard.insertAdjacentHTML('beforeend', '<p class="no-data-msg text-center text-text-secondary mt-8">لا توجد صفقات كافية لعرض المنحنى.</p>');
-            return; 
+            return;
         }
         
         canvas.style.display = 'block';
@@ -915,7 +922,7 @@ def determine_market_state():
             days_to_fetch = 3 if tf == '15m' else (5 if tf == '1h' else 15)
             df = fetch_historical_data(BTC_SYMBOL, tf, days_to_fetch)
             trend_details[tf] = get_trend_for_timeframe(df)
-            time.sleep(0.2) 
+            time.sleep(0.2)
 
         overall_regime = trend_details.get('4h', {}).get('trend', 'Uncertain').upper()
         if overall_regime not in ["UPTREND", "DOWNTREND"]:
@@ -931,7 +938,7 @@ def determine_market_state():
         logger.info(f"✅ [Market State] New state: 15m={trend_details['15m']['trend']}, 1H={trend_details['1h']['trend']}, 4H={trend_details['4h']['trend']}")
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
-        with market_state_lock: 
+        with market_state_lock:
             current_market_state['overall_regime'] = "RANGING"
             current_market_state['trend_details_by_tf'] = {}
 
@@ -1364,7 +1371,7 @@ def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         is_real, quantity, order_id = signal.get('is_real_trade', False), signal.get('quantity'), signal.get('order_id')
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price, is_real_trade, quantity, order_id) 
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, current_peak_price, is_real_trade, quantity, order_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
                 """,
                 (signal['symbol'], entry, target, sl, signal.get('strategy_name'), json.dumps(signal.get('signal_details', {})), entry, is_real, quantity, order_id))
@@ -1573,12 +1580,12 @@ def main_loop():
                     strategy_name_for_db = f"Reversal_ML" if active_strategy_type == "REVERSAL" else f"Momentum_ML"
                     new_signal = {
                         'symbol': symbol, 'strategy_name': strategy_name_for_db,
-                        'signal_details': { 
-                            'ML_Confidence': ml_signal['confidence'], 
-                            'ML_Confidence_Display': f"{ml_signal['confidence']:.2%}", 
+                        'signal_details': {
+                            'ML_Confidence': ml_signal['confidence'],
+                            'ML_Confidence_Display': f"{ml_signal['confidence']:.2%}",
                             'Filter_Profile': f"{filter_profile['name']}",
                             'Technical_Reason': technical_signal.get('reason', 'N/A')
-                        }, 
+                        },
                         'entry_price': entry_price, **tp_sl_data
                     }
                     
@@ -1599,7 +1606,7 @@ def main_loop():
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                         send_new_signal_alert(saved_signal)
 
-                except Exception as e: 
+                except Exception as e:
                     logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
                 finally:
                     del strategy, df_15m, df_4h, df_features
@@ -1614,9 +1621,9 @@ def main_loop():
             logger.info(f"⏳ [End of Cycle] Waiting for 60 seconds...")
             time.sleep(60)
 
-        except (KeyboardInterrupt, SystemExit): 
+        except (KeyboardInterrupt, SystemExit):
             log_and_notify("info", "Bot is shutting down by user request.", "SYSTEM"); break
-        except Exception as main_err: 
+        except Exception as main_err:
             log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
 
@@ -1835,7 +1842,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.3 - Final Polish) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.4 - Optimized Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
