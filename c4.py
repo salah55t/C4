@@ -71,7 +71,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0, "rel_vol": 1.0, "rsi_range": (45, 90), "roc": 0.2, 
+            "adx": 20.0, "rel_vol": 0.5, "rsi_range": (45, 90), "roc": 0.2, 
             "accel": 0.05, "slope": 0.005, "min_rrr": 1.8, "min_volatility_pct": 0.35, 
             "min_btc_correlation": 0.0
         }
@@ -80,7 +80,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه عرضي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 18.0, "rel_vol": 0.9, "rsi_range": (40, 70), "roc": 0.1, 
+            "adx": 18.0, "rel_vol": 0.3, "rsi_range": (40, 70), "roc": 0.1, 
             "accel": 0.0, "slope": 0.0, "min_rrr": 2.0, "min_volatility_pct": 0.3, 
             "min_btc_correlation": -0.2
         }
