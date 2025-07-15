@@ -72,8 +72,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0, "rel_vol": 0.5, "rsi_range": (45, 90), "roc": 0.10,
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.5,
+            "adx": 20.0, "rel_vol": 0.9, "rsi_range": (45, 90), "roc": 0.15,
+            "accel": 0.0, "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
         }
@@ -82,8 +82,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه عرضي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 15.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.02,
-            "accel": -0.07, "slope": 0.0, "min_rrr": 1.45,
+            "adx": 15.0, "rel_vol": 0.8, "rsi_range": (40, 70), "roc": 0.05,
+            "accel": -0.05, "slope": 0.0, "min_rrr": 1.4,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.2
         }
@@ -1735,14 +1735,23 @@ def get_profit_curve():
 
 @app.route('/api/signals')
 def get_signals():
-    if not check_db_connection() or not redis_client: return jsonify({"error": "Service connection failed"}), 500
+    # --- بداية الكود المُعدل ---
+    # التأكد من أن الخدمات المطلوبة (قاعدة البيانات، Redis، Binance) متاحة
+    if not all([check_db_connection(), redis_client, client]):
+        return jsonify({"error": "Service connection failed"}), 500
+    
     try:
+        # جلب جميع الصفقات من قاعدة البيانات
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals ORDER BY CASE WHEN status IN ('open', 'updated') THEN 0 ELSE 1 END, id DESC;")
             all_signals = [dict(s) for s in cur.fetchall()]
         
+        # تحديد رموز العملات للصفقات المفتوحة
         open_signals_symbols = [s['symbol'] for s in all_signals if s['status'] in ('open', 'updated')]
+        
+        # إذا كانت هناك صفقات مفتوحة، قم بتحديث أسعارها
         if open_signals_symbols:
+            # محاولة جلب الأسعار من Redis أولاً
             prices_from_redis = redis_client.hmget(REDIS_PRICES_HASH_NAME, open_signals_symbols)
             redis_prices_map = {symbol: p for symbol, p in zip(open_signals_symbols, prices_from_redis)}
 
@@ -1750,17 +1759,29 @@ def get_signals():
                 if s['status'] in ('open', 'updated'):
                     symbol = s['symbol']
                     price = None
-                    try: price = float(redis_prices_map.get(symbol))
-                    except (ValueError, TypeError, AttributeError): pass
-                    
+                    try:
+                        # جرب تحويل السعر من Redis
+                        price = float(redis_prices_map.get(symbol))
+                    except (ValueError, TypeError, AttributeError):
+                        # **الآلية الاحتياطية:** إذا فشل Redis، اجلب السعر مباشرة من باينانس
+                        try:
+                            price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                            logger.info(f"[{symbol}] Fetched price directly from API for dashboard.")
+                        except Exception as api_e:
+                            logger.warning(f"[{symbol}] Could not fetch price from API for dashboard: {api_e}")
+
+                    # تحديث بيانات الصفقة بالسعر الحالي ونسبة الربح/الخسارة
                     s['current_price'] = price
                     if price and s.get('entry_price'):
                         s['pnl_pct'] = ((price / float(s['entry_price'])) - 1) * 100
+                        
         return jsonify(all_signals)
     except Exception as e:
         logger.error(f"❌ [API Signals] Error: {e}", exc_info=True)
         if conn: conn.rollback()
         return jsonify({"error": str(e)}), 500
+    # --- نهاية الكود المُعدل ---
+
 
 @app.route('/api/close/<int:signal_id>', methods=['POST'])
 def manual_close_signal_api(signal_id):
