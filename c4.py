@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V27.1 (Optimized Filters) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V27.2 (Improved Logic) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v27_1_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v27_2_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV27.1')
+logger = logging.getLogger('CryptoBotV27.2')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -56,49 +56,42 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- إعدادات الفلاتر الديناميكية (معدلة بناءً على السجلات) ----------------------
-# تم تعديل ملف "UPTREND" بشكل كبير ليتوافق مع بيانات السجل التي قدمتها.
+# --- [تحسين] ---
+# ---------------------- ملفات الفلاتر الديناميكية (معدلة للمنطق الجديد) ----------------------
+# تم تعديل الفلاتر لتكون أكثر واقعية ومنطقية، خاصة فلاتر الزخم.
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
-        "description": "اتجاه صاعد قوي",
+        "description": "اتجاه صاعد قوي (نقاط 4+)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 25.0, "rel_vol": 0.1, "rsi_range": (50, 95), "roc": 0.1,
-            "slope": 0.01, "min_rrr": 1.2, "min_volatility_pct": 0.25,
+            "adx": 25.0, "rel_vol": 0.2, "rsi_range": (50, 95), "roc": 0.0,
+            "slope": 0.0, "min_rrr": 1.3, "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.1, "min_bid_ask_ratio": 1.1
         }
     },
     "UPTREND": {
-        "description": "اتجاه صاعد (مُخفف حسب السجل)",
+        "description": "اتجاه صاعد (نقاط 1-3)",
         "strategy": "MOMENTUM",
         "filters": {
-            # تم خفض ADX من 24 إلى 20. السجل أظهر رفض عند 21.95 و 18.64
             "adx": 20.0,
-            # تم خفض rel_vol من 0.2 إلى 0.05. السجل أظهر قيم منخفضة مثل 0.09 و 0.03
-            "rel_vol": 0.05,
-            # تم توسيع نطاق RSI من (50, 90) إلى (45, 90). السجل أظهر رفض عند 45.23 و 46.32
-            "rsi_range": (45, 90),
-            # تم خفض ROC بشكل كبير من 0.05 إلى -1.5. السجل أظهر قيمًا سلبية باستمرار (-0.21, -1.20)
-            "roc": -1.5,
-            # تم خفض slope بشكل كبير من 0.04 إلى -0.2. السجل أظهر قيمًا سلبية باستمرار (-0.03, -0.10)
-            "slope": -0.2,
-            # تم الإبقاء على RRR كما هو، حيث أن الرفض يحدث قبل هذا الفلتر
-            "min_rrr": 1.3,
-            # تم خفض الحد الأدنى للتقلب للسماح بعملات أكثر هدوءًا
-            "min_volatility_pct": 0.15,
-            # تم تخفيف شرط الارتباط مع البيتكوين
+            "rel_vol": 0.1,
+            "rsi_range": (48, 90),
+            # تم تعديل ROC و Slope للسماح بتصحيحات بسيطة ولكن ليس هبوط حاد
+            "roc": -0.5,
+            "slope": -0.05,
+            "min_rrr": 1.4,
+            "min_volatility_pct": 0.20,
             "min_btc_correlation": -0.2,
-            # تم تخفيف شرط ضغط الشراء
             "min_bid_ask_ratio": 1.1
         }
     },
     "RANGING": {
-        "description": "اتجاه عرضي (بحث عن زخم قصير)",
-        "strategy": "MOMENTUM",
+        "description": "اتجاه عرضي/محايد (نقاط 0)",
+        "strategy": "MOMENTUM", # يمكن البحث عن زخم قصير المدى
         "filters": {
-            "adx": 15.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.05,
-            "slope": 0.0, "min_rrr": 1.4, "min_volatility_pct": 0.25,
-            "min_btc_correlation": -0.2, "min_bid_ask_ratio": 1.3
+            "adx": 18.0, "rel_vol": 0.2, "rsi_range": (45, 75), "roc": 0.05,
+            "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25,
+            "min_btc_correlation": -0.2, "min_bid_ask_ratio": 1.2
         }
     },
     "DOWNTREND": {
@@ -114,19 +107,13 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 17.0, "rel_vol": 0.2, "rsi_range": (30, 70), "roc": 0.1,
+            "adx": 17.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.1,
             "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.4, "min_bid_ask_ratio": 1.4
         }
     }
 }
 
-
-SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
-    "HIGH_LIQUIDITY": { "adx_mult": 1.05, "rel_vol_mult": 1.05, "rrr_mult": 0.95 },
-    "NORMAL_LIQUIDITY": { "adx_mult": 1.0, "rel_vol_mult": 1.0, "rrr_mult": 1.0 },
-    "LOW_LIQUIDITY": { "adx_mult": 0.95, "rel_vol_mult": 0.95, "rrr_mult": 1.05 }
-}
 
 # ---------------------- الثوابت والمتغيرات العامة ----------------------
 is_trading_enabled: bool = False
@@ -137,7 +124,8 @@ RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
+# --- [تحسين] --- أطر زمنية لتحليل الاتجاه
+TIMEFRAMES_FOR_TREND_ANALYSIS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 DIRECT_API_CHECK_INTERVAL: int = 10
@@ -146,7 +134,8 @@ STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
-EMA_FAST_PERIOD: int = 50; EMA_SLOW_PERIOD: int = 200
+# --- [تحسين] --- تعريف المتوسطات المستخدمة في تحليل الاتجاه
+EMA_PERIODS: List[int] = [21, 50, 200]
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.80
@@ -158,10 +147,10 @@ TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 LAST_PEAK_UPDATE_TIME: Dict[int, float] = {}
 PEAK_UPDATE_COOLDOWN: int = 60
+# --- [تحسين] --- إعدادات فلتر القمة المبسط
 USE_PEAK_FILTER: bool = True
-PEAK_CHECK_PERIOD: int = 50
-PULLBACK_THRESHOLD_PCT: float = 0.988
-BREAKOUT_ALLOWANCE_PCT: float = 1.003
+PEAK_LOOKBACK_PERIOD: int = 50 # عدد الشموع للنظر للخلف
+PEAK_DISTANCE_THRESHOLD_PCT: float = 0.995 # لا تشتري إذا كان السعر ضمن أعلى 0.5% من القمة
 DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 900
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
@@ -178,7 +167,13 @@ signals_pending_closure: Set[int] = set(); closure_lock = Lock()
 last_api_check_time = time.time()
 rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
-current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
+# --- [تحسين] --- هيكل جديد لحالة السوق
+current_market_state: Dict[str, Any] = {
+    "trend_score": 0,
+    "trend_label": "INITIALIZING",
+    "details_by_tf": {},
+    "last_updated": None
+}
 market_state_lock = Lock()
 dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
@@ -191,7 +186,7 @@ REJECTION_REASONS_AR = {
     "RRR Filter": "نسبة المخاطرة/العائد غير كافية",
     "Reversal Volume Filter": "فوليوم الانعكاس ضعيف",
     "Momentum/Strength Filter": "فلتر الزخم والقوة",
-    "Peak/Pullback Filter": "فلتر القمة/التصحيح",
+    "Peak Filter": "فلتر القمة (السعر قريب جداً من القمة الأخيرة)",
     "Invalid ATR for TP/SL": "ATR غير صالح لحساب الأهداف",
     "Reversal Signal Rejected by ML Model": "نموذج التعلم الآلي رفض إشارة الانعكاس",
     "Invalid Position Size": "حجم الصفقة غير صالح (الوقف تحت الدخول)",
@@ -201,8 +196,6 @@ REJECTION_REASONS_AR = {
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Order Book Imbalance": "اختلال توازن دفتر الطلبات (ضغط بيع)",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم",
-    "Peak Price Rejection (24h)": "رفض بسبب سعر القمة (24 شمعة)",
-    "Peak Price Filter (25h)": "فلتر سعر القمة (25 شمعة)",
 }
 
 # ---------------------- دالة HTML للوحة التحكم ----------------------
@@ -213,7 +206,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V27.1</title>
+    <title>لوحة تحكم التداول V27.2</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -260,7 +253,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V27.1</span>
+                <span class="text-text-secondary font-medium">V27.2</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
@@ -278,15 +271,15 @@ def get_dashboard_html():
             <div class="card p-4">
                  <h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3>
                  <div class="grid grid-cols-2 gap-4 text-center">
-                     <div><h4 class="text-sm font-medium text-text-secondary">الاتجاه العام (4H)</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
-                     <div><h4 class="text-sm font-medium text-text-secondary">الاستراتيجية الحالية</h4><div id="active-strategy" class="text-xl font-bold skeleton h-7 w-2/3 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">تقييم الاتجاه</h4><div id="overall-regime" class="text-2xl font-bold skeleton h-8 w-3/4 mx-auto mt-1"></div></div>
+                     <div><h4 class="text-sm font-medium text-text-secondary">نقاط الاتجاه</h4><div id="trend-score" class="text-3xl font-bold skeleton h-9 w-1/2 mx-auto"></div></div>
                  </div>
             </div>
             <div class="card p-4">
-                 <h3 class="font-bold mb-3 text-lg text-text-secondary">ملف الفلاتر الديناميكي</h3>
+                 <h3 class="font-bold mb-3 text-lg text-text-secondary">ملف الفلاتر والاستراتيجية</h3>
                  <div class="text-center">
-                     <div id="filter-profile-name" class="text-xl font-bold skeleton h-8 w-full mx-auto mt-1"></div>
-                     <div id="filter-profile-desc" class="text-sm text-text-secondary skeleton h-5 w-full mx-auto mt-2"></div>
+                     <div id="filter-profile-name" class="text-xl font-bold skeleton h-7 w-full mx-auto mt-1"></div>
+                     <div id="active-strategy" class="text-base text-text-secondary skeleton h-5 w-2/3 mx-auto mt-2"></div>
                  </div>
             </div>
             <div class="card p-4">
@@ -359,11 +352,15 @@ def get_dashboard_html():
 
 <script>
 let profitChartInstance;
-const REGIME_STYLES = {
-    "STRONG_UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
-    "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
-    "STRONG_DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
-    "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" }
+// --- [تحسين] --- تم تحديث الأنماط لتناسب منطق النقاط الجديد
+const TREND_STYLES = {
+    "صاعد قوي": { color: "text-accent-green" },
+    "صاعد": { color: "text-green-400" },
+    "محايد": { color: "text-accent-yellow" },
+    "هابط": { color: "text-red-400" },
+    "هابط قوي": { color: "text-accent-red" },
+    "غير واضح": { color: "text-text-secondary" },
+    "تهيئة...": { color: "text-accent-blue" }
 };
 const STRATEGY_STYLES = {
     "MOMENTUM": { text: "متابعة الزخم", color: "text-accent-blue" },
@@ -371,7 +368,7 @@ const STRATEGY_STYLES = {
     "DISABLED": { text: "متوقف (غير مناسب)", color: "text-text-secondary" },
     "FORCED_MOMENTUM": { text: "زخم (يدوي)", color: "text-cyan-400" }
 };
-const TREND_LIGHT_COLORS = { "Strong Uptrend": "light-on-green", "Uptrend": "light-on-green", "Downtrend": "light-on-red", "Strong Downtrend": "light-on-red", "Ranging": "light-on-yellow", "Uncertain": "light-off" };
+const TREND_LIGHT_COLORS = { "صاعد": "light-on-green", "هابط": "light-on-red", "محايد": "light-on-yellow", "غير واضح": "light-off" };
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
@@ -425,20 +422,26 @@ function updateMarketStatus() {
         
         updateMomentumToggle(data.force_momentum_enabled);
 
+        // --- [تحسين] --- تحديث واجهة المستخدم بناءً على منطق النقاط الجديد
         const state = data.market_state;
-        const overallRegimeKey = state.overall_regime || "UNCERTAIN";
-        const regimeStyle = REGIME_STYLES[overallRegimeKey] || REGIME_STYLES["UNCERTAIN"];
-        const overallDiv = document.getElementById('overall-regime');
-        overallDiv.textContent = regimeStyle.text;
-        overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
+        const trendLabel = state.trend_label || "غير واضح";
+        const trendStyle = TREND_STYLES[trendLabel] || TREND_STYLES["غير واضح"];
         
-        const trendDetails = state.trend_details_by_tf || {};
+        const overallDiv = document.getElementById('overall-regime');
+        overallDiv.textContent = trendLabel;
+        overallDiv.className = `text-2xl font-bold ${trendStyle.color}`;
+
+        const scoreDiv = document.getElementById('trend-score');
+        scoreDiv.textContent = state.trend_score;
+        scoreDiv.className = `text-3xl font-bold ${trendStyle.color}`;
+
+        const trendDetails = state.details_by_tf || {};
         ['15m', '1h', '4h'].forEach(tf => {
             const lightEl = document.getElementById(`trend-light-${tf}`);
             if (lightEl) {
                 const trendInfo = trendDetails[tf];
-                const trend = trendInfo ? trendInfo.trend : "Uncertain";
-                const colorClass = TREND_LIGHT_COLORS[trend] || TREND_LIGHT_COLORS["Uncertain"];
+                const trend = trendInfo ? trendInfo.label : "غير واضح";
+                const colorClass = TREND_LIGHT_COLORS[trend] || TREND_LIGHT_COLORS["غير واضح"];
                 lightEl.className = `trend-light ${colorClass}`;
             }
         });
@@ -451,14 +454,11 @@ function updateMarketStatus() {
         const strategyStyle = STRATEGY_STYLES[strategy] || STRATEGY_STYLES["DISABLED"];
         const strategyDiv = document.getElementById('active-strategy');
         strategyDiv.textContent = strategyStyle.text;
-        strategyDiv.className = `text-xl font-bold ${strategyStyle.color}`;
+        strategyDiv.className = `text-base font-bold ${strategyStyle.color}`;
 
         const profileNameDiv = document.getElementById('filter-profile-name');
-        const profileDescDiv = document.getElementById('filter-profile-desc');
         profileNameDiv.textContent = profile.name;
-        profileNameDiv.className = `text-xl font-bold ${regimeStyle.color}`;
-        profileDescDiv.textContent = profile.description;
-        profileDescDiv.classList.remove('skeleton', 'h-5', 'w-full');
+        profileNameDiv.className = `text-xl font-bold ${trendStyle.color}`;
 
         const sessions = data.active_sessions;
         const sessionsDiv = document.getElementById('active-sessions-list');
@@ -921,6 +921,10 @@ def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, An
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
     
+    # --- [تحسين] --- إضافة المتوسطات المستخدمة في تحليل الاتجاه
+    for period in EMA_PERIODS:
+        df_calc[f'ema_{period}'] = df_calc['close'].ewm(span=period, adjust=False).mean()
+
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -948,8 +952,8 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     df_calc['kc_middle'] = kc_ema
 
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
     if btc_df is not None and not btc_df.empty:
         merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
@@ -965,78 +969,81 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     
     return df_calc.astype('float32', errors='ignore')
 
-def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
-    if df is None or len(df) < 50: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
-    try:
-        close_series = df['close']
-        delta = close_series.diff()
-        gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-        loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-        rsi = (100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))).iloc[-1]
-        
-        high_low = df['high'] - df['low']
-        high_close = (df['high'] - close_series.shift()).abs()
-        low_close = (df['low'] - close_series.shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = tr.ewm(span=ADX_PERIOD, adjust=False).mean()
-        
-        up_move = df['high'].diff(); down_move = -df['low'].diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
-        plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
-        minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
-        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-        adx = dx.ewm(span=ADX_PERIOD, adjust=False).mean().iloc[-1]
-        
-        ema_fast = close_series.ewm(span=12, adjust=False).mean().iloc[-1]
-        ema_slow = close_series.ewm(span=26, adjust=False).mean().iloc[-1]
-        
-        trend = "Ranging"
-        if adx > 25:
-            if ema_fast > ema_slow and rsi > 55:
-                trend = "Strong Uptrend"
-            elif ema_fast < ema_slow and rsi < 45:
-                trend = "Strong Downtrend"
-        elif adx > 20:
-            if ema_fast > ema_slow and rsi > 50:
-                trend = "Uptrend"
-            elif ema_fast < ema_slow and rsi < 50:
-                trend = "Downtrend"
-                
-        return {"trend": trend, "rsi": float(rsi), "adx": float(adx)}
-    except Exception as e:
-        logger.error(f"Error in get_trend_for_timeframe: {e}")
-        return {"trend": "Uncertain", "rsi": -1, "adx": -1}
-
-def determine_market_state():
+# --- [تحسين] --- دالة جديدة لتحديد الاتجاه بناءً على نظام النقاط
+def determine_market_trend_score():
     global current_market_state, last_market_state_check
     with market_state_lock:
         if time.time() - last_market_state_check < 300: return
-    logger.info("🧠 [Market State] Updating multi-timeframe market state...")
+    
+    logger.info("🧠 [Market Score] Updating multi-timeframe trend score...")
     try:
-        trend_details = {}
-        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            days_to_fetch = 3 if tf == '15m' else (5 if tf == '1h' else 20)
+        total_score = 0
+        details = {}
+        tf_weights = {'15m': 0.2, '1h': 0.3, '4h': 0.5} # إعطاء وزن أكبر للإطارات الزمنية الأكبر
+
+        for tf in TIMEFRAMES_FOR_TREND_ANALYSIS:
+            days_to_fetch = 5 if tf == '15m' else (15 if tf == '1h' else 50)
             df = fetch_historical_data(BTC_SYMBOL, tf, days_to_fetch)
-            trend_details[tf] = get_trend_for_timeframe(df)
+            if df is None or len(df) < EMA_PERIODS[-1]:
+                details[tf] = {"score": 0, "label": "غير واضح", "reason": "بيانات غير كافية"}
+                continue
+
+            # إضافة المتوسطات
+            for period in EMA_PERIODS:
+                df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
+            
+            last_candle = df.iloc[-1]
+            close = last_candle['close']
+            ema21 = last_candle['ema_21']
+            ema50 = last_candle['ema_50']
+            ema200 = last_candle['ema_200']
+
+            tf_score = 0
+            # النقطة الأولى: السعر فوق/تحت EMA21
+            if close > ema21: tf_score += 1
+            elif close < ema21: tf_score -= 1
+            
+            # النقطة الثانية: EMA21 فوق/تحت EMA50
+            if ema21 > ema50: tf_score += 1
+            elif ema21 < ema50: tf_score -= 1
+
+            # النقطة الثالثة: EMA50 فوق/تحت EMA200
+            if ema50 > ema200: tf_score += 1
+            elif ema50 < ema200: tf_score -= 1
+
+            label = "محايد"
+            if tf_score >= 2: label = "صاعد"
+            elif tf_score <= -2: label = "هابط"
+            
+            details[tf] = {"score": tf_score, "label": label, "reason": f"EMA21:{ema21:.2f}, EMA50:{ema50:.2f}, EMA200:{ema200:.2f}"}
+            total_score += tf_score * tf_weights[tf]
             time.sleep(0.2)
         
-        overall_regime_text = trend_details.get('4h', {}).get('trend', 'Uncertain')
-        overall_regime_key = overall_regime_text.upper().replace(" ", "_")
+        # تقريب النتيجة النهائية
+        final_score = round(total_score)
+        
+        trend_label = "محايد"
+        if final_score >= 4: trend_label = "صاعد قوي"
+        elif final_score >= 1: trend_label = "صاعد"
+        elif final_score <= -4: trend_label = "هابط قوي"
+        elif final_score <= -1: trend_label = "هابط"
 
         with market_state_lock:
             current_market_state = {
-                "overall_regime": overall_regime_key,
-                "trend_details_by_tf": trend_details,
+                "trend_score": final_score,
+                "trend_label": trend_label,
+                "details_by_tf": details,
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] New state: 15m={trend_details['15m']['trend']}, 1H={trend_details['1h']['trend']}, 4H={overall_regime_text}")
+        logger.info(f"✅ [Market Score] New State: Score={final_score}, Label='{trend_label}' | Details: {details}")
+
     except Exception as e:
-        logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
+        logger.error(f"❌ [Market Score] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock:
-            current_market_state['overall_regime'] = "RANGING"
-            current_market_state['trend_details_by_tf'] = {}
+            current_market_state['trend_score'] = 0
+            current_market_state['trend_label'] = "غير واضح"
+
 
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
@@ -1073,12 +1080,19 @@ def analyze_market_and_create_dynamic_profile() -> None:
     else:
         active_sessions, liquidity_state, liquidity_desc = get_session_state()
         with market_state_lock:
-            market_regime = current_market_state.get("overall_regime", "RANGING")
+            market_label = current_market_state.get("trend_label", "محايد")
+
+        # --- [تحسين] --- اختيار ملف الفلاتر بناءً على تصنيف الاتجاه الجديد
+        profile_key = "RANGING" # Default
+        if "صاعد قوي" in market_label: profile_key = "STRONG_UPTREND"
+        elif "صاعد" in market_label: profile_key = "UPTREND"
+        elif "هابط قوي" in market_label: profile_key = "STRONG_DOWNTREND"
+        elif "هابط" in market_label: profile_key = "DOWNTREND"
 
         if liquidity_state == "WEEKEND":
             base_profile = FILTER_PROFILES["WEEKEND"].copy()
         else:
-            base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
+            base_profile = FILTER_PROFILES.get(profile_key, FILTER_PROFILES["RANGING"]).copy()
 
     with dynamic_filter_lock:
         dynamic_filter_profile_cache = {
@@ -1267,12 +1281,8 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
         log_rejection(symbol, "Filters Not Loaded", {"profile": profile.get('name')})
         return False
 
+    # --- [تحسين] --- لا حاجة لتعديل الفلاتر هنا لأنها تأتي جاهزة من ملف التعريف الديناميكي
     final_filters = filters.copy()
-    _, liquidity_state, _ = get_session_state()
-    multipliers = SESSION_MULTIPLIERS.get(liquidity_state, SESSION_MULTIPLIERS["NORMAL_LIQUIDITY"])
-    if "adx" in final_filters: final_filters["adx"] *= multipliers["adx_mult"]
-    if "rel_vol" in final_filters: final_filters["rel_vol"] *= multipliers["rel_vol_mult"]
-    if "min_rrr" in final_filters: final_filters["min_rrr"] *= multipliers["rrr_mult"]
 
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
     if volatility < final_filters.get('min_volatility_pct', 0.0):
@@ -1315,61 +1325,20 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
             })
             return False
         
-    if profile.get("strategy") == "REVERSAL":
-        rel_vol = last_features.get("relative_volume", 0)
-        if rel_vol < final_filters.get("min_relative_volume", 1.5):
-            log_rejection(symbol, "Reversal Volume Filter", {"RelVol": f"{rel_vol:.2f}", "min": final_filters.get("min_relative_volume", 1.5)})
-            return False
-
-    elif profile.get("strategy") == "MOMENTUM":
-        adx = last_features.get("adx", 0)
-        rel_vol = last_features.get("relative_volume", 0)
-        rsi = last_features.get("rsi", 0)
-        roc = last_features.get(f"roc_{MOMENTUM_PERIOD}", 0)
-        slope = last_features.get(f"ema_slope_{EMA_SLOPE_PERIOD}", 0)
-        
-        rsi_min, rsi_max = final_filters.get("rsi_range", (0, 100))
-
-        if not (adx >= final_filters.get("adx", 0) and 
-                rel_vol >= final_filters.get("rel_vol", 0) and 
-                rsi_min <= rsi < rsi_max and
-                roc > final_filters.get("roc", -100) and
-                slope > final_filters.get("slope", -100)):
-            log_rejection(symbol, "Momentum/Strength Filter", {
-                "ADX": f"{adx:.2f}", "Volume": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}",
-                "ROC": f"{roc:.2f}", "Slope": f"{slope:.6f}"
-            })
-            return False
-        
-        # New Peak Filter Logic
+        # --- [تحسين] --- فلتر القمة المبسط والفعال
         if USE_PEAK_FILTER:
-            # Fetch 1-hour data for peak calculation
-            df_1h = fetch_historical_data(symbol, '1h', days=2) # Fetch enough data for 25 candles
-            if df_1h is None or df_1h.empty or len(df_1h) < 25:
-                logger.warning(f"⚠️ [{symbol}] Not enough 1h data for peak filter. Skipping peak check.")
+            if df_15m is None or len(df_15m) < PEAK_LOOKBACK_PERIOD:
+                 logger.warning(f"⚠️ [{symbol}] Not enough 15m data for peak filter. Skipping peak check.")
             else:
-                # Condition 1: Prevent entry if current price is at the level of the last historical peak for 24 candles
-                # We need the highest high of the last 24 completed candles. So, we take the last 25 candles and exclude the very last one.
-                peak_24h_candles = df_1h.iloc[-25:-1] # Last 24 completed candles
-                if not peak_24h_candles.empty:
-                    highest_high_24h = peak_24h_candles['high'].max()
-                    # Allow a small tolerance for floating point comparisons
-                    if entry_price >= highest_high_24h * 0.999:
-                        log_rejection(symbol, "Peak Price Rejection (24h)", {"entry": f"{entry_price:.4f}", "24h_peak": f"{highest_high_24h:.4f}"})
-                        return False
-
-                # Condition 2: Allow trades only if the price is less than 1.5 times the highest peak price on the hourly timeframe for 25 candles
-                # This means the highest high of the last 25 candles (including the current one if it's part of the 25) should be considered.
-                # The prompt says "25 candles" which implies the current candle might be included in the lookback for this filter.
-                # Let's consider the last 25 candles including the current one for this filter.
-                peak_25h_candles = df_1h.iloc[-25:] # Last 25 candles including the current one
-                if not peak_25h_candles.empty:
-                    highest_high_25h = peak_25h_candles['high'].max()
-                    if entry_price >= highest_high_25h * 1.5:
-                        log_rejection(symbol, "Peak Price Filter (25h)", {"entry": f"{entry_price:.4f}", "25h_peak_1.5x": f"{highest_high_25h * 1.5:.4f}"})
+                lookback_data = df_15m.iloc[-PEAK_LOOKBACK_PERIOD:-1] # استثناء الشمعة الحالية
+                if not lookback_data.empty:
+                    highest_high = lookback_data['high'].max()
+                    if entry_price >= (highest_high * PEAK_DISTANCE_THRESHOLD_PCT):
+                        log_rejection(symbol, "Peak Filter", {"entry": f"{entry_price:.4f}", "peak_limit": f"{highest_high * PEAK_DISTANCE_THRESHOLD_PCT:.4f}"})
                         return False
 
     return True
+
 
 def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dict) -> bool:
     filters = profile.get("filters", {})
@@ -1663,7 +1632,8 @@ def main_loop():
             logger.info("🔄 Starting new main cycle...")
             ml_models_cache.clear(); gc.collect()
 
-            determine_market_state()
+            # --- [تحسين] --- استخدام دالة تحديد الاتجاه الجديدة
+            determine_market_trend_score()
             analyze_market_and_create_dynamic_profile()
             
             filter_profile = get_current_filter_profile()
@@ -2025,7 +1995,7 @@ def initialize_bot_services():
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         
-        Thread(target=determine_market_state, daemon=True).start()
+        Thread(target=determine_market_trend_score, daemon=True).start()
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
@@ -2035,40 +2005,8 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V27.1 - Optimized Filters) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V27.2 - Improved Logic) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
-
-def get_highest_peak_price(symbol: str, interval: str, lookback_candles: int) -> Optional[float]:
-    """
-    Calculates the highest 'high' price over a specified number of candles for a given symbol and interval.
-    """
-    df = fetch_historical_data(symbol, interval, days=int(lookback_candles * (int(re.sub('[a-zA-Z]', '', interval)) / (24 * 60)) + 1))
-    if df is None or df.empty:
-        logger.warning(f"⚠️ [{symbol}] No historical data found for peak calculation on {interval} for {lookback_candles} candles.")
-        return None
-    
-    # Ensure we have enough candles for the lookback period
-    if len(df) < lookback_candles:
-        logger.warning(f"⚠️ [{symbol}] Not enough historical data ({len(df)} candles) for peak calculation on {interval} for {lookback_candles} candles.")
-        return None
-
-    # Get the highest 'high' from the last 'lookback_candles' excluding the current (last) candle
-    # The problem statement implies 
-
-
-    # The problem statement implies "last 24 candles" and "25 candles" for historical peak.
-    # We should exclude the very last candle (current candle) from the peak calculation.
-    # So, we take `lookback_candles` from the end, excluding the last one.
-    relevant_data = df.iloc[-(lookback_candles + 1):-1] # +1 to ensure we get enough data before the last candle
-    if relevant_data.empty:
-        logger.warning(f"⚠️ [{symbol}] No relevant data for peak calculation after slicing.")
-        return None
-
-    highest_high = relevant_data["high"].max()
-    logger.debug(f"📈 [{symbol}] Highest peak over last {lookback_candles} candles on {interval}: {highest_high}")
-    return float(highest_high)
-
-
