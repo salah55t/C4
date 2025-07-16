@@ -63,8 +63,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 28.0, "rel_vol": 0.3, "rsi_range": (50, 95), "roc": 0.1,
-            "slope": 0.05, "min_rrr": 1.2, "min_volatility_pct": 0.25,
+            "adx": 25.0, "rel_vol": 0.1, "rsi_range": (50, 95), "roc": 0.1,
+            "slope": 0.01, "min_rrr": 1.2, "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.1, "min_bid_ask_ratio": 1.1
         }
     },
