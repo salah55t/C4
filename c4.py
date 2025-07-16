@@ -69,8 +69,8 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "أفضل حالة للشراء (زخم قوي مع اتجاه عام صاعد)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 25.0, "rel_vol": 0.2, "rsi_range": (55, 95), "roc": 0.08,
-            "slope": 0.04, "min_rrr": 1.3, "min_volatility_pct": 0.20,
+            "adx": 25.0, "rel_vol": 0.1, "rsi_range": (55, 95), "roc": 0.08,
+            "slope": 0.04, "min_rrr": 1.2, "min_volatility_pct": 0.20,
             "min_btc_correlation": -0.1, "min_bid_ask_ratio": 1.15
         }
     },
