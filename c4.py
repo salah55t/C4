@@ -73,7 +73,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0, "rel_vol": 0.9, "rsi_range": (50, 90), "roc": 0.15,
+            "adx": 20.0, "rel_vol": 0.5, "rsi_range": (50, 90), "roc": 0.15,
             "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
@@ -103,7 +103,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1,
+            "adx": 17.0, "rel_vol": 0.3, "rsi_range": (30, 70), "roc": 0.1,
             "slope": 0.0, "min_rrr": 1.5,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.4
