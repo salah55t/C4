@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.8 (Simplified Filters) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.9 (Ranging Enabled) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.8_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.9_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.8')
+logger = logging.getLogger('CryptoBotV26.9')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -57,7 +57,7 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعدادات الفلاتر الديناميكية ----------------------
-# --- تعديل: تم تبسيط الفلاتر بإزالة فلتر التسارع (accel) ---
+# --- تعديل: تم تفعيل التداول في الاتجاه العرضي مع فلاتر مخصصة ---
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
@@ -73,16 +73,21 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0, "rel_vol": 0.5, "rsi_range": (50, 90), "roc": 0.15,
+            "adx": 20.0, "rel_vol": 0.4, "rsi_range": (50, 90), "roc": 0.15,
             "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
         }
     },
     "RANGING": {
-        "description": "اتجاه عرضي (التداول متوقف)",
-        "strategy": "DISABLED",
-        "filters": {}
+        "description": "اتجاه عرضي (بحث عن زخم قصير)",
+        "strategy": "MOMENTUM",
+        "filters": {
+            "adx": 15.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.05,
+            "slope": 0.0, "min_rrr": 1.4,
+            "min_volatility_pct": 0.25,
+            "min_btc_correlation": -0.2
+        }
     },
     "DOWNTREND": {
         "description": "اتجاه هابط (مراقبة الانعكاس)",
@@ -103,7 +108,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 17.0, "rel_vol": 0.3, "rsi_range": (30, 70), "roc": 0.1,
+            "adx": 17.0, "rel_vol": 0.2, "rsi_range": (30, 70), "roc": 0.1,
             "slope": 0.0, "min_rrr": 1.5,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.4
@@ -169,7 +174,6 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
-# --- تعديل: دمج أسباب الرفض في سبب واحد ---
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة",
     "Low Volatility": "تقلب منخفض جداً",
@@ -194,7 +198,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.8</title>
+    <title>لوحة تحكم التداول V26.9</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -241,7 +245,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.8</span>
+                <span class="text-text-secondary font-medium">V26.9</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
@@ -907,7 +911,7 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
         df_calc['btc_correlation'] = 0.0
         
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff() # Calculation remains for ML model compatibility
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
     df_calc['hour_of_day'] = df_calc.index.hour
@@ -941,12 +945,12 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         ema_slow = close_series.ewm(span=26, adjust=False).mean().iloc[-1]
         
         trend = "Ranging"
-        if adx > 25: # عتبة الاتجاه القوي
+        if adx > 25:
             if ema_fast > ema_slow and rsi > 55:
                 trend = "Strong Uptrend"
             elif ema_fast < ema_slow and rsi < 45:
                 trend = "Strong Downtrend"
-        elif adx > 20: # عتبة الاتجاه العادي
+        elif adx > 20:
             if ema_fast > ema_slow and rsi > 50:
                 trend = "Uptrend"
             elif ema_fast < ema_slow and rsi < 50:
@@ -1210,7 +1214,6 @@ def find_crazy_reversal_signal(df_featured: pd.DataFrame) -> Optional[Dict[str, 
         logger.error(f"❌ [{symbol_name}] Error in find_crazy_reversal_signal: {e}")
         return None
 
-# --- تعديل: تبسيط دالة التحقق من الفلاتر ---
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     filters = profile.get("filters", {})
     if not filters:
@@ -1923,7 +1926,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.8 - Simplified Filters) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.9 - Ranging Enabled) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
