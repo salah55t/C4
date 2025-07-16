@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.6 (Momentum Override) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.7 (Dynamic Strategy) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.6_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.7_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.6')
+logger = logging.getLogger('CryptoBotV26.7')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -57,12 +57,13 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعدادات الفلاتر الديناميكية ----------------------
+# --- تعديل: تم تحديث ملفات تعريف الفلتر لتحديد استراتيجية مناسبة لكل اتجاه سوق ---
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 21.0, "rel_vol": 1.0, "rsi_range": (50, 95), "roc": 0.2,
+            "adx": 25.0, "rel_vol": 1.0, "rsi_range": (55, 95), "roc": 0.2,
             "accel": 0.0, "slope": 0.0, "min_rrr": 1.2,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.1
@@ -72,21 +73,16 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "اتجاه صاعد",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0, "rel_vol": 0.3, "rsi_range": (45, 90), "roc": 0.15,
+            "adx": 20.0, "rel_vol": 0.9, "rsi_range": (50, 90), "roc": 0.15,
             "accel": 0.0, "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
         }
     },
     "RANGING": {
-        "description": "اتجاه عرضي",
-        "strategy": "MOMENTUM",
-        "filters": {
-            "adx": 15.0, "rel_vol": 0.1, "rsi_range": (40, 70), "roc": 0.05,
-            "accel": -0.05, "slope": 0.0, "min_rrr": 1.4,
-            "min_volatility_pct": 0.25,
-            "min_btc_correlation": -0.2
-        }
+        "description": "اتجاه عرضي (التداول متوقف)",
+        "strategy": "DISABLED", # --- تعديل: إيقاف التداول في السوق العرضي
+        "filters": {}
     },
     "DOWNTREND": {
         "description": "اتجاه هابط (مراقبة الانعكاس)",
@@ -97,6 +93,11 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
             "min_btc_correlation": -0.5,
             "min_relative_volume": 1.5
         }
+    },
+    "STRONG_DOWNTREND": {
+        "description": "اتجاه هابط قوي (التداول متوقف)",
+        "strategy": "DISABLED", # --- إضافة: إيقاف التداول في الاتجاه الهابط القوي
+        "filters": {}
     },
     "WEEKEND": {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)",
@@ -119,10 +120,8 @@ SESSION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
 # ---------------------- الثوابت والمتغيرات العامة ----------------------
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-# --- إضافة جديدة: متغير وقفل للتحكم في فرض استراتيجية الزخم ---
 force_momentum_strategy: bool = False
 force_momentum_lock = Lock()
-# --- نهاية الإضافة ---
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
@@ -189,14 +188,13 @@ REJECTION_REASONS_AR = {
 
 # ---------------------- دالة HTML للوحة التحكم ----------------------
 def get_dashboard_html():
-    # --- تعديل: إضافة بطاقة جديدة وعناصر تحكم لاستراتيجية الزخم ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.6</title>
+    <title>لوحة تحكم التداول V26.7</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -243,7 +241,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.6</span>
+                <span class="text-text-secondary font-medium">V26.7</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
@@ -286,7 +284,6 @@ def get_dashboard_html():
                 </div>
                  <div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono skeleton w-20 inline-block"></span></div>
             </div>
-            <!-- --- إضافة جديدة: بطاقة التحكم في الاستراتيجية --- -->
             <div class="card p-4 flex flex-col justify-center items-center bg-blue-900/20 border-accent-blue">
                 <h3 class="font-bold text-lg text-text-secondary mb-2">التحكم بالاستراتيجية</h3>
                 <div class="flex items-center space-x-3 space-x-reverse">
@@ -297,7 +294,6 @@ def get_dashboard_html():
                 </div>
                  <div id="force-momentum-desc" class="mt-2 text-xs text-text-secondary text-center">فرض استراتيجية الزخم</div>
             </div>
-            <!-- --- نهاية الإضافة --- -->
         </section>
 
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -344,19 +340,20 @@ def get_dashboard_html():
 
 <script>
 let profitChartInstance;
+// --- تعديل: إضافة أنماط جديدة لحالات السوق والاستراتيجيات ---
 const REGIME_STYLES = {
-    "STRONG UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
+    "STRONG_UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
     "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
-    "STRONG DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
+    "STRONG_DOWNTREND": { text: "هابط قوي", color: "text-accent-red" }, "UNCERTAIN": { text: "غير واضح", color: "text-text-secondary" },
     "INITIALIZING": { text: "تهيئة...", color: "text-accent-blue" }
 };
 const STRATEGY_STYLES = {
     "MOMENTUM": { text: "متابعة الزخم", color: "text-accent-blue" },
     "REVERSAL": { text: "بحث عن انعكاس", color: "text-accent-yellow" },
-    "DISABLED": { text: "متوقف", color: "text-text-secondary" },
+    "DISABLED": { text: "متوقف (غير مناسب)", color: "text-text-secondary" },
     "FORCED_MOMENTUM": { text: "زخم (يدوي)", color: "text-cyan-400" }
 };
-const TREND_LIGHT_COLORS = { "Uptrend": "light-on-green", "Downtrend": "light-on-red", "Ranging": "light-on-yellow", "Uncertain": "light-off" };
+const TREND_LIGHT_COLORS = { "Strong Uptrend": "light-on-green", "Uptrend": "light-on-green", "Downtrend": "light-on-red", "Strong Downtrend": "light-on-red", "Ranging": "light-on-yellow", "Uncertain": "light-off" };
 
 function formatNumber(num, digits = 2) {
     if (num === null || num === undefined || isNaN(num)) return 'N/A';
@@ -408,12 +405,11 @@ function updateMarketStatus() {
         document.getElementById('db-status-light').className = `w-2.5 h-2.5 rounded-full ${data.db_ok ? 'bg-green-500' : 'bg-red-500'}`;
         document.getElementById('api-status-light').className = `w-2.5 h-2.5 rounded-full ${data.api_ok ? 'bg-green-500' : 'bg-red-500'}`;
         
-        // --- تعديل: تحديث حالة زر فرض الزخم ---
         updateMomentumToggle(data.force_momentum_enabled);
 
         const state = data.market_state;
-        const overallRegime = state.overall_regime || "UNCERTAIN";
-        const regimeStyle = REGIME_STYLES[overallRegime.toUpperCase()] || REGIME_STYLES["UNCERTAIN"];
+        const overallRegimeKey = state.overall_regime || "UNCERTAIN";
+        const regimeStyle = REGIME_STYLES[overallRegimeKey] || REGIME_STYLES["UNCERTAIN"];
         const overallDiv = document.getElementById('overall-regime');
         overallDiv.textContent = regimeStyle.text;
         overallDiv.className = `text-2xl font-bold ${regimeStyle.color}`;
@@ -431,7 +427,6 @@ function updateMarketStatus() {
 
         const profile = data.filter_profile;
         let strategy = profile.strategy || "DISABLED";
-        // --- تعديل: إظهار حالة الفرض اليدوي في الاستراتيجية الحالية ---
         if (data.force_momentum_enabled) {
             strategy = "FORCED_MOMENTUM";
         }
@@ -470,7 +465,7 @@ function updateMarketStatus() {
 
         const filtersDisplay = document.getElementById('filters-display');
         filtersDisplay.innerHTML = '';
-        if(profile && profile.filters) {
+        if(profile && profile.filters && Object.keys(profile.filters).length > 0) {
             for (const [key, value] of Object.entries(profile.filters)) {
                 let displayValue = value;
                 if (typeof value === 'number') displayValue = formatNumber(value, 4);
@@ -479,7 +474,7 @@ function updateMarketStatus() {
                 filtersDisplay.innerHTML += item;
             }
         } else {
-            filtersDisplay.innerHTML = '<p class="text-text-secondary col-span-full text-center">الفلاتر غير نشطة.</p>';
+            filtersDisplay.innerHTML = '<p class="text-text-secondary col-span-full text-center">لا توجد فلاتر نشطة (التداول متوقف).</p>';
         }
     });
 }
@@ -501,7 +496,6 @@ function updateTradingStatus() {
     });
 }
 
-// --- إضافة جديدة: دالة لتحديث واجهة زر فرض الزخم ---
 function updateMomentumToggle(is_forced) {
     const toggle = document.getElementById('force-momentum-toggle');
     const text = document.getElementById('force-momentum-text');
@@ -535,7 +529,6 @@ function toggleTrading() {
     } else { toggle.checked = !toggle.checked; }
 }
 
-// --- إضافة جديدة: دالة لتفعيل/إلغاء فرض استراتيجية الزخم ---
 function toggleMomentumStrategy() {
     const toggle = document.getElementById('force-momentum-toggle');
     const confirmationMessage = toggle.checked
@@ -922,19 +915,22 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     
     return df_calc.astype('float32', errors='ignore')
 
+# --- تعديل: تحسين منطق تحديد الاتجاه للتمييز بين الاتجاهات القوية والعادية ---
 def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
-    if df is None or len(df) < 26: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
+    if df is None or len(df) < 50: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
     try:
         close_series = df['close']
         delta = close_series.diff()
         gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
         loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
         rsi = (100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))).iloc[-1]
+        
         high_low = df['high'] - df['low']
         high_close = (df['high'] - close_series.shift()).abs()
         low_close = (df['low'] - close_series.shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         atr = tr.ewm(span=ADX_PERIOD, adjust=False).mean()
+        
         up_move = df['high'].diff(); down_move = -df['low'].diff()
         plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
         minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
@@ -942,12 +938,22 @@ def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / atr.replace(0, 1e-9)
         dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
         adx = dx.ewm(span=ADX_PERIOD, adjust=False).mean().iloc[-1]
+        
         ema_fast = close_series.ewm(span=12, adjust=False).mean().iloc[-1]
         ema_slow = close_series.ewm(span=26, adjust=False).mean().iloc[-1]
+        
         trend = "Ranging"
-        if adx > 20:
-            if ema_fast > ema_slow and rsi > 50: trend = "Uptrend"
-            elif ema_fast < ema_slow and rsi < 50: trend = "Downtrend"
+        if adx > 25: # عتبة الاتجاه القوي
+            if ema_fast > ema_slow and rsi > 55:
+                trend = "Strong Uptrend"
+            elif ema_fast < ema_slow and rsi < 45:
+                trend = "Strong Downtrend"
+        elif adx > 20: # عتبة الاتجاه العادي
+            if ema_fast > ema_slow and rsi > 50:
+                trend = "Uptrend"
+            elif ema_fast < ema_slow and rsi < 50:
+                trend = "Downtrend"
+                
         return {"trend": trend, "rsi": float(rsi), "adx": float(adx)}
     except Exception as e:
         logger.error(f"Error in get_trend_for_timeframe: {e}")
@@ -961,23 +967,23 @@ def determine_market_state():
     try:
         trend_details = {}
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            days_to_fetch = 3 if tf == '15m' else (5 if tf == '1h' else 15)
+            days_to_fetch = 3 if tf == '15m' else (5 if tf == '1h' else 20)
             df = fetch_historical_data(BTC_SYMBOL, tf, days_to_fetch)
             trend_details[tf] = get_trend_for_timeframe(df)
             time.sleep(0.2)
-
-        overall_regime = trend_details.get('4h', {}).get('trend', 'Uncertain').upper()
-        if overall_regime not in ["UPTREND", "DOWNTREND"]:
-            overall_regime = "RANGING"
+        
+        # --- تعديل: استخدام اسم الاتجاه مباشرة من الإطار الزمني 4 ساعات ---
+        overall_regime_text = trend_details.get('4h', {}).get('trend', 'Uncertain')
+        overall_regime_key = overall_regime_text.upper().replace(" ", "_")
 
         with market_state_lock:
             current_market_state = {
-                "overall_regime": overall_regime,
+                "overall_regime": overall_regime_key,
                 "trend_details_by_tf": trend_details,
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] New state: 15m={trend_details['15m']['trend']}, 1H={trend_details['1h']['trend']}, 4H={trend_details['4h']['trend']}")
+        logger.info(f"✅ [Market State] New state: 15m={trend_details['15m']['trend']}, 1H={trend_details['1h']['trend']}, 4H={overall_regime_text}")
     except Exception as e:
         logger.error(f"❌ [Market State] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock:
@@ -1001,7 +1007,6 @@ def get_session_state() -> Tuple[List[str], str, str]:
     else:
         return [], "LOW_LIQUIDITY", "سيولة منخفضة (خارج أوقات الذروة)"
 
-# --- تعديل: دمج منطق فرض الاستراتيجية اليدوي ---
 def analyze_market_and_create_dynamic_profile() -> None:
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     with dynamic_filter_lock:
@@ -1025,6 +1030,7 @@ def analyze_market_and_create_dynamic_profile() -> None:
         if liquidity_state == "WEEKEND":
             base_profile = FILTER_PROFILES["WEEKEND"].copy()
         else:
+            # --- تعديل: اختيار ملف التعريف بناءً على حالة السوق المحددة بدقة ---
             base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
 
     with dynamic_filter_lock:
@@ -1038,7 +1044,6 @@ def analyze_market_and_create_dynamic_profile() -> None:
         last_dynamic_filter_analysis_time = time.time()
     
     logger.info(f"✅ [Dynamic Filter] New profile: '{base_profile['description']}' | Strategy: '{base_profile['strategy']}' | Manual Force: {is_forced}")
-# --- نهاية التعديل ---
 
 def get_current_filter_profile() -> Dict[str, Any]:
     with dynamic_filter_lock:
@@ -1714,7 +1719,7 @@ def get_market_status():
         "filter_profile": profile_copy, "active_sessions": active_sessions,
         "db_ok": check_db_connection(), "api_ok": check_api_status(),
         "usdt_balance": get_usdt_balance(),
-        "force_momentum_enabled": is_forced # --- إضافة: إرسال حالة الفرض اليدوي للواجهة ---
+        "force_momentum_enabled": is_forced
     })
 
 @app.route('/api/stats')
@@ -1846,7 +1851,6 @@ def toggle_trading_status():
         log_and_notify('warning', f"🚨 Real trading status changed to: {status_msg}", "TRADING_STATUS_CHANGE")
         return jsonify({"message": f"Trading status set to {status_msg}", "is_enabled": is_trading_enabled})
 
-# --- إضافة جديدة: نقطة API للتحكم في فرض استراتيجية الزخم ---
 @app.route('/api/strategy/force_momentum/toggle', methods=['POST'])
 def toggle_force_momentum():
     global force_momentum_strategy
@@ -1857,7 +1861,6 @@ def toggle_force_momentum():
         # قم بتشغيل التحليل فورًا ليعكس التغيير
         Thread(target=analyze_market_and_create_dynamic_profile).start()
         return jsonify({"message": f"Strategy mode set to {status_msg}", "is_forced": force_momentum_strategy})
-# --- نهاية الإضافة ---
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1916,8 +1919,9 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.6 - Momentum Override) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.7 - Dynamic Strategy) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
+
