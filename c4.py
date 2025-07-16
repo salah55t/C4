@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V26.7 (Dynamic Strategy) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V26.8 (Simplified Filters) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v26.7_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26.8_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.7')
+logger = logging.getLogger('CryptoBotV26.8')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -57,14 +57,14 @@ except Exception as e:
     exit(1)
 
 # ---------------------- إعدادات الفلاتر الديناميكية ----------------------
-# --- تعديل: تم تحديث ملفات تعريف الفلتر لتحديد استراتيجية مناسبة لكل اتجاه سوق ---
+# --- تعديل: تم تبسيط الفلاتر بإزالة فلتر التسارع (accel) ---
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي",
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 25.0, "rel_vol": 1.0, "rsi_range": (55, 95), "roc": 0.2,
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.2,
+            "slope": 0.0, "min_rrr": 1.2,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.1
         }
@@ -74,14 +74,14 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 20.0, "rel_vol": 0.9, "rsi_range": (50, 90), "roc": 0.15,
-            "accel": 0.0, "slope": 0.0, "min_rrr": 1.3,
+            "slope": 0.0, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
         }
     },
     "RANGING": {
         "description": "اتجاه عرضي (التداول متوقف)",
-        "strategy": "DISABLED", # --- تعديل: إيقاف التداول في السوق العرضي
+        "strategy": "DISABLED",
         "filters": {}
     },
     "DOWNTREND": {
@@ -96,7 +96,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "STRONG_DOWNTREND": {
         "description": "اتجاه هابط قوي (التداول متوقف)",
-        "strategy": "DISABLED", # --- إضافة: إيقاف التداول في الاتجاه الهابط القوي
+        "strategy": "DISABLED",
         "filters": {}
     },
     "WEEKEND": {
@@ -104,7 +104,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 17.0, "rel_vol": 0.8, "rsi_range": (30, 70), "roc": 0.1,
-            "accel": -0.05, "slope": 0.0, "min_rrr": 1.5,
+            "slope": 0.0, "min_rrr": 1.5,
             "min_volatility_pct": 0.25,
             "min_btc_correlation": -0.4
         }
@@ -169,14 +169,14 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 
+# --- تعديل: دمج أسباب الرفض في سبب واحد ---
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة",
     "Low Volatility": "تقلب منخفض جداً",
     "BTC Correlation": "ارتباط ضعيف بالبيتكوين",
     "RRR Filter": "نسبة المخاطرة/العائد غير كافية",
     "Reversal Volume Filter": "فوليوم الانعكاس ضعيف",
-    "Speed Filter": "فلتر السرعة (ADX/Volume/RSI)",
-    "Momentum Filter": "فلتر الزخم (ROC/Accel/Slope)",
+    "Momentum/Strength Filter": "فلتر الزخم والقوة",
     "Peak/Pullback Filter": "فلتر القمة/التصحيح",
     "Invalid ATR for TP/SL": "ATR غير صالح لحساب الأهداف",
     "Reversal Signal Rejected by ML Model": "نموذج التعلم الآلي رفض إشارة الانعكاس",
@@ -194,7 +194,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V26.7</title>
+    <title>لوحة تحكم التداول V26.8</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
@@ -241,7 +241,7 @@ def get_dashboard_html():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold text-white">
                 <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V26.7</span>
+                <span class="text-text-secondary font-medium">V26.8</span>
             </h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
@@ -340,7 +340,6 @@ def get_dashboard_html():
 
 <script>
 let profitChartInstance;
-// --- تعديل: إضافة أنماط جديدة لحالات السوق والاستراتيجيات ---
 const REGIME_STYLES = {
     "STRONG_UPTREND": { text: "صاعد قوي", color: "text-accent-green" }, "UPTREND": { text: "صاعد", color: "text-green-400" },
     "RANGING": { text: "عرضي", color: "text-accent-yellow" }, "DOWNTREND": { text: "هابط", color: "text-red-400" },
@@ -908,14 +907,13 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
         df_calc['btc_correlation'] = 0.0
         
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff() # Calculation remains for ML model compatibility
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
     df_calc['hour_of_day'] = df_calc.index.hour
     
     return df_calc.astype('float32', errors='ignore')
 
-# --- تعديل: تحسين منطق تحديد الاتجاه للتمييز بين الاتجاهات القوية والعادية ---
 def get_trend_for_timeframe(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     if df is None or len(df) < 50: return {"trend": "Uncertain", "rsi": -1, "adx": -1}
     try:
@@ -972,7 +970,6 @@ def determine_market_state():
             trend_details[tf] = get_trend_for_timeframe(df)
             time.sleep(0.2)
         
-        # --- تعديل: استخدام اسم الاتجاه مباشرة من الإطار الزمني 4 ساعات ---
         overall_regime_text = trend_details.get('4h', {}).get('trend', 'Uncertain')
         overall_regime_key = overall_regime_text.upper().replace(" ", "_")
 
@@ -1030,7 +1027,6 @@ def analyze_market_and_create_dynamic_profile() -> None:
         if liquidity_state == "WEEKEND":
             base_profile = FILTER_PROFILES["WEEKEND"].copy()
         else:
-            # --- تعديل: اختيار ملف التعريف بناءً على حالة السوق المحددة بدقة ---
             base_profile = FILTER_PROFILES.get(market_regime, FILTER_PROFILES["RANGING"]).copy()
 
     with dynamic_filter_lock:
@@ -1214,7 +1210,7 @@ def find_crazy_reversal_signal(df_featured: pd.DataFrame) -> Optional[Dict[str, 
         logger.error(f"❌ [{symbol_name}] Error in find_crazy_reversal_signal: {e}")
         return None
 
-
+# --- تعديل: تبسيط دالة التحقق من الفلاتر ---
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     filters = profile.get("filters", {})
     if not filters:
@@ -1250,15 +1246,23 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
             return False
 
     elif profile.get("strategy") == "MOMENTUM":
-        adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
+        adx = last_features.get('adx', 0)
+        rel_vol = last_features.get('relative_volume', 0)
+        rsi = last_features.get('rsi', 0)
+        roc = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0)
+        slope = last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
+        
         rsi_min, rsi_max = final_filters.get('rsi_range', (0, 100))
-        if not (adx >= final_filters.get('adx', 0) and rel_vol >= final_filters.get('rel_vol', 0) and rsi_min <= rsi < rsi_max):
-            log_rejection(symbol, "Speed Filter", {"ADX": f"{adx:.2f}", "Volume": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}", "min_ADX": f"{final_filters.get('adx', 0):.2f}"})
-            return False
 
-        roc, accel, slope = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get('roc_acceleration', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-        if not (roc > final_filters.get('roc', -100) and accel >= final_filters.get('accel', -100) and slope > final_filters.get('slope', -100)):
-            log_rejection(symbol, "Momentum Filter", {"ROC": f"{roc:.2f}", "Accel": f"{accel:.4f}", "Slope": f"{slope:.6f}"})
+        if not (adx >= final_filters.get('adx', 0) and 
+                rel_vol >= final_filters.get('rel_vol', 0) and 
+                rsi_min <= rsi < rsi_max and
+                roc > final_filters.get('roc', -100) and
+                slope > final_filters.get('slope', -100)):
+            log_rejection(symbol, "Momentum/Strength Filter", {
+                "ADX": f"{adx:.2f}", "Volume": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}",
+                "ROC": f"{roc:.2f}", "Slope": f"{slope:.6f}"
+            })
             return False
         
         if USE_PEAK_FILTER:
@@ -1919,7 +1923,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.7 - Dynamic Strategy) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V26.8 - Simplified Filters) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     run_flask()
