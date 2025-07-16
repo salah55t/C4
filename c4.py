@@ -69,7 +69,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         }
     },
     "UPTREND": {
-        "description": "اتجاه صاعد (مُخفف حسب السجل)",
+        "description": "اتجاه صاعد (مُخفف)",
         "strategy": "MOMENTUM",
         "filters": {
             # تم خفض ADX من 24 إلى 20. السجل أظهر رفض عند 21.95 و 18.64
