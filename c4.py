@@ -74,7 +74,7 @@ FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
         "strategy": "MOMENTUM",
         "filters": {
             "adx": 20.0, "rel_vol": 0.4, "rsi_range": (50, 90), "roc": 0.15,
-            "slope": 0.10, "min_rrr": 1.3,
+            "slope": 0.12, "min_rrr": 1.3,
             "min_volatility_pct": 0.20,
             "min_btc_correlation": 0.0
         }
