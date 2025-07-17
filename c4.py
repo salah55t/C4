@@ -56,38 +56,44 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# --- [تحسين] ---
-# ---------------------- ملفات الفلاتر الديناميكية (معدلة للمنطق الجديد) ----------------------
-# تم تعديل الفلاتر لتكون أكثر واقعية ومنطقية، خاصة فلاتر الزخم.
+# --- [تحديث] ---
+# ---------------------- ملفات الفلاتر الديناميكية (معدلة بناءً على تحليل النتائج) ----------------------
+# تم تحديث ملفات تعريف الاتجاه الصاعد بناءً على تحليل الصفقات الناجحة (>1% ربح).
+# أصبحت الشروط أكثر صرامة لتعكس ظروف السوق المثالية التي لوحظت.
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
-        "description": "اتجاه صاعد قوي (نقاط 4+)",
+        "description": "اتجاه صاعد قوي (مستخلص من البيانات)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 25.0, "rel_vol": 0.2, "rsi_range": (50, 95), "roc": 0.0,
-            "slope": 0.0, "min_rrr": 1.3, "min_volatility_pct": 0.25,
-            "min_btc_correlation": -0.1, "min_bid_ask_ratio": 1.1
+            "adx": 30.0,                 # يتطلب اتجاه أقوى
+            "rel_vol": 0.5,              # يتطلب حجم تداول أعلى
+            "rsi_range": (55, 95),       # نطاق RSI أعلى لمزيد من الزخم
+            "roc": 0.1,                  # معدل تغير إيجابي
+            "slope": 0.01,               # ميل إيجابي للمتوسط المتحرك
+            "min_rrr": 1.5,              # نسبة مخاطرة/عائد جيدة
+            "min_volatility_pct": 0.40,  # تقلب كافٍ للحركة
+            "min_btc_correlation": 0.5,  # ارتباط إيجابي قوي بالبيتكوين
+            "min_bid_ask_ratio": 1.2     # ضغط شرائي واضح
         }
     },
     "UPTREND": {
-        "description": "اتجاه صاعد (نقاط 1-3)",
+        "description": "اتجاه صاعد (مستخلص من البيانات)",
         "strategy": "MOMENTUM",
         "filters": {
-            "adx": 20.0,
-            "rel_vol": 0.1,
-            "rsi_range": (48, 90),
-            # تم تعديل ROC و Slope للسماح بتصحيحات بسيطة ولكن ليس هبوط حاد
-            "roc": -0.5,
-            "slope": -0.05,
+            "adx": 22.0,
+            "rel_vol": 0.3,
+            "rsi_range": (50, 90),
+            "roc": 0.0,                  # على الأقل ليس سلبياً
+            "slope": 0.0,                # على الأقل ليس سلبياً
             "min_rrr": 1.4,
-            "min_volatility_pct": 0.20,
-            "min_btc_correlation": -0.2,
+            "min_volatility_pct": 0.30,
+            "min_btc_correlation": 0.3,  # يتطلب ارتباطاً إيجابياً
             "min_bid_ask_ratio": 1.1
         }
     },
     "RANGING": {
         "description": "اتجاه عرضي/محايد (نقاط 0)",
-        "strategy": "MOMENTUM", # يمكن البحث عن زخم قصير المدى
+        "strategy": "MOMENTUM",
         "filters": {
             "adx": 18.0, "rel_vol": 0.2, "rsi_range": (45, 75), "roc": 0.05,
             "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25,
@@ -1009,7 +1015,7 @@ def determine_market_trend_score():
 
             # النقطة الثالثة: EMA50 فوق/تحت EMA200
             if ema50 > ema200: tf_score += 1
-            elif ema50 < ema200: tf_score -= 1
+            elif ema50 < ema50: tf_score -= 1
 
             label = "محايد"
             if tf_score >= 2: label = "صاعد"
@@ -1968,18 +1974,6 @@ def run_flask():
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
-def run_websocket_manager():
-    if not client or not validated_symbols_to_scan:
-        logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized.")
-        return
-    logger.info("📡 [WebSocket] Starting WebSocket Manager...")
-    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
-    twm.start()
-    streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
-    twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
-    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
-    twm.join()
-
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
