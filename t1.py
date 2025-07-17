@@ -1684,6 +1684,9 @@ def perform_end_of_cycle_cleanup():
 
 # ---------------------- Main Backtesting Function ----------------------
 def run_backtest(days: int):
+    # Declare global variables at the very beginning of the function
+    global client, validated_symbols_to_scan, exchange_info_map
+    
     logger.info(f"🚀 Starting backtest for {days} days...")
     
     # Clear previous backtest results from the database for a clean run
@@ -1700,6 +1703,16 @@ def run_backtest(days: int):
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
+    # Ensure client and exchange info are initialized for backtesting
+    if client is None:
+        logger.info("Initializing Binance Client for backtest...")
+        client = Client(API_KEY, API_SECRET)
+    if not exchange_info_map:
+        get_exchange_info_map()
+    if not validated_symbols_to_scan:
+        logger.info("Loading validated symbols for backtest...")
+        validated_symbols_to_scan = get_validated_symbols()
+
     # Fetch all necessary historical data for the backtesting period
     all_symbols_data = {}
     all_btc_data_frames = {}
@@ -1710,17 +1723,11 @@ def run_backtest(days: int):
         if all_btc_data_frames[tf] is not None:
             all_btc_data_frames[tf]['btc_returns'] = all_btc_data_frames[tf]['close'].pct_change()
 
-    # Get validated symbols (assuming these are the ones for which you have ML models)
+    # Get symbols that have ML models
     symbols_with_models = []
     script_dir = os.path.dirname(os.path.abspath(__file__))
     model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
-    if not validated_symbols_to_scan:
-        logger.warning("Validated symbols not loaded. Attempting to load for backtest.")
-        global client, validated_symbols_to_scan
-        if not client: client = Client(API_KEY, API_SECRET)
-        if not exchange_info_map: get_exchange_info_map()
-        validated_symbols_to_scan = get_validated_symbols()
-
+    
     for symbol in validated_symbols_to_scan:
         if os.path.exists(os.path.join(model_dir_path, f"{BASE_ML_MODEL_NAME}_{symbol}.pkl")):
             symbols_with_models.append(symbol)
@@ -1854,7 +1861,8 @@ def run_backtest(days: int):
                     strategy = TradingStrategy(symbol)
                     if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
                     
-                    df_features = strategy.get_features(df_15m_slice, df_4h, current_btc_data_frames_slice.get(SIGNAL_GENERATION_TIMEFRAME))
+                    df_4h_features_for_ml = calculate_features(df_4h, None) # Features for 4h for ML model
+                    df_features = strategy.get_features(df_15m_slice, df_4h_features_for_ml, current_btc_data_frames_slice.get(SIGNAL_GENERATION_TIMEFRAME))
                     if df_features is None or df_features.empty: continue
                     
                     ml_signal = strategy.generate_buy_signal(df_features)
@@ -1903,11 +1911,13 @@ def run_backtest(days: int):
 
                 except Exception as e:
                     logger.error(f"❌ [Backtest Processing Error] for symbol {symbol} at {current_candle_time}: {e}", exc_info=True)
-            
-            # After processing a batch, clean up memory
-            ml_models_cache.clear()
-            gc.collect()
-            logger.debug(f"🧹 [Backtest Cleanup] Processed batch. Memory cleaned. Open positions: {len(backtest_open_positions)}")
+                finally:
+                    del strategy, df_15m, df_4h, df_features
+                    processed_count += 1
+                    if processed_count % SYMBOL_PROCESSING_BATCH_SIZE == 0:
+                        logger.info("📦 Processed batch. Running memory cleanup...")
+                        ml_models_cache.clear(); gc.collect()
+                        time.sleep(0.1) # Small delay to yield CPU if running locally
 
     # After iterating through all candles, close any remaining open positions
     for symbol, signal in list(backtest_open_positions.items()):
@@ -1959,6 +1969,97 @@ def run_backtest(days: int):
 
 
 # ---------------------- Main Loop (for real-time bot, not backtest) ----------------------
+# This section remains for the real-time bot functionality and is separate from backtesting.
+# The `evaluate_filters` function in this section will still perform actual filtering.
+def determine_market_trend_score():
+    # Placeholder for real-time market trend determination
+    # This would typically fetch live BTC data
+    logger.info("🧠 [Market Score] Determining real-time market trend score...")
+    # For simplicity, using a dummy value or a cached one if available
+    with market_state_lock:
+        global current_market_state
+        # In a real scenario, you'd fetch live BTC data here
+        # For now, let's just simulate a state or use a default
+        current_market_state = {
+            "trend_score": random.randint(-5, 5),
+            "trend_label": random.choice(["صاعد قوي", "صاعد", "محايد", "هابط", "هابط قوي"]),
+            "details_by_tf": {
+                "15m": {"score": random.randint(-2, 2), "label": random.choice(["صاعد", "هابط", "محايد"])},
+                "1h": {"score": random.randint(-2, 2), "label": random.choice(["صاعد", "هابط", "محايد"])},
+                "4h": {"score": random.randint(-2, 2), "label": random.choice(["صاعد", "هابط", "محايد"])}
+            },
+            "last_updated": datetime.now(timezone.utc).isoformat()
+        }
+    logger.info(f"✅ [Market Score] Real-time State: {current_market_state['trend_label']}")
+
+def get_session_state():
+    # Placeholder for real-time session state
+    return ["London"], "NORMAL_LIQUIDITY", "Normal liquidity (London)"
+
+def get_current_filter_profile():
+    # Placeholder for real-time filter profile
+    with dynamic_filter_lock:
+        if not dynamic_filter_profile_cache or \
+           (time.time() - last_dynamic_filter_analysis_time) > DYNAMIC_FILTER_ANALYSIS_INTERVAL:
+            # In real-time, you'd call analyze_market_and_create_dynamic_profile here
+            # For now, return a default or a simple dynamic one
+            market_label = current_market_state.get("trend_label", "محايد")
+            profile_key = "RANGING"
+            if "صاعد قوي" in market_label: profile_key = "STRONG_UPTREND"
+            elif "صاعد" in market_label: profile_key = "UPTREND"
+            elif "هابط قوي" in market_label: profile_key = "STRONG_DOWNTREND"
+            elif "هابط" in market_label: profile_key = "DOWNTREND"
+            
+            base_profile = FILTER_PROFILES.get(profile_key, FILTER_PROFILES["RANGING"]).copy()
+            dynamic_filter_profile_cache.update({
+                "name": base_profile['description'],
+                "description": "Real-time dynamic profile",
+                "strategy": base_profile.get("strategy", "DISABLED"),
+                "filters": base_profile.get("filters", {}),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+            })
+        return dynamic_filter_profile_cache
+
+def analyze_market_and_create_dynamic_profile():
+    # This function is called in real-time main loop
+    # It updates the global dynamic_filter_profile_cache
+    logger.info("🔬 [Dynamic Filter] Analyzing market and creating dynamic profile...")
+    global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
+    
+    with market_state_lock:
+        market_state = current_market_state
+    with force_momentum_lock:
+        force_momentum = force_momentum_strategy
+
+    active_sessions, liquidity_state, liquidity_desc = get_session_state()
+    market_label = market_state.get("trend_label", "محايد")
+
+    if force_momentum:
+        base_profile = FILTER_PROFILES["UPTREND"].copy()
+        liquidity_desc = "Manual momentum strategy forced"
+    else:
+        profile_key = "RANGING"
+        if "صاعد قوي" in market_label: profile_key = "STRONG_UPTREND"
+        elif "صاعد" in market_label: profile_key = "UPTREND"
+        elif "هابط قوي" in market_label: profile_key = "STRONG_DOWNTREND"
+        elif "هابط" in market_label: profile_key = "DOWNTREND"
+
+        if liquidity_state == "WEEKEND":
+            base_profile = FILTER_PROFILES["WEEKEND"].copy()
+        else:
+            base_profile = FILTER_PROFILES.get(profile_key, FILTER_PROFILES["RANGING"]).copy()
+
+    dynamic_filter_profile_cache.update({
+        "name": base_profile['description'],
+        "description": liquidity_desc,
+        "strategy": base_profile.get("strategy", "DISABLED"),
+        "filters": base_profile.get("filters", {}),
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    })
+    last_dynamic_filter_analysis_time = time.time()
+    logger.info(f"✅ [Dynamic Filter] Real-time profile updated: '{base_profile['description']}' | Strategy: '{base_profile['strategy']}'")
+
+
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
@@ -2032,7 +2133,8 @@ def main_loop():
                     df_4h = fetch_historical_data(symbol, '4h', SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df_4h is None or df_4h.empty: continue
                     
-                    df_features = strategy.get_features(df_15m, df_4h, btc_data)
+                    df_4h_features_for_ml = calculate_features(df_4h, None) # Features for 4h for ML model
+                    df_features = strategy.get_features(df_15m, df_4h_features_for_ml, btc_data)
                     if df_features is None or df_features.empty: continue
                     
                     ml_signal = strategy.generate_buy_signal(df_features)
@@ -2052,15 +2154,19 @@ def main_loop():
                     last_atr = last_features.get('atr', 0)
                     tp_sl_data = calculate_tp_sl(symbol, entry_price, last_atr)
                     
-                    if not tp_sl_data or not evaluate_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m)["potential_rejection_reasons"] == []: # This is the real-time filter check
-                        # In real-time, if filters don't pass, we reject.
-                        # The evaluate_filters function is called here to get rejection reasons for logging.
-                        rejection_info = evaluate_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m)
-                        log_rejection(symbol, "Momentum/Strength Filter", {"reasons": rejection_info["potential_rejection_reasons"]})
+                    # In real-time, we apply filters to reject signals
+                    if not tp_sl_data:
+                        log_rejection(symbol, "Invalid ATR for TP/SL", {"atr": last_atr})
+                        continue
+
+                    # Evaluate filters and get potential rejection reasons for logging in real-time
+                    filter_evaluation_results = evaluate_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m)
+                    if filter_evaluation_results["potential_rejection_reasons"]:
+                        log_rejection(symbol, "Momentum/Strength Filter", {"reasons": filter_evaluation_results["potential_rejection_reasons"]})
                         continue
 
                     order_book_analysis = analyze_order_book(symbol, entry_price)
-                    if not order_book_analysis or not order_book_analysis.get('bid_ask_ratio', 0) >= filter_profile.get('filters', {}).get('min_bid_ask_ratio', 1.0) or order_book_analysis.get('has_large_sell_wall', True):
+                    if not order_book_analysis.get('bid_ask_ratio', 0) >= filter_profile.get('filters', {}).get('min_bid_ask_ratio', 1.0) or order_book_analysis.get('has_large_sell_wall', True):
                         log_rejection(symbol, "Order Book Imbalance", {"details": order_book_analysis})
                         continue
                     
@@ -2379,13 +2485,13 @@ def run_websocket_manager():
     twm.join()
 
 def initialize_bot_services():
-    global client, validated_symbols_to_scan
+    global client, validated_symbols_to_scan, exchange_info_map
     logger.info("🤖 [Bot Services] Starting background initialization...")
     try:
         client = Client(API_KEY, API_SECRET)
         init_db()
         init_redis()
-        get_exchange_info_map()
+        get_exchange_info_map() # This populates exchange_info_map
         load_open_signals_to_cache()
         load_notifications_to_cache()
         
