@@ -105,7 +105,8 @@ def fetch_historical_data(symbol: str, interval: str, start_date_str: str) -> Op
         logger.error(f"خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+# --- [مُصحح] --- تم تعديل الدالة لتقبل اسم العملة
+def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol: str) -> pd.DataFrame:
     df_calc = df.copy()
     for period in EMA_PERIODS:
         df_calc[f'ema_{period}'] = df_calc['close'].ewm(span=period, adjust=False).mean()
@@ -129,11 +130,18 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
-    if btc_df is not None and not btc_df.empty:
+    
+    # --- [مُصحح] --- منطق جديد لحساب ارتباط البيتكوين
+    if symbol == BTC_SYMBOL:
+        df_calc['btc_correlation'] = 1.0
+    elif btc_df is not None and not btc_df.empty:
+        if 'btc_returns' not in btc_df.columns:
+            raise ValueError("btc_df is missing the 'btc_returns' column")
         merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
+
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
     df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
@@ -166,11 +174,12 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
+    # --- [مُصحح] --- تم تعديل الدالة لتمرير اسم العملة
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
-            df_featured = calculate_features(df_15m, btc_df)
-            df_4h_features = calculate_features(df_4h, None)
+            df_featured = calculate_features(df_15m, btc_df, self.symbol)
+            df_4h_features = calculate_features(df_4h, None, self.symbol)
             df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h", inplace=False)
             required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
             df_featured = df_featured.join(df_4h_features[required_4h_cols], how='outer')
@@ -204,7 +213,6 @@ def calculate_tp_sl(entry_price: float, last_atr: float) -> Optional[Dict[str, A
     sl = entry_price - (last_atr * ATR_FALLBACK_SL_MULTIPLIER)
     return {'target_price': tp, 'stop_loss': sl}
 
-# --- [جديد] --- دالة لتحديد اتجاه السوق في نقطة زمنية محددة
 def determine_market_trend_at_time(timestamp: pd.Timestamp, btc_data_all_tf: Dict[str, pd.DataFrame]) -> Dict:
     details = {}
     total_score = 0
@@ -242,7 +250,6 @@ def determine_market_trend_at_time(timestamp: pd.Timestamp, btc_data_all_tf: Dic
     
     return {"trend_score": final_score, "trend_label": trend_label, "details_by_tf": details}
 
-# --- [جديد] --- دالة لالتقاط جميع تفاصيل الصفقة
 def capture_trade_details(features_row: pd.Series, market_trend: Dict, confidence: float) -> Dict:
     details = {
         "market_trend": market_trend,
@@ -261,7 +268,6 @@ def capture_trade_details(features_row: pd.Series, market_trend: Dict, confidenc
     }
     return details
 
-# --- [مُحسَّن] --- دالة إنشاء التقرير المفصل
 def generate_detailed_report(closed_trades: List[Dict], initial_capital: float, final_capital: float):
     logger.info("\n" + "="*80)
     logger.info("📊 تقرير الاختبار التاريخي المفصل 📊")
@@ -271,7 +277,6 @@ def generate_detailed_report(closed_trades: List[Dict], initial_capital: float, 
         logger.warning("لم يتم إغلاق أي صفقات خلال فترة الاختبار.")
         return
 
-    # --- ملخص الأداء العام ---
     total_trades = len(closed_trades)
     wins = [t for t in closed_trades if t['pnl_usdt'] > 0]
     losses = [t for t in closed_trades if t['pnl_usdt'] <= 0]
@@ -296,7 +301,6 @@ def generate_detailed_report(closed_trades: List[Dict], initial_capital: float, 
     logger.info(f"متوسط ربح الصفقة الرابحة: {avg_win_pct:.2f}%")
     logger.info(f"متوسط خسارة الصفقة الخاسرة: {avg_loss_pct:.2f}%")
     
-    # --- قائمة الصفقات الرابحة ---
     logger.info("\n" + "="*80)
     logger.info(f"✅ قائمة الصفقات الرابحة ({len(wins)} صفقة)")
     logger.info("="*80)
@@ -306,7 +310,6 @@ def generate_detailed_report(closed_trades: List[Dict], initial_capital: float, 
         for trade in wins:
             print_trade_details(trade)
 
-    # --- قائمة الصفقات الخاسرة ---
     logger.info("\n" + "="*80)
     logger.info(f"❌ قائمة الصفقات الخاسرة ({len(losses)} صفقة)")
     logger.info("="*80)
@@ -359,7 +362,6 @@ def run_backtest():
     btc_data_15m = all_data[BTC_SYMBOL]
     btc_data_15m['btc_returns'] = btc_data_15m['close'].pct_change()
     
-    # جلب بيانات BTC لجميع الأطر الزمنية لتحليل الاتجاه
     btc_data_all_tf = {}
     for tf in TIMEFRAMES_FOR_TREND_ANALYSIS:
         df_btc_tf = fetch_historical_data(BTC_SYMBOL, tf, start_date_str)
@@ -453,7 +455,6 @@ def run_backtest():
                 
                 if capital < notional_value: continue
                 
-                # --- [جديد] --- التقاط جميع التفاصيل هنا ---
                 market_trend = determine_market_trend_at_time(timestamp, btc_data_all_tf)
                 trade_details = capture_trade_details(features_row, market_trend, ml_signal['confidence'])
                 
