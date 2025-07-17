@@ -37,7 +37,7 @@ except Exception as e:
     API_KEY, API_SECRET = '', ''
 
 # ---------------------- إعدادات الاختبار التاريخي ----------------------
-BACKTEST_DAYS: int = 10
+BACKTEST_DAYS: int = 5
 INITIAL_CAPITAL: float = 10000.0
 RISK_PER_TRADE_PERCENT: float = 1.0
 MAX_OPEN_TRADES: int = 30
