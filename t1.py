@@ -15,7 +15,7 @@ from binance.client import Client
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
 from sklearn.preprocessing import StandardScaler
@@ -58,6 +58,9 @@ ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 MAX_TRADE_DURATION_CANDLES: int = 96
 BACKTEST_BATCH_SIZE: int = 5
+# --- [FIX] --- عدد الأيام الإضافية لجلب البيانات التاريخية لحساب المؤشرات بشكل صحيح
+DATA_FETCH_BUFFER_DAYS: int = 40
+
 
 # --- متغيرات الاتصال ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -289,7 +292,6 @@ def create_backtest_results_table():
     logger.info("[DB] التحقق من جدول نتائج الاختبار الخلفي...")
     try:
         with conn.cursor() as cur:
-            # --- [FIX] --- حذف الجدول أولاً لضمان أن المخطط محدث دائمًا
             logger.warning("سيتم حذف جدول backtest_results الموجود لضمان مخطط جديد...")
             cur.execute("DROP TABLE IF EXISTS backtest_results;")
             
@@ -418,7 +420,9 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
     if btc_df is not None and not btc_df.empty:
-        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+        # --- [FIX] --- التأكد من أن btc_df له نفس الفهرس الزمني
+        btc_df_resampled = btc_df.reindex(df_calc.index, method='ffill')
+        merged_df = pd.merge(df_calc, btc_df_resampled[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
@@ -431,27 +435,37 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     
     return df_calc
 
-def determine_trend_for_timestamp(df: pd.DataFrame) -> str:
-    if df is None or len(df) < EMA_PERIODS[-1]:
-        return "غير واضح"
+# --- [FIX] --- دالة جديدة ومحسنة لحساب عمود الاتجاه بشكل فعال
+def add_trend_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Applies trend calculation to each row of a dataframe efficiently."""
+    if df is None or df.empty:
+        return df
 
-    last_candle = df.iloc[-1]
-    close = last_candle['close']
-    ema21 = last_candle['ema_21']
-    ema50 = last_candle['ema_50']
-    ema200 = last_candle['ema_200']
+    # التأكد من وجود المتوسطات المتحركة
+    if not all(f'ema_{p}' in df.columns for p in EMA_PERIODS):
+        logger.warning("EMAs not found in dataframe. Cannot calculate trend.")
+        df['trend'] = "غير واضح"
+        return df
 
-    score = 0
-    if close > ema21: score += 1
-    elif close < ema21: score -= 1
-    if ema21 > ema50: score += 1
-    elif ema21 < ema50: score -= 1
-    if ema50 > ema200: score += 1
-    elif ema50 < ema200: score -= 1
+    # حساب النقاط بناءً على الشروط
+    score = pd.Series(0, index=df.index)
+    score += np.where(df['close'] > df['ema_21'], 1, -1)
+    score += np.where(df['ema_21'] > df['ema_50'], 1, -1)
+    score += np.where(df['ema_50'] > df['ema_200'], 1, -1)
 
-    if score >= 2: return "صاعد"
-    if score <= -2: return "هابط"
-    return "محايد"
+    # تحديد الاتجاه بناءً على النقاط
+    conditions = [
+        score >= 2,
+        score <= -2
+    ]
+    choices = ["صاعد", "هابط"]
+    df['trend'] = np.select(conditions, choices, default="محايد")
+    
+    # تعيين "غير واضح" للصفوف التي لا تملك بيانات كافية للمتوسطات
+    min_required_period = EMA_PERIODS[-1]
+    df.loc[df.index[:min_required_period], 'trend'] = "غير واضح"
+    
+    return df
 
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
@@ -531,38 +545,67 @@ def simulate_trade_outcome(entry_price: float, tp: float, sl: float, future_cand
     last_candle = future_candles.iloc[-1]
     return {'outcome': 'TIMEOUT', 'timestamp': last_candle.name, 'pnl': ((last_candle['close'] / entry_price) - 1) * 100}
 
-def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
-    logger.info(f"🚀 بدء الاختبار الخلفي للعملة: {symbol} من {start_date} إلى {end_date}")
+def run_backtest_for_symbol(symbol: str, start_date_str: str, end_date_str: str):
+    logger.info(f"🚀 بدء الاختبار الخلفي للعملة: {symbol} من {start_date_str} إلى {end_date_str}")
     
     strategy = BacktestTradingStrategy(symbol)
     if not strategy.ml_model:
         logger.warning(f"⚠️ لا يوجد نموذج للعملة {symbol}. جاري التخطي.")
         return 0
 
-    df_15m = fetch_historical_data(symbol, '15m', start_date, end_date)
-    df_1h = fetch_historical_data(symbol, '1h', start_date, end_date)
-    df_4h = fetch_historical_data(symbol, '4h', start_date, end_date)
-    btc_df = fetch_historical_data(BTC_SYMBOL, '15m', start_date, end_date)
+    # --- [FIX] --- حساب تاريخ بدء جلب البيانات مع فترة إضافية
+    start_dt = pd.to_datetime(start_date_str, utc=True)
+    fetch_start_dt = start_dt - timedelta(days=DATA_FETCH_BUFFER_DAYS)
+    fetch_start_str = fetch_start_dt.strftime('%d %b, %Y')
+
+    # --- [FIX] --- جلب البيانات باستخدام تاريخ البدء الجديد
+    df_15m = fetch_historical_data(symbol, '15m', fetch_start_str, end_date_str)
+    df_1h = fetch_historical_data(symbol, '1h', fetch_start_str, end_date_str)
+    df_4h = fetch_historical_data(symbol, '4h', fetch_start_str, end_date_str)
+    btc_df = fetch_historical_data(BTC_SYMBOL, '15m', fetch_start_str, end_date_str)
 
     if df_15m is None or len(df_15m) < 250:
         logger.warning(f"⚠️ بيانات غير كافية لـ {symbol}. جاري التخطي.")
         return 0
     if btc_df is not None: btc_df['btc_returns'] = btc_df['close'].pct_change()
-        
-    df_15m_features = calculate_features(df_15m.copy(), btc_df)
-    df_1h_features = calculate_features(df_1h.copy(), None) if df_1h is not None else None
-    df_4h_features = calculate_features(df_4h.copy(), None) if df_4h is not None else None
 
+    # --- [FIX] --- حساب الميزات والاتجاهات مرة واحدة قبل الدخول في الحلقة
+    logger.info(f"[{symbol}] حساب الميزات والاتجاهات لجميع الإطارات الزمنية...")
+    df_15m_features = calculate_features(df_15m.copy(), btc_df)
+    df_1h_features = calculate_features(df_1h.copy(), None) if df_1h is not None else pd.DataFrame()
+    df_4h_features = calculate_features(df_4h.copy(), None) if df_4h is not None else pd.DataFrame()
+
+    df_15m_features = add_trend_column(df_15m_features)
+    df_1h_features = add_trend_column(df_1h_features)
+    df_4h_features = add_trend_column(df_4h_features)
+
+    # دمج الاتجاهات من الإطارات الأعلى إلى إطار 15 دقيقة
+    if not df_1h_features.empty:
+        df_15m_features = pd.merge_asof(df_15m_features, df_1h_features[['trend']].rename(columns={'trend': 'trend_1h'}), 
+                                      left_index=True, right_index=True, direction='backward')
+    else:
+        df_15m_features['trend_1h'] = "غير واضح"
+
+    if not df_4h_features.empty:
+        df_15m_features = pd.merge_asof(df_15m_features, df_4h_features[['trend']].rename(columns={'trend': 'trend_4h'}),
+                                      left_index=True, right_index=True, direction='backward')
+    else:
+        df_15m_features['trend_4h'] = "غير واضح"
+    
+    df_15m_features.rename(columns={'trend': 'trend_15m'}, inplace=True)
+
+    # قص البيانات لتبدأ من تاريخ البدء الفعلي للاختبار
+    df_15m_features = df_15m_features.loc[start_dt:]
+    
     results_to_insert = []
     
-    for i in range(250, len(df_15m_features)):
+    # --- [FIX] --- الحلقة الآن أسرع لأنها لا تعيد حساب كل شيء
+    for i in range(1, len(df_15m_features)): # نبدأ من 1 لتجنب مشاكل .iloc[[-1]]
         current_timestamp = df_15m_features.index[i]
         
-        df_15m_point_in_time = df_15m.iloc[:i+1]
-        df_4h_point_in_time = df_4h[df_4h.index <= current_timestamp] if df_4h is not None else None
-        btc_point_in_time = btc_df[btc_df.index <= current_timestamp] if btc_df is not None else None
+        # استخدام البيانات حتى الشمعة الحالية
+        features_for_model = df_15m_features.iloc[:i]
         
-        features_for_model = strategy.get_features(df_15m_point_in_time, df_4h_point_in_time, btc_point_in_time)
         if features_for_model is None or features_for_model.empty:
             continue
             
@@ -575,11 +618,12 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
             tp_sl_data = calculate_tp_sl(entry_price, last_features.get('atr', 0))
             if not tp_sl_data: continue
 
-            trend_15m = determine_trend_for_timestamp(df_15m_features.iloc[:i+1])
-            trend_1h = determine_trend_for_timestamp(df_1h_features[df_1h_features.index <= current_timestamp]) if df_1h_features is not None else "N/A"
-            trend_4h = determine_trend_for_timestamp(df_4h_features[df_4h_features.index <= current_timestamp]) if df_4h_features is not None else "N/A"
+            # --- [FIX] --- جلب الاتجاهات المحسوبة مسبقًا مباشرة
+            trend_15m = last_features.get('trend_15m', "غير واضح")
+            trend_1h = last_features.get('trend_1h', "غير واضح")
+            trend_4h = last_features.get('trend_4h', "غير واضح")
             
-            future_candles = df_15m.iloc[i+1 : i+1+MAX_TRADE_DURATION_CANDLES]
+            future_candles = df_15m.loc[current_timestamp:].iloc[1 : 1+MAX_TRADE_DURATION_CANDLES]
             if future_candles.empty: continue
             
             trade_sim = simulate_trade_outcome(entry_price, tp_sl_data['target_price'], tp_sl_data['stop_loss'], future_candles)
@@ -612,9 +656,6 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
                 "filter_volatility_pct": (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
             }
             
-            # --- [FIX] تحويل أنواع بيانات NumPy إلى أنواع Python الأصلية ---
-            # تقوم قاعدة البيانات برفض أنواع مثل numpy.float64 مباشرة.
-            # نحولها إلى float و int و None قبل إرسالها.
             for key, value in result_row.items():
                 if pd.isna(value):
                     result_row[key] = None
