@@ -48,7 +48,6 @@ except Exception as e:
 # ---------------------- الثوابت والمتغيرات العامة للاختبار ----------------------
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
 MODEL_FOLDER: str = 'V8'
-TIMEFRAMES_FOR_TREND_ANALYSIS: List[str] = ['15m', '1h', '4h']
 BTC_SYMBOL: str = 'BTCUSDT'
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_PERIODS: List[int] = [21, 50, 200]
@@ -58,7 +57,6 @@ ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 MAX_TRADE_DURATION_CANDLES: int = 96
 BACKTEST_BATCH_SIZE: int = 5
-# --- [FIX] --- عدد الأيام الإضافية لجلب البيانات التاريخية لحساب المؤشرات بشكل صحيح
 DATA_FETCH_BUFFER_DAYS: int = 40
 
 
@@ -70,6 +68,7 @@ exchange_info_map: Dict[str, Any] = {}
 
 # ---------------------- دالة HTML للوحة التحكم ----------------------
 def get_dashboard_html():
+    # ... (محتوى HTML بدون تغيير) ...
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -420,7 +419,6 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
     if btc_df is not None and not btc_df.empty:
-        # --- [FIX] --- التأكد من أن btc_df له نفس الفهرس الزمني
         btc_df_resampled = btc_df.reindex(df_calc.index, method='ffill')
         merged_df = pd.merge(df_calc, btc_df_resampled[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
@@ -435,37 +433,42 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
     
     return df_calc
 
-# --- [FIX] --- دالة جديدة ومحسنة لحساب عمود الاتجاه بشكل فعال
-def add_trend_column(df: pd.DataFrame) -> pd.DataFrame:
-    """Applies trend calculation to each row of a dataframe efficiently."""
-    if df is None or df.empty:
-        return df
+# --- [FIX] --- دالة قوية لتحديد الاتجاه بناءً على البيانات المتاحة حتى لحظة معينة
+def determine_trend_for_timestamp(df: pd.DataFrame) -> str:
+    """
+    Calculates trend based on the last row of the provided point-in-time dataframe.
+    Returns 'غير واضح' if there isn't enough data.
+    """
+    # الشرط الأساسي: هل لدينا بيانات كافية لحساب أطول متوسط متحرك؟
+    if df is None or len(df) < EMA_PERIODS[-1]:
+        return "غير واضح"
 
-    # التأكد من وجود المتوسطات المتحركة
-    if not all(f'ema_{p}' in df.columns for p in EMA_PERIODS):
-        logger.warning("EMAs not found in dataframe. Cannot calculate trend.")
-        df['trend'] = "غير واضح"
-        return df
+    # حساب المتوسطات المتحركة على البيانات المتاحة
+    df_calc = df.copy()
+    for period in EMA_PERIODS:
+        df_calc[f'ema_{period}'] = df_calc['close'].ewm(span=period, adjust=False).mean()
 
-    # حساب النقاط بناءً على الشروط
-    score = pd.Series(0, index=df.index)
-    score += np.where(df['close'] > df['ema_21'], 1, -1)
-    score += np.where(df['ema_21'] > df['ema_50'], 1, -1)
-    score += np.where(df['ema_50'] > df['ema_200'], 1, -1)
+    last_candle = df_calc.iloc[-1]
+    close = last_candle['close']
+    ema21 = last_candle['ema_21']
+    ema50 = last_candle['ema_50']
+    ema200 = last_candle['ema_200']
 
-    # تحديد الاتجاه بناءً على النقاط
-    conditions = [
-        score >= 2,
-        score <= -2
-    ]
-    choices = ["صاعد", "هابط"]
-    df['trend'] = np.select(conditions, choices, default="محايد")
-    
-    # تعيين "غير واضح" للصفوف التي لا تملك بيانات كافية للمتوسطات
-    min_required_period = EMA_PERIODS[-1]
-    df.loc[df.index[:min_required_period], 'trend'] = "غير واضح"
-    
-    return df
+    # التأكد من أن المتوسطات ليست قيم فارغة
+    if pd.isna(ema200):
+        return "غير واضح"
+
+    score = 0
+    if close > ema21: score += 1
+    elif close < ema21: score -= 1
+    if ema21 > ema50: score += 1
+    elif ema21 < ema50: score -= 1
+    if ema50 > ema200: score += 1
+    elif ema50 < ema200: score -= 1
+
+    if score >= 2: return "صاعد"
+    if score <= -2: return "هابط"
+    return "محايد"
 
 def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     global ml_models_cache
@@ -553,12 +556,10 @@ def run_backtest_for_symbol(symbol: str, start_date_str: str, end_date_str: str)
         logger.warning(f"⚠️ لا يوجد نموذج للعملة {symbol}. جاري التخطي.")
         return 0
 
-    # --- [FIX] --- حساب تاريخ بدء جلب البيانات مع فترة إضافية
     start_dt = pd.to_datetime(start_date_str, utc=True)
     fetch_start_dt = start_dt - timedelta(days=DATA_FETCH_BUFFER_DAYS)
     fetch_start_str = fetch_start_dt.strftime('%d %b, %Y')
 
-    # --- [FIX] --- جلب البيانات باستخدام تاريخ البدء الجديد
     df_15m = fetch_historical_data(symbol, '15m', fetch_start_str, end_date_str)
     df_1h = fetch_historical_data(symbol, '1h', fetch_start_str, end_date_str)
     df_4h = fetch_historical_data(symbol, '4h', fetch_start_str, end_date_str)
@@ -568,44 +569,23 @@ def run_backtest_for_symbol(symbol: str, start_date_str: str, end_date_str: str)
         logger.warning(f"⚠️ بيانات غير كافية لـ {symbol}. جاري التخطي.")
         return 0
     if btc_df is not None: btc_df['btc_returns'] = btc_df['close'].pct_change()
-
-    # --- [FIX] --- حساب الميزات والاتجاهات مرة واحدة قبل الدخول في الحلقة
-    logger.info(f"[{symbol}] حساب الميزات والاتجاهات لجميع الإطارات الزمنية...")
-    df_15m_features = calculate_features(df_15m.copy(), btc_df)
-    df_1h_features = calculate_features(df_1h.copy(), None) if df_1h is not None else pd.DataFrame()
-    df_4h_features = calculate_features(df_4h.copy(), None) if df_4h is not None else pd.DataFrame()
-
-    df_15m_features = add_trend_column(df_15m_features)
-    df_1h_features = add_trend_column(df_1h_features)
-    df_4h_features = add_trend_column(df_4h_features)
-
-    # دمج الاتجاهات من الإطارات الأعلى إلى إطار 15 دقيقة
-    if not df_1h_features.empty:
-        df_15m_features = pd.merge_asof(df_15m_features, df_1h_features[['trend']].rename(columns={'trend': 'trend_1h'}), 
-                                      left_index=True, right_index=True, direction='backward')
-    else:
-        df_15m_features['trend_1h'] = "غير واضح"
-
-    if not df_4h_features.empty:
-        df_15m_features = pd.merge_asof(df_15m_features, df_4h_features[['trend']].rename(columns={'trend': 'trend_4h'}),
-                                      left_index=True, right_index=True, direction='backward')
-    else:
-        df_15m_features['trend_4h'] = "غير واضح"
-    
-    df_15m_features.rename(columns={'trend': 'trend_15m'}, inplace=True)
-
-    # قص البيانات لتبدأ من تاريخ البدء الفعلي للاختبار
-    df_15m_features = df_15m_features.loc[start_dt:]
+        
+    # --- [FIX] --- قص البيانات لتبدأ من تاريخ البدء الفعلي للاختبار بعد جلبها
+    df_15m_backtest = df_15m.loc[start_dt:].copy()
     
     results_to_insert = []
     
-    # --- [FIX] --- الحلقة الآن أسرع لأنها لا تعيد حساب كل شيء
-    for i in range(1, len(df_15m_features)): # نبدأ من 1 لتجنب مشاكل .iloc[[-1]]
-        current_timestamp = df_15m_features.index[i]
+    initial_feature_calculation_index = df_15m.index.get_loc(start_dt)
+    
+    for i in range(initial_feature_calculation_index, len(df_15m)):
+        current_timestamp = df_15m.index[i]
         
-        # استخدام البيانات حتى الشمعة الحالية
-        features_for_model = df_15m_features.iloc[:i]
+        # --- [FIX] --- إنشاء إطارات بيانات "لحظة بلحظة" لكل إطار زمني
+        df_15m_pit = df_15m.iloc[:i+1]
+        df_4h_pit = df_4h[df_4h.index <= current_timestamp] if df_4h is not None else None
+        btc_pit = btc_df[btc_df.index <= current_timestamp] if btc_df is not None else None
         
+        features_for_model = strategy.get_features(df_15m_pit, df_4h_pit, btc_pit)
         if features_for_model is None or features_for_model.empty:
             continue
             
@@ -618,12 +598,14 @@ def run_backtest_for_symbol(symbol: str, start_date_str: str, end_date_str: str)
             tp_sl_data = calculate_tp_sl(entry_price, last_features.get('atr', 0))
             if not tp_sl_data: continue
 
-            # --- [FIX] --- جلب الاتجاهات المحسوبة مسبقًا مباشرة
-            trend_15m = last_features.get('trend_15m', "غير واضح")
-            trend_1h = last_features.get('trend_1h', "غير واضح")
-            trend_4h = last_features.get('trend_4h', "غير واضح")
+            # --- [FIX] --- حساب الاتجاهات باستخدام البيانات المتاحة "لحظة بلحظة"
+            df_1h_pit = df_1h[df_1h.index <= current_timestamp] if df_1h is not None else None
             
-            future_candles = df_15m.loc[current_timestamp:].iloc[1 : 1+MAX_TRADE_DURATION_CANDLES]
+            trend_15m = determine_trend_for_timestamp(df_15m_pit)
+            trend_1h = determine_trend_for_timestamp(df_1h_pit)
+            trend_4h = determine_trend_for_timestamp(df_4h_pit)
+            
+            future_candles = df_15m.iloc[i+1 : i+1+MAX_TRADE_DURATION_CANDLES]
             if future_candles.empty: continue
             
             trade_sim = simulate_trade_outcome(entry_price, tp_sl_data['target_price'], tp_sl_data['stop_loss'], future_candles)
