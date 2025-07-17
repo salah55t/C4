@@ -50,68 +50,7 @@ def fetch_historical_data(client, symbol, interval, days):
     df.set_index('timestamp', inplace=True)
     return df.dropna()
 
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame = None) -> pd.DataFrame:
-    df_calc = df.copy()
-    # EMAs
-    for period in EMA_PERIODS:
-        df_calc[f'ema_{period}'] = df_calc['close'].ewm(span=period, adjust=False).mean()
-    # ATR
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    # ADX
-    up_move = df_calc['high'].diff()
-    down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    # RSI
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-    df_calc['btc_correlation'] = 0.0
-    if btc_df is not None and not btc_df.empty:
-        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-        df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
-    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['slope'] = df_calc['close'].diff()
-    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
-    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
-    return df_calc.astype('float32', errors='ignore')
-
-def load_ml_model(symbol):
-    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-    model_path = os.path.join(MODEL_FOLDER, f"{model_name}.pkl")
-    if not os.path.exists(model_path):
-        return None, None, None
-    with open(model_path, 'rb') as f:
-        model_bundle = pickle.load(f)
-    return model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
-
-def insert_signal(conn, symbol, ts, entry, atr, filter_values, ml_conf, target, stop_loss):
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO signals_backtest (symbol, timestamp, entry_price, atr, filter_values, ml_confidence, target_price, stop_loss, status)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id;
-        """, (symbol, ts, entry, atr, json.dumps(filter_values), ml_conf, target, stop_loss, 'open'))
-        conn.commit()
-        signal_id = cur.fetchone()['id']
-    return signal_id
-
-def update_signal_status(conn, signal_id, status, close_price, close_time):
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE signals_backtest SET status=%s, close_price=%s, close_time=%s WHERE id=%s
-        """, (status, close_price, close_time, signal_id))
-        conn.commit()
+# باقي الكود كما هو ...
 
 def main():
     # Binance client
@@ -137,13 +76,10 @@ def main():
         """)
         conn.commit()
 
-    # جلب قائمة العملات المدعومة (ممكن تعديلها حسب المتوفر)
-    symbols = []
-    with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT symbol FROM signals;")
-        symbols = [row['symbol'] for row in cur.fetchall()]
-    if not symbols:
-        symbols = ['BTCUSDT', 'ETHUSDT']
+    # جلب قائمة الرموز من ملفات النماذج في المجلد V8
+    symbols = [filename.replace(f"{BASE_ML_MODEL_NAME}_", "").replace(".pkl", "") 
+               for filename in os.listdir(MODEL_FOLDER) if filename.endswith(".pkl")]
+    symbols = symbols[:20]  # تحديد أول 20 رمز فقط
 
     # بيانات البيتكوين للارتباط
     btc_df = fetch_historical_data(client, BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, 3)
@@ -157,7 +93,8 @@ def main():
         df = fetch_historical_data(client, symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
         if df is None or df.empty: continue
         df_feat = calculate_features(df, btc_df)
-        # بدء من الشمعة التي يكون فيها كل الميزات متوفرة
+        # باقي الكود كما هو ...
+           # بدء من الشمعة التي يكون فيها كل الميزات متوفرة
         for ts in df_feat.index:
             row = df_feat.loc[ts]
             # تجهيز الميزات بنفس ترتيب النموذج
@@ -198,6 +135,7 @@ def main():
                     # لم يحدث شيء خلال 3 أيام
                     update_signal_status(conn, signal_id, 'timeout', row2['close'], ts2)
     print("Backtest complete.")
+
 
 if __name__ == "__main__":
     main()
