@@ -151,6 +151,82 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)"
 }
 
+# --- [إضافة] --- الدوال المساعدة المفقودة
+fng_cache: Dict[str, Any] = {"value": -1, "classification": "فشل التحميل", "last_updated": 0}
+FNG_CACHE_DURATION: int = 3600 # تحديث كل ساعة
+
+def get_fear_and_greed_index() -> Dict[str, Any]:
+    """
+    Fetches the Fear and Greed Index from alternative.me API with caching.
+    """
+    global fng_cache
+    now = time.time()
+    if now - fng_cache["last_updated"] < FNG_CACHE_DURATION:
+        return fng_cache
+
+    logger.info("ℹ️ [F&G Index] Fetching new Fear and Greed index data...")
+    try:
+        response = requests.get("https://api.alternative.me/fng/?limit=1", timeout=10)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        if data:
+            value = int(data[0]['value'])
+            classification = data[0]['value_classification']
+            fng_cache = {
+                "value": value,
+                "classification": classification,
+                "last_updated": now
+            }
+            logger.info(f"✅ [F&G Index] Updated: {value} ({classification})")
+        else:
+            raise ValueError("No data in F&G API response")
+    except (requests.RequestException, ValueError) as e:
+        logger.error(f"❌ [F&G Index] Could not fetch F&G Index: {e}")
+        if fng_cache["value"] == -1:
+             fng_cache["last_updated"] = now # Prevent rapid retries on failure
+    return fng_cache
+
+def get_session_state() -> Tuple[List[str], str, str]:
+    """
+    Determines the current active trading sessions and overall liquidity state.
+    Returns a tuple: (active_sessions_list, liquidity_state, description).
+    """
+    now_utc = datetime.now(timezone.utc)
+    current_time = now_utc.time()
+    current_weekday = now_utc.weekday() # Monday is 0, Sunday is 6
+
+    sessions = {
+        "Tokyo": {"start": "00:00", "end": "09:00"},
+        "London": {"start": "08:00", "end": "17:00"},
+        "New York": {"start": "13:00", "end": "22:00"}
+    }
+
+    active_sessions = []
+    for name, times in sessions.items():
+        start_time = datetime.strptime(times["start"], "%H:%M").time()
+        end_time = datetime.strptime(times["end"], "%H:%M").time()
+        if start_time <= current_time < end_time:
+            active_sessions.append(name)
+
+    is_weekend = current_weekday >= 5 # Saturday or Sunday
+    is_london_ny_overlap = "London" in active_sessions and "New York" in active_sessions
+
+    if is_weekend:
+        liquidity_state = "WEEKEND"
+        description = "سيولة منخفضة (عطلة نهاية الأسبوع)"
+    elif is_london_ny_overlap:
+        liquidity_state = "HIGH"
+        description = "سيولة مرتفعة (تداخل لندن ونيويورك)"
+    elif active_sessions:
+        liquidity_state = "NORMAL"
+        description = f"سيولة عادية ({', '.join(active_sessions)})"
+    else:
+        liquidity_state = "LOW"
+        description = "سيولة منخفضة (خارج ساعات التداول الرئيسية)"
+
+    return active_sessions, liquidity_state, description
+
+
 # --- [جديد] --- منظم ذكي لمعالجة أخطاء Binance API والحظر
 def handle_binance_api_errors(func):
     def wrapper(*args, **kwargs):
