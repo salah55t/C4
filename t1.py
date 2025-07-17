@@ -12,6 +12,9 @@ from decouple import config
 from typing import List, Dict, Optional, Any
 from sklearn.preprocessing import StandardScaler
 import warnings
+import threading
+import http.server
+import socketserver
 
 # --- تجاهل التحذيرات ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -57,6 +60,33 @@ ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 client: Optional[Client] = None
 exchange_info_map: Dict[str, Any] = {}
 ml_models_cache: Dict[str, Any] = {}
+
+# ---------------------- خادم الويب البسيط ----------------------
+def start_web_server():
+    """
+    يبدأ خادم ويب بسيط في خيط منفصل للاستجابة لطلبات HTTP.
+    هذا ضروري لمنصات مثل Render لمنع توقف الخدمة.
+    """
+    # احصل على المنفذ من متغيرات البيئة أو استخدم 8080 كقيمة افتراضية
+    PORT = int(os.environ.get('PORT', 8080))
+    
+    # معالج طلبات بسيط
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write("الخادم يعمل بشكل سليم.".encode('utf-8'))
+
+    # ابدأ الخادم في خيط منفصل
+    def run_server():
+        with socketserver.TCPServer(("", PORT), Handler) as httpd:
+            logger.info(f"خادم الويب يعمل على المنفذ {PORT}")
+            httpd.serve_forever()
+
+    server_thread = threading.Thread(target=run_server)
+    server_thread.daemon = True  # اسمح للبرنامج الرئيسي بالخروج حتى لو كان الخيط يعمل
+    server_thread.start()
 
 # ---------------------- دوال مساعدة (مقتبسة من البوت) ----------------------
 
@@ -488,7 +518,11 @@ def run_backtest():
     generate_detailed_report(closed_trades, INITIAL_CAPITAL, capital)
 
 if __name__ == "__main__":
+    # --- [جديد] --- بدء تشغيل خادم الويب
+    start_web_server()
+    
     if not os.path.exists(MODEL_FOLDER):
         logger.critical(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
     else:
         run_backtest()
+
