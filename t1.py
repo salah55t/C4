@@ -7,7 +7,6 @@ import pandas as pd
 import pickle
 import re
 import threading
-import io
 from flask import Flask, jsonify
 from binance.client import Client
 from datetime import datetime, timedelta, timezone
@@ -20,13 +19,8 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- إعداد التسجيل ---
-# يتم الإعداد هنا ليتمكن Flask من استخدامه أيضاً
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
+# --- إعداد المسجل (Logger) ---
+# سنقوم بتعريف المسجل هنا، ولكن سيتم تكوينه لاحقاً للعمل مع Gunicorn
 logger = logging.getLogger('CryptoBacktesterDetailed')
 
 # --- تحميل متغيرات البيئة (اختياري للاختبار) ---
@@ -34,7 +28,8 @@ try:
     API_KEY: str = config('BINANCE_API_KEY', default='')
     API_SECRET: str = config('BINANCE_API_SECRET', default='')
 except Exception as e:
-    logger.warning(f"لم يتم تحميل مفاتيح API من متغيرات البيئة: {e}")
+    # استخدام print هنا لأن المسجل لم يتم تكوينه بعد
+    print(f"تحذير: لم يتم تحميل مفاتيح API من متغيرات البيئة: {e}")
     API_KEY, API_SECRET = '', ''
 
 # ---------------------- إعدادات الاختبار التاريخي ----------------------
@@ -78,9 +73,7 @@ def get_exchange_info_map() -> None:
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     if not client: return []
     try:
-        if not os.path.exists(filename):
-            logger.error(f"ملف العملات '{filename}' غير موجود. يرجى إنشاء الملف وإضافة العملات.")
-            return []
+        # تم نقل التحقق من الملف إلى دالة التشغيل الرئيسية
         with open(filename, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
@@ -156,9 +149,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
     model_path = os.path.join(MODEL_FOLDER, f"{model_name}.pkl")
-    if not os.path.exists(model_path):
-        logger.debug(f"⚠️ نموذج التعلم الآلي غير موجود: '{model_path}'.")
-        return None
+    # تم نقل التحقق من الملف إلى دالة التشغيل الرئيسية
     try:
         with open(model_path, 'rb') as f:
             model_bundle = pickle.load(f)
@@ -170,6 +161,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ خطأ في تحميل النموذج لـ {symbol}: {e}", exc_info=True)
         return None
 
+# ... (بقية دوال الاستراتيجية والتحليل تبقى كما هي) ...
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -400,6 +392,7 @@ def run_backtest():
     
     logger.info(f"▶️ بدء محاكاة التداول من {main_df.index[0]} إلى {main_df.index[-1]}...")
     
+    # ... (حلقة التداول الرئيسية تبقى كما هي) ...
     for timestamp, row in main_df.iterrows():
         trades_to_close_indices = []
         for i, trade in enumerate(open_trades):
@@ -491,7 +484,7 @@ def run_backtest():
     logger.info("✅ اكتمل الاختبار التاريخي بنجاح.")
 
 
-# --- [جديد] جزء خادم الويب باستخدام فلاسك ---
+# --- [مُحسّن] جزء خادم الويب باستخدام فلاسك ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -500,36 +493,54 @@ def home():
     return "خدمة الاختبار التاريخي تعمل. أرسل طلب GET إلى /run لبدء الاختبار.", 200
 
 def run_backtest_in_background():
-    """دالة وسيطة لتشغيل الاختبار في خيط منفصل لتجنب توقف الطلب."""
-    logger.info("بدء الاختبار التاريخي في الخلفية...")
+    """[مُحسّن] دالة وسيطة لتشغيل الاختبار في خيط منفصل مع التحقق من الملفات."""
+    logger.info("التحقق من الملفات المطلوبة قبل بدء الاختبار في الخلفية...")
+    
+    # التحقق من وجود مجلد النماذج
+    if not os.path.exists(MODEL_FOLDER):
+        logger.critical(f"خطأ فادح: مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
+        return # إيقاف التنفيذ
+        
+    # التحقق من وجود ملف العملات
+    if not os.path.exists('crypto_list.txt'):
+        logger.critical("خطأ فادح: ملف 'crypto_list.txt' غير موجود. لا يمكن المتابعة.")
+        return # إيقاف التنفيذ
+
+    logger.info("تم العثور على الملفات المطلوبة. بدء عملية الاختبار التاريخي الآن...")
     try:
-        if not os.path.exists(MODEL_FOLDER):
-            logger.critical(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
-            return
         run_backtest()
     except Exception as e:
-        logger.error(f"حدث خطأ أثناء تشغيل الاختبار في الخلفية: {e}", exc_info=True)
+        logger.error(f"حدث خطأ فادح وغير متوقع أثناء تشغيل الاختبار في الخلفية: {e}", exc_info=True)
 
 @app.route('/run')
 def trigger_backtest():
     """
     يشغل الاختبار التاريخي في خيط خلفي (background thread).
-    هذا يمنع انتهاء مهلة طلب HTTP، حيث أن الاختبار قد يستغرق وقتاً طويلاً.
     """
-    logger.info("تم استلام طلب لبدء الاختبار التاريخي.")
+    # استخدام مسجل التطبيق هنا لأنه مرتبط بـ Gunicorn
+    app.logger.info("تم استلام طلب لبدء الاختبار التاريخي.")
     
-    # تشغيل المهمة التي تستغرق وقتاً طويلاً في خيط خلفي
     thread = threading.Thread(target=run_backtest_in_background)
-    thread.daemon = True # يسمح للبرنامج الرئيسي بالخروج حتى لو كان الخيط لا يزال يعمل
+    thread.daemon = True
     thread.start()
 
     return jsonify({"status": "success", "message": "بدأ الاختبار في الخلفية. تحقق من سجلات الخدمة (Logs) للمتابعة والنتائج."})
 
 
 if __name__ == "__main__":
-    # Render توفر متغير البيئة PORT.
-    # القيمة الافتراضية هي 10000 لخدمات الويب.
-    port = int(os.environ.get('PORT', 10000))
+    # --- [مُعدّل] إعداد التسجيل للعمل مع Gunicorn/Render ---
+    # Gunicorn يدير معالجات السجل. نحن نربط سجلات تطبيقنا به.
+    gunicorn_logger = logging.getLogger('gunicorn.error')
     
-    # الربط بـ 0.0.0.0 ليكون الخادم متاحاً من خارج الحاوية (container).
+    # ربط سجل Flask
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
+    
+    # ربط سجل الباك تستر الرئيسي
+    logger.handlers = gunicorn_logger.handlers
+    logger.setLevel(gunicorn_logger.level)
+    
+    logger.info("تم إعداد وتكوين نظام التسجيل بنجاح للعمل مع Gunicorn.")
+
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
