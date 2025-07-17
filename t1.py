@@ -644,8 +644,11 @@ class BacktestingEngine:
 
                         ml_signal = strategy_backtest.generate_buy_signal(df_features)
                         
+                        # FIX: Handle formatting for 'N/A' correctly
+                        confidence_display = f"{ml_signal['confidence']:.2%}" if ml_signal and 'confidence' in ml_signal else "N/A"
+                        
                         if ml_signal and ml_signal['confidence'] >= BUY_CONFIDENCE_THRESHOLD:
-                            logger.info(f"💡 [{symbol}] تم توليد إشارة شراء بواسطة ML بثقة {ml_signal['confidence']:.2%} عند {current_timestamp}.")
+                            logger.info(f"💡 [{symbol}] تم توليد إشارة شراء بواسطة ML بثقة {confidence_display} عند {current_timestamp}.")
                             
                             # Get the latest features for filter values
                             last_features = df_features.iloc[-1]
@@ -688,7 +691,8 @@ class BacktestingEngine:
                             insert_backtest_result(backtest_result)
                             
                         else:
-                            logger.debug(f"[{symbol}] لم يتم توليد إشارة شراء أو الثقة منخفضة ({ml_signal.get('confidence') if ml_signal else 'N/A':.2%}).")
+                            # Use the pre-calculated confidence_display
+                            logger.debug(f"[{symbol}] لم يتم توليد إشارة شراء أو الثقة منخفضة ({confidence_display}).")
 
                     except Exception as e:
                         logger.error(f"❌ [خطأ في معالجة الرمز] {symbol} في الطابع الزمني {current_timestamp}: {e}", exc_info=True)
