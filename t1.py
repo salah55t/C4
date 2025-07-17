@@ -53,10 +53,12 @@ BTC_SYMBOL: str = 'BTCUSDT'
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_PERIODS: List[int] = [21, 50, 200]
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
-BUY_CONFIDENCE_THRESHOLD = 0.80 # يمكن تعديل هذا الحد الأدنى لتسجيل الإشارات
+BUY_CONFIDENCE_THRESHOLD = 0.80 
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
-MAX_TRADE_DURATION_CANDLES: int = 96 # 24 hours on 15m timeframe
+MAX_TRADE_DURATION_CANDLES: int = 96 
+# --- [تحسين] --- حجم الدفعة لإدارة الذاكرة
+BACKTEST_BATCH_SIZE: int = 5
 
 # --- متغيرات الاتصال ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -379,7 +381,6 @@ def fetch_historical_data(symbol: str, interval: str, start_str: str, end_str: s
         df.set_index('timestamp', inplace=True)
         return df.dropna()
     except Exception as e:
-        # logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
 # ---------------------- دوال حساب الميزات وتحديد الاتجاه ----------------------
@@ -460,7 +461,6 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
     
     if not os.path.exists(model_path):
-        # logger.debug(f"⚠️ [ML Model] ملف النموذج غير موجود: '{model_path}'.")
         return None
     try:
         with open(model_path, 'rb') as f:
@@ -536,7 +536,6 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
         logger.warning(f"⚠️ لا يوجد نموذج للعملة {symbol}. جاري التخطي.")
         return 0
 
-    # جلب جميع البيانات اللازمة مرة واحدة
     df_15m = fetch_historical_data(symbol, '15m', start_date, end_date)
     df_1h = fetch_historical_data(symbol, '1h', start_date, end_date)
     df_4h = fetch_historical_data(symbol, '4h', start_date, end_date)
@@ -547,24 +546,19 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
         return 0
     if btc_df is not None: btc_df['btc_returns'] = btc_df['close'].pct_change()
         
-    # حساب المؤشرات لجميع الأطر الزمنية
     df_15m_features = calculate_features(df_15m.copy(), btc_df)
     df_1h_features = calculate_features(df_1h.copy(), None) if df_1h is not None else None
     df_4h_features = calculate_features(df_4h.copy(), None) if df_4h is not None else None
 
     results_to_insert = []
     
-    # التكرار على الشموع الرئيسية (15 دقيقة)
-    # نبدأ من 250 للسماح للمؤشرات بالاستقرار
     for i in range(250, len(df_15m_features)):
         current_timestamp = df_15m_features.index[i]
         
-        # --- إنشاء إطارات بيانات "حتى هذه اللحظة" ---
         df_15m_point_in_time = df_15m.iloc[:i+1]
         df_4h_point_in_time = df_4h[df_4h.index <= current_timestamp] if df_4h is not None else None
         btc_point_in_time = btc_df[btc_df.index <= current_timestamp] if btc_df is not None else None
         
-        # --- توليد إشارة النموذج ---
         features_for_model = strategy.get_features(df_15m_point_in_time, df_4h_point_in_time, btc_point_in_time)
         if features_for_model is None or features_for_model.empty:
             continue
@@ -575,27 +569,22 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
             last_features = features_for_model.iloc[-1]
             entry_price = last_features['close']
             
-            # --- حساب TP/SL ---
             tp_sl_data = calculate_tp_sl(entry_price, last_features.get('atr', 0))
             if not tp_sl_data: continue
 
-            # --- تحديد اتجاه السوق في هذه اللحظة ---
             trend_15m = determine_trend_for_timestamp(df_15m_features.iloc[:i+1])
             trend_1h = determine_trend_for_timestamp(df_1h_features[df_1h_features.index <= current_timestamp]) if df_1h_features is not None else "N/A"
             trend_4h = determine_trend_for_timestamp(df_4h_features[df_4h_features.index <= current_timestamp]) if df_4h_features is not None else "N/A"
             
-            # --- محاكاة الصفقة ---
             future_candles = df_15m.iloc[i+1 : i+1+MAX_TRADE_DURATION_CANDLES]
             if future_candles.empty: continue
             
             trade_sim = simulate_trade_outcome(entry_price, tp_sl_data['target_price'], tp_sl_data['stop_loss'], future_candles)
             
-            # --- حساب إحصائيات إضافية ---
             trade_period_candles = df_15m.loc[current_timestamp:trade_sim['timestamp']]
             max_p = ((trade_period_candles['high'].max() / entry_price) - 1) * 100
             max_d = ((trade_period_candles['low'].min() / entry_price) - 1) * 100
 
-            # --- جمع البيانات للتخزين ---
             result_row = {
                 "symbol": symbol,
                 "signal_timestamp": current_timestamp,
@@ -621,7 +610,6 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
             }
             results_to_insert.append(result_row)
 
-    # --- إدراج النتائج في قاعدة البيانات دفعة واحدة ---
     if results_to_insert:
         if not check_db_connection() or not conn:
             logger.error("فشل إدراج النتائج، لا يوجد اتصال بقاعدة البيانات.")
@@ -632,7 +620,6 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
             sql.SQL(', ').join(map(sql.Identifier, cols))
         )
         
-        # تحويل البيانات إلى tuple
         values = [[row[col] for col in cols] for row in results_to_insert]
         
         try:
@@ -651,26 +638,34 @@ def main_backtest_loop(start_date: str, end_date: str, symbols: List[str]):
     logger.info(f"====== بدء دورة الاختبار الخلفي الكاملة من {start_date} إلى {end_date} ======")
     total_signals_found = 0
     
-    # فلترة الرموز التي لها نماذج فقط
     symbols_with_models = []
     logger.info("... التحقق من النماذج المتاحة ...")
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
     for symbol in symbols:
-        if load_ml_model_bundle_from_folder(symbol):
+        model_path = os.path.join(model_dir_path, f"{BASE_ML_MODEL_NAME}_{symbol}.pkl")
+        if os.path.exists(model_path):
             symbols_with_models.append(symbol)
     logger.info(f"وجد {len(symbols_with_models)} عملة مع نماذج متاحة للاختبار.")
 
-    for i, symbol in enumerate(symbols_with_models):
-        try:
-            signals_count = run_backtest_for_symbol(symbol, start_date, end_date)
-            total_signals_found += signals_count
-            logger.info(f"--- ({i+1}/{len(symbols_with_models)}) اكتمل الاختبار لـ {symbol}. العثور على {signals_count} إشارة. ---")
-        except Exception as e:
-            logger.error(f"❌ حدث خطأ فادح أثناء اختبار {symbol}: {e}", exc_info=True)
-        finally:
-            # تنظيف الذاكرة بعد كل عملة
-            ml_models_cache.clear()
-            gc.collect()
-            time.sleep(1) # لإعطاء فرصة للخدمات الأخرى
+    # --- [تحسين] --- معالجة العملات على دفعات
+    for i in range(0, len(symbols_with_models), BACKTEST_BATCH_SIZE):
+        batch_symbols = symbols_with_models[i:i + BACKTEST_BATCH_SIZE]
+        num_batches = (len(symbols_with_models) + BACKTEST_BATCH_SIZE - 1) // BACKTEST_BATCH_SIZE
+        logger.info(f"--- بدء معالجة الدفعة {i//BACKTEST_BATCH_SIZE + 1}/{num_batches} ({len(batch_symbols)} عملة) ---")
+        
+        for symbol_in_batch in batch_symbols:
+            try:
+                signals_count = run_backtest_for_symbol(symbol_in_batch, start_date, end_date)
+                total_signals_found += signals_count
+            except Exception as e:
+                logger.error(f"❌ حدث خطأ فادح أثناء اختبار {symbol_in_batch}: {e}", exc_info=True)
+        
+        logger.info(f"--- 🧹 اكتملت الدفعة. بدء تنظيف الذاكرة... ---")
+        ml_models_cache.clear()
+        collected = gc.collect()
+        logger.info(f"--- ✅ تم تنظيف الذاكرة. تم جمع {collected} كائن. ---")
+        time.sleep(2)
 
     logger.info(f"====== اكتملت دورة الاختبار الخلفي. إجمالي الإشارات التي تم العثور عليها وتخزينها: {total_signals_found} ======")
 
@@ -694,7 +689,6 @@ def get_backtest_results():
     sort_by = request.args.get('sort_by', 'id')
     order = request.args.get('order', 'desc').upper()
     
-    # قائمة الأعمدة المسموح بها للفرز لمنع SQL Injection
     allowed_columns = [
         'id', 'symbol', 'signal_timestamp', 'entry_price', 'target_price', 'stop_loss',
         'ml_confidence', 'trade_outcome', 'outcome_timestamp', 'pnl_pct', 'max_drawdown_pct',
@@ -709,7 +703,6 @@ def get_backtest_results():
 
     try:
         with conn.cursor() as cur:
-            # استخدام sql.Identifier لمنع SQL Injection في أسماء الأعمدة
             query = sql.SQL("SELECT * FROM backtest_results ORDER BY {} {} NULLS LAST LIMIT 500").format(
                 sql.Identifier(sort_by),
                 sql.SQL(order)
@@ -717,7 +710,6 @@ def get_backtest_results():
             cur.execute(query)
             results = cur.fetchall()
         
-        # تحويل كائنات datetime إلى سلاسل نصية
         for row in results:
             for key, value in row.items():
                 if isinstance(value, datetime):
@@ -730,7 +722,7 @@ def get_backtest_results():
         return jsonify({"error": "Internal error fetching results"}), 500
 
 def run_flask():
-    port = int(os.environ.get('PORT', 10001)) # استخدام منفذ مختلف عن البوت الرئيسي
+    port = int(os.environ.get('PORT', 10001)) 
     host = "0.0.0.0"
     logger.info(f"✅ إعداد لوحة التحكم على {host}:{port}")
     app.run(host=host, port=port)
@@ -739,33 +731,27 @@ def run_flask():
 if __name__ == "__main__":
     logger.info("🚀 إطلاق محرك الاختبار الخلفي ولوحة التحكم 🚀")
     
-    # تهيئة الخدمات الأساسية
     client = Client(API_KEY, API_SECRET)
     init_db()
     get_exchange_info_map()
     
-    # بدء تشغيل Flask في خيط منفصل
     flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
     # --- منطقة التحكم في الاختبار ---
-    # تم تحديث القيم بناءً على طلبك
-    # ملاحظة: تاريخ النهاية حصري، لذا 17 يوليو يعني أن البيانات ستشمل يوم 16 يوليو بالكامل.
     backtest_start_date = "14 July, 2025"
     backtest_end_date = "17 July, 2025"
     symbols_to_test = get_validated_symbols()
     
-    # بدء الاختبار في خيط منفصل حتى لا تتجمد لوحة التحكم
     logger.info(f"===> سيتم بدء الاختبار الخلفي تلقائيًا للفترة من {backtest_start_date} إلى {backtest_end_date} <===")
     backtest_thread = Thread(target=main_backtest_loop, args=(backtest_start_date, backtest_end_date, symbols_to_test))
     backtest_thread.start()
     
-    # إبقاء البرنامج الرئيسي يعمل
     try:
-        backtest_thread.join() # انتظر حتى ينتهي الاختبار
+        backtest_thread.join() 
         logger.info("✅✅✅ اكتمل الاختبار الخلفي. يمكنك الآن تحليل النتائج من لوحة التحكم. ✅✅✅")
         while True:
-            time.sleep(60) # إبقاء الخادم يعمل لعرض النتائج
+            time.sleep(60)
     except KeyboardInterrupt:
         logger.info("👋 إيقاف تشغيل البرنامج.")
         os._exit(0)
