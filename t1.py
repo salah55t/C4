@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import pickle
 import re
+import threading
+import io
+from flask import Flask, jsonify
 from binance.client import Client
 from datetime import datetime, timedelta, timezone
 from decouple import config
@@ -18,6 +21,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 # --- إعداد التسجيل ---
+# يتم الإعداد هنا ليتمكن Flask من استخدامه أيضاً
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -105,7 +109,6 @@ def fetch_historical_data(symbol: str, interval: str, start_date_str: str) -> Op
         logger.error(f"خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# --- [مُصحح] --- تم تعديل الدالة لتقبل اسم العملة
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol: str) -> pd.DataFrame:
     df_calc = df.copy()
     for period in EMA_PERIODS:
@@ -131,7 +134,6 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol:
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
-    # --- [مُصحح] --- منطق جديد لحساب ارتباط البيتكوين
     if symbol == BTC_SYMBOL:
         df_calc['btc_correlation'] = 1.0
     elif btc_df is not None and not btc_df.empty:
@@ -174,7 +176,6 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    # --- [مُصحح] --- تم تعديل الدالة لتمرير اسم العملة
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
@@ -365,9 +366,10 @@ def run_backtest():
     btc_data_all_tf = {}
     for tf in TIMEFRAMES_FOR_TREND_ANALYSIS:
         df_btc_tf = fetch_historical_data(BTC_SYMBOL, tf, start_date_str)
-        for period in EMA_PERIODS:
-            df_btc_tf[f'ema_{period}'] = df_btc_tf['close'].ewm(span=period, adjust=False).mean()
-        btc_data_all_tf[tf] = df_btc_tf.dropna()
+        if df_btc_tf is not None:
+            for period in EMA_PERIODS:
+                df_btc_tf[f'ema_{period}'] = df_btc_tf['close'].ewm(span=period, adjust=False).mean()
+            btc_data_all_tf[tf] = df_btc_tf.dropna()
 
     all_features = {}
     for symbol in symbols_to_test:
@@ -389,7 +391,7 @@ def run_backtest():
         logger.critical("فشل حساب الميزات لجميع العملات. الخروج.")
         return
 
-    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items()], axis=1)
+    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items() if symbol in all_features], axis=1)
     main_df.dropna(inplace=True)
     
     capital = INITIAL_CAPITAL
@@ -486,9 +488,48 @@ def run_backtest():
             closed_trades.append(trade)
 
     generate_detailed_report(closed_trades, INITIAL_CAPITAL, capital)
+    logger.info("✅ اكتمل الاختبار التاريخي بنجاح.")
+
+
+# --- [جديد] جزء خادم الويب باستخدام فلاسك ---
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    """نقطة نهاية بسيطة للتأكد من أن الخدمة تعمل."""
+    return "خدمة الاختبار التاريخي تعمل. أرسل طلب GET إلى /run لبدء الاختبار.", 200
+
+def run_backtest_in_background():
+    """دالة وسيطة لتشغيل الاختبار في خيط منفصل لتجنب توقف الطلب."""
+    logger.info("بدء الاختبار التاريخي في الخلفية...")
+    try:
+        if not os.path.exists(MODEL_FOLDER):
+            logger.critical(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
+            return
+        run_backtest()
+    except Exception as e:
+        logger.error(f"حدث خطأ أثناء تشغيل الاختبار في الخلفية: {e}", exc_info=True)
+
+@app.route('/run')
+def trigger_backtest():
+    """
+    يشغل الاختبار التاريخي في خيط خلفي (background thread).
+    هذا يمنع انتهاء مهلة طلب HTTP، حيث أن الاختبار قد يستغرق وقتاً طويلاً.
+    """
+    logger.info("تم استلام طلب لبدء الاختبار التاريخي.")
+    
+    # تشغيل المهمة التي تستغرق وقتاً طويلاً في خيط خلفي
+    thread = threading.Thread(target=run_backtest_in_background)
+    thread.daemon = True # يسمح للبرنامج الرئيسي بالخروج حتى لو كان الخيط لا يزال يعمل
+    thread.start()
+
+    return jsonify({"status": "success", "message": "بدأ الاختبار في الخلفية. تحقق من سجلات الخدمة (Logs) للمتابعة والنتائج."})
+
 
 if __name__ == "__main__":
-    if not os.path.exists(MODEL_FOLDER):
-        logger.critical(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
-    else:
-        run_backtest()
+    # Render توفر متغير البيئة PORT.
+    # القيمة الافتراضية هي 10000 لخدمات الويب.
+    port = int(os.environ.get('PORT', 10000))
+    
+    # الربط بـ 0.0.0.0 ليكون الخادم متاحاً من خارج الحاوية (container).
+    app.run(host='0.0.0.0', port=port)
