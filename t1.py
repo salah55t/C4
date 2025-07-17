@@ -57,7 +57,6 @@ BUY_CONFIDENCE_THRESHOLD = 0.80
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 MAX_TRADE_DURATION_CANDLES: int = 96 
-# --- [تحسين] --- حجم الدفعة لإدارة الذاكرة
 BACKTEST_BATCH_SIZE: int = 5
 
 # --- متغيرات الاتصال ---
@@ -275,7 +274,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
-            conn.autocommit = True # Autocommit is better for batch inserts
+            conn.autocommit = True 
             logger.info("✅ [DB] تم الاتصال بنجاح بقاعدة البيانات.")
             create_backtest_results_table()
             return
@@ -290,8 +289,12 @@ def create_backtest_results_table():
     logger.info("[DB] التحقق من جدول نتائج الاختبار الخلفي...")
     try:
         with conn.cursor() as cur:
+            # --- [FIX] --- حذف الجدول أولاً لضمان أن المخطط محدث دائمًا
+            logger.warning("سيتم حذف جدول backtest_results الموجود لضمان مخطط جديد...")
+            cur.execute("DROP TABLE IF EXISTS backtest_results;")
+            
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS backtest_results (
+                CREATE TABLE backtest_results (
                     id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     signal_timestamp TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -648,7 +651,6 @@ def main_backtest_loop(start_date: str, end_date: str, symbols: List[str]):
             symbols_with_models.append(symbol)
     logger.info(f"وجد {len(symbols_with_models)} عملة مع نماذج متاحة للاختبار.")
 
-    # --- [تحسين] --- معالجة العملات على دفعات
     for i in range(0, len(symbols_with_models), BACKTEST_BATCH_SIZE):
         batch_symbols = symbols_with_models[i:i + BACKTEST_BATCH_SIZE]
         num_batches = (len(symbols_with_models) + BACKTEST_BATCH_SIZE - 1) // BACKTEST_BATCH_SIZE
