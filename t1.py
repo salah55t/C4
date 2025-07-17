@@ -1,211 +1,203 @@
 import os
-import gc
+import time
 import json
+import pickle
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from psycopg2 import sql
 import psycopg2
-from decouple import config
-import random
-from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from psycopg2.extras import RealDictCursor
 from binance.client import Client
+from decouple import config
 
-# --- تهيئة الإعدادات ---
+# إعدادات الاتصال
+API_KEY = config('BINANCE_API_KEY')
+API_SECRET = config('BINANCE_API_SECRET')
 DB_URL = config('DATABASE_URL')
-BATCH_SIZE = 10
-RISK_PER_TRADE_PERCENT = 1.0
-START_DATE = "2024-01-01"
-END_DATE = "2024-06-01"
-TIMEFRAME = '15m'
-TEST_SYMBOLS = get_validated_symbols()  # دالة لتحميل الرموز الصالحة
+MODEL_FOLDER = 'V8'
+BASE_ML_MODEL_NAME = 'LightGBM_Scalping_V8_With_Momentum'
+SIGNAL_GENERATION_TIMEFRAME = '15m'
+BTC_SYMBOL = 'BTCUSDT'
+ADX_PERIOD = 14; RSI_PERIOD = 14; ATR_PERIOD = 14
+EMA_PERIODS = [21, 50, 200]
+REL_VOL_PERIOD = 30; MOMENTUM_PERIOD = 12; EMA_SLOPE_PERIOD = 5
 
-# --- تهيئة قاعدة البيانات للاختبار الخلفي ---
-def init_backtest_db():
-    conn = psycopg2.connect(DB_URL)
+# تعريف الفلاتر كما هي في الكود الأساسي
+FILTER_KEYS = [
+    "adx", "rel_vol", "rsi", "roc", "slope", "min_rrr", "min_volatility_pct",
+    "min_btc_correlation", "min_bid_ask_ratio", "relative_volume", "btc_correlation",
+    f"roc_{MOMENTUM_PERIOD}", f"ema_slope_{EMA_SLOPE_PERIOD}", "atr"
+]
+
+def get_db():
+    conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
+    conn.autocommit = False
+    return conn
+
+def fetch_historical_data(client, symbol, interval, days):
+    limit = int((days * 24 * 60) / int(interval.replace('m', '')))
+    klines = client.get_historical_klines(symbol, interval, limit=min(limit, 1000))
+    if not klines:
+        return None
+    df = pd.DataFrame(klines, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+        'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'
+    ])
+    df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df.set_index('timestamp', inplace=True)
+    return df.dropna()
+
+def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame = None) -> pd.DataFrame:
+    df_calc = df.copy()
+    # EMAs
+    for period in EMA_PERIODS:
+        df_calc[f'ema_{period}'] = df_calc['close'].ewm(span=period, adjust=False).mean()
+    # ATR
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    # ADX
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    # RSI
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['btc_correlation'] = 0.0
+    if btc_df is not None and not btc_df.empty:
+        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+        df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=30).corr(merged_df['btc_returns'])
+    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    df_calc['slope'] = df_calc['close'].diff()
+    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+    return df_calc.astype('float32', errors='ignore')
+
+def load_ml_model(symbol):
+    model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
+    model_path = os.path.join(MODEL_FOLDER, f"{model_name}.pkl")
+    if not os.path.exists(model_path):
+        return None, None, None
+    with open(model_path, 'rb') as f:
+        model_bundle = pickle.load(f)
+    return model_bundle['model'], model_bundle['scaler'], model_bundle['feature_names']
+
+def insert_signal(conn, symbol, ts, entry, atr, filter_values, ml_conf, target, stop_loss):
     with conn.cursor() as cur:
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS backtest_results (
+            INSERT INTO signals_backtest (symbol, timestamp, entry_price, atr, filter_values, ml_confidence, target_price, stop_loss, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id;
+        """, (symbol, ts, entry, atr, json.dumps(filter_values), ml_conf, target, stop_loss, 'open'))
+        conn.commit()
+        signal_id = cur.fetchone()['id']
+    return signal_id
+
+def update_signal_status(conn, signal_id, status, close_price, close_time):
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE signals_backtest SET status=%s, close_price=%s, close_time=%s WHERE id=%s
+        """, (status, close_price, close_time, signal_id))
+        conn.commit()
+
+def main():
+    # Binance client
+    client = Client(API_KEY, API_SECRET)
+    conn = get_db()
+    # تجهيز الجدول إذا لم يكن موجوداً
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS signals_backtest (
                 id SERIAL PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                entry_price DOUBLE PRECISION NOT NULL,
-                target_price DOUBLE PRECISION NOT NULL,
-                stop_loss DOUBLE PRECISION NOT NULL,
-                closing_price DOUBLE PRECISION,
-                profit_percentage DOUBLE PRECISION,
-                entry_time TIMESTAMP NOT NULL,
-                exit_time TIMESTAMP,
-                filter_values JSONB NOT NULL,
-                status TEXT CHECK(status IN ('win', 'loss', 'open'))
+                symbol TEXT,
+                timestamp TIMESTAMP,
+                entry_price DOUBLE PRECISION,
+                atr DOUBLE PRECISION,
+                filter_values JSONB,
+                ml_confidence DOUBLE PRECISION,
+                target_price DOUBLE PRECISION,
+                stop_loss DOUBLE PRECISION,
+                status TEXT,
+                close_price DOUBLE PRECISION,
+                close_time TIMESTAMP
             );
         """)
         conn.commit()
-    return conn
 
-# --- دالة محاكاة التداول ---
-def simulate_trade(
-    df: pd.DataFrame, 
-    entry_idx: int, 
-    entry_price: float, 
-    target_price: float, 
-    stop_loss: float
-) -> Tuple[float, float, str]:
-    """
-    محاكاة صفقة من نقطة الدخول حتى الخروج
-    """
-    for i in range(entry_idx + 1, len(df)):
-        current_low = df.iloc[i]['low']
-        current_high = df.iloc[i]['high']
-        current_close = df.iloc[i]['close']
-        
-        # التحقق من ضرب وقف الخسارة
-        if current_low <= stop_loss:
-            return stop_loss, ((stop_loss / entry_price) - 1) * 100, 'loss'
-        
-        # التحقق من تحقيق الهدف
-        if current_high >= target_price:
-            return target_price, ((target_price / entry_price) - 1) * 100, 'win'
-        
-        # إغلاق عند نهاية البيانات
-        if i == len(df) - 1:
-            return current_close, ((current_close / entry_price) - 1) * 100, 'open'
-
-    return entry_price, 0, 'open'
-
-# --- دالة الاختبار الخلفي لرمز واحد ---
-def backtest_symbol(symbol: str, client: Client) -> List[Dict[str, Any]]:
-    results = []
-    
-    # جلب البيانات التاريخية
-    klines = client.get_historical_klines(
-        symbol=symbol,
-        interval=TIMEFRAME,
-        start_str=START_DATE,
-        end_str=END_DATE
-    )
-    
-    if not klines:
-        return results
-        
-    # تحويل إلى DataFrame
-    df = pd.DataFrame(klines, columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume', 
-        'close_time', 'quote_volume', 'trades', 'taker_buy_base', 
-        'taker_buy_quote', 'ignore'
-    ])
-    
-    # تحويل الأنواع
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    
-    # حساب المؤشرات (يجب إضافة دوال حساب المؤشرات الفعلية)
-    df = calculate_indicators(df)
-    
-    # المحاكاة
-    for i in range(50, len(df) - 1):  # بدءاً من الشمعة الـ 50
-        # تطبيق الاستراتيجية (يجب استبدال هذا بمنطق الإشارة الفعلي)
-        signal = generate_signal(df.iloc[:i+1])
-        
-        if signal:
-            # حساب قيم الفلاتر
-            filter_values = {
-                'adx': df.iloc[i]['adx'],
-                'rsi': df.iloc[i]['rsi'],
-                'atr': df.iloc[i]['atr'],
-                'rel_vol': df.iloc[i]['relative_volume'],
-                'btc_corr': df.iloc[i]['btc_correlation'],
-                'roc': df.iloc[i][f'roc_{MOMENTUM_PERIOD}'],
-                'ema_slope': df.iloc[i][f'ema_slope_{EMA_SLOPE_PERIOD}']
-            }
-            
-            # محاكاة الصفقة
-            entry_price = df.iloc[i]['close']
-            target_price = entry_price * 1.02  # +2%
-            stop_loss = entry_price * 0.98     # -2%
-            
-            # تشغيل المحاكاة
-            closing_price, profit_pct, status = simulate_trade(
-                df, i, entry_price, target_price, stop_loss
-            )
-            
-            # تسجيل النتيجة
-            trade_data = {
-                'symbol': symbol,
-                'entry_price': entry_price,
-                'target_price': target_price,
-                'stop_loss': stop_loss,
-                'closing_price': closing_price,
-                'profit_percentage': profit_pct,
-                'entry_time': df.iloc[i]['timestamp'],
-                'exit_time': df.iloc[i + 1]['timestamp'],  # تبسيط
-                'filter_values': json.dumps(filter_values),
-                'status': status
-            }
-            results.append(trade_data)
-    
-    return results
-
-# --- دالة معالجة الدفعات ---
-def run_backtest_in_batches():
-    # تهيئة العميل والاتصال بقاعدة البيانات
-    client = Client()
-    db_conn = init_backtest_db()
-    
-    # تقسيم الرموز إلى دفعات
-    batches = [TEST_SYMBOLS[i:i + BATCH_SIZE] 
-               for i in range(0, len(TEST_SYMBOLS), BATCH_SIZE)]
-    
-    for batch_idx, batch in enumerate(batches):
-        logger.info(f"🚀 بدء الدفعة {batch_idx + 1}/{len(batches)} - {len(batch)} رموز")
-        batch_results = []
-        
-        for symbol in batch:
-            try:
-                symbol_results = backtest_symbol(symbol, client)
-                batch_results.extend(symbol_results)
-                logger.info(f"✅ تم معالجة {symbol} - {len(symbol_results)} صفقة")
-            except Exception as e:
-                logger.error(f"❌ فشل معالجة {symbol}: {str(e)}")
-        
-        # حفظ نتائج الدفعة في قاعدة البيانات
-        save_batch_results(db_conn, batch_results)
-        
-        # تحرير الذاكرة
-        del batch_results
-        gc.collect()
-        logger.info(f"♻️ تم تحرير ذاكرة الدفعة {batch_idx + 1}")
-
-# --- دالة حفظ النتائج ---
-def save_batch_results(conn, results: List[Dict[str, Any]]):
-    if not results:
-        return
-        
+    # جلب قائمة العملات المدعومة (ممكن تعديلها حسب المتوفر)
+    symbols = []
     with conn.cursor() as cur:
-        args = ','.join(cur.mogrify("(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (
-            r['symbol'],
-            r['entry_price'],
-            r['target_price'],
-            r['stop_loss'],
-            r['closing_price'],
-            r['profit_percentage'],
-            r['entry_time'],
-            r['exit_time'],
-            r['filter_values'],
-            r['status']
-        )).decode('utf-8') for r in results)
-        
-        cur.execute(
-            sql.SQL("""
-            INSERT INTO backtest_results (
-                symbol, entry_price, target_price, stop_loss,
-                closing_price, profit_percentage, entry_time,
-                exit_time, filter_values, status
-            ) VALUES {}
-            """).format(sql.SQL(args))
-        )
-        conn.commit()
-    logger.info(f"💾 تم حفظ {len(results)} صفقة في قاعدة البيانات")
+        cur.execute("SELECT DISTINCT symbol FROM signals;")
+        symbols = [row['symbol'] for row in cur.fetchall()]
+    if not symbols:
+        symbols = ['BTCUSDT', 'ETHUSDT']
+
+    # بيانات البيتكوين للارتباط
+    btc_df = fetch_historical_data(client, BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, 3)
+    if btc_df is not None:
+        btc_df['btc_returns'] = btc_df['close'].pct_change()
+
+    for symbol in symbols:
+        print(f"Processing {symbol} ...")
+        model, scaler, feats = load_ml_model(symbol)
+        if not model: continue
+        df = fetch_historical_data(client, symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
+        if df is None or df.empty: continue
+        df_feat = calculate_features(df, btc_df)
+        # بدء من الشمعة التي يكون فيها كل الميزات متوفرة
+        for ts in df_feat.index:
+            row = df_feat.loc[ts]
+            # تجهيز الميزات بنفس ترتيب النموذج
+            try:
+                feats_row = row[feats].values.reshape(1, -1)
+                feats_row = scaler.transform(feats_row)
+                y_pred = model.predict(feats_row)[0]
+                y_prob = model.predict_proba(feats_row)[0].max()
+            except Exception as e:
+                continue
+            if y_pred == 1:
+                entry = row['close']
+                atr = row['atr']
+                if not atr or atr <= 0: continue
+                target = entry + (atr * 2.2)
+                stop_loss = entry - (atr * 1.5)
+                # حفظ كل قيم الفلاتر
+                filter_values = {k: float(row.get(k, 0)) for k in FILTER_KEYS}
+                signal_id = insert_signal(conn, symbol, ts, entry, atr, filter_values, float(y_prob), target, stop_loss)
+                # تتبع التوصية لمدة 3 أيام أو حتى تحقق الهدف/وقف الخسارة
+                close_status, close_price, close_time = None, None, None
+                closing_window = df_feat.loc[ts:].iloc[1:]  # بعد التوصية مباشرة
+                for ts2, row2 in closing_window.iterrows():
+                    price = row2['close']
+                    if price >= target:
+                        close_status, close_price, close_time = 'target_hit', price, ts2
+                        break
+                    elif price <= stop_loss:
+                        close_status, close_price, close_time = 'stop_loss_hit', price, ts2
+                        break
+                    # انتهاء 3 أيام؟ (تاريخ الشمعة الحالية - تاريخ التوصية)
+                    if (ts2 - ts) > timedelta(days=3):
+                        close_status, close_price, close_time = 'timeout', price, ts2
+                        break
+                if close_status:
+                    update_signal_status(conn, signal_id, close_status, close_price, close_time)
+                else:
+                    # لم يحدث شيء خلال 3 أيام
+                    update_signal_status(conn, signal_id, 'timeout', row2['close'], ts2)
+    print("Backtest complete.")
 
 if __name__ == "__main__":
-    run_backtest_in_batches()
+    main()
