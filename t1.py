@@ -90,6 +90,7 @@ market_state_lock = Lock()
 
 # ---------------------- Dashboard HTML ----------------------
 def get_dashboard_html():
+    # UPDATE: Added new buttons and tabs for successful and failed signals.
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -117,14 +118,18 @@ def get_dashboard_html():
         </header>
 
         <div class="mb-4 border-b border-gray-700">
-            <nav class="flex -mb-px space-x-6 space-x-reverse">
+            <nav class="flex flex-wrap -mb-px space-x-6 space-x-reverse">
                 <button onclick="showTab('tracking', this)" class="tab-btn active py-3 px-1 border-b-2 font-semibold">توصيات قيد التتبع</button>
-                <button onclick="showTab('closed', this)" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-400 hover:text-white">التوصيات المغلقة</button>
+                <button onclick="showTab('successful', this)" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-400 hover:text-white">التوصيات الناجحة</button>
+                <button onclick="showTab('failed', this)" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-400 hover:text-white">التوصيات الخاسرة</button>
+                <button onclick="showTab('closed', this)" class="tab-btn py-3 px-1 border-b-2 border-transparent text-gray-400 hover:text-white">كل التوصيات المغلقة</button>
             </nav>
         </div>
 
         <main>
             <div id="tracking-tab" class="tab-content space-y-4"></div>
+            <div id="successful-tab" class="tab-content hidden space-y-4"></div>
+            <div id="failed-tab" class="tab-content hidden space-y-4"></div>
             <div id="closed-tab" class="tab-content hidden space-y-4"></div>
         </main>
     </div>
@@ -141,8 +146,11 @@ def get_dashboard_html():
         activeTab = tabName;
         document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
         document.getElementById(`${tabName}-tab`).classList.remove('hidden');
-        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active', 'text-white', 'border-blue-500'));
-        element.classList.add('active', 'text-white', 'border-blue-500');
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.classList.remove('active');
+            btn.classList.remove('font-semibold');
+        });
+        element.classList.add('active', 'font-semibold');
         refreshData();
     }
 
@@ -169,7 +177,7 @@ def get_dashboard_html():
         };
 
         for (const [key, value] of Object.entries(itemsToShow)) {
-            detailsHTML += `<div class="bg-gray-900/50 p-2 rounded text-center"><div class="text-xs text-gray-400 uppercase">${key}</div><div class="font-mono font-semibold">${value}</div></div>`;
+            detailsHTML += `<div class="bg-gray-900/50 p-2 rounded text-center"><div class="text-xs text-gray-400 uppercase">${key}</div><div class="font-mono font-semibold">${value !== undefined && value !== null ? value : 'N/A'}</div></div>`;
         }
         detailsHTML += '</div>';
 
@@ -189,9 +197,9 @@ def get_dashboard_html():
                     <div>هدف: <span class="font-mono">${formatNumber(signal.target_price, 4)}</span></div>
                 </div>
                 <div class="mt-2 w-full bg-gray-700 rounded-full h-1.5"><div class="bg-blue-500 h-1.5 rounded-full" style="width: ${progressPct}%"></div></div>
-                ` : `<div class="mt-2 text-sm">أغلقت بسعر <span class="font-mono">${formatNumber(signal.closing_price, 4)}</span> - الحالة: ${signal.status}</div>`}
+                ` : `<div class="mt-2 text-sm">أغلقت بسعر <span class="font-mono">${formatNumber(signal.closing_price, 4)}</span> بتاريخ ${new Date(signal.closed_at).toLocaleString('ar-EG')}</div>`}
                 <div class="mt-2 border-t border-gray-700 pt-2">
-                    <h4 class="font-semibold text-gray-300">بيانات التوصية:</h4>
+                    <h4 class="font-semibold text-gray-300">بيانات التوصية عند الإنشاء:</h4>
                     ${detailsHTML}
                 </div>
             </div>
@@ -199,7 +207,8 @@ def get_dashboard_html():
     }
 
     function refreshData() {
-        const endpoint = activeTab === 'tracking' ? '/api/signals?status=tracking' : '/api/signals?status=closed';
+        // UPDATE: The endpoint now dynamically uses the activeTab variable.
+        const endpoint = '/api/signals?status=' + activeTab;
         const container = document.getElementById(`${activeTab}-tab`);
         
         fetch(endpoint)
@@ -210,7 +219,7 @@ def get_dashboard_html():
                     return;
                 }
                 if (data.length === 0) {
-                    container.innerHTML = '<p class="text-center text-gray-400 p-8">لا توجد توصيات لعرضها.</p>';
+                    container.innerHTML = '<p class="text-center text-gray-400 p-8">لا توجد توصيات لعرضها في هذا القسم.</p>';
                     return;
                 }
                 container.innerHTML = data.map(renderSignalCard).join('');
@@ -236,7 +245,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn.autocommit = False
             
             with conn.cursor() as cur:
-                # --- [ميزة جديدة] --- جدول واحد لتتبع كل التوصيات
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS tracked_signals (
                         id SERIAL PRIMARY KEY,
@@ -283,12 +291,10 @@ def check_db_connection() -> bool:
             return False
     return False
 
-# --- [ميزة جديدة] --- دالة لحفظ التوصية المتتبعة في قاعدة البيانات
 def insert_tracked_signal_into_db(signal_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as cur:
-            # FIX: Cast numpy types to standard Python floats before insertion
             cur.execute("""
                 INSERT INTO tracked_signals (
                     symbol, entry_price, target_price, stop_loss, 
@@ -311,7 +317,6 @@ def insert_tracked_signal_into_db(signal_data: Dict[str, Any]) -> Optional[Dict[
         if conn: conn.rollback()
         return None
 
-# --- [ميزة جديدة] --- دالة لإغلاق التوصية المتتبعة في قاعدة البيانات
 def close_tracked_signal(signal: Dict, status: str, closing_price: float):
     signal_id = signal.get('id')
     with closure_lock:
@@ -402,9 +407,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 # ---------------------- Feature and Logic Functions ----------------------
 
 def calculate_distance_from_peak(symbol: str, current_price: float) -> Optional[float]:
-    """Calculates the percentage distance between the current price and the peak of the last N candles."""
     try:
-        # Fetch slightly more data to ensure we have enough candles
         days_to_fetch = int((PEAK_LOOKBACK_CANDLES * 60) / (24 * 60)) + 2
         df_peak = fetch_historical_data(symbol, PEAK_TIMEFRAME, days=days_to_fetch)
         
@@ -412,7 +415,6 @@ def calculate_distance_from_peak(symbol: str, current_price: float) -> Optional[
             logger.warning(f"⚠️ [{symbol}] Not enough data for peak calculation ({len(df_peak) if df_peak is not None else 0} candles).")
             return None
         
-        # Get the highest high from the last N candles, excluding the current incomplete one
         peak_high = df_peak.iloc[-PEAK_LOOKBACK_CANDLES-1:-1]['high'].max()
         
         if pd.isna(peak_high) or peak_high <= 0:
@@ -470,7 +472,6 @@ def determine_market_trend_score():
                     details[tf] = {"score": 0, "label": "غير واضح"}; continue
                 for period in EMA_PERIODS: df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
                 last = df.iloc[-1]
-                # FIX: Use correct attribute names with underscores (e.g., ema_21)
                 tf_score = (1 if last.close > last.ema_21 else -1) + (1 if last.ema_21 > last.ema_50 else -1) + (1 if last.ema_50 > last.ema_200 else -1)
                 details[tf] = {"score": tf_score, "label": "صاعد" if tf_score >= 2 else ("هابط" if tf_score <= -2 else "محايد")}
                 total_score += tf_score * tf_weights[tf]
@@ -638,21 +639,26 @@ def home(): return render_template_string(get_dashboard_html())
 
 @app.route('/api/signals')
 def get_signals():
+    # UPDATE: Added logic to handle 'successful' and 'failed' statuses.
     status = request.args.get('status', 'tracking')
     if not check_db_connection(): return jsonify({"error": "DB connection failed"}), 500
     
     try:
         with conn.cursor() as cur:
-            if status == 'closed':
+            if status == 'successful':
+                cur.execute("SELECT * FROM tracked_signals WHERE status = 'target_hit' ORDER BY closed_at DESC;")
+            elif status == 'failed':
+                cur.execute("SELECT * FROM tracked_signals WHERE status = 'stop_loss_hit' ORDER BY closed_at DESC;")
+            elif status == 'closed':
                 cur.execute("SELECT * FROM tracked_signals WHERE status IN ('target_hit', 'stop_loss_hit') ORDER BY closed_at DESC;")
-            else: # tracking
+            else: # 'tracking'
                 cur.execute("SELECT * FROM tracked_signals WHERE status = 'tracking' ORDER BY created_at DESC;")
             
             signals = [dict(s) for s in cur.fetchall()]
 
         if status == 'tracking':
             symbols = [s['symbol'] for s in signals]
-            if symbols:
+            if symbols and redis_client:
                 prices = {s: p for s, p in zip(symbols, redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols)) if p}
                 for s in signals:
                     s['current_price'] = float(prices.get(s['symbol'], s['entry_price']))
@@ -660,13 +666,12 @@ def get_signals():
         return jsonify(signals)
     except Exception as e:
         if conn: conn.rollback()
+        logger.error(f"❌ [API Error] Failed to get signals for status '{status}': {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 # ---------------------- Program Startup ----------------------
 
-# FIX: Define the missing websocket callback function
 def handle_price_update_message(msg: Dict[str, Any]):
-    """Callback to handle price updates from the websocket."""
     global redis_client
     try:
         if msg and 'e' in msg and msg['e'] == 'error':
@@ -684,7 +689,6 @@ def run_websocket_manager():
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
-    # Use the now-defined callback function
     twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
     logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
     twm.join()
@@ -729,7 +733,6 @@ if __name__ == "__main__":
     logger.info("🚀 LAUNCHING SIGNAL TRACKER & DASHBOARD (V29.0) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
-    # Run Flask app
     port = int(os.environ.get('PORT', 10000))
     app.run(host="0.0.0.0", port=port)
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
