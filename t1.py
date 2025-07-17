@@ -28,7 +28,7 @@ from sklearn.preprocessing import StandardScaler
 from collections import deque
 import warnings
 
-# --- Ignore irrelevant warnings ---
+# --- Ignore irrelevant warnings --
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
@@ -178,6 +178,11 @@ market_state_lock = Lock()
 dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
+
+# New global variable to control backtesting mode
+is_backtesting_active: bool = False
+backtesting_active_lock = Lock()
+
 
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة",
@@ -788,7 +793,7 @@ function displayBacktestResults(results) {
         return;
     }
 
-    // Calculate aggregated stats
+    # Calculate aggregated stats - these stats are for the *simulated* trades in backtest
     let totalTrades = results.length;
     let winningTrades = results.filter(t => t.profit_percentage > 0).length;
     let losingTrades = results.filter(t => t.profit_percentage < 0).length;
@@ -1501,6 +1506,12 @@ def trade_monitoring_loop():
     global last_api_check_time
     logger.info("✅ [Trade Monitor] Starting trade monitoring loop.")
     while True:
+        # Only run if backtesting is NOT active
+        with backtesting_active_lock:
+            if is_backtesting_active:
+                time.sleep(5) # Sleep while backtesting is active
+                continue
+
         try:
             with signal_cache_lock: signals_to_check = dict(open_signals_cache)
             if not signals_to_check or not redis_client or not client:
@@ -1685,10 +1696,14 @@ def perform_end_of_cycle_cleanup():
 # ---------------------- Main Backtesting Function ----------------------
 def run_backtest(days: int):
     # Declare global variables at the very beginning of the function
-    global client, validated_symbols_to_scan, exchange_info_map
+    global client, validated_symbols_to_scan, exchange_info_map, is_backtesting_active
     
     logger.info(f"🚀 Starting backtest for {days} days...")
     
+    # Set backtesting active flag
+    with backtesting_active_lock:
+        is_backtesting_active = True
+
     # Clear previous backtest results from the database for a clean run
     if check_db_connection():
         try:
@@ -1734,6 +1749,9 @@ def run_backtest(days: int):
     
     if not symbols_with_models:
         logger.error("❌ No symbols with ML models found for backtesting.")
+        # Reset backtesting active flag before returning
+        with backtesting_active_lock:
+            is_backtesting_active = False
         return []
 
     logger.info(f"Starting backtest for {len(symbols_with_models)} symbols over {days} days.")
@@ -1965,6 +1983,11 @@ def run_backtest(days: int):
             if conn: conn.rollback()
 
     logger.info(f"✅ Backtest completed. Total trades: {len(backtest_trades)}")
+    
+    # Reset backtesting active flag after completion
+    with backtesting_active_lock:
+        is_backtesting_active = False
+
     return backtest_trades
 
 
@@ -1992,13 +2015,28 @@ def determine_market_trend_score():
         }
     logger.info(f"✅ [Market Score] Real-time State: {current_market_state['trend_label']}")
 
-def get_session_state():
+def get_session_state() -> Tuple[List[str], str, str]:
     # Placeholder for real-time session state
-    return ["London"], "NORMAL_LIQUIDITY", "Normal liquidity (London)"
+    sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
+    active_sessions = []
+    now_utc = datetime.now(timezone.utc)
+    current_hour = now_utc.hour
+    if now_utc.weekday() >= 5: # Saturday or Sunday
+        return [], "WEEKEND", "Low liquidity (weekend)"
+    for session, (start, end) in sessions.items():
+        if start <= current_hour < end:
+            active_sessions.append(session)
+    if "London" in active_sessions and "New York" in active_sessions:
+        return active_sessions, "HIGH_LIQUIDITY", "High liquidity (London/New York overlap)"
+    elif len(active_sessions) >= 1:
+        return active_sessions, "NORMAL_LIQUIDITY", f"Normal liquidity ({', '.join(active_sessions)})"
+    else:
+        return [], "LOW_LIQUIDITY", "Low liquidity (off-peak hours)"
 
 def get_current_filter_profile():
     # Placeholder for real-time filter profile
     with dynamic_filter_lock:
+        # If the cache is empty or stale, re-analyze
         if not dynamic_filter_profile_cache or \
            (time.time() - last_dynamic_filter_analysis_time) > DYNAMIC_FILTER_ANALYSIS_INTERVAL:
             # In real-time, you'd call analyze_market_and_create_dynamic_profile here
@@ -2063,17 +2101,33 @@ def analyze_market_and_create_dynamic_profile():
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
+    
+    # Check if backtesting is active. If so, this real-time loop should pause.
+    with backtesting_active_lock:
+        if is_backtesting_active:
+            logger.info("Main loop paused: Backtesting is active.")
+            while is_backtesting_active:
+                time.sleep(10) # Sleep while backtesting is running
+            logger.info("Main loop resuming: Backtesting finished.")
+
     if not validated_symbols_to_scan:
         log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM")
         return
     log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
 
     while True:
+        # Re-check backtesting status at the start of each cycle
+        with backtesting_active_lock:
+            if is_backtesting_active:
+                logger.info("Main loop paused: Backtesting is active.")
+                while is_backtesting_active:
+                    time.sleep(10) # Sleep while backtesting is running
+                logger.info("Main loop resuming: Backtesting finished.")
+
         try:
             logger.info("🔄 Starting new main cycle...")
             ml_models_cache.clear(); gc.collect()
 
-            # --- [Improvement] --- Use new trend determination function
             determine_market_trend_score()
             analyze_market_and_create_dynamic_profile()
             
@@ -2162,6 +2216,7 @@ def main_loop():
                     # Evaluate filters and get potential rejection reasons for logging in real-time
                     filter_evaluation_results = evaluate_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m)
                     if filter_evaluation_results["potential_rejection_reasons"]:
+                        # Log rejection and skip if filters would have rejected in real-time
                         log_rejection(symbol, "Momentum/Strength Filter", {"reasons": filter_evaluation_results["potential_rejection_reasons"]})
                         continue
 
@@ -2499,6 +2554,7 @@ def initialize_bot_services():
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         
+        # Start background threads, ensuring main_loop respects backtesting flag
         Thread(target=determine_market_trend_score, daemon=True).start()
         Thread(target=run_websocket_manager, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
