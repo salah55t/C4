@@ -264,7 +264,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             else: logger.critical("❌ [DB] Failed to connect to the database.")
 
 def check_db_connection() -> bool:
-    # ... (This function remains the same)
     global conn
     if conn is None or conn.closed != 0:
         logger.warning("[DB] Connection is closed, attempting to reconnect...")
@@ -289,14 +288,18 @@ def insert_tracked_signal_into_db(signal_data: Dict[str, Any]) -> Optional[Dict[
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as cur:
+            # FIX: Cast numpy types to standard Python floats before insertion
             cur.execute("""
                 INSERT INTO tracked_signals (
                     symbol, entry_price, target_price, stop_loss, 
                     distance_from_peak_1h_pct, signal_context
                 ) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
-                signal_data['symbol'], signal_data['entry_price'], signal_data['target_price'],
-                signal_data['stop_loss'], signal_data['distance_from_peak_1h_pct'],
+                signal_data['symbol'],
+                float(signal_data['entry_price']),
+                float(signal_data['target_price']),
+                float(signal_data['stop_loss']),
+                float(signal_data['distance_from_peak_1h_pct']),
                 json.dumps(signal_data.get('signal_context', {}))
             ))
             inserted_signal = dict(cur.fetchone())
@@ -338,7 +341,6 @@ def close_tracked_signal(signal: Dict, status: str, closing_price: float):
         with closure_lock: signals_pending_closure.discard(signal_id)
 
 
-# ... (Binance and Data Functions like get_exchange_info, fetch_historical_data remain the same) ...
 def init_redis() -> None:
     global redis_client
     logger.info("[Redis] Initializing Redis connection...")
@@ -399,7 +401,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 # ---------------------- Feature and Logic Functions ----------------------
 
-# --- [ميزة جديدة] --- دالة لحساب المسافة من القمة
 def calculate_distance_from_peak(symbol: str, current_price: float) -> Optional[float]:
     """Calculates the percentage distance between the current price and the peak of the last N candles."""
     try:
@@ -424,7 +425,6 @@ def calculate_distance_from_peak(symbol: str, current_price: float) -> Optional[
         logger.error(f"❌ [{symbol}] Error in calculate_distance_from_peak: {e}")
         return None
 
-# ... (The functions calculate_features, determine_market_trend_score, TradingStrategy remain the same) ...
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
     for period in EMA_PERIODS:
@@ -460,7 +460,6 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.D
 def determine_market_trend_score():
     global current_market_state, market_state_lock
     with market_state_lock:
-        # Simplified to run every cycle for fresh data, can be optimized with a timer if needed
         logger.info("🧠 [Market Score] Updating multi-timeframe trend score...")
         try:
             total_score, details, tf_weights = 0, {}, {'15m': 0.2, '1h': 0.3, '4h': 0.5}
@@ -471,7 +470,8 @@ def determine_market_trend_score():
                     details[tf] = {"score": 0, "label": "غير واضح"}; continue
                 for period in EMA_PERIODS: df[f'ema_{period}'] = df['close'].ewm(span=period, adjust=False).mean()
                 last = df.iloc[-1]
-                tf_score = (1 if last.close > last.ema21 else -1) + (1 if last.ema21 > last.ema50 else -1) + (1 if last.ema50 > last.ema200 else -1)
+                # FIX: Use correct attribute names with underscores (e.g., ema_21)
+                tf_score = (1 if last.close > last.ema_21 else -1) + (1 if last.ema_21 > last.ema_50 else -1) + (1 if last.ema_50 > last.ema_200 else -1)
                 details[tf] = {"score": tf_score, "label": "صاعد" if tf_score >= 2 else ("هابط" if tf_score <= -2 else "محايد")}
                 total_score += tf_score * tf_weights[tf]
             final_score = round(total_score)
@@ -579,20 +579,17 @@ def main_scanner_loop():
                     ml_signal = strategy.generate_buy_signal(df_features)
                     if not ml_signal: continue
                     
-                    # --- [ميزة جديدة] --- إذا وافق النموذج، قم بالتسجيل مباشرة
                     logger.info(f"💡 [ML Signal] Model approved BUY for {symbol} with confidence {ml_signal['confidence']:.2%}")
                     
                     entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     last_atr = df_features.iloc[-1].get('atr', 0)
                     if last_atr <= 0: continue
 
-                    # حساب المسافة من القمة
                     distance_pct = calculate_distance_from_peak(symbol, entry_price)
                     if distance_pct is None: 
                         logger.warning(f"[{symbol}] Could not calculate distance from peak. Skipping signal.")
                         continue
 
-                    # جمع كل بيانات السياق
                     with market_state_lock: market_state_copy = dict(current_market_state)
                     last_features = df_features.iloc[-1]
                     all_filters_data = {k: (float(v) if pd.notna(v) and np.isfinite(v) else None) for k, v in last_features.items()}
@@ -622,7 +619,7 @@ def main_scanner_loop():
                 except Exception as e:
                     logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
                 finally:
-                    time.sleep(2) # To avoid hitting API limits too quickly
+                    time.sleep(2)
             
             logger.info("✅ [End of Cycle] Full scan cycle finished. Waiting for 60 seconds...")
             time.sleep(60)
@@ -666,11 +663,28 @@ def get_signals():
         return jsonify({"error": str(e)}), 500
 
 # ---------------------- Program Startup ----------------------
+
+# FIX: Define the missing websocket callback function
+def handle_price_update_message(msg: Dict[str, Any]):
+    """Callback to handle price updates from the websocket."""
+    global redis_client
+    try:
+        if msg and 'e' in msg and msg['e'] == 'error':
+            logger.error(f"❌ [WebSocket Error] Message: {msg['m']}")
+        elif msg and 's' in msg and 'c' in msg:
+            symbol = msg['s']
+            price = msg['c']
+            if redis_client:
+                redis_client.hset(REDIS_PRICES_HASH_NAME, symbol, price)
+    except Exception as e:
+        logger.error(f"❌ [WebSocket Handler] Error processing message: {e} - Data: {msg}")
+
 def run_websocket_manager():
     if not client or not validated_symbols_to_scan: return
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
+    # Use the now-defined callback function
     twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
     logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
     twm.join()
@@ -719,4 +733,3 @@ if __name__ == "__main__":
     port = int(os.environ.get('PORT', 10000))
     app.run(host="0.0.0.0", port=port)
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
-
