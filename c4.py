@@ -104,7 +104,7 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v8"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
-SYMBOL_PROCESSING_BATCH_SIZE: int = 50
+SYMBOL_PROCESSING_BATCH_SIZE: int = 50 # حجم دفعة النماذج
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_PERIODS: List[int] = [21, 50, 200]
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
@@ -1290,7 +1290,9 @@ def main_loop():
     time.sleep(15)
     if not validated_symbols_to_scan:
         log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM"); return
+    
     log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
+    
     while True:
         try:
             logger.info("🔄 Starting new main cycle...")
@@ -1298,75 +1300,105 @@ def main_loop():
             analyze_market_and_create_dynamic_profile()
             filter_profile = get_current_filter_profile()
             active_strategy_type = filter_profile.get("strategy")
+
             if not active_strategy_type or active_strategy_type == "DISABLED":
                 logger.warning(f"🛑 Trading disabled by profile: '{filter_profile.get('name')}'. Skipping cycle."); time.sleep(300); continue
-            btc_data = get_btc_data_for_bot()
-            if btc_data is None: logger.warning("⚠️ Could not get BTC data, some features will be disabled."); time.sleep(60); continue
-            
-            symbols_with_models = [s for s in validated_symbols_to_scan if load_ml_model_bundle_from_folder(s) is not None]
-            if not symbols_with_models: logger.warning("⚠️ No symbols with models found. Skipping scan cycle."); time.sleep(300); continue
-            
-            logger.info(f"✅ Found {len(symbols_with_models)} symbols with models. Active Strategy: {active_strategy_type}")
-            
-            for symbol in random.sample(symbols_with_models, len(symbols_with_models)):
-                try:
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
-                    
-                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None or df_15m.empty: continue
-                    
-                    # --- [تعديل] --- الاعتماد على Redis لجلب السعر الحالي
-                    if not redis_client: continue
-                    entry_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                    if not entry_price_str: logger.debug(f"[{symbol}] Price not in Redis cache. Skipping."); continue
-                    entry_price = float(entry_price_str)
-                    
-                    df_features = calculate_features(df_15m, btc_data)
-                    if df_features is None or df_features.empty: continue
-                    
-                    strategy = TradingStrategy(symbol)
-                    ml_signal = strategy.generate_buy_signal(df_features)
-                    if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD: continue
-                    
-                    last_features = df_features.iloc[-1]
-                    tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
-                    if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
-                    
-                    order_book_analysis = analyze_order_book(symbol, entry_price)
-                    if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                    
-                    new_signal = {
-                        'symbol': symbol, 'strategy_name': f"{active_strategy_type}_ML",
-                        'signal_details': {
-                            'ML_Confidence_Display': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}",
-                            'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0)
-                        }, 'entry_price': entry_price, **tp_sl_data
-                    }
-                    with trading_status_lock: is_enabled = is_trading_enabled
-                    if is_enabled:
-                        quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
-                        if quantity and quantity > 0:
-                            order_result = place_order(symbol, Client.SIDE_BUY, quantity)
-                            if order_result: new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
-                            else: continue
-                        else: continue
-                    else: new_signal['is_real_trade'] = False
 
-                    saved_signal = insert_signal_into_db(new_signal)
-                    if saved_signal:
-                        with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                        send_new_signal_alert(saved_signal)
-                except Exception as e:
-                    logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
-                finally:
-                    time.sleep(0.75) # --- [تعديل] --- إضافة تأخير لتوزيع الطلبات
+            btc_data = get_btc_data_for_bot()
+            if btc_data is None: 
+                logger.warning("⚠️ Could not get BTC data, some features will be disabled."); time.sleep(60); continue
             
-            logger.info("✅ [End of Cycle] Full scan cycle finished."); perform_end_of_cycle_cleanup(); logger.info("⏳ Waiting for 60 seconds..."); time.sleep(60)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            all_symbols_with_models = [
+                s for s in validated_symbols_to_scan 
+                if os.path.exists(os.path.join(script_dir, MODEL_FOLDER, f"{BASE_ML_MODEL_NAME}_{s}.pkl"))
+            ]
+            
+            if not all_symbols_with_models:
+                logger.warning("⚠️ No symbols with models found. Skipping scan cycle."); time.sleep(300); continue
+
+            random.shuffle(all_symbols_with_models)
+            total_batches = (len(all_symbols_with_models) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
+
+            for i in range(0, len(all_symbols_with_models), SYMBOL_PROCESSING_BATCH_SIZE):
+                batch_symbols = all_symbols_with_models[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
+                batch_num = (i // SYMBOL_PROCESSING_BATCH_SIZE) + 1
+                logger.info(f"🔄 Processing Batch {batch_num}/{total_batches} with {len(batch_symbols)} symbols.")
+
+                for symbol in batch_symbols:
+                    try:
+                        with signal_cache_lock:
+                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
+                        
+                        # تحميل النموذج فقط عند الحاجة
+                        model_bundle = load_ml_model_bundle_from_folder(symbol)
+                        if not model_bundle:
+                            logger.debug(f"[{symbol}] Could not load model bundle, skipping.")
+                            continue
+
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_15m is None or df_15m.empty: continue
+                        
+                        if not redis_client: continue
+                        entry_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
+                        if not entry_price_str: logger.debug(f"[{symbol}] Price not in Redis cache. Skipping."); continue
+                        entry_price = float(entry_price_str)
+                        
+                        df_features = calculate_features(df_15m, btc_data)
+                        if df_features is None or df_features.empty: continue
+                        
+                        strategy = TradingStrategy(symbol) # يتم تحميل النموذج داخل هذه الفئة
+                        ml_signal = strategy.generate_buy_signal(df_features)
+                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD: continue
+                        
+                        last_features = df_features.iloc[-1]
+                        tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
+                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                        
+                        order_book_analysis = analyze_order_book(symbol, entry_price)
+                        if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
+                        
+                        new_signal = {
+                            'symbol': symbol, 'strategy_name': f"{active_strategy_type}_ML",
+                            'signal_details': {
+                                'ML_Confidence_Display': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}",
+                                'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0)
+                            }, 'entry_price': entry_price, **tp_sl_data
+                        }
+                        with trading_status_lock: is_enabled = is_trading_enabled
+                        if is_enabled:
+                            quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
+                            if quantity and quantity > 0:
+                                order_result = place_order(symbol, Client.SIDE_BUY, quantity)
+                                if order_result: new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
+                                else: continue
+                            else: continue
+                        else: new_signal['is_real_trade'] = False
+
+                        saved_signal = insert_signal_into_db(new_signal)
+                        if saved_signal:
+                            with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
+                            send_new_signal_alert(saved_signal)
+                    except Exception as e:
+                        logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
+                    finally:
+                        time.sleep(0.75) 
+                
+                # تنظيف الذاكرة بعد كل دفعة
+                logger.info(f"🧹 [Batch Cleanup] Cleaning up memory after batch {batch_num}/{total_batches}...")
+                ml_models_cache.clear()
+                collected = gc.collect()
+                logger.info(f"🧹 [Batch Cleanup] Garbage Collector freed {collected} objects. Model cache cleared.")
+
+            logger.info("✅ [End of Cycle] Full scan of all batches finished."); 
+            logger.info("⏳ Waiting for 60 seconds before next full scan..."); 
+            time.sleep(60)
+
         except (KeyboardInterrupt, SystemExit):
             log_and_notify("info", "Bot is shutting down by user request.", "SYSTEM"); break
         except Exception as main_err:
             log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
+
 
 # ---------------------- واجهة برمجة تطبيقات Flask ----------------------
 app = Flask(__name__)
