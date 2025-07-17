@@ -67,25 +67,26 @@ def start_web_server():
     يبدأ خادم ويب بسيط في خيط منفصل للاستجابة لطلبات HTTP.
     هذا ضروري لمنصات مثل Render لمنع توقف الخدمة.
     """
-    # احصل على المنفذ من متغيرات البيئة أو استخدم 8080 كقيمة افتراضية
     PORT = int(os.environ.get('PORT', 8080))
     
-    # معالج طلبات بسيط
     class Handler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header('Content-type', 'text/plain; charset=utf-8')
             self.end_headers()
             self.wfile.write("الخادم يعمل بشكل سليم.".encode('utf-8'))
+        
+        def log_message(self, format, *args):
+            # كتم سجلات خادم الويب لتقليل الضوضاء في المخرجات
+            return
 
-    # ابدأ الخادم في خيط منفصل
     def run_server():
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             logger.info(f"خادم الويب يعمل على المنفذ {PORT}")
             httpd.serve_forever()
 
     server_thread = threading.Thread(target=run_server)
-    server_thread.daemon = True  # اسمح للبرنامج الرئيسي بالخروج حتى لو كان الخيط يعمل
+    server_thread.daemon = True
     server_thread.start()
 
 # ---------------------- دوال مساعدة (مقتبسة من البوت) ----------------------
@@ -101,23 +102,58 @@ def get_exchange_info_map() -> None:
     except Exception as e:
         logger.error(f"فشل جلب معلومات المنصة: {e}")
 
+# --- [مُحسّن] --- تم تعديل الدالة لتصفية العملات بناءً على النماذج المتاحة أولاً
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
+    """
+    يحصل على قائمة بالعملات الصالحة للاختبار عن طريق التحقق من وجود نموذج لها أولاً،
+    ثم التحقق من وجودها في قائمة العملات، وأخيراً التحقق من أنها نشطة على المنصة.
+    """
     if not client: return []
     try:
-        if not os.path.exists(filename):
-            logger.error(f"ملف العملات '{filename}' غير موجود. يرجى إنشاء الملف وإضافة العملات.")
+        # الخطوة 1: الحصول على قائمة العملات التي لها نماذج في مجلد V8
+        if not os.path.exists(MODEL_FOLDER):
+            logger.error(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
             return []
-        with open(filename, 'r', encoding='utf-8') as f:
-            raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
-        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        
+        model_files = [f for f in os.listdir(MODEL_FOLDER) if f.endswith('.pkl')]
+        prefix = f"{BASE_ML_MODEL_NAME}_"
+        suffix = ".pkl"
+        symbols_with_models = {f.replace(prefix, "").replace(suffix, "") for f in model_files}
+        logger.info(f"تم العثور على {len(symbols_with_models)} نموذجًا في مجلد '{MODEL_FOLDER}'.")
+        if not symbols_with_models:
+            logger.error("لم يتم العثور على أي نماذج. لا يمكن المتابعة.")
+            return []
+
+        # الخطوة 2: الحصول على قائمة العملات من ملف crypto_list.txt
+        if not os.path.exists(filename):
+            logger.warning(f"ملف العملات '{filename}' غير موجود. سيتم محاولة اختبار جميع العملات التي لها نماذج.")
+            symbols_from_file = symbols_with_models
+        else:
+            with open(filename, 'r', encoding='utf-8') as f:
+                symbols_from_file = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        
+        # الخطوة 3: إيجاد التقاطع بين قائمة الملف والنماذج المتاحة
+        symbols_to_check = symbols_from_file.intersection(symbols_with_models)
+        logger.info(f"تم العثور على {len(symbols_to_check)} عملة مشتركة بين ملف '{filename}' والنماذج المتاحة.")
+
+        if not symbols_to_check:
+            logger.warning("لا توجد عملات مشتركة بين القائمة والنماذج. لن يتم اختبار أي شيء.")
+            return []
+
+        # الخطوة 4: التحقق من أن العملات نشطة وقابلة للتداول على المنصة
+        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in symbols_to_check}
         if not exchange_info_map: get_exchange_info_map()
-        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
-        validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"سيتم اختبار {len(validated)} عملة.")
+        active_trading_symbols = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
+        
+        validated = sorted(list(formatted_symbols.intersection(active_trading_symbols)))
+        
+        logger.info(f"✅ سيتم اختبار {len(validated)} عملة صالحة للتداول ولها نموذج موجود.")
         return validated
+        
     except Exception as e:
-        logger.error(f"خطأ أثناء التحقق من العملات: {e}", exc_info=True)
+        logger.error(f"❌ خطأ فادح أثناء التحقق من العملات: {e}", exc_info=True)
         return []
+
 
 def fetch_historical_data(symbol: str, interval: str, start_date_str: str) -> Optional[pd.DataFrame]:
     if not client: return None
@@ -135,7 +171,6 @@ def fetch_historical_data(symbol: str, interval: str, start_date_str: str) -> Op
         logger.error(f"خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# --- [مُصحح] --- تم تعديل الدالة لتقبل اسم العملة
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol: str) -> pd.DataFrame:
     df_calc = df.copy()
     for period in EMA_PERIODS:
@@ -161,7 +196,6 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol:
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
-    # --- [مُصحح] --- منطق جديد لحساب ارتباط البيتكوين
     if symbol == BTC_SYMBOL:
         df_calc['btc_correlation'] = 1.0
     elif btc_df is not None and not btc_df.empty:
@@ -185,6 +219,7 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     if model_name in ml_models_cache: return ml_models_cache[model_name]
     model_path = os.path.join(MODEL_FOLDER, f"{model_name}.pkl")
     if not os.path.exists(model_path):
+        # هذه الرسالة لا يجب أن تظهر الآن مع المنطق الجديد
         logger.debug(f"⚠️ نموذج التعلم الآلي غير موجود: '{model_path}'.")
         return None
     try:
@@ -204,7 +239,6 @@ class TradingStrategy:
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
-    # --- [مُصحح] --- تم تعديل الدالة لتمرير اسم العملة
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
@@ -375,7 +409,10 @@ def run_backtest():
     
     all_data = {}
     logger.info(f"جاري تحميل البيانات التاريخية لـ {len(symbols_to_test)} عملة...")
-    for symbol in symbols_to_test + [BTC_SYMBOL]:
+    # إضافة BTCUSDT لضمان تحميل بياناته دائماً
+    symbols_to_fetch = list(set(symbols_to_test + [BTC_SYMBOL]))
+
+    for symbol in symbols_to_fetch:
         df = fetch_historical_data(symbol, TIMEFRAME, start_date_str)
         if df is not None and not df.empty:
             all_data[symbol] = df
@@ -407,8 +444,9 @@ def run_backtest():
             logger.warning(f"لا توجد بيانات 4h لـ {symbol}, سيتم تجاهلها.")
             continue
         strategy = TradingStrategy(symbol)
+        # هذا التحقق الآن هو إجراء احترازي فقط، من المفترض أن يمر دائماً
         if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-            logger.warning(f"لا يوجد نموذج لـ {symbol}, سيتم تجاهلها.")
+            logger.error(f"فشل تحميل النموذج لـ {symbol} بالرغم من وجود الملف. تحقق من الملف.")
             continue
         features = strategy.get_features(df_15m, df_4h, btc_data_15m)
         if features is not None and not features.empty:
@@ -419,7 +457,7 @@ def run_backtest():
         logger.critical("فشل حساب الميزات لجميع العملات. الخروج.")
         return
 
-    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items()], axis=1)
+    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items() if symbol in symbols_to_test], axis=1)
     main_df.dropna(inplace=True)
     
     capital = INITIAL_CAPITAL
@@ -518,7 +556,6 @@ def run_backtest():
     generate_detailed_report(closed_trades, INITIAL_CAPITAL, capital)
 
 if __name__ == "__main__":
-    # --- [جديد] --- بدء تشغيل خادم الويب
     start_web_server()
     
     if not os.path.exists(MODEL_FOLDER):
