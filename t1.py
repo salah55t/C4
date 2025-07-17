@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 import pickle
 import re
-import threading
-from flask import Flask, jsonify
 from binance.client import Client
 from datetime import datetime, timedelta, timezone
 from decouple import config
@@ -19,8 +17,12 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# --- إعداد المسجل (Logger) ---
-# سنقوم بتعريف المسجل هنا، ولكن سيتم تكوينه لاحقاً للعمل مع Gunicorn
+# --- إعداد التسجيل ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
 logger = logging.getLogger('CryptoBacktesterDetailed')
 
 # --- تحميل متغيرات البيئة (اختياري للاختبار) ---
@@ -28,8 +30,7 @@ try:
     API_KEY: str = config('BINANCE_API_KEY', default='')
     API_SECRET: str = config('BINANCE_API_SECRET', default='')
 except Exception as e:
-    # استخدام print هنا لأن المسجل لم يتم تكوينه بعد
-    print(f"تحذير: لم يتم تحميل مفاتيح API من متغيرات البيئة: {e}")
+    logger.warning(f"لم يتم تحميل مفاتيح API من متغيرات البيئة: {e}")
     API_KEY, API_SECRET = '', ''
 
 # ---------------------- إعدادات الاختبار التاريخي ----------------------
@@ -73,7 +74,9 @@ def get_exchange_info_map() -> None:
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     if not client: return []
     try:
-        # تم نقل التحقق من الملف إلى دالة التشغيل الرئيسية
+        if not os.path.exists(filename):
+            logger.error(f"ملف العملات '{filename}' غير موجود. يرجى إنشاء الملف وإضافة العملات.")
+            return []
         with open(filename, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
@@ -102,6 +105,7 @@ def fetch_historical_data(symbol: str, interval: str, start_date_str: str) -> Op
         logger.error(f"خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
+# --- [مُصحح] --- تم تعديل الدالة لتقبل اسم العملة
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol: str) -> pd.DataFrame:
     df_calc = df.copy()
     for period in EMA_PERIODS:
@@ -127,6 +131,7 @@ def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame], symbol:
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['ema_200']) - 1
     
+    # --- [مُصحح] --- منطق جديد لحساب ارتباط البيتكوين
     if symbol == BTC_SYMBOL:
         df_calc['btc_correlation'] = 1.0
     elif btc_df is not None and not btc_df.empty:
@@ -149,7 +154,9 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
     model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
     if model_name in ml_models_cache: return ml_models_cache[model_name]
     model_path = os.path.join(MODEL_FOLDER, f"{model_name}.pkl")
-    # تم نقل التحقق من الملف إلى دالة التشغيل الرئيسية
+    if not os.path.exists(model_path):
+        logger.debug(f"⚠️ نموذج التعلم الآلي غير موجود: '{model_path}'.")
+        return None
     try:
         with open(model_path, 'rb') as f:
             model_bundle = pickle.load(f)
@@ -161,13 +168,13 @@ def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
         logger.error(f"❌ خطأ في تحميل النموذج لـ {symbol}: {e}", exc_info=True)
         return None
 
-# ... (بقية دوال الاستراتيجية والتحليل تبقى كما هي) ...
 class TradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
         model_bundle = load_ml_model_bundle_from_folder(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
+    # --- [مُصحح] --- تم تعديل الدالة لتمرير اسم العملة
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
@@ -358,10 +365,9 @@ def run_backtest():
     btc_data_all_tf = {}
     for tf in TIMEFRAMES_FOR_TREND_ANALYSIS:
         df_btc_tf = fetch_historical_data(BTC_SYMBOL, tf, start_date_str)
-        if df_btc_tf is not None:
-            for period in EMA_PERIODS:
-                df_btc_tf[f'ema_{period}'] = df_btc_tf['close'].ewm(span=period, adjust=False).mean()
-            btc_data_all_tf[tf] = df_btc_tf.dropna()
+        for period in EMA_PERIODS:
+            df_btc_tf[f'ema_{period}'] = df_btc_tf['close'].ewm(span=period, adjust=False).mean()
+        btc_data_all_tf[tf] = df_btc_tf.dropna()
 
     all_features = {}
     for symbol in symbols_to_test:
@@ -383,7 +389,7 @@ def run_backtest():
         logger.critical("فشل حساب الميزات لجميع العملات. الخروج.")
         return
 
-    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items() if symbol in all_features], axis=1)
+    main_df = pd.concat([df['close'].rename(f"{symbol}_close") for symbol, df in all_data.items()], axis=1)
     main_df.dropna(inplace=True)
     
     capital = INITIAL_CAPITAL
@@ -392,7 +398,6 @@ def run_backtest():
     
     logger.info(f"▶️ بدء محاكاة التداول من {main_df.index[0]} إلى {main_df.index[-1]}...")
     
-    # ... (حلقة التداول الرئيسية تبقى كما هي) ...
     for timestamp, row in main_df.iterrows():
         trades_to_close_indices = []
         for i, trade in enumerate(open_trades):
@@ -481,66 +486,9 @@ def run_backtest():
             closed_trades.append(trade)
 
     generate_detailed_report(closed_trades, INITIAL_CAPITAL, capital)
-    logger.info("✅ اكتمل الاختبار التاريخي بنجاح.")
-
-
-# --- [مُحسّن] جزء خادم الويب باستخدام فلاسك ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """نقطة نهاية بسيطة للتأكد من أن الخدمة تعمل."""
-    return "خدمة الاختبار التاريخي تعمل. أرسل طلب GET إلى /run لبدء الاختبار.", 200
-
-def run_backtest_in_background():
-    """[مُحسّن] دالة وسيطة لتشغيل الاختبار في خيط منفصل مع التحقق من الملفات."""
-    logger.info("التحقق من الملفات المطلوبة قبل بدء الاختبار في الخلفية...")
-    
-    # التحقق من وجود مجلد النماذج
-    if not os.path.exists(MODEL_FOLDER):
-        logger.critical(f"خطأ فادح: مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
-        return # إيقاف التنفيذ
-        
-    # التحقق من وجود ملف العملات
-    if not os.path.exists('crypto_list.txt'):
-        logger.critical("خطأ فادح: ملف 'crypto_list.txt' غير موجود. لا يمكن المتابعة.")
-        return # إيقاف التنفيذ
-
-    logger.info("تم العثور على الملفات المطلوبة. بدء عملية الاختبار التاريخي الآن...")
-    try:
-        run_backtest()
-    except Exception as e:
-        logger.error(f"حدث خطأ فادح وغير متوقع أثناء تشغيل الاختبار في الخلفية: {e}", exc_info=True)
-
-@app.route('/run')
-def trigger_backtest():
-    """
-    يشغل الاختبار التاريخي في خيط خلفي (background thread).
-    """
-    # استخدام مسجل التطبيق هنا لأنه مرتبط بـ Gunicorn
-    app.logger.info("تم استلام طلب لبدء الاختبار التاريخي.")
-    
-    thread = threading.Thread(target=run_backtest_in_background)
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({"status": "success", "message": "بدأ الاختبار في الخلفية. تحقق من سجلات الخدمة (Logs) للمتابعة والنتائج."})
-
 
 if __name__ == "__main__":
-    # --- [مُعدّل] إعداد التسجيل للعمل مع Gunicorn/Render ---
-    # Gunicorn يدير معالجات السجل. نحن نربط سجلات تطبيقنا به.
-    gunicorn_logger = logging.getLogger('gunicorn.error')
-    
-    # ربط سجل Flask
-    app.logger.handlers = gunicorn_logger.handlers
-    app.logger.setLevel(gunicorn_logger.level)
-    
-    # ربط سجل الباك تستر الرئيسي
-    logger.handlers = gunicorn_logger.handlers
-    logger.setLevel(gunicorn_logger.level)
-    
-    logger.info("تم إعداد وتكوين نظام التسجيل بنجاح للعمل مع Gunicorn.")
-
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    if not os.path.exists(MODEL_FOLDER):
+        logger.critical(f"مجلد النماذج '{MODEL_FOLDER}' غير موجود. لا يمكن المتابعة.")
+    else:
+        run_backtest()
