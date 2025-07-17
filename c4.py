@@ -1015,7 +1015,7 @@ def determine_market_trend_score():
 
             # النقطة الثالثة: EMA50 فوق/تحت EMA200
             if ema50 > ema200: tf_score += 1
-            elif ema50 < ema50: tf_score -= 1
+            elif ema50 < ema200: tf_score -= 1
 
             label = "محايد"
             if tf_score >= 2: label = "صاعد"
@@ -1974,6 +1974,18 @@ def run_flask():
         app.run(host=host, port=port)
 
 # ---------------------- نقطة انطلاق البرنامج ----------------------
+def run_websocket_manager():
+    if not client or not validated_symbols_to_scan:
+        logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized.")
+        return
+    logger.info("📡 [WebSocket] Starting WebSocket Manager...")
+    twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
+    twm.start()
+    streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
+    twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
+    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
+    twm.join()
+
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
