@@ -53,10 +53,10 @@ BTC_SYMBOL: str = 'BTCUSDT'
 ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_PERIODS: List[int] = [21, 50, 200]
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
-BUY_CONFIDENCE_THRESHOLD = 0.80 
+BUY_CONFIDENCE_THRESHOLD = 0.80
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
-MAX_TRADE_DURATION_CANDLES: int = 96 
+MAX_TRADE_DURATION_CANDLES: int = 96
 BACKTEST_BATCH_SIZE: int = 5
 
 # --- متغيرات الاتصال ---
@@ -274,7 +274,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
     for attempt in range(retries):
         try:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
-            conn.autocommit = True 
+            conn.autocommit = True
             logger.info("✅ [DB] تم الاتصال بنجاح بقاعدة البيانات.")
             create_backtest_results_table()
             return
@@ -611,6 +611,16 @@ def run_backtest_for_symbol(symbol: str, start_date: str, end_date: str):
                 "filter_btc_correlation": last_features.get('btc_correlation'),
                 "filter_volatility_pct": (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
             }
+            
+            # --- [FIX] تحويل أنواع بيانات NumPy إلى أنواع Python الأصلية ---
+            # تقوم قاعدة البيانات برفض أنواع مثل numpy.float64 مباشرة.
+            # نحولها إلى float و int و None قبل إرسالها.
+            for key, value in result_row.items():
+                if pd.isna(value):
+                    result_row[key] = None
+                elif isinstance(value, np.generic):
+                    result_row[key] = value.item()
+            
             results_to_insert.append(result_row)
 
     if results_to_insert:
@@ -724,7 +734,7 @@ def get_backtest_results():
         return jsonify({"error": "Internal error fetching results"}), 500
 
 def run_flask():
-    port = int(os.environ.get('PORT', 10001)) 
+    port = int(os.environ.get('PORT', 10001))
     host = "0.0.0.0"
     logger.info(f"✅ إعداد لوحة التحكم على {host}:{port}")
     app.run(host=host, port=port)
@@ -750,7 +760,7 @@ if __name__ == "__main__":
     backtest_thread.start()
     
     try:
-        backtest_thread.join() 
+        backtest_thread.join()
         logger.info("✅✅✅ اكتمل الاختبار الخلفي. يمكنك الآن تحليل النتائج من لوحة التحكم. ✅✅✅")
         while True:
             time.sleep(60)
