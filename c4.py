@@ -151,11 +151,15 @@ REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً", "BTC Correlation": "ارتباط ضعيف بالبيتكوين",
     "RRR Filter": "نسبة المخاطرة/العائد غير كافية", "Reversal Volume Filter": "فوليوم الانعكاس ضعيف", "Momentum/Strength Filter": "فلتر الزخم والقوة",
     "Peak Filter": "فلتر القمة (السعر قريب جداً من القمة الأخيرة)", "Invalid ATR for TP/SL": "ATR غير صالح لحساب الأهداف",
-    "ML Model Rejected": "نموذج التعلم الآلي رفض الإشارة", # تحديث سبب الرفض ليكون أكثر عمومية
+    "ML Model Predicted No Buy": "نموذج التعلم الآلي لم يتنبأ بالشراء", # تحديث سبب الرفض ليكون أكثر وضوحاً
+    "ML Confidence Too Low": "ثقة نموذج التعلم الآلي منخفضة جداً", # سبب رفض جديد
     "Invalid Position Size": "حجم الصفقة غير صالح (الوقف تحت الدخول)",
     "Lot Size Adjustment Failed": "فشل ضبط حجم العقد (LOT_SIZE)", "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ", "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات (ضغط بيع)",
-    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)"
+    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)",
+    "No Historical Data": "لا توجد بيانات تاريخية كافية للعملة", # سبب رفض جديد
+    "No Current Price": "لا يوجد سعر حالي للعملة في ذاكرة التخزين المؤقت", # سبب رفض جديد
+    "Feature Calculation Failed": "فشل حساب الميزات الفنية" # سبب رفض جديد
 }
 
 # --- [إضافة] --- الدوال المساعدة المفقودة
@@ -604,7 +608,7 @@ function toggleMomentumStrategy() {
     });
 }
 
-// Custom Alert/Confirm Modals (بدلاً من alert() و confirm())
+# Custom Alert/Confirm Modals (بدلاً من alert() و confirm())
 function showCustomAlert(message) {
     const modalHtml = `
         <div id="customAlertModal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
@@ -1096,7 +1100,7 @@ class TradingStrategy:
             
             # التحقق من تنبؤ النموذج وثقته هنا
             if prediction != 1: # إذا لم يتنبأ النموذج بـ "شراء"
-                log_rejection(self.symbol, "ML Model Rejected", {"prediction": int(prediction), "confidence": f"{confidence:.2%}"})
+                log_rejection(self.symbol, "ML Model Predicted No Buy", {"prediction": int(prediction), "confidence": f"{confidence:.2%}"})
                 return None
             
             logger.debug(f"ℹ️ [{self.symbol}] ML Model predicted 'BUY' with {confidence:.2%} confidence.")
@@ -1111,7 +1115,7 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
     
     # فلتر ثقة نموذج التعلم الآلي
     if ml_confidence < filters.get('ml_confidence', 0.0):
-        log_rejection(symbol, "ML Model Rejected", {"confidence": f"{ml_confidence:.2%}", "min": f"{filters.get('ml_confidence', 0.0):.2%}"}); return False
+        log_rejection(symbol, "ML Confidence Too Low", {"confidence": f"{ml_confidence:.2%}", "min": f"{filters.get('ml_confidence', 0.0):.2%}"}); return False
 
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
     if volatility < filters.get('min_volatility_pct', 0.0):
@@ -1365,7 +1369,10 @@ def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
     time.sleep(15)
     if not validated_symbols_to_scan:
-        log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM"); return
+        log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM");
+        logger.critical("❌ [Main Loop] No validated symbols to scan. Check 'crypto_list.txt' and exchange info.")
+        time.sleep(300) # Sleep to prevent rapid logging
+        return
     
     log_and_notify("info", f"✅ Starting main scan loop for {len(validated_symbols_to_scan)} symbols.", "SYSTEM")
     
@@ -1382,7 +1389,8 @@ def main_loop():
 
             btc_data = get_btc_data_for_bot()
             if btc_data is None: 
-                logger.warning("⚠️ Could not get BTC data, some features will be disabled."); time.sleep(60); continue
+                logger.warning("⚠️ [Main Loop] Could not get BTC data, some features might be disabled or incorrect. Retrying in 60s.");
+                time.sleep(60); continue
             
             script_dir = os.path.dirname(os.path.abspath(__file__))
             all_symbols_with_models = [
@@ -1391,7 +1399,9 @@ def main_loop():
             ]
             
             if not all_symbols_with_models:
-                logger.warning("⚠️ No symbols with models found. Skipping scan cycle."); time.sleep(300); continue
+                logger.warning("⚠️ [Main Loop] No symbols with ML models found in the specified folder. Skipping scan cycle.");
+                logger.warning(f"💡 Ensure '{MODEL_FOLDER}' folder exists and contains '{BASE_ML_MODEL_NAME}_SYMBOL.pkl' files for your symbols.")
+                time.sleep(300); continue
 
             random.shuffle(all_symbols_with_models)
             total_batches = (len(all_symbols_with_models) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
@@ -1404,44 +1414,61 @@ def main_loop():
                 for symbol in batch_symbols:
                     try:
                         with signal_cache_lock:
-                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
+                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
+                                logger.debug(f"[{symbol}] Skipping: Already open or max open trades reached.")
+                                continue
                         
                         # تحميل النموذج فقط عند الحاجة
                         model_bundle = load_ml_model_bundle_from_folder(symbol)
                         if not model_bundle:
                             logger.debug(f"[{symbol}] Could not load model bundle, skipping.")
+                            # لا نسجل رفض هنا لأنه قد لا يكون هناك نموذج لهذه العملة أصلاً
                             continue
 
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty: continue
+                        if df_15m is None or df_15m.empty:
+                            log_rejection(symbol, "No Historical Data", {"timeframe": SIGNAL_GENERATION_TIMEFRAME, "days": SIGNAL_GENERATION_LOOKBACK_DAYS})
+                            continue
                         
-                        if not redis_client: continue
+                        if not redis_client:
+                            logger.error(f"[{symbol}] Redis client not initialized. Cannot fetch current price.")
+                            continue # لا نسجل رفض هنا، المشكلة أعمق
+                        
                         entry_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                        if not entry_price_str: logger.debug(f"[{symbol}] Price not in Redis cache. Skipping."); continue
+                        if not entry_price_str:
+                            log_rejection(symbol, "No Current Price", {"detail": "Price not in Redis cache."})
+                            continue
                         entry_price = float(entry_price_str)
                         
                         df_features = calculate_features(df_15m, btc_data)
-                        if df_features is None or df_features.empty: continue
+                        if df_features is None or df_features.empty:
+                            log_rejection(symbol, "Feature Calculation Failed", {"detail": "Could not calculate features from historical data."})
+                            continue
                         
                         strategy = TradingStrategy(symbol) # يتم تحميل النموذج داخل هذه الفئة
-                        ml_signal = strategy.generate_buy_signal(df_features)
+                        ml_signal = strategy.generate_buy_signal(df_features) # هذا سيقوم بتسجيل الرفض إذا لم يتنبأ بـ "شراء"
                         
                         # التحقق من إشارة ML وثقتها بعد توليدها
-                        if not ml_signal or ml_signal['confidence'] < filter_profile.get("filters", {}).get("ml_confidence", 0.0):
-                            # يتم تسجيل الرفض داخل generate_buy_signal إذا لم يتنبأ بـ "شراء"
-                            # هنا نسجل الرفض إذا كانت الثقة أقل من المطلوب
-                            if ml_signal:
-                                log_rejection(symbol, "ML Model Rejected", {"confidence": f"{ml_signal['confidence']:.2%}", "min_required": f"{filter_profile.get('filters', {}).get('ml_confidence', 0.0):.2%}"})
+                        if not ml_signal: # إذا لم يتم توليد إشارة ML أصلاً (تم رفضها داخل generate_buy_signal)
                             continue
+                        
+                        # هذا التحقق سيتم تسجيله الآن بواسطة passes_filters
+                        # if ml_signal['confidence'] < filter_profile.get("filters", {}).get("ml_confidence", 0.0):
+                        #     log_rejection(symbol, "ML Confidence Too Low", {"confidence": f"{ml_signal['confidence']:.2%}", "min_required": f"{filter_profile.get('filters', {}).get('ml_confidence', 0.0):.2%}"})
+                        #     continue
                         
                         last_features = df_features.iloc[-1]
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
                         
                         # تمرير ثقة ML إلى دالة passes_filters
-                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m, ml_signal['confidence']): continue
+                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m, ml_signal['confidence']):
+                            # يتم تسجيل الرفض داخل passes_filters
+                            continue
                         
                         order_book_analysis = analyze_order_book(symbol, entry_price)
-                        if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
+                        if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile):
+                            # يتم تسجيل الرفض داخل passes_order_book_check
+                            continue
                         
                         new_signal = {
                             'symbol': symbol, 'strategy_name': f"{active_strategy_type}_ML",
