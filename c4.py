@@ -159,7 +159,8 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)",
     "No Historical Data": "لا توجد بيانات تاريخية كافية للعملة", # سبب رفض جديد
     "No Current Price": "لا يوجد سعر حالي للعملة في ذاكرة التخزين المؤقت", # سبب رفض جديد
-    "Feature Calculation Failed": "فشل حساب الميزات الفنية" # سبب رفض جديد
+    "Feature Calculation Failed": "فشل حساب الميزات الفنية", # سبب رفض جديد
+    "Redis Cache Empty": "ذاكرة التخزين المؤقت لـ Redis فارغة" # سبب رفض جديد
 }
 
 # --- [إضافة] --- الدوال المساعدة المفقودة
@@ -584,27 +585,27 @@ function updateMomentumToggle(is_forced) {
 function toggleTrading() {
     const toggle = document.getElementById('trading-toggle');
     const msg = toggle.checked ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟" : "هل أنت متأكد من إيقاف التداول الحقيقي؟";
-    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    # استخدام نافذة مودال مخصصة بدلاً من confirm()
     showCustomConfirm(msg, () => {
         apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => {
             if (data.message) { showCustomAlert(data.message); updateTradingStatus(); } 
             else if (data.error) { showCustomAlert(`خطأ: ${data.error}`); updateTradingStatus(); }
         });
     }, () => {
-        toggle.checked = !toggle.checked; // إعادة التبديل إذا تم الإلغاء
+        toggle.checked = !toggle.checked; # إعادة التبديل إذا تم الإلغاء
     });
 }
 function toggleMomentumStrategy() {
     const toggle = document.getElementById('force-momentum-toggle');
     const msg = toggle.checked ? "هل أنت متأكد من فرض استراتيجية الزخم؟" : "هل أنت متأكد من العودة إلى الوضع التلقائي؟";
-    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    # استخدام نافذة مودال مخصصة بدلاً من confirm()
     showCustomConfirm(msg, () => {
         apiFetch('/api/strategy/force_momentum/toggle', { method: 'POST' }).then(data => {
             if (data.message) { showCustomAlert(data.message); updateMomentumToggle(data.is_forced); } 
             else if (data.error) { showCustomAlert(`خطأ: ${data.error}`); updateMomentumToggle(!toggle.checked); }
         });
     }, () => {
-        toggle.checked = !toggle.checked; // إعادة التبديل إذا تم الإلغاء
+        toggle.checked = !toggle.checked; # إعادة التبديل إذا تم الإلغاء
     });
 }
 
@@ -742,7 +743,7 @@ function updateList(endpoint, listId, formatter) {
     });
 }
 function manualCloseSignal(signalId) {
-    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    # استخدام نافذة مودال مخصصة بدلاً من confirm()
     showCustomConfirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`, () => {
         fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
             showCustomAlert(data.message || data.error);
@@ -1170,7 +1171,9 @@ def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
     if not isinstance(msg, list) or not redis_client: return
     try:
         price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
-        if price_updates: redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
+        if price_updates:
+            redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
+            logger.debug(f"✅ [WebSocket Price Updater] Stored {len(price_updates)} price updates in Redis.")
     except Exception as e: logger.error(f"❌ [WebSocket Price Updater] Error: {e}", exc_info=True)
 
 def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
@@ -1367,9 +1370,10 @@ def perform_end_of_cycle_cleanup():
 # ---------------------- حلقة العمل الرئيسية ----------------------
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
-    time.sleep(15)
+    time.sleep(30) # زيادة وقت الانتظار الأولي
+
     if not validated_symbols_to_scan:
-        log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM");
+        log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM")
         logger.critical("❌ [Main Loop] No validated symbols to scan. Check 'crypto_list.txt' and exchange info.")
         time.sleep(300) # Sleep to prevent rapid logging
         return
@@ -1386,6 +1390,21 @@ def main_loop():
 
             if not active_strategy_type or active_strategy_type == "DISABLED":
                 logger.warning(f"🛑 Trading disabled by profile: '{filter_profile.get('name')}'. Skipping cycle."); time.sleep(300); continue
+
+            # التحقق من أن Redis يحتوي على أسعار قبل البدء في معالجة الرموز
+            if redis_client:
+                # محاولة جلب بعض الأسعار للتأكد من أن Redis ليس فارغًا تمامًا
+                test_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
+                if not test_prices or len(test_prices) < len(validated_symbols_to_scan) * 0.5: # على الأقل نصف الرموز لديها أسعار
+                    logger.warning(f"⚠️ [Main Loop] Redis price cache is largely empty ({len(test_prices)}/{len(validated_symbols_to_scan)} symbols have prices). Waiting for WebSocket data.")
+                    log_rejection("N/A", "Redis Cache Empty", {"detail": "Waiting for WebSocket to populate prices."})
+                    time.sleep(60) # انتظر أكثر لـ WebSocket
+                    continue
+            else:
+                logger.error("❌ [Main Loop] Redis client is not initialized. Cannot proceed.")
+                time.sleep(60)
+                continue
+
 
             btc_data = get_btc_data_for_bot()
             if btc_data is None: 
@@ -1451,11 +1470,6 @@ def main_loop():
                         # التحقق من إشارة ML وثقتها بعد توليدها
                         if not ml_signal: # إذا لم يتم توليد إشارة ML أصلاً (تم رفضها داخل generate_buy_signal)
                             continue
-                        
-                        # هذا التحقق سيتم تسجيله الآن بواسطة passes_filters
-                        # if ml_signal['confidence'] < filter_profile.get("filters", {}).get("ml_confidence", 0.0):
-                        #     log_rejection(symbol, "ML Confidence Too Low", {"confidence": f"{ml_signal['confidence']:.2%}", "min_required": f"{filter_profile.get('filters', {}).get('ml_confidence', 0.0):.2%}"})
-                        #     continue
                         
                         last_features = df_features.iloc[-1]
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
@@ -1675,9 +1689,15 @@ def run_websocket_manager():
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
+    
+    # التحقق مما إذا كان WebSocket Manager قد بدأ بنجاح
+    if not twm.is_alive():
+        logger.critical("❌ [WebSocket] ThreadedWebsocketManager failed to start. Check API keys and network.")
+        return
+
     twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
-    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
-    twm.join()
+    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams. Waiting for data...")
+    twm.join() # هذا سيجعل الثريد يعمل في الخلفية
 
 def initialize_bot_services():
     global client, validated_symbols_to_scan
@@ -1691,8 +1711,14 @@ def initialize_bot_services():
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         
-        Thread(target=determine_market_trend_score, daemon=True).start()
+        # تشغيل WebSocket Manager في ثريد منفصل
         Thread(target=run_websocket_manager, daemon=True).start()
+        
+        # إعطاء بعض الوقت لـ WebSocket Manager لبدء جلب البيانات
+        logger.info("⏳ Giving WebSocket Manager some time to populate Redis with initial prices (10 seconds)...")
+        time.sleep(10) # انتظار إضافي هنا
+        
+        Thread(target=determine_market_trend_score, daemon=True).start()
         Thread(target=trade_monitoring_loop, daemon=True).start()
         Thread(target=main_loop, daemon=True).start()
         logger.info("✅ [Bot Services] All background services started successfully.")
