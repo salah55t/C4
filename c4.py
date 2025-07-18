@@ -56,38 +56,44 @@ except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# ---------------------- ملفات الفلاتر الديناميكية ----------------------
+# ---------------------- ملفات الفلاتر الديناميكية (القيم المثلى) ----------------------
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي (مستخلص من البيانات)", "strategy": "MOMENTUM",
         "filters": {
-            "adx": 30.0, "rel_vol": 0.5, "rsi_range": (55, 95), "roc": 0.1, "slope": 0.01,
-            "min_rrr": 1.5, "min_volatility_pct": 0.40, "min_btc_correlation": 0.5, "min_bid_ask_ratio": 1.2
+            "adx": 35.0, "rel_vol": 0.8, "rsi_range": (60, 90), "roc": 0.5, "slope": 0.05, # قيم مثلى للسوق الصاعد القوي
+            "min_rrr": 1.8, "min_volatility_pct": 0.50, "min_btc_correlation": 0.6, "min_bid_ask_ratio": 1.5,
+            "ml_confidence": 0.90 # إضافة ثقة نموذج التعلم الآلي كفلتر
         }},
     "UPTREND": {
         "description": "اتجاه صاعد (مستخلص من البيانات)", "strategy": "MOMENTUM",
         "filters": {
-            "adx": 22.0, "rel_vol": 0.3, "rsi_range": (50, 90), "roc": 0.0, "slope": 0.0,
-            "min_rrr": 1.4, "min_volatility_pct": 0.30, "min_btc_correlation": 0.3, "min_bid_ask_ratio": 1.1
+            "adx": 25.0, "rel_vol": 0.5, "rsi_range": (55, 85), "roc": 0.2, "slope": 0.02, # قيم مثلى للسوق الصاعد
+            "min_rrr": 1.5, "min_volatility_pct": 0.40, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.3,
+            "ml_confidence": 0.85
         }},
     "RANGING": {
-        "description": "اتجاه عرضي/محايد", "strategy": "MOMENTUM",
+        "description": "اتجاه عرضي/محايد", "strategy": "MOMENTUM", # يمكن تغيير الاستراتيجية هنا إذا كان هناك استراتيجية خاصة بالرينج
         "filters": {
-            "adx": 18.0, "rel_vol": 0.2, "rsi_range": (45, 75), "roc": 0.05, "slope": 0.0,
-            "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.2, "min_bid_ask_ratio": 1.2
+            "adx": 20.0, "rel_vol": 0.3, "rsi_range": (45, 70), "roc": 0.0, "slope": 0.0, # قيم مثلى للسوق المحايد
+            "min_rrr": 1.5, "min_volatility_pct": 0.30, "min_btc_correlation": -0.1, "min_bid_ask_ratio": 1.2,
+            "ml_confidence": 0.80
         }},
     "DOWNTREND": {
-        "description": "اتجاه هابط (مراقبة الانعكاس)", "strategy": "REVERSAL",
+        "description": "اتجاه هابط (مراقبة الانعكاس)", "strategy": "REVERSAL", # استراتيجية الانعكاس
         "filters": {
-            "min_rrr": 2.0, "min_volatility_pct": 0.5, "min_btc_correlation": -0.5,
-            "min_relative_volume": 1.5, "min_bid_ask_ratio": 1.5
+            "adx": 30.0, "rel_vol": 1.0, "rsi_range": (10, 40), "roc": -0.5, "slope": -0.05, # قيم مثلى للسوق الهابط (للانعكاس)
+            "min_rrr": 2.0, "min_volatility_pct": 0.6, "min_btc_correlation": -0.3, # الارتباط قد يكون سلبياً
+            "min_bid_ask_ratio": 1.8, # نسبة العرض/الطلب أعلى للانعكاس الصاعد
+            "ml_confidence": 0.92 # ثقة أعلى للانعكاس
         }},
     "STRONG_DOWNTREND": { "description": "اتجاه هابط قوي (التداول متوقف)", "strategy": "DISABLED", "filters": {} },
     "WEEKEND": {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)", "strategy": "MOMENTUM",
         "filters": {
             "adx": 17.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.1, "slope": 0.0,
-            "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.4, "min_bid_ask_ratio": 1.4
+            "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.4, "min_bid_ask_ratio": 1.4,
+            "ml_confidence": 0.75
         }}
 }
 
@@ -109,7 +115,7 @@ ADX_PERIOD: int = 14; RSI_PERIOD: int = 14; ATR_PERIOD: int = 14
 EMA_PERIODS: List[int] = [21, 50, 200]
 REL_VOL_PERIOD: int = 30; MOMENTUM_PERIOD: int = 12; EMA_SLOPE_PERIOD: int = 5
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80
+# BUY_CONFIDENCE_THRESHOLD = 0.80 # تم نقل هذا إلى FILTER_PROFILES
 ATR_FALLBACK_SL_MULTIPLIER: float = 1.5
 ATR_FALLBACK_TP_MULTIPLIER: float = 2.2
 USE_TRAILING_STOP_LOSS: bool = True
@@ -136,7 +142,7 @@ validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}; signal_cache_lock = Lock()
 notifications_cache = deque(maxlen=50); notifications_lock = Lock()
 signals_pending_closure: Set[int] = set(); closure_lock = Lock()
-rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
+rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock() # سجلات الرفض
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"trend_score": 0, "trend_label": "INITIALIZING", "details_by_tf": {}, "last_updated": None}; market_state_lock = Lock()
 dynamic_filter_profile_cache: Dict[str, Any] = {}; last_dynamic_filter_analysis_time: float = 0; dynamic_filter_lock = Lock()
@@ -145,7 +151,8 @@ REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً", "BTC Correlation": "ارتباط ضعيف بالبيتكوين",
     "RRR Filter": "نسبة المخاطرة/العائد غير كافية", "Reversal Volume Filter": "فوليوم الانعكاس ضعيف", "Momentum/Strength Filter": "فلتر الزخم والقوة",
     "Peak Filter": "فلتر القمة (السعر قريب جداً من القمة الأخيرة)", "Invalid ATR for TP/SL": "ATR غير صالح لحساب الأهداف",
-    "Reversal Signal Rejected by ML Model": "نموذج التعلم الآلي رفض إشارة الانعكاس", "Invalid Position Size": "حجم الصفقة غير صالح (الوقف تحت الدخول)",
+    "ML Model Rejected": "نموذج التعلم الآلي رفض الإشارة", # تحديث سبب الرفض ليكون أكثر عمومية
+    "Invalid Position Size": "حجم الصفقة غير صالح (الوقف تحت الدخول)",
     "Lot Size Adjustment Failed": "فشل ضبط حجم العقد (LOT_SIZE)", "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ", "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات (ضغط بيع)",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)"
@@ -573,23 +580,74 @@ function updateMomentumToggle(is_forced) {
 function toggleTrading() {
     const toggle = document.getElementById('trading-toggle');
     const msg = toggle.checked ? "هل أنت متأكد من تفعيل التداول بأموال حقيقية؟" : "هل أنت متأكد من إيقاف التداول الحقيقي؟";
-    if (confirm(msg)) {
+    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    showCustomConfirm(msg, () => {
         apiFetch('/api/trading/toggle', { method: 'POST' }).then(data => {
-            if (data.message) { alert(data.message); updateTradingStatus(); } 
-            else if (data.error) { alert(`خطأ: ${data.error}`); updateTradingStatus(); }
+            if (data.message) { showCustomAlert(data.message); updateTradingStatus(); } 
+            else if (data.error) { showCustomAlert(`خطأ: ${data.error}`); updateTradingStatus(); }
         });
-    } else { toggle.checked = !toggle.checked; }
+    }, () => {
+        toggle.checked = !toggle.checked; // إعادة التبديل إذا تم الإلغاء
+    });
 }
 function toggleMomentumStrategy() {
     const toggle = document.getElementById('force-momentum-toggle');
     const msg = toggle.checked ? "هل أنت متأكد من فرض استراتيجية الزخم؟" : "هل أنت متأكد من العودة إلى الوضع التلقائي؟";
-    if (confirm(msg)) {
+    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    showCustomConfirm(msg, () => {
         apiFetch('/api/strategy/force_momentum/toggle', { method: 'POST' }).then(data => {
-            if (data.message) { alert(data.message); updateMomentumToggle(data.is_forced); } 
-            else if (data.error) { alert(`خطأ: ${data.error}`); updateMomentumToggle(!toggle.checked); }
+            if (data.message) { showCustomAlert(data.message); updateMomentumToggle(data.is_forced); } 
+            else if (data.error) { showCustomAlert(`خطأ: ${data.error}`); updateMomentumToggle(!toggle.checked); }
         });
-    } else { toggle.checked = !toggle.checked; }
+    }, () => {
+        toggle.checked = !toggle.checked; // إعادة التبديل إذا تم الإلغاء
+    });
 }
+
+// Custom Alert/Confirm Modals (بدلاً من alert() و confirm())
+function showCustomAlert(message) {
+    const modalHtml = `
+        <div id="customAlertModal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full text-center border border-gray-700">
+                <p class="text-lg text-white mb-4">${message}</p>
+                <button onclick="document.getElementById('customAlertModal').remove()" class="bg-accent-blue hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">
+                    حسناً
+                </button>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+function showCustomConfirm(message, onConfirm, onCancel) {
+    const modalHtml = `
+        <div id="customConfirmModal" class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+            <div class="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full text-center border border-gray-700">
+                <p class="text-lg text-white mb-4">${message}</p>
+                <div class="flex justify-center space-x-4 space-x-reverse">
+                    <button id="confirmBtn" class="bg-accent-green hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md">
+                        تأكيد
+                    </button>
+                    <button id="cancelBtn" class="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md">
+                        إلغاء
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    document.getElementById('confirmBtn').onclick = () => {
+        document.getElementById('customConfirmModal').remove();
+        if (onConfirm) onConfirm();
+    };
+    document.getElementById('cancelBtn').onclick = () => {
+        document.getElementById('customConfirmModal').remove();
+        if (onCancel) onCancel();
+    };
+}
+
+
 function updateStats() {
     apiFetch('/api/stats').then(data => {
         if (!data || data.error) return;
@@ -680,12 +738,13 @@ function updateList(endpoint, listId, formatter) {
     });
 }
 function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
+    // استخدام نافذة مودال مخصصة بدلاً من confirm()
+    showCustomConfirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`, () => {
         fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
-            alert(data.message || data.error);
+            showCustomAlert(data.message || data.error);
             refreshData();
         });
-    }
+    });
 }
 function refreshData() {
     updateMarketStatus();
@@ -1033,18 +1092,27 @@ class TradingStrategy:
             last_row = df_features.iloc[[-1]][self.feature_names]
             features_scaled = self.scaler.transform(last_row)
             prediction = self.ml_model.predict(features_scaled)[0]
-            if prediction != 1: return None
             confidence = float(np.max(self.ml_model.predict_proba(features_scaled)[0]))
+            
+            # التحقق من تنبؤ النموذج وثقته هنا
+            if prediction != 1: # إذا لم يتنبأ النموذج بـ "شراء"
+                log_rejection(self.symbol, "ML Model Rejected", {"prediction": int(prediction), "confidence": f"{confidence:.2%}"})
+                return None
+            
             logger.debug(f"ℹ️ [{self.symbol}] ML Model predicted 'BUY' with {confidence:.2%} confidence.")
             return {'prediction': int(prediction), 'confidence': confidence}
         except Exception as e:
             logger.warning(f"⚠️ [{self.symbol}] ML Signal Generation Error: {e}")
             return None
 
-def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
+def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame, ml_confidence: float) -> bool:
     filters = profile.get("filters", {})
     if not filters: log_rejection(symbol, "Filters Not Loaded", {"profile": profile.get('name')}); return False
     
+    # فلتر ثقة نموذج التعلم الآلي
+    if ml_confidence < filters.get('ml_confidence', 0.0):
+        log_rejection(symbol, "ML Model Rejected", {"confidence": f"{ml_confidence:.2%}", "min": f"{filters.get('ml_confidence', 0.0):.2%}"}); return False
+
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
     if volatility < filters.get('min_volatility_pct', 0.0):
         log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%", "min": f"{filters.get('min_volatility_pct', 0.0):.2f}%"}); return False
@@ -1069,6 +1137,14 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
                 highest_high = lookback_data['high'].max()
                 if entry_price >= (highest_high * PEAK_DISTANCE_THRESHOLD_PCT):
                     log_rejection(symbol, "Peak Filter", {"entry": f"{entry_price:.4f}", "peak_limit": f"{highest_high * PEAK_DISTANCE_THRESHOLD_PCT:.4f}"}); return False
+    elif profile.get("strategy") == "REVERSAL":
+        # فلاتر خاصة باستراتيجية الانعكاس (يمكن تعديلها بناءً على التحليل)
+        adx, rel_vol, rsi = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0)
+        roc, slope = last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
+        rsi_min, rsi_max = filters.get('rsi_range', (0, 100))
+        # مثال: قد تتطلب استراتيجية الانعكاس RSI منخفضاً جداً و ADX مرتفعاً
+        if not (adx >= filters.get('adx', 0) and rel_vol >= filters.get('rel_vol', 0) and rsi_min <= rsi < rsi_max and roc < filters.get('roc', 100) and slope < filters.get('slope', 100)):
+             log_rejection(symbol, "Reversal Signal Filter", {"ADX": f"{adx:.2f}", "Vol": f"{rel_vol:.2f}", "RSI": f"{rsi:.2f}", "ROC": f"{roc:.2f}", "Slope": f"{slope:.6f}"}); return False
     return True
 
 def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dict) -> bool:
@@ -1349,11 +1425,20 @@ def main_loop():
                         
                         strategy = TradingStrategy(symbol) # يتم تحميل النموذج داخل هذه الفئة
                         ml_signal = strategy.generate_buy_signal(df_features)
-                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD: continue
+                        
+                        # التحقق من إشارة ML وثقتها بعد توليدها
+                        if not ml_signal or ml_signal['confidence'] < filter_profile.get("filters", {}).get("ml_confidence", 0.0):
+                            # يتم تسجيل الرفض داخل generate_buy_signal إذا لم يتنبأ بـ "شراء"
+                            # هنا نسجل الرفض إذا كانت الثقة أقل من المطلوب
+                            if ml_signal:
+                                log_rejection(symbol, "ML Model Rejected", {"confidence": f"{ml_signal['confidence']:.2%}", "min_required": f"{filter_profile.get('filters', {}).get('ml_confidence', 0.0):.2%}"})
+                            continue
                         
                         last_features = df_features.iloc[-1]
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
-                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                        
+                        # تمرير ثقة ML إلى دالة passes_filters
+                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m, ml_signal['confidence']): continue
                         
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
@@ -1594,3 +1679,4 @@ if __name__ == "__main__":
     initialization_thread.start()
     run_flask()
     logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
+
