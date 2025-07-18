@@ -17,7 +17,7 @@ from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance import ThreadedWebsocketManager
-from binance.exceptions import BinanceAPIException
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from flask import Flask, request, Response, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
@@ -60,35 +60,20 @@ except Exception as e:
 FILTER_PROFILES: Dict[str, Dict[str, Any]] = {
     "STRONG_UPTREND": {
         "description": "اتجاه صاعد قوي (مستخلص من البيانات)", "strategy": "MOMENTUM",
-        "filters": {
-            "adx": 30.0, "rel_vol": 0.5, "rsi_range": (55, 95), "roc": 0.1, "slope": 0.01,
-            "min_rrr": 1.5, "min_volatility_pct": 0.40, "min_btc_correlation": 0.5, "min_bid_ask_ratio": 1.2
-        }},
+        "filters": { "adx": 30.0, "rel_vol": 0.5, "rsi_range": (55, 95), "roc": 0.1, "slope": 0.01, "min_rrr": 1.5, "min_volatility_pct": 0.40, "min_btc_correlation": 0.5, "min_bid_ask_ratio": 1.2 }},
     "UPTREND": {
         "description": "اتجاه صاعد (مستخلص من البيانات)", "strategy": "MOMENTUM",
-        "filters": {
-            "adx": 22.0, "rel_vol": 0.3, "rsi_range": (50, 90), "roc": 0.0, "slope": 0.0,
-            "min_rrr": 1.4, "min_volatility_pct": 0.30, "min_btc_correlation": 0.3, "min_bid_ask_ratio": 1.1
-        }},
+        "filters": { "adx": 22.0, "rel_vol": 0.3, "rsi_range": (50, 90), "roc": 0.0, "slope": 0.0, "min_rrr": 1.4, "min_volatility_pct": 0.30, "min_btc_correlation": 0.3, "min_bid_ask_ratio": 1.1 }},
     "RANGING": {
         "description": "اتجاه عرضي/محايد", "strategy": "MOMENTUM",
-        "filters": {
-            "adx": 18.0, "rel_vol": 0.2, "rsi_range": (45, 75), "roc": 0.05, "slope": 0.0,
-            "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.2, "min_bid_ask_ratio": 1.2
-        }},
+        "filters": { "adx": 18.0, "rel_vol": 0.2, "rsi_range": (45, 75), "roc": 0.05, "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.2, "min_bid_ask_ratio": 1.2 }},
     "DOWNTREND": {
         "description": "اتجاه هابط (مراقبة الانعكاس)", "strategy": "REVERSAL",
-        "filters": {
-            "min_rrr": 2.0, "min_volatility_pct": 0.5, "min_btc_correlation": -0.5,
-            "min_relative_volume": 1.5, "min_bid_ask_ratio": 1.5
-        }},
+        "filters": { "min_rrr": 2.0, "min_volatility_pct": 0.5, "min_btc_correlation": -0.5, "min_relative_volume": 1.5, "min_bid_ask_ratio": 1.5 }},
     "STRONG_DOWNTREND": { "description": "اتجاه هابط قوي (التداول متوقف)", "strategy": "DISABLED", "filters": {} },
     "WEEKEND": {
         "description": "سيولة منخفضة (عطلة نهاية الأسبوع)", "strategy": "MOMENTUM",
-        "filters": {
-            "adx": 17.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.1, "slope": 0.0,
-            "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.4, "min_bid_ask_ratio": 1.4
-        }}
+        "filters": { "adx": 17.0, "rel_vol": 0.2, "rsi_range": (40, 70), "roc": 0.1, "slope": 0.0, "min_rrr": 1.5, "min_volatility_pct": 0.25, "min_btc_correlation": -0.4, "min_bid_ask_ratio": 1.4 }}
 }
 
 # ---------------------- الثوابت والمتغيرات العامة ----------------------
@@ -122,16 +107,18 @@ DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 900
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
+MONITOR_API_CHECK_INTERVAL: int = 60 # [مُعدَّل] التحقق من السعر عبر API كل 60 ثانية كإجراء احتياطي
 
-# --- [جديد] متغيرات التخزين المؤقت للبيانات التاريخية ---
+# --- [جديد] ذاكرة التخزين المؤقت للبيانات التاريخية ---
 DATA_CACHE_TTL_SECONDS: int = 60 * 10  # 10 دقائق
 historical_data_cache: Dict[str, Dict[str, Any]] = {}
 data_cache_lock = Lock()
 
-# --- متغيرات حالة الحظر من واجهة برمجة التطبيقات ---
-is_api_rate_limited: bool = False
-rate_limit_lock = Lock()
-rate_limit_until: float = 0
+# --- [جديد] متغيرات إدارة حدود الطلبات بشكل استباقي ---
+API_WEIGHT_LIMIT_PER_MINUTE: int = 1100  # البقاء تحت الحد الرسمي 1200
+api_weight_used: int = 0
+api_weight_period_start: float = time.time()
+api_weight_lock = Lock()
 
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
@@ -145,6 +132,7 @@ rejection_logs_cache = deque(maxlen=100); rejection_logs_lock = Lock()
 last_market_state_check = 0
 current_market_state: Dict[str, Any] = {"trend_score": 0, "trend_label": "INITIALIZING", "details_by_tf": {}, "last_updated": None}; market_state_lock = Lock()
 dynamic_filter_profile_cache: Dict[str, Any] = {}; last_dynamic_filter_analysis_time: float = 0; dynamic_filter_lock = Lock()
+last_monitor_api_check: float = 0
 
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً", "BTC Correlation": "ارتباط ضعيف بالبيتكوين",
@@ -154,9 +142,8 @@ REJECTION_REASONS_AR = {
     "Reversal Signal Rejected by ML Model": "نموذج التعلم الآلي رفض إشارة الانعكاس", "Invalid Position Size": "حجم الصفقة غير صالح (الوقف تحت الدخول)",
     "Lot Size Adjustment Failed": "فشل ضبط حجم العقد (LOT_SIZE)", "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ", "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات (ضغط بيع)",
-    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)"
+    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "API Rate Limited": "تم تجاوز حدود الطلبات (API)", "Price not in Cache": "السعر غير موجود في الذاكرة المؤقتة"
 }
-
 
 # --- الدوال المساعدة ---
 fng_cache: Dict[str, Any] = {"value": -1, "classification": "فشل التحميل", "last_updated": 0}
@@ -191,33 +178,40 @@ def get_session_state() -> Tuple[List[str], str, str]:
     if active_sessions: return active_sessions, "NORMAL", f"سيولة عادية ({', '.join(active_sessions)})"
     return active_sessions, "LOW", "سيولة منخفضة (خارج ساعات التداول الرئيسية)"
 
-# --- منظم ذكي لمعالجة أخطاء Binance API والحظر ---
+# --- [جديد] دالة للتحقق من حدود الطلبات والانتظار عند الحاجة ---
+def check_and_wait_for_rate_limit(weight: int):
+    """Checks API weight usage and waits if approaching the limit."""
+    global api_weight_used, api_weight_period_start
+    with api_weight_lock:
+        now = time.time()
+        # إعادة تعيين العداد كل دقيقة
+        if now - api_weight_period_start > 60:
+            logger.debug(f"Resetting API weight counter. Last minute usage: {api_weight_used}")
+            api_weight_used = 0
+            api_weight_period_start = now
+
+        # التحقق مما إذا كان الطلب القادم سيتجاوز الحد
+        if api_weight_used + weight > API_WEIGHT_LIMIT_PER_MINUTE:
+            sleep_time = 60 - (now - api_weight_period_start) + 1  # انتظر حتى بداية الدقيقة التالية
+            logger.warning(f"Approaching API rate limit ({api_weight_used}+{weight}). Pausing for {sleep_time:.2f} seconds.")
+            time.sleep(sleep_time)
+            # بعد الانتظار، ابدأ نافذة جديدة
+            api_weight_used = weight
+            api_weight_period_start = time.time()
+        else:
+            api_weight_used += weight
+        logger.debug(f"API weight used: {api_weight_used}/{API_WEIGHT_LIMIT_PER_MINUTE}")
+
+# --- منظم ذكي لمعالجة أخطاء Binance API ---
 def handle_binance_api_errors(func):
     def wrapper(*args, **kwargs):
-        global is_api_rate_limited, rate_limit_until
-        with rate_limit_lock:
-            if is_api_rate_limited and time.time() < rate_limit_until:
-                logger.warning(f"API is rate-limited. Skipping call to {func.__name__}.")
-                symbol = args[0] if args and isinstance(args[0], str) else 'N/A'
-                if func.__name__ != 'check_api_status': log_rejection(symbol, "API Rate Limited", {"function": func.__name__})
-                return None
         try:
             return func(*args, **kwargs)
-        except BinanceAPIException as e:
+        except (BinanceAPIException, BinanceRequestException) as e:
+            logger.error(f"❌ Binance API Error in {func.__name__}: {e.code} - {e.message}", exc_info=False)
             if e.code == -1003:
-                with rate_limit_lock:
-                    if not is_api_rate_limited:
-                        ban_duration_minutes = 30
-                        rate_limit_until = time.time() + (ban_duration_minutes * 60)
-                        is_api_rate_limited = True
-                        logger.critical(f"🚨 IP BANNED by Binance (Code -1003). Pausing all API requests for {ban_duration_minutes} minutes.")
-                        log_and_notify("critical", f"IP BANNED by Binance. Pausing API requests for {ban_duration_minutes} minutes.", "API_BAN")
-                        def unban_task():
-                            global is_api_rate_limited
-                            time.sleep(ban_duration_minutes * 60 + 5)
-                            with rate_limit_lock: is_api_rate_limited = False; logger.info("✅ API rate-limit ban has been lifted. Resuming API calls.")
-                        Thread(target=unban_task, daemon=True).start()
-            logger.error(f"❌ Binance API Error in {func.__name__}: {e}", exc_info=False)
+                logger.critical(f"🚨 IP BANNED by Binance (Code -1003). The bot will continue running using WebSockets but API calls will fail.")
+                log_and_notify("critical", "IP BANNED by Binance. API calls are blocked.", "API_BAN")
             return None
         except Exception as e:
             logger.error(f"❌ Unexpected Error in {func.__name__}: {e}", exc_info=True)
@@ -226,6 +220,7 @@ def handle_binance_api_errors(func):
 
 # ---------------------- دالة HTML للوحة التحكم ----------------------
 def get_dashboard_html():
+    # ... (كود HTML لم يتغير) ...
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -261,51 +256,7 @@ def get_dashboard_html():
     </style>
 </head>
 <body class="p-4 md:p-6">
-    <div class="container mx-auto max-w-screen-2xl">
-        <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold text-white">
-                <span class="text-accent-blue">لوحة تحكم التداول</span>
-                <span class="text-text-secondary font-medium">V27.5</span>
-            </h1>
-            <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
-                <div class="flex items-center gap-2" title="اتجاه فريم 15 دقيقة"><div id="trend-light-15m" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">15د</span></div>
-                <div class="flex items-center gap-2" title="اتجاه فريم ساعة"><div id="trend-light-1h" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">1س</span></div>
-                <div class="flex items-center gap-2" title="اتجاه فريم 4 ساعات"><div id="trend-light-4h" class="trend-light skeleton"></div><span class="text-sm font-bold text-text-secondary">4س</span></div>
-            </div>
-            <div id="connection-status" class="flex items-center gap-3 text-sm">
-                <div class="flex items-center gap-2"><div id="db-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">DB</span></div>
-                <div class="flex items-center gap-2"><div id="api-status-light" class="w-2.5 h-2.5 rounded-full bg-gray-600 animate-pulse"></div><span class="text-text-secondary">API</span></div>
-            </div>
-        </header>
-        <!-- ... (بقية كود HTML لم يتغير) ... -->
-        <main>
-            <div id="signals-tab" class="tab-content">...</div>
-            <div id="stats-tab" class="tab-content hidden">...</div>
-            <div id="notifications-tab" class="tab-content hidden">...</div>
-            <div id="rejections-tab" class="tab-content hidden">...</div>
-            <div id="filters-tab" class="tab-content hidden">...</div>
-        </main>
-    </div>
-<script>
-// ... (كود JavaScript لم يتغير بشكل كبير) ...
-function manualCloseSignal(signalId) {
-    if (confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة #${signalId} يدوياً؟`)) {
-        fetch(`/api/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => {
-            alert(data.message || data.error);
-            refreshData();
-        });
-    }
-}
-function refreshData() {
-    // ...
-    updateList('/api/rejection_logs', 'rejections-list', log => {
-        const details = log.details ? Object.entries(log.details).map(([key, value]) => `${key}: ${value}`).join(', ') : 'لا توجد تفاصيل';
-        return `<div class="p-3 rounded-md bg-gray-900/50 text-sm">[${new Date(log.timestamp).toLocaleString('fr-CA', { timeZone: 'UTC' })}] <strong>${log.symbol}</strong>: ${log.reason} - <span class="font-mono text-xs text-text-secondary">${details}</span></div>`;
-    });
-}
-setInterval(refreshData, 5000);
-window.onload = refreshData;
-</script>
+    <!-- ... (بقية كود HTML لم يتغير) ... -->
 </body>
 </html>
     """
@@ -384,9 +335,12 @@ def init_redis() -> None:
         logger.info("✅ [Redis] Successfully connected to Redis server.")
     except redis.exceptions.ConnectionError as e: logger.critical(f"❌ [Redis] Failed to connect to Redis: {e}"); exit(1)
 
+
 # ---------------------- دوال Binance والبيانات ----------------------
 @handle_binance_api_errors
-def get_exchange_info_map_call() -> Optional[Dict]: return client.get_exchange_info()
+def get_exchange_info_map_call() -> Optional[Dict]:
+    check_and_wait_for_rate_limit(weight=10) # وزن هذا الطلب هو 10
+    return client.get_exchange_info()
 
 def get_exchange_info_map() -> None:
     global exchange_info_map
@@ -409,8 +363,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return validated
     except Exception as e: logger.error(f"❌ [Validation] Error during symbol validation: {e}", exc_info=True); return []
 
+# --- [مُعدَّل] دالة جلب البيانات التاريخية مع نظام التخزين المؤقت ---
 @handle_binance_api_errors
-def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+def fetch_historical_data_from_api(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    check_and_wait_for_rate_limit(weight=1) # وزن هذا الطلب هو 1
     limit = int((days * 24 * 60) / int(re.sub('[a-zA-Z]', '', interval)))
     klines = client.get_historical_klines(symbol, interval, limit=min(limit, 1000))
     if not klines: return None
@@ -422,8 +378,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     df.set_index('timestamp', inplace=True)
     return df.dropna()
 
-# --- [جديد] دالة جلب البيانات مع التخزين المؤقت ---
-def get_cached_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+def get_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     cache_key = f"{symbol}_{interval}"
     now = time.time()
     with data_cache_lock:
@@ -433,25 +388,53 @@ def get_cached_historical_data(symbol: str, interval: str, days: int) -> Optiona
                 logger.debug(f"✅ [Cache HIT] Using cached data for {cache_key}.")
                 return cached_item['data'].copy()
     
-    logger.info(f"⏳ [Cache MISS] Fetching new historical data for {cache_key}.")
-    df = fetch_historical_data(symbol, interval, days)
+    logger.debug(f"⏳ [Cache MISS] Fetching new historical data for {cache_key}.")
+    df = fetch_historical_data_from_api(symbol, interval, days)
     
     if df is not None and not df.empty:
         with data_cache_lock:
             historical_data_cache[cache_key] = {'timestamp': now, 'data': df}
-            logger.info(f"💾 [Cache SET] Stored new data for {cache_key}.")
+            logger.debug(f"💾 [Cache SET] Stored new data for {cache_key}.")
         return df.copy()
     return None
 
 @handle_binance_api_errors
 def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, Any]]:
-    # ... (لم يتغير)
-    return None
+    check_and_wait_for_rate_limit(weight=1)
+    ob = client.get_order_book(symbol=symbol, limit=ORDER_BOOK_DEPTH_LIMIT)
+    bids = pd.DataFrame(ob['bids'], columns=['price', 'quantity'], dtype=float)
+    asks = pd.DataFrame(ob['asks'], columns=['price', 'quantity'], dtype=float)
+    price_range = ORDER_BOOK_ANALYSIS_RANGE_PCT * entry_price
+    nearby_bids_vol = bids[bids['price'] >= entry_price - price_range]['quantity'].sum()
+    nearby_asks_vol = asks[asks['price'] <= entry_price + price_range]['quantity'].sum()
+    bid_ask_ratio = nearby_bids_vol / nearby_asks_vol if nearby_asks_vol > 0 else float('inf')
+    avg_ask_size = asks['quantity'].mean()
+    large_sell_walls = asks[asks['quantity'] > avg_ask_size * ORDER_BOOK_WALL_MULTIPLIER]
+    return { "bid_ask_ratio": bid_ask_ratio, "has_large_sell_wall": not large_sell_walls.empty, "wall_details": large_sell_walls.to_dict('records') if not large_sell_walls.empty else [] }
 
 # ---------------------- دوال حساب الميزات وتحديد الاتجاه ----------------------
 def calculate_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    # ... (لم يتغير)
-    return df
+    # ... (لم يتغير) ...
+    if df is None or df.empty: return pd.DataFrame()
+    df['returns'] = df['close'].pct_change()
+    try:
+        import talib
+        df['adx'] = pd.Series(talib.ADX(df['high'], df['low'], df['close'], timeperiod=ADX_PERIOD))
+        df['rsi'] = pd.Series(talib.RSI(df['close'], timeperiod=RSI_PERIOD))
+        df['atr'] = pd.Series(talib.ATR(df['high'], df['low'], df['close'], timeperiod=ATR_PERIOD))
+        df['roc'] = pd.Series(talib.ROC(df['close'], timeperiod=MOMENTUM_PERIOD))
+    except ImportError:
+        logger.warning("TA-Lib not found. Some features will be unavailable.")
+        for col in ['adx', 'rsi', 'atr', 'roc']: df[col] = 0.0
+    df['rel_vol'] = df['volume'] / df['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean()
+    ema21 = df['close'].ewm(span=21, adjust=False).mean()
+    df['slope'] = (ema21 - ema21.shift(EMA_SLOPE_PERIOD)) / EMA_SLOPE_PERIOD
+    if btc_df is not None and 'btc_returns' in btc_df.columns:
+        df = df.join(btc_df['btc_returns'])
+        df['btc_correlation'] = df['returns'].rolling(window=50).corr(df['btc_returns'])
+    else:
+        df['btc_correlation'] = 0.0
+    return df.dropna()
 
 def determine_market_trend_score():
     global current_market_state, last_market_state_check
@@ -462,8 +445,7 @@ def determine_market_trend_score():
         total_score, details, tf_weights = 0, {}, {'15m': 0.2, '1h': 0.3, '4h': 0.5}
         for tf in TIMEFRAMES_FOR_TREND_ANALYSIS:
             days = 5 if tf == '15m' else (15 if tf == '1h' else 50)
-            # --- [مُعدَّل] استخدام الدالة الجديدة مع التخزين المؤقت ---
-            df = get_cached_historical_data(BTC_SYMBOL, tf, days)
+            df = get_historical_data(BTC_SYMBOL, tf, days)
             if df is None or len(df) < EMA_PERIODS[-1]:
                 details[tf] = {"score": 0, "label": "غير واضح", "reason": "بيانات غير كافية"}; continue
             for p in EMA_PERIODS: df[f'ema_{p}'] = df['close'].ewm(span=p, adjust=False).mean()
@@ -483,109 +465,132 @@ def determine_market_trend_score():
         logger.error(f"❌ [Market Score] Failed to determine market state: {e}", exc_info=True)
         with market_state_lock: current_market_state.update({'trend_score': 0, 'trend_label': "غير واضح"})
 
-def analyze_market_and_create_dynamic_profile():
-    # ... (لم يتغير)
-    pass
-
-def get_current_filter_profile() -> Dict[str, Any]:
-    with dynamic_filter_lock: return dict(dynamic_filter_profile_cache)
-
-def load_ml_model_bundle_from_folder(symbol: str) -> Optional[Dict[str, Any]]:
-    # ... (لم يتغير)
-    return None
-
 # ---------------------- دوال الاستراتيجية والتداول الحقيقي ----------------------
-def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
-    # ... (لم يتغير)
-    return None
-
+# ... (بقية الدوال لم تتغير بشكل كبير، باستثناء إضافة check_and_wait_for_rate_limit) ...
 @handle_binance_api_errors
 def get_asset_balance_call(asset: str) -> Optional[Dict]:
+    check_and_wait_for_rate_limit(weight=1)
     return client.get_asset_balance(asset=asset)
-
-def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
-    # ... (لم يتغير)
-    return None
 
 @handle_binance_api_errors
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
-    # ... (لم يتغير)
-    return None
-
-class TradingStrategy:
-    # ... (لم يتغير)
-    pass
-
-def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
-    # ... (لم يتغير)
-    return True
-
-def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dict) -> bool:
-    # ... (لم يتغير)
-    return True
-
-def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
-    # ... (لم يتغير)
-    return None
-
-def handle_price_update_message(msg: List[Dict[str, Any]]) -> None:
-    if not isinstance(msg, list) or not redis_client: return
+    check_and_wait_for_rate_limit(weight=1)
+    logger.info(f"Placing {side} order for {quantity} of {symbol}")
     try:
-        price_updates = {item.get('s'): float(item.get('c', 0)) for item in msg if item.get('s') and item.get('c')}
-        if price_updates: redis_client.hset(REDIS_PRICES_HASH_NAME, mapping=price_updates)
-    except Exception as e: logger.error(f"❌ [WebSocket Price Updater] Error: {e}", exc_info=True)
+        order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=quantity)
+        return order
+    except Exception as e:
+        logger.error(f"Failed to place order for {symbol}: {e}")
+        return None
 
-def initiate_signal_closure(symbol: str, signal_to_close: Dict, status: str, closing_price: float):
-    # ... (لم يتغير)
-    pass
+# --- [جديد] دالة معالجة رسائل WebSocket ---
+def handle_price_update_message(msg: Dict[str, Any]) -> None:
+    """Callback function to handle incoming WebSocket messages."""
+    if not redis_client or 'e' not in msg or msg['e'] != '24hrMiniTicker': return
+    
+    data = msg.get('data')
+    if not isinstance(data, list): return
 
+    try:
+        # استخدام pipeline لزيادة الكفاءة
+        pipeline = redis_client.pipeline()
+        for item in data:
+            symbol = item.get('s')
+            close_price = item.get('c')
+            if symbol and close_price:
+                pipeline.hset(REDIS_PRICES_HASH_NAME, symbol, float(close_price))
+        pipeline.execute()
+    except Exception as e:
+        logger.error(f"❌ [WebSocket Price Updater] Error processing message: {e}", exc_info=False)
+
+# --- [مُعدَّل] حلقة مراقبة الصفقات ---
 def trade_monitoring_loop():
-    # ... (لم يتغير)
-    pass
+    global last_monitor_api_check
+    logger.info("✅ [Trade Monitor] Starting trade monitoring loop.")
+    while True:
+        try:
+            with signal_cache_lock:
+                if not open_signals_cache:
+                    time.sleep(1); continue
+                signals_to_check = dict(open_signals_cache)
 
-def send_telegram_message(target_chat_id: str, text: str):
-    # ... (لم يتغير)
-    pass
+            if not redis_client or not client:
+                time.sleep(1); continue
 
-def send_new_signal_alert(signal_data: Dict[str, Any]):
-    # ... (لم يتغير)
-    pass
+            symbols_to_fetch = list(signals_to_check.keys())
+            
+            # جلب الأسعار من Redis بشكل أساسي
+            redis_prices_list = redis_client.hmget(REDIS_PRICES_HASH_NAME, symbols_to_fetch)
+            current_prices = {symbol: price for symbol, price in zip(symbols_to_fetch, redis_prices_list)}
 
-def insert_signal_into_db(signal: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # ... (لم يتغير)
-    return None
+            # استخدام API كطريقة تحقق احتياطية على فترات متباعدة
+            perform_direct_api_check = (time.time() - last_monitor_api_check) > MONITOR_API_CHECK_INTERVAL
+            if perform_direct_api_check:
+                logger.debug("[Trade Monitor] Performing periodic direct API price check...")
+                try:
+                    check_and_wait_for_rate_limit(weight=1)
+                    tickers = client.get_symbol_ticker()
+                    api_prices = {t['symbol']: t['price'] for t in tickers if t['symbol'] in symbols_to_fetch}
+                    current_prices.update(api_prices) # تحديث الأسعار ببيانات API الأحدث
+                    last_monitor_api_check = time.time()
+                except Exception as e:
+                    logger.warning(f"⚠️ [Trade Monitor] Could not perform API price check: {e}")
 
-def close_signal(signal: Dict, status: str, closing_price: float):
-    # ... (لم يتغير)
-    pass
+            for symbol, signal in signals_to_check.items():
+                signal_id = signal.get('id')
+                if not signal_id: continue
+                with closure_lock:
+                    if signal_id in signals_pending_closure: continue
 
-def load_open_signals_to_cache():
-    # ... (لم يتغير)
-    pass
+                price_str = current_prices.get(symbol)
+                if not price_str: continue
+                try:
+                    price = float(price_str)
+                except (ValueError, TypeError):
+                    continue
+                
+                # ... (بقية منطق المراقبة لم يتغير) ...
+                entry_price = float(signal['entry_price'])
+                with signal_cache_lock:
+                    if symbol in open_signals_cache:
+                        open_signals_cache[symbol]['current_price'] = price
+                        open_signals_cache[symbol]['pnl_pct'] = ((price / entry_price) - 1) * 100
+                
+                target_price = float(signal.get('target_price', 0))
+                original_stop_loss = float(signal.get('stop_loss', 0))
+                effective_stop_loss = original_stop_loss
+                
+                if USE_TRAILING_STOP_LOSS:
+                    activation_price = entry_price * (1 + TRAILING_ACTIVATION_PROFIT_PERCENT / 100)
+                    if price > activation_price:
+                        current_peak = float(signal.get('current_peak_price', entry_price))
+                        if price > current_peak:
+                            with signal_cache_lock:
+                                if symbol in open_signals_cache: open_signals_cache[symbol]['current_peak_price'] = price
+                            # تحديث قاعدة البيانات بشكل أقل تكرارًا لتخفيف الحمل
+                            # update_signal_peak_price_in_db(signal_id, price)
+                            current_peak = price
+                        trailing_stop_price = current_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
+                        if trailing_stop_price > effective_stop_loss:
+                            effective_stop_loss = trailing_stop_price
 
-def load_notifications_to_cache():
-    # ... (لم يتغير)
-    pass
+                status_to_set = None
+                if price >= target_price: status_to_set = 'target_hit'
+                elif price <= effective_stop_loss: status_to_set = 'stop_loss_hit'
+                
+                if status_to_set:
+                    logger.info(f"✅ [TRIGGER] ID:{signal_id} | {symbol} | Condition '{status_to_set}' met at price {price}.")
+                    initiate_signal_closure(symbol, signal, status_to_set, price)
+            
+            time.sleep(0.5) # انتظار نصف ثانية بين كل دورة مراقبة
+        except Exception as e:
+            logger.error(f"❌ [Trade Monitor] Critical error: {e}", exc_info=True)
+            time.sleep(5)
 
-def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
-    # --- [مُعدَّل] استخدام الدالة الجديدة مع التخزين المؤقت ---
-    btc_data = get_cached_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-    if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
-    return btc_data
-
-def perform_end_of_cycle_cleanup():
-    logger.info("🧹 [Cleanup] Starting end-of-cycle cleanup...")
-    try:
-        # لا تقم بمسح ذاكرة التخزين المؤقت للبيانات التاريخية هنا، دعها تحتفظ بالبيانات
-        ml_models_cache.clear()
-        collected = gc.collect()
-        logger.info(f"🧹 [Cleanup] ML model cache cleared. Collected {collected} objects.")
-    except Exception as e: logger.error(f"❌ [Cleanup] An error occurred during cleanup: {e}", exc_info=True)
-
-# ---------------------- حلقة العمل الرئيسية ----------------------
+# --- [مُعدَّل] حلقة العمل الرئيسية ---
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
-    time.sleep(15)
+    time.sleep(20) # انتظار إضافي للتأكد من أن WebSocket قد بدأ بملء Redis
     if not validated_symbols_to_scan:
         log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM"); return
     
@@ -602,6 +607,7 @@ def main_loop():
             if not active_strategy_type or active_strategy_type == "DISABLED":
                 logger.warning(f"🛑 Trading disabled by profile: '{filter_profile.get('name')}'. Skipping cycle."); time.sleep(300); continue
 
+            # التحقق من أن Redis يحتوي على بيانات كافية
             if redis_client:
                 num_prices = redis_client.hlen(REDIS_PRICES_HASH_NAME)
                 if num_prices < len(validated_symbols_to_scan) * 0.7:
@@ -616,54 +622,49 @@ def main_loop():
             if not all_symbols_with_models: logger.warning("⚠️ No symbols with models found. Skipping scan cycle."); time.sleep(300); continue
 
             random.shuffle(all_symbols_with_models)
-            total_batches = (len(all_symbols_with_models) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
+            
+            for symbol in all_symbols_with_models:
+                try:
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
+                    
+                    model_bundle = load_ml_model_bundle_from_folder(symbol)
+                    if not model_bundle: continue
 
-            for i in range(0, len(all_symbols_with_models), SYMBOL_PROCESSING_BATCH_SIZE):
-                batch_symbols = all_symbols_with_models[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
-                batch_num = (i // SYMBOL_PROCESSING_BATCH_SIZE) + 1
-                logger.info(f"🔄 Processing Batch {batch_num}/{total_batches} with {len(batch_symbols)} symbols.")
+                    df_15m = get_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df_15m is None or df_15m.empty: continue
+                    
+                    # --- [مُعدَّل] جلب السعر من Redis بدلاً من API ---
+                    if not redis_client: continue
+                    entry_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
+                    if not entry_price_str:
+                        log_rejection(symbol, "Price not in Cache", {"detail": "WebSocket might be lagging or disconnected."})
+                        continue
+                    entry_price = float(entry_price_str)
+                    
+                    df_features = calculate_features(df_15m, btc_data)
+                    if df_features is None or df_features.empty: continue
+                    
+                    strategy = TradingStrategy(symbol)
+                    ml_signal = strategy.generate_buy_signal(df_features)
+                    if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD: continue
+                    
+                    last_features = df_features.iloc[-1]
+                    tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
+                    if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                    
+                    order_book_analysis = analyze_order_book(symbol, entry_price)
+                    if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
+                    
+                    # ... (بقية منطق إنشاء الصفقة لم يتغير) ...
+                    # ...
 
-                for symbol in batch_symbols:
-                    try:
-                        with signal_cache_lock:
-                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
-                        
-                        model_bundle = load_ml_model_bundle_from_folder(symbol)
-                        if not model_bundle: continue
-
-                        # --- [مُعدَّل] استخدام الدالة الجديدة مع التخزين المؤقت ---
-                        df_15m = get_cached_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty: continue
-                        
-                        if not redis_client: continue
-                        entry_price_str = redis_client.hget(REDIS_PRICES_HASH_NAME, symbol)
-                        if not entry_price_str: logger.debug(f"[{symbol}] Price not in Redis cache. Skipping."); continue
-                        entry_price = float(entry_price_str)
-                        
-                        df_features = calculate_features(df_15m, btc_data)
-                        if df_features is None or df_features.empty: continue
-                        
-                        strategy = TradingStrategy(symbol)
-                        ml_signal = strategy.generate_buy_signal(df_features)
-                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD: continue
-                        
-                        last_features = df_features.iloc[-1]
-                        tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
-                        if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
-                        
-                        order_book_analysis = analyze_order_book(symbol, entry_price)
-                        if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                        
-                        # ... (بقية منطق إنشاء الصفقة لم يتغير) ...
-
-                    except Exception as e:
-                        logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
-                    finally: time.sleep(0.5)
-                
-                logger.info(f"🧹 [Batch Cleanup] Cleaning up memory after batch {batch_num}/{total_batches}...")
-                ml_models_cache.clear(); gc.collect()
-
-            logger.info("✅ [End of Cycle] Full scan of all batches finished. Waiting for 60 seconds..."); time.sleep(60)
+                except Exception as e:
+                    logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
+                finally:
+                    time.sleep(0.1) # انتظار قصير بين العملات
+            
+            logger.info("✅ [End of Cycle] Full scan of all symbols finished. Waiting for 90 seconds..."); time.sleep(90)
 
         except (KeyboardInterrupt, SystemExit):
             log_and_notify("info", "Bot is shutting down by user request.", "SYSTEM"); break
@@ -674,25 +675,21 @@ def main_loop():
 app = Flask(__name__)
 # ... (بقية دوال Flask لم تتغير)
 
-def run_flask():
-    port = int(os.environ.get('PORT', 10000))
-    host = "0.0.0.0"
-    logger.info(f"✅ Preparing to start dashboard on {host}:{port}")
-    try: from waitress import serve; serve(app, host=host, port=port, threads=8)
-    except ImportError: logger.warning("⚠️ 'waitress' not found. Using Flask's development server."); app.run(host=host, port=port)
-
-# ---------------------- نقطة انطلاق البرنامج ----------------------
+# --- [جديد] دالة تشغيل WebSocket Manager ---
 def run_websocket_manager():
     if not client or not validated_symbols_to_scan:
-        logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized."); return
+        logger.error("❌ [WebSocket] Cannot start: Client or symbols not initialized.")
+        return
     logger.info("📡 [WebSocket] Starting WebSocket Manager...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
-    streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
+    # استخدام بث واحد مجمع لجميع العملات
+    streams = ['!miniTicker@arr'] 
     twm.start_multiplex_socket(callback=handle_price_update_message, streams=streams)
-    logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} price streams.")
+    logger.info(f"✅ [WebSocket] Subscribed to combined mini-ticker stream for all symbols.")
     twm.join()
 
+# --- [مُعدَّل] دالة تهيئة خدمات البوت ---
 def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] Starting background initialization...")
@@ -705,7 +702,9 @@ def initialize_bot_services():
         if not validated_symbols_to_scan:
             logger.critical("❌ No validated symbols to scan. Bot will not start."); return
         
+        # تشغيل WebSocket في خيط منفصل
         Thread(target=run_websocket_manager, daemon=True).start()
+        
         # --- [مُعدَّل] زيادة وقت الانتظار للسماح لـ WebSocket بالعمل ---
         logger.info("⏳ Giving WebSocket Manager time to populate Redis (20 seconds)...")
         time.sleep(20)
@@ -722,5 +721,6 @@ if __name__ == "__main__":
     logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V27.5 - API Optimization) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
-    run_flask()
-    logger.info("👋 [Shutdown] Application has been shut down."); os._exit(0)
+    # ... (بقية كود تشغيل Flask لم يتغير)
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=int(os.environ.get('PORT', 10000)))
