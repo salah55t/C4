@@ -32,16 +32,16 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-# ---------------------- إعداد نظام التسجيل (Logging) - V27.7 (Dashboard Update) ----------------------
+# ---------------------- إعداد نظام التسجيل (Logging) - V27.8 (WebSocket Fix) ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v27_7_arabic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v27_8_arabic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV27.7')
+logger = logging.getLogger('CryptoBotV27.8')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -217,7 +217,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V27.7</title>
+    <title>لوحة تحكم التداول V27.8</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -263,7 +263,7 @@ def get_dashboard_html():
     <div class="max-w-7xl mx-auto">
         <!-- Header -->
         <header class="flex flex-col md:flex-row justify-between items-center mb-6">
-            <h1 class="text-3xl font-bold text-white mb-4 md:mb-0">لوحة تحكم التداول <span class="text-sm font-mono text-gray-500">v27.7</span></h1>
+            <h1 class="text-3xl font-bold text-white mb-4 md:mb-0">لوحة تحكم التداول <span class="text-sm font-mono text-gray-500">v27.8</span></h1>
             <div class="card p-3 flex items-center space-x-4 space-x-reverse">
                 <div id="main-status-light" class="status-dot bg-gray-500"></div>
                 <span id="main-status-text" class="text-lg font-semibold">جاري التهيئة...</span>
@@ -945,19 +945,39 @@ def close_signal(signal: Dict, status: str, closing_price: float):
 
 # ---------------------- WebSocket & Main Loops ----------------------
 def handle_price_update_message(msg: Dict[str, Any]) -> None:
-    if not redis_client or 'e' not in msg or msg['e'] != '24hrMiniTicker': return
-    data = msg.get('data')
-    if not isinstance(data, list): return
+    """
+    Callback function to handle messages from the multiplexed WebSocket stream.
+    The message format is {'stream': <stream_name>, 'data': <payload>}.
+    For '!miniTicker@arr', the payload is a list of ticker data dictionaries.
+    """
+    payload = msg.get('data')
+
+    # Handle potential error messages from the websocket
+    if isinstance(payload, dict) and payload.get('e') == 'error':
+        logger.error(f"❌ [WebSocket Error] Received error message: {payload}")
+        return
+
+    # For '!miniTicker@arr', the payload should be a list.
+    if not redis_client or not isinstance(payload, list):
+        return
+    
     try:
         pipeline = redis_client.pipeline()
-        for item in data:
+        count = 0
+        for item in payload:
+            # Each item in the list is a dictionary representing a ticker.
             symbol = item.get('s')
             close_price = item.get('c')
             if symbol and close_price:
                 pipeline.hset(REDIS_PRICES_HASH_NAME, symbol, float(close_price))
-        pipeline.execute()
+                count += 1
+        
+        if count > 0:
+            pipeline.execute()
+            logger.debug(f"Updated {count} prices in Redis via WebSocket.")
+
     except Exception as e:
-        logger.error(f"❌ [WebSocket Price Updater] Error processing message: {e}", exc_info=False)
+        logger.error(f"❌ [WebSocket Price Updater] Error processing message: {e}", exc_info=True)
 
 def trade_monitoring_loop():
     global last_monitor_api_check
@@ -1038,7 +1058,7 @@ def trade_monitoring_loop():
 
 def main_loop():
     logger.info("[Main Loop] Waiting for initialization...")
-    time.sleep(20)
+    time.sleep(20) # Wait for other services to start
     if not validated_symbols_to_scan:
         log_and_notify("critical", "No validated symbols to scan. Bot will not start.", "SYSTEM"); return
     
@@ -1047,6 +1067,29 @@ def main_loop():
     while True:
         try:
             logger.info("🔄 Starting new main cycle...")
+            
+            # Wait for Redis cache to be populated by the WebSocket
+            if redis_client:
+                is_cache_ready = False
+                # Wait up to 60 seconds for the cache to be populated
+                for i in range(10):
+                    num_prices = redis_client.hlen(REDIS_PRICES_HASH_NAME)
+                    # Check for a reasonable number of symbols, not necessarily all of them
+                    if num_prices >= len(validated_symbols_to_scan) * 0.7:
+                        logger.info(f"✅ [Main Loop] Redis price cache is populated ({num_prices}/{len(validated_symbols_to_scan)}).")
+                        is_cache_ready = True
+                        break
+                    else:
+                        if i == 0: # Log the warning only on the first check to avoid log spam
+                             logger.warning(f"⚠️ [Main Loop] Redis price cache is not yet populated ({num_prices}/{len(validated_symbols_to_scan)}). Waiting for WebSocket data...")
+                        time.sleep(6)
+                
+                if not is_cache_ready:
+                    last_count = redis_client.hlen(REDIS_PRICES_HASH_NAME)
+                    logger.error(f"❌ [Main Loop] Redis cache failed to populate sufficiently after 60 seconds. Last count: {last_count}. Skipping cycle.")
+                    time.sleep(60) # Wait longer before retrying
+                    continue
+
             determine_market_trend_score()
             # analyze_market_and_create_dynamic_profile() # Assuming this function exists
             filter_profile = FILTER_PROFILES["UPTREND"] # Simplified for now
@@ -1054,12 +1097,6 @@ def main_loop():
 
             if not active_strategy_type or active_strategy_type == "DISABLED":
                 logger.warning(f"🛑 Trading disabled by profile. Skipping cycle."); time.sleep(300); continue
-
-            if redis_client:
-                num_prices = redis_client.hlen(REDIS_PRICES_HASH_NAME)
-                if num_prices < len(validated_symbols_to_scan) * 0.7:
-                    logger.warning(f"⚠️ [Main Loop] Redis price cache is not fully populated ({num_prices}/{len(validated_symbols_to_scan)}). Waiting...")
-                    time.sleep(30); continue
             
             btc_data = get_btc_data_for_bot()
             if btc_data is None: logger.warning("⚠️ Could not get BTC data, some features will be disabled."); time.sleep(60); continue
@@ -1214,8 +1251,8 @@ def initialize_bot_services():
         
         Thread(target=run_websocket_manager, daemon=True).start()
         
-        logger.info("⏳ Giving WebSocket Manager time to populate Redis (20 seconds)...")
-        time.sleep(20)
+        logger.info("⏳ Giving WebSocket Manager time to connect (10 seconds)...")
+        time.sleep(10)
 
         # Start main loops
         Thread(target=determine_market_trend_score, daemon=True).start()
@@ -1228,7 +1265,7 @@ def initialize_bot_services():
         exit(1)
 
 if __name__ == "__main__":
-    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V27.7 - Dashboard Update) 🚀")
+    logger.info("🚀 LAUNCHING TRADING BOT & DASHBOARD (V27.8 - WebSocket Fix) 🚀")
     initialization_thread = Thread(target=initialize_bot_services, daemon=True)
     initialization_thread.start()
     
