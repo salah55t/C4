@@ -426,8 +426,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             scaler = StandardScaler()
-            X_train_scaled = scaler.fit_transform(X_train)
-            X_test_scaled = scaler.transform(X_test)
+
+            # --- FIX START: Recreate DataFrame after scaling to preserve feature names ---
+            X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
+            X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+            # --- FIX END ---
+
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], callbacks=[lgb.early_stopping(20, verbose=False)])
             y_pred = model.predict(X_test_scaled)
@@ -446,7 +450,9 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     final_model_params = {'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced', 'random_state': 42, 'verbosity': -1, **best_params}
     
     final_scaler = StandardScaler()
-    X_scaled_full = final_scaler.fit_transform(X)
+    # --- FIX START: Recreate DataFrame after scaling for final model ---
+    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
+    # --- FIX END ---
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
@@ -457,8 +463,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        
+        # --- FIX START: Recreate DataFrame in final validation loop ---
+        X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
+        X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
+        # --- FIX END ---
+
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
