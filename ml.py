@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v8.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v9.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V8_Momentum')
+logger = logging.getLogger('MLTrainer_V9_Microstructure')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,8 +51,7 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-# تم تحديث اسم النموذج ليعكس الميزات الجديدة
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V8_With_Momentum'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
@@ -67,10 +66,8 @@ EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
-# New Momentum and Velocity Parameters
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
-
 
 # Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
@@ -154,6 +151,21 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except Exception as e:
         logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
 
+# --- دالة تحسين استهلاك الذاكرة ---
+def optimize_memory_usage(df: pd.DataFrame, log_prefix: str = "") -> pd.DataFrame:
+    """تقليل استهلاك الذاكرة للبيانات عن طريق تحويل أنواع البيانات."""
+    start_mem = df.memory_usage().sum() / 1024**2
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+    
+    end_mem = df.memory_usage().sum() / 1024**2
+    if start_mem > end_mem:
+         logger.info(f"🧠 [{log_prefix}] Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB ({100 * (start_mem - end_mem) / start_mem:.1f}% reduction).")
+    return df
+
 # --- دوال جلب ومعالجة البيانات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     try:
@@ -161,13 +173,25 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
-        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
-        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
+        
+        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 
+                'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
+        df = pd.DataFrame(klines, columns=cols)
+        
+        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base']
+        df = df[required_cols]
+        
+        numeric_cols = {
+            'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 
+            'volume': 'float', 'quote_volume': 'float', 'taker_buy_base': 'float'
+        }
         df = df.astype(numeric_cols)
+        
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
-        return df.dropna()
+        df.dropna(inplace=True)
+        
+        return optimize_memory_usage(df, log_prefix=f"Fetch {symbol} {interval}")
     except Exception as e:
         logger.error(f"❌ [Data] خطأ أثناء جلب البيانات لـ {symbol} على إطار {interval}: {e}"); return None
 
@@ -179,21 +203,102 @@ def fetch_and_cache_btc_data():
         logger.critical("❌ [BTC Data] فشل جلب بيانات البيتكوين."); exit(1)
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
+# --- دوال حساب الميزات ---
 
-def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
+def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
+    highest_high = df['high'].rolling(window=14).max()
+    lowest_low = df['low'].rolling(window=14).min()
+    df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
+    df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
+    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_histogram'] = df['macd'] - df['macd_signal']
+    bb_period = 20
+    df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
+    bb_std = df['close'].rolling(window=bb_period).std()
+    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
+    df['kc_middle'] = df['close'].ewm(span=20, adjust=False).mean()
+    if 'atr' in df.columns:
+        df['kc_upper'] = df['kc_middle'] + (df['atr'] * 1.5)
+        df['kc_lower'] = df['kc_middle'] - (df['atr'] * 1.5)
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    money_flow = typical_price * df['volume']
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
+    money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
+    df['mfi'] = 100 - (100 / (1 + money_ratio))
+    return df
+
+def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
+    required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
+    if not all(col in df.columns for col in required_cols):
+        logger.warning("⚠️ [Microstructure] Missing required columns for microstructure features. Skipping.")
+        return df
+    df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
+    volume_ma = df['volume'].rolling(20).mean()
+    df['volume_ratio'] = df['volume'] / volume_ma.replace(0, 1e-9)
+    df['price_impact'] = df['quote_volume'] / df['volume'].replace(0, 1e-9)
+    log_hl = np.log(df['high'] / df['low'].replace(0, 1e-9))
+    log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
+    gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
+    df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
+    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
+    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
+    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
+    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
+    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
+    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
+    return df
+
+def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+    high_low = df['high'] - df['low']
+    ema_high_low = high_low.ewm(span=10, adjust=False).mean()
+    ema_high_low_shifted = ema_high_low.shift(10)
+    df['chaikin_volatility'] = (ema_high_low - ema_high_low_shifted) / ema_high_low_shifted.replace(0, 1e-9) * 100
+    period = 14
+    max_close = df['close'].rolling(window=period).max()
+    percentage_drawdown = 100 * (df['close'] - max_close) / max_close.replace(0, 1e-9)
+    df['ulcer_index'] = np.sqrt((percentage_drawdown ** 2).rolling(window=period).mean())
+    if 'atr' not in df.columns: return df
+    high_low_tr = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift()).abs()
+    low_close_prev = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low_tr, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    for p in [5, 10, 20]:
+        atr_p = tr.ewm(span=p, adjust=False).mean()
+        df[f'atr_ratio_{p}'] = df['atr'] / atr_p.replace(0, 1e-9)
+    return df
+
+def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+    df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
+    df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
+    df['day_of_week'] = df.index.dayofweek
+    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
+    df['asia_session'] = ((df.index.hour >= 0) & (df.index.hour < 8)).astype(int)
+    df['london_session'] = ((df.index.hour >= 8) & (df.index.hour < 16)).astype(int)
+    df['ny_session'] = ((df.index.hour >= 13) & (df.index.hour < 21)).astype(int)
+    df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
+    df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
+    return df
+
+def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Function to calculate all technical analysis features for the model.
-    Includes new features: Momentum (ROC), Velocity (ROC Acceleration), and Market Direction (EMA Slope).
+    دالة محسنة وشاملة لحساب جميع الميزات مع التقليل من استهلاك الذاكرة.
     """
+    logger.info("ℹ️ [Features] Calculating all features in a unified function...")
     df_calc = df.copy()
 
-    # --- Existing Features ---
+    # --- 1. Standard Features (Optimized) ---
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -202,35 +307,37 @@ def calculate_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
-    
+    asset_returns = df_calc['close'].pct_change()
     merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = df_calc['close'].pct_change().rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
+    df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     
-    # --- ✨ New Features: Momentum, Velocity, and Market Direction ---
-    
-    # 1. Momentum (Rate of Change)
+    # --- 2. Advanced & Other Features (Chained) ---
+    df_calc = calculate_advanced_momentum_features(df_calc)
+    df_calc = calculate_market_microstructure_features(df_calc)
+    df_calc = calculate_advanced_volatility_features(df_calc)
+    df_calc = calculate_temporal_features(df_calc)
+
+    # --- 3. Basic Momentum ---
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    
-    # 2. Velocity (Acceleration of Momentum)
     df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    
-    # 3. Market Direction (Short-term EMA Slope)
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
 
-    df_calc['hour_of_day'] = df_calc.index.hour
+    # --- 4. Cleanup and Finalization ---
+    del high_low, high_close, low_close, tr, up_move, down_move, plus_dm, minus_dm, plus_di, minus_di, dx, delta, gain, loss, asset_returns, merged_df, ema_slope
+    gc.collect()
+    
+    logger.info("✅ [Features] All features calculated successfully.")
+    return optimize_memory_usage(df_calc, log_prefix="All Features")
 
-    return df_calc.astype('float32', errors='ignore')
-
+# --- دوال إعداد البيانات والتدريب ---
 
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
     labels = pd.Series(0, index=prices.index)
@@ -250,9 +357,11 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
-    df_featured = calculate_features(df_15m, btc_df)
     
-    # --- MTF Features ---
+    # --- 1. Feature Engineering (Unified Call) ---
+    df_featured = calculate_all_features(df_15m, btc_df)
+    
+    # --- 2. MTF Features ---
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -263,24 +372,23 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
     df_featured = df_featured.join(mtf_features)
     df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+    df_featured = optimize_memory_usage(df_featured, log_prefix="After MTF")
     
-    # --- Target Labeling ---
+    # --- 3. Target Labeling ---
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # --- ✨ Updated Feature List ---
+    # --- 4. Feature List and Cleaning ---
     feature_columns = [
-        'rsi', 'adx', 'atr', 'relative_volume', 'hour_of_day',
-        'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
+        'rsi', 'adx', 'atr', 'relative_volume', 'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'rsi_4h', 'price_vs_ema50_4h',
-        # New Features
-        f'roc_{MOMENTUM_PERIOD}', 
-        'roc_acceleration', 
-        f'ema_slope_{EMA_SLOPE_PERIOD}'
+        f'roc_{MOMENTUM_PERIOD}', 'roc_acceleration', f'ema_slope_{EMA_SLOPE_PERIOD}',
+        'williams_r', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'mfi',
+        'buy_pressure', 'volume_ratio', 'price_impact', 'garman_klass_vol', 'rogers_satchell_vol',
+        'chaikin_volatility', 'ulcer_index', 'atr_ratio_5', 'atr_ratio_10', 'atr_ratio_20',
+        'hour_sin', 'hour_cos', 'day_of_week', 'is_weekend', 'asia_session', 'london_session', 'ny_session', 'month_sin', 'month_cos'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
-    
-    # Replace any remaining infinite values with NaN and then drop them
     df_cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_cleaned.dropna(subset=feature_columns, inplace=True)
 
@@ -300,8 +408,7 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     def objective(trial: optuna.trial.Trial) -> float:
         params = {
             'objective': 'multiclass', 'num_class': 3, 'metric': 'multi_logloss',
-            'verbosity': -1, 'boosting_type': 'gbdt', 'class_weight': 'balanced',
-            'random_state': 42,
+            'verbosity': -1, 'boosting_type': 'gbdt', 'class_weight': 'balanced', 'random_state': 42,
             'n_estimators': trial.suggest_int('n_estimators', 200, 800, step=100),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
             'num_leaves': trial.suggest_int('num_leaves', 20, 150),
@@ -318,17 +425,12 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         for train_index, test_index in tscv.split(X):
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-            
             scaler = StandardScaler()
-            X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
-            X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
-            
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
             model = lgb.LGBMClassifier(**params)
-            model.fit(X_train_scaled_df, y_train,
-                      eval_set=[(X_test_scaled_df, y_test)],
-                      callbacks=[lgb.early_stopping(20, verbose=False)])
-            
-            y_pred = model.predict(X_test_scaled_df)
+            model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], callbacks=[lgb.early_stopping(20, verbose=False)])
+            y_pred = model.predict(X_test_scaled)
             all_preds.extend(y_pred)
             all_true.extend(y_test)
 
@@ -341,24 +443,25 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     logger.info(f"🏆 [ML Train] Best hyperparameters found: {best_params}")
     
     logger.info("ℹ️ [ML Train] Retraining model with best parameters on all data...")
-    final_model_params = {
-        'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced',
-        'random_state': 42, 'verbosity': -1, **best_params
-    }
+    final_model_params = {'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced', 'random_state': 42, 'verbosity': -1, **best_params}
     
+    final_scaler = StandardScaler()
+    X_scaled_full = final_scaler.fit_transform(X)
+    final_model = lgb.LGBMClassifier(**final_model_params)
+    final_model.fit(X_scaled_full, y)
+    
+    # Walk-forward validation for final metrics
     all_preds_final, all_true_final = [], []
     tscv_final = TimeSeriesSplit(n_splits=5)
     for train_index, test_index in tscv_final.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
-        
         scaler = StandardScaler()
-        X_train_scaled_df = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
-        X_test_scaled_df = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
-
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
         model = lgb.LGBMClassifier(**final_model_params)
-        model.fit(X_train_scaled_df, y_train)
-        y_pred = model.predict(X_test_scaled_df)
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
         all_preds_final.extend(y_pred)
         all_true_final.extend(y_test)
         
@@ -372,12 +475,6 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         'num_samples_trained': len(X),
         'best_hyperparameters': json.dumps(best_params)
     }
-    
-    final_scaler = StandardScaler()
-    X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), columns=X.columns, index=X.index)
-    
-    final_model = lgb.LGBMClassifier(**final_model_params)
-    final_model.fit(X_scaled_full, y)
     
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(1): {final_metrics['precision_class_1']:.4f}, R(1): {final_metrics['recall_class_1']:.4f}"
     logger.info(f"📊 [ML Train] Final Walk-Forward Performance: {metrics_log_str}")
@@ -482,7 +579,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Momentum features) service is running and healthy.", 200
+    return "ML Trainer (with Microstructure features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
