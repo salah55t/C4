@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final.py - نسخة محدثة مع إدارة الصفقات وتحميل النماذج من الملفات
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع إشعارات تليجرام
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -37,11 +37,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v9_final_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v9_telegram_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9_Final')
+logger = logging.getLogger('CryptoBotV9_Telegram')
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -49,6 +49,10 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
+    # --- إعدادات تليجرام ---
+    TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
+    TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
+
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
@@ -71,7 +75,7 @@ STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.75
+BUY_CONFIDENCE_THRESHOLD = 0.80
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -128,6 +132,28 @@ REJECTION_REASONS_AR = {
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم",
 }
+
+# --- دالة إرسال رسائل تليجرام ---
+def send_telegram_message(message: str):
+    """
+    Sends a message to the configured Telegram chat.
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("[Telegram] Token أو Chat ID غير معين، تم تخطي الإرسال.")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown'
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 # --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -681,6 +707,21 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 del open_signals_cache[symbol_to_close]
             
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
+            
+            # --- إشعار تليجرام بالإغلاق ---
+            reason_map = {'take_profit': '🎯 Take Profit', 'stop_loss': '🛑 Stop Loss', 'manual': '🖐️ Manual Close'}
+            emoji = "✅" if profit_percentage >= 0 else "🔻"
+            trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
+            telegram_message = (
+                f"{emoji} *إغلاق صفقة {trade_type}*\n\n"
+                f"*العملة:* `{symbol_to_close}`\n"
+                f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
+                f"*سعر الدخول:* `{entry_price:.4f}`\n"
+                f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
+                f"*الربح/الخسارة:* `{profit_percentage:.2f}%`"
+            )
+            send_telegram_message(telegram_message)
+
             return True
         except Exception as e:
             logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}")
@@ -715,6 +756,19 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
+            
+            # --- إشعار تليجرام بالتوصية الجديدة ---
+            trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
+            telegram_message = (
+                f"💡 *توصية شراء {trade_type} جديدة*\n\n"
+                f"*العملة:* `{signal_data['symbol']}`\n"
+                f"*سعر الدخول:* `{entry_price:.4f}`\n"
+                f"*الهدف (TP):* `{target_price:.4f}`\n"
+                f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
+                f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
+            )
+            send_telegram_message(telegram_message)
+
             return dict(saved_signal)
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
@@ -1220,12 +1274,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Final) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Final with Telegram) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
@@ -1236,3 +1291,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
+
