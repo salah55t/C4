@@ -55,7 +55,7 @@ BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 5
+HYPERPARAM_TUNING_TRIALS: int = 8
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- Indicator & Feature Parameters ---
