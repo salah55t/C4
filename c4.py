@@ -56,8 +56,8 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-are_filters_disabled: bool = False # <-- تم التغيير من force_momentum_strategy
-filters_disabled_lock = Lock() # <-- تم التغيير من force_momentum_lock
+are_filters_disabled: bool = False
+filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 MODEL_FOLDER: str = 'V9'
@@ -71,7 +71,7 @@ STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.50
+BUY_CONFIDENCE_THRESHOLD = 0.60
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -536,7 +536,6 @@ class EnhancedTradingStrategy:
             return None
 
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
-    # --- NEW: Global filter override ---
     with filters_disabled_lock:
         if are_filters_disabled:
             logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
@@ -581,7 +580,7 @@ def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, An
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)}); return None
 
 def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dict) -> bool:
-    with filters_disabled_lock: # Also bypass this check if filters are disabled
+    with filters_disabled_lock:
         if are_filters_disabled:
             return True
     filters = profile.get("filters", {})
@@ -642,7 +641,6 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
-    """دالة مركزية لإغلاق الصفقات في قاعدة البيانات والكاش."""
     with signal_cache_lock:
         signal_to_close = None
         symbol_to_close = None
@@ -693,14 +691,26 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as cur:
+            # Explicitly convert numpy types to standard Python floats before insertion
+            entry_price = float(signal_data['entry_price'])
+            target_price = float(signal_data['target_price'])
+            stop_loss = float(signal_data['stop_loss'])
+            quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
+
             cur.execute("""
                 INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price, closing_reason)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) RETURNING *;
             """, (
-                signal_data['symbol'], signal_data['entry_price'], signal_data['target_price'],
-                signal_data['stop_loss'], signal_data['strategy_name'], json.dumps(signal_data['signal_details']),
-                signal_data.get('is_real_trade', False), signal_data.get('quantity'), signal_data.get('order_id'),
-                signal_data['entry_price']
+                signal_data['symbol'],
+                entry_price,
+                target_price,
+                stop_loss,
+                signal_data['strategy_name'],
+                json.dumps(signal_data['signal_details']),
+                signal_data.get('is_real_trade', False),
+                quantity,
+                signal_data.get('order_id'),
+                entry_price  # current_peak_price starts at entry_price
             ))
             saved_signal = cur.fetchone()
             conn.commit()
@@ -984,9 +994,7 @@ def get_stats():
         })
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
-        # Do not rollback here, as it might be the source of the "cursor already closed" error
         return jsonify({"error": "Internal server error fetching stats"}), 500
-
 
 @app.route('/api/signals')
 def get_signals():
@@ -1053,7 +1061,6 @@ def manual_close_trade_endpoint(signal_id):
 
 # ---------------------- حلقات النظام ----------------------
 def trade_management_loop():
-    """حلقة لمراقبة وإدارة الصفقات المفتوحة (TP/SL/Trailing)."""
     logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات...")
     while True:
         try:
