@@ -141,21 +141,38 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # Original CREATE TABLE for new setups
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL,
+                        stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT,
+                        signal_details JSONB,
+                        current_peak_price DOUBLE PRECISION,
+                        is_real_trade BOOLEAN DEFAULT FALSE,
+                        quantity DOUBLE PRECISION,
+                        order_id TEXT
                     );
                 """)
+                # Add the closing_reason column if it doesn't exist for backward compatibility
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS closing_reason TEXT;")
+
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
+                
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
-                        id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                        type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        type TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
             conn.commit()
@@ -687,8 +704,8 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price, closing_reason)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) RETURNING *;
             """, (
                 signal_data['symbol'], signal_data['entry_price'], signal_data['target_price'],
                 signal_data['stop_loss'], signal_data['strategy_name'], json.dumps(signal_data['signal_details']),
