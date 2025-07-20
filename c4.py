@@ -1,5 +1,3 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة
-# تم التحديث بواسطة Gemini
 import time
 import os
 import json
@@ -71,11 +69,11 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.75
-MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
+BUY_CONFIDENCE_THRESHOLD = 0.70
+MIN_PROFIT_PERCENT: float = 0.6 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
