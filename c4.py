@@ -75,7 +75,7 @@ STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80
+BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
