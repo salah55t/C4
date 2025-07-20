@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع شرط الحد الأدنى للربح
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -73,10 +73,12 @@ REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
-SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
+
+# --- NEW: Memory Optimization Setting ---
+SYMBOL_PROCESSING_BATCH_SIZE: int = 20 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -132,25 +134,17 @@ REJECTION_REASONS_AR = {
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى", "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
-    "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى", # <-- سبب الرفض الجديد
+    "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
-    """
-    Sends a message to the configured Telegram chat.
-    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("[Telegram] Token أو Chat ID غير معين، تم تخطي الإرسال.")
         return
-
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'Markdown'
-    }
+    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
     try:
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
@@ -1275,70 +1269,114 @@ def trade_management_loop():
 def main_loop_enhanced():
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
     time.sleep(15)
-    if not validated_symbols_to_scan: log_and_notify("critical", "لا توجد عملات صالحة للمسح.", "SYSTEM"); return
+    if not validated_symbols_to_scan:
+        log_and_notify("critical", "لا توجد عملات صالحة للمسح.", "SYSTEM")
+        return
     log_and_notify("info", f"✅ بدء حلقة المسح لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
 
     while True:
         try:
             logger.info("🔄 بدء دورة مسح جديدة...")
-            ml_models_cache.clear(); gc.collect()
             determine_market_state_enhanced()
             analyze_market_and_create_dynamic_profile_enhanced()
-            with dynamic_filter_lock: filter_profile = dynamic_filter_profile_cache
-            if not filter_profile: logger.warning("🛑 لم يتم تحميل ملف الفلاتر."); time.sleep(60); continue
+            
+            with dynamic_filter_lock:
+                filter_profile = dynamic_filter_profile_cache
+            
+            if not filter_profile:
+                logger.warning("🛑 لم يتم تحميل ملف الفلاتر. الانتظار...")
+                time.sleep(60)
+                continue
+
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
-            for symbol in symbols_to_process:
-                try:
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
-                    strategy = EnhancedTradingStrategy(symbol)
-                    if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]): continue
-                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None or df_15m.empty: continue
-                    df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_4h is None or df_4h.empty: continue
-                    df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                    if df_features is None or df_features.empty: continue
-                    ml_signal = strategy.generate_buy_signal(df_features)
-                    if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
-                        if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
-                        continue
-                    try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                    except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
-                    
-                    tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
-                    
-                    if not tp_sl_data: continue
-                    
-                    last_features = df_features.iloc[-1]
-                    if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
-                    
-                    order_book_analysis = analyze_order_book(symbol, entry_price)
-                    if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                    
-                    new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
-                    
-                    with trading_status_lock: is_enabled = is_trading_enabled
-                    if is_enabled:
-                        quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
-                        if quantity and quantity > 0:
-                            order_result = place_order(symbol, Client.SIDE_BUY, quantity)
-                            if order_result: new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
-                            else: continue
-                        else: continue
-                    saved_signal = insert_signal_into_db(new_signal)
-                    if saved_signal:
-                        with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                        log_and_notify('info', f"SIGNAL: New buy signal for {symbol} at {entry_price}", "NEW_SIGNAL")
-                except Exception as e: logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
-                finally: time.sleep(0.75)
-            logger.info("✅ [End of Cycle] انتهت دورة المسح. الانتظار 60 ثانية...")
+            
+            # --- START: Memory Optimization with Batch Processing ---
+            for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
+                batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
+                total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
+                logger.info(f"🔄 Processing batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}/{total_batches} ({len(batch)} symbols)...")
+
+                for symbol in batch:
+                    try:
+                        with signal_cache_lock:
+                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
+                                continue
+                        
+                        strategy = EnhancedTradingStrategy(symbol)
+                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                            continue
+                        
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_15m is None or df_15m.empty: continue
+                        
+                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_4h is None or df_4h.empty: continue
+                        
+                        df_features = strategy.get_features(df_15m, df_4h, btc_data)
+                        if df_features is None or df_features.empty: continue
+                        
+                        ml_signal = strategy.generate_buy_signal(df_features)
+                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
+                            if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
+                            continue
+                        
+                        try:
+                            entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                        except Exception as e:
+                            logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
+                            continue
+                        
+                        tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
+                        if not tp_sl_data: continue
+                        
+                        last_features = df_features.iloc[-1]
+                        if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                        
+                        order_book_analysis = analyze_order_book(symbol, entry_price)
+                        if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
+                        
+                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        
+                        with trading_status_lock: is_enabled = is_trading_enabled
+                        if is_enabled:
+                            quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
+                            if quantity and quantity > 0:
+                                order_result = place_order(symbol, Client.SIDE_BUY, quantity)
+                                if order_result:
+                                    new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
+                                else:
+                                    continue
+                            else:
+                                continue
+                        
+                        saved_signal = insert_signal_into_db(new_signal)
+                        if saved_signal:
+                            with signal_cache_lock:
+                                open_signals_cache[saved_signal['symbol']] = saved_signal
+                            log_and_notify('info', f"SIGNAL: New buy signal for {symbol} at {entry_price}", "NEW_SIGNAL")
+
+                    except Exception as e:
+                        logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
+                    finally:
+                        time.sleep(0.5) # Small delay between symbols
+
+                # --- Memory Management after each batch ---
+                logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches and collecting garbage.")
+                ml_models_cache.clear()
+                gc.collect()
+                logger.info("✅ Memory cleanup for batch complete.")
+            # --- END: Memory Optimization with Batch Processing ---
+
+            logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
+            
         except (KeyboardInterrupt, SystemExit):
-            log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
+            log_and_notify("info", "إيقاف البوت.", "SYSTEM")
+            break
         except Exception as main_err:
-            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
+            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM")
+            time.sleep(120)
 
 def price_update_loop():
     if not redis_client: return
