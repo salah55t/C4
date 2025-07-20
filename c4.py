@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع حساب ذكي للهدف ووقف الخسارة
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع شرط الحد الأدنى للربح
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -76,6 +76,7 @@ BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 50
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.80
+MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -130,7 +131,8 @@ REJECTION_REASONS_AR = {
     "Invalid Position Size": "حجم الصفقة غير صالح", "Lot Size Adjustment Failed": "فشل ضبط حجم العقد",
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى", "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
-    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL"
+    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
+    "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى" # <-- سبب الرفض الجديد
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -614,11 +616,11 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: NEW DYNAMIC TP/SL CALCULATION FUNCTION ---
+# --- START: DYNAMIC TP/SL CALCULATION FUNCTION (UPDATED) ---
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """
     Calculates Take Profit (TP) and Stop Loss (SL) dynamically based on ATR, ADX,
-    and recent support/resistance levels.
+    and recent support/resistance levels, with a minimum profit check.
     """
     try:
         if df.empty or len(df) < 50:
@@ -636,7 +638,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         plus_di_series = (df['high'].diff().clip(lower=0).rolling(ADX_PERIOD).mean() / atr) * 100
         minus_di_series = (-df['low'].diff().clip(upper=0).rolling(ADX_PERIOD).mean() / atr) * 100
         
-        # التأكد من أن السلاسل ليست فارغة قبل الوصول إلى iloc[-1]
         if plus_di_series.dropna().empty or minus_di_series.dropna().empty:
             log_rejection(symbol, "Insufficient data for ADX calculation")
             return None
@@ -645,12 +646,10 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         minus_di = minus_di_series.iloc[-1]
         
         dx_series = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
-        # التأكد من أن dx_series ليست قيمة واحدة فقط
         if isinstance(dx_series, (int, float)):
              adx = dx_series
         else:
             adx = dx_series.rolling(ADX_PERIOD).mean().iloc[-1]
-
 
         # دعم ومقاومة ديناميكية (Swing Points)
         lookback = 20
@@ -660,16 +659,16 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         # تعديل ATR بناءً على ADX
         volatility_factor = 1.0
         if adx > 30:
-            volatility_factor = 1.5  # سوق قوي
+            volatility_factor = 1.5
         elif adx < 15:
-            volatility_factor = 0.7  # سوق متراجع
+            volatility_factor = 0.7
 
         adjusted_atr = atr * volatility_factor
 
         # حساب SL بناءً على دعم + ATR
         sl_below_support = recent_low - adjusted_atr * 0.5
         sl_atr = entry_price - adjusted_atr * 1.2
-        stop_loss = min(sl_below_support, sl_atr)  # اختر الأقرب للحماية في الشراء
+        stop_loss = min(sl_below_support, sl_atr)
 
         # حساب TP بناءً على RR ديناميكي
         if entry_price <= stop_loss:
@@ -678,19 +677,24 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         risk = entry_price - stop_loss
         min_rr = 2.0
         max_rr = 4.0
-        dynamic_rr = min(max_rr, max(min_rr, adx / 10 if adx > 0 else min_rr))  # ADX أعلى = RR أعلى
+        dynamic_rr = min(max_rr, max(min_rr, adx / 10 if adx > 0 else min_rr))
 
         target_price = entry_price + risk * dynamic_rr
 
         # تعديل TP لتجنب القمم القريبة
-        if target_price > recent_high * 0.99: # إذا كان الهدف قريبًا جدًا من المقاومة
-            target_price = recent_high * 0.985  # ضع الهدف أسفل المقاومة مباشرة
+        if target_price > recent_high * 0.99:
+            target_price = recent_high * 0.985
 
         if target_price <= entry_price:
             log_rejection(symbol, "Invalid Target Price", {"tp": target_price, "entry": entry_price})
-            # Fallback to a simple ATR multiple if dynamic calculation fails
             target_price = entry_price + (adjusted_atr * 2.0)
 
+        # --- START: NEW MINIMUM PROFIT CHECK ---
+        potential_profit_pct = ((target_price - entry_price) / entry_price) * 100
+        if potential_profit_pct < MIN_PROFIT_PERCENT:
+            log_rejection(symbol, "Potential Profit Below Threshold", {"potential_profit": f"{potential_profit_pct:.2f}%", "threshold": f"{MIN_PROFIT_PERCENT}%"})
+            return None
+        # --- END: NEW MINIMUM PROFIT CHECK ---
 
         return {
             'target_price': round(target_price, 6),
@@ -703,7 +707,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ في حساب TP/SL الذكي: {e}", exc_info=True)
-        # Fallback to simple ATR calculation on error
         try:
             last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df.empty else 0
             if last_atr > 0:
@@ -711,7 +714,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         except:
             pass
         return None
-# --- END: NEW DYNAMIC TP/SL CALCULATION FUNCTION ---
+# --- END: DYNAMIC TP/SL CALCULATION FUNCTION (UPDATED) ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1317,10 +1320,9 @@ def main_loop_enhanced():
                     try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
                     
-                    # --- MODIFICATION: Call the new smart TP/SL function with the full DataFrame ---
                     tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                     
-                    if not tp_sl_data: continue # The function already logs the rejection
+                    if not tp_sl_data: continue
                     
                     last_features = df_features.iloc[-1]
                     if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
