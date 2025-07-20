@@ -610,7 +610,7 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     return True
 
 # --- START: NEW S/R BASED TP/SL FUNCTIONS ---
-SR_LOOKBACK_CANDLES = 50
+SR_LOOKBACK_CANDLES = 96
 SR_MIN_BOUNCES      = 2
 
 def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
