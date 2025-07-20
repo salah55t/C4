@@ -26,7 +26,7 @@ from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Set, Tuple
 from sklearn.preprocessing import StandardScaler
-from collections import deque
+from collections import deque, Counter
 import warnings
 
 # --- إعدادات التجاهل واللوجر ---
@@ -132,7 +132,8 @@ REJECTION_REASONS_AR = {
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى", "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
-    "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى" # <-- سبب الرفض الجديد
+    "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى", # <-- سبب الرفض الجديد
+    "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -616,105 +617,91 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: DYNAMIC TP/SL CALCULATION FUNCTION (UPDATED) ---
+# --- START: NEW S/R BASED TP/SL FUNCTIONS ---
+SR_LOOKBACK_CANDLES = 50
+SR_MIN_BOUNCES      = 2
+
+def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
+    """
+    Very simple pivot-based S/R detector.
+    Returns {'support': float, 'resistance': float} for the latest bar.
+    """
+    if len(df) < lookback:
+        return {'support': None, 'resistance': None}
+
+    highs = df['high'].iloc[-lookback:]
+    lows  = df['low'].iloc[-lookback:]
+
+    # identify swing highs / lows
+    pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
+    pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
+
+    highs_list = highs[pivot_high].dropna().tolist()
+    lows_list  = lows[pivot_low].dropna().tolist()
+
+    # Count occurrences to keep only the strongest
+    if not highs_list or not lows_list:
+        return {'support': None, 'resistance': None}
+
+    resistance = Counter(highs_list).most_common(1)[0][0]   # highest frequent
+    support    = Counter(lows_list).most_common(1)[0][0]    # lowest frequent
+
+    return {'support': support, 'resistance': resistance}
+
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """
-    Calculates Take Profit (TP) and Stop Loss (SL) dynamically based on ATR, ADX,
-    and recent support/resistance levels, with a minimum profit check.
+    TP = nearest resistance, SL = nearest support (or ATR fallback).
+    Enforces MIN_PROFIT_PERCENT vs entry.
     """
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
 
-        # حساب ATR
-        high_low = df['high'] - df['low']
-        high_close = (df['high'] - df['close'].shift()).abs()
-        low_close = (df['low'] - df['close'].shift()).abs()
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr = tr.ewm(span=ATR_PERIOD, adjust=False).mean().iloc[-1]
+        # --- 1. Find nearest S/R
+        sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
+        resistance = sr['resistance']
+        support    = sr['support']
 
-        # حساب ADX
-        plus_di_series = (df['high'].diff().clip(lower=0).rolling(ADX_PERIOD).mean() / atr) * 100
-        minus_di_series = (-df['low'].diff().clip(upper=0).rolling(ADX_PERIOD).mean() / atr) * 100
-        
-        if plus_di_series.dropna().empty or minus_di_series.dropna().empty:
-            log_rejection(symbol, "Insufficient data for ADX calculation")
-            return None
-        
-        plus_di = plus_di_series.iloc[-1]
-        minus_di = minus_di_series.iloc[-1]
-        
-        dx_series = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
-        if isinstance(dx_series, (int, float)):
-             adx = dx_series
-        else:
-            adx = dx_series.rolling(ADX_PERIOD).mean().iloc[-1]
+        # Fallback if no clear levels
+        if resistance is None or support is None:
+            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+            if last_atr <= 0:
+                return None
+            resistance = entry_price + last_atr * 2.5
+            support    = entry_price - last_atr * 1.5
 
-        # دعم ومقاومة ديناميكية (Swing Points)
-        lookback = 20
-        recent_high = df['high'].rolling(window=lookback).max().iloc[-1]
-        recent_low = df['low'].rolling(window=lookback).min().iloc[-1]
-
-        # تعديل ATR بناءً على ADX
-        volatility_factor = 1.0
-        if adx > 30:
-            volatility_factor = 1.5
-        elif adx < 15:
-            volatility_factor = 0.7
-
-        adjusted_atr = atr * volatility_factor
-
-        # حساب SL بناءً على دعم + ATR
-        sl_below_support = recent_low - adjusted_atr * 0.5
-        sl_atr = entry_price - adjusted_atr * 1.2
-        stop_loss = min(sl_below_support, sl_atr)
-
-        # حساب TP بناءً على RR ديناميكي
-        if entry_price <= stop_loss:
-             log_rejection(symbol, "Invalid Stop Loss for RR calculation", {"entry": entry_price, "sl": stop_loss})
-             return None
-        risk = entry_price - stop_loss
-        min_rr = 2.0
-        max_rr = 4.0
-        dynamic_rr = min(max_rr, max(min_rr, adx / 10 if adx > 0 else min_rr))
-
-        target_price = entry_price + risk * dynamic_rr
-
-        # تعديل TP لتجنب القمم القريبة
-        if target_price > recent_high * 0.99:
-            target_price = recent_high * 0.985
-
-        if target_price <= entry_price:
-            log_rejection(symbol, "Invalid Target Price", {"tp": target_price, "entry": entry_price})
-            target_price = entry_price + (adjusted_atr * 2.0)
-
-        # --- START: NEW MINIMUM PROFIT CHECK ---
-        potential_profit_pct = ((target_price - entry_price) / entry_price) * 100
+        # --- 2. Validate profit ≥ MIN_PROFIT_PERCENT
+        potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
         if potential_profit_pct < MIN_PROFIT_PERCENT:
-            log_rejection(symbol, "Potential Profit Below Threshold", {"potential_profit": f"{potential_profit_pct:.2f}%", "threshold": f"{MIN_PROFIT_PERCENT}%"})
+            log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
             return None
-        # --- END: NEW MINIMUM PROFIT CHECK ---
+
+        # --- 3. Ensure SL is below entry
+        if support >= entry_price:
+            # If support is above entry, push it slightly below
+            support = entry_price * 0.98
+
+        # --- 4. Prevent extremely tight SL
+        risk_pct = ((entry_price - support) / entry_price) * 100
+        if risk_pct < 0.3:  # < 0.3 % is too tight
+            support = entry_price * (1 - 0.003)
 
         return {
-            'target_price': round(target_price, 6),
-            'stop_loss': round(stop_loss, 6),
-            'source': 'SMART_TP_SL_V2',
-            'rr_ratio': round(dynamic_rr, 2),
-            'atr_used': round(adjusted_atr, 6),
-            'adx': round(adx, 2)
+            'target_price': round(resistance, 6),
+            'stop_loss':    round(support, 6),
+            'source':       'SR_LEVELS',
+            'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
 
     except Exception as e:
-        logger.error(f"❌ [{symbol}] خطأ في حساب TP/SL الذكي: {e}", exc_info=True)
-        try:
-            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df.empty else 0
-            if last_atr > 0:
-                return {'target_price': entry_price + (last_atr * 2.2), 'stop_loss': entry_price - (last_atr * 1.5), 'source': 'ATR_Fallback_On_Error'}
-        except:
-            pass
+        logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
+        # Fallback to old ATR method
+        last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+        if last_atr > 0:
+            return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: DYNAMIC TP/SL CALCULATION FUNCTION (UPDATED) ---
+# --- END: NEW S/R BASED TP/SL FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
