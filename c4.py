@@ -963,10 +963,14 @@ def get_signals():
         logger.error(f"❌ [API Signals] Error: {e}"); return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notifications')
-def get_notifications(): with notifications_lock: return jsonify(list(notifications_cache))
+def get_notifications():
+    with notifications_lock:
+        return jsonify(list(notifications_cache))
 
 @app.route('/api/rejection_logs')
-def get_rejection_logs(): with rejection_logs_lock: return jsonify(list(rejection_logs_cache))
+def get_rejection_logs():
+    with rejection_logs_lock:
+        return jsonify(list(rejection_logs_cache))
 
 @app.route('/api/trading/toggle', methods=['POST'])
 def toggle_trading_status():
