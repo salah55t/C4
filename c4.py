@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع إشعارات تليجرام
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع حساب ذكي للهدف ووقف الخسارة
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -130,7 +130,7 @@ REJECTION_REASONS_AR = {
     "Invalid Position Size": "حجم الصفقة غير صالح", "Lot Size Adjustment Failed": "فشل ضبط حجم العقد",
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى", "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
-    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم",
+    "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -614,9 +614,105 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-def calculate_tp_sl(symbol: str, entry_price: float, last_atr: float) -> Optional[Dict[str, Any]]:
-    if last_atr <= 0: log_rejection(symbol, "Invalid ATR for TP/SL", {"atr": last_atr}); return None
-    return {'target_price': entry_price + (last_atr * 2.2), 'stop_loss': entry_price - (last_atr * 1.5), 'source': 'ATR_Fallback'}
+# --- START: NEW DYNAMIC TP/SL CALCULATION FUNCTION ---
+def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    Calculates Take Profit (TP) and Stop Loss (SL) dynamically based on ATR, ADX,
+    and recent support/resistance levels.
+    """
+    try:
+        if df.empty or len(df) < 50:
+            log_rejection(symbol, "Insufficient data for TP/SL calculation")
+            return None
+
+        # حساب ATR
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        atr = tr.ewm(span=ATR_PERIOD, adjust=False).mean().iloc[-1]
+
+        # حساب ADX
+        plus_di_series = (df['high'].diff().clip(lower=0).rolling(ADX_PERIOD).mean() / atr) * 100
+        minus_di_series = (-df['low'].diff().clip(upper=0).rolling(ADX_PERIOD).mean() / atr) * 100
+        
+        # التأكد من أن السلاسل ليست فارغة قبل الوصول إلى iloc[-1]
+        if plus_di_series.dropna().empty or minus_di_series.dropna().empty:
+            log_rejection(symbol, "Insufficient data for ADX calculation")
+            return None
+        
+        plus_di = plus_di_series.iloc[-1]
+        minus_di = minus_di_series.iloc[-1]
+        
+        dx_series = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+        # التأكد من أن dx_series ليست قيمة واحدة فقط
+        if isinstance(dx_series, (int, float)):
+             adx = dx_series
+        else:
+            adx = dx_series.rolling(ADX_PERIOD).mean().iloc[-1]
+
+
+        # دعم ومقاومة ديناميكية (Swing Points)
+        lookback = 20
+        recent_high = df['high'].rolling(window=lookback).max().iloc[-1]
+        recent_low = df['low'].rolling(window=lookback).min().iloc[-1]
+
+        # تعديل ATR بناءً على ADX
+        volatility_factor = 1.0
+        if adx > 30:
+            volatility_factor = 1.5  # سوق قوي
+        elif adx < 15:
+            volatility_factor = 0.7  # سوق متراجع
+
+        adjusted_atr = atr * volatility_factor
+
+        # حساب SL بناءً على دعم + ATR
+        sl_below_support = recent_low - adjusted_atr * 0.5
+        sl_atr = entry_price - adjusted_atr * 1.2
+        stop_loss = min(sl_below_support, sl_atr)  # اختر الأقرب للحماية في الشراء
+
+        # حساب TP بناءً على RR ديناميكي
+        if entry_price <= stop_loss:
+             log_rejection(symbol, "Invalid Stop Loss for RR calculation", {"entry": entry_price, "sl": stop_loss})
+             return None
+        risk = entry_price - stop_loss
+        min_rr = 2.0
+        max_rr = 4.0
+        dynamic_rr = min(max_rr, max(min_rr, adx / 10 if adx > 0 else min_rr))  # ADX أعلى = RR أعلى
+
+        target_price = entry_price + risk * dynamic_rr
+
+        # تعديل TP لتجنب القمم القريبة
+        if target_price > recent_high * 0.99: # إذا كان الهدف قريبًا جدًا من المقاومة
+            target_price = recent_high * 0.985  # ضع الهدف أسفل المقاومة مباشرة
+
+        if target_price <= entry_price:
+            log_rejection(symbol, "Invalid Target Price", {"tp": target_price, "entry": entry_price})
+            # Fallback to a simple ATR multiple if dynamic calculation fails
+            target_price = entry_price + (adjusted_atr * 2.0)
+
+
+        return {
+            'target_price': round(target_price, 6),
+            'stop_loss': round(stop_loss, 6),
+            'source': 'SMART_TP_SL_V2',
+            'rr_ratio': round(dynamic_rr, 2),
+            'atr_used': round(adjusted_atr, 6),
+            'adx': round(adx, 2)
+        }
+
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] خطأ في حساب TP/SL الذكي: {e}", exc_info=True)
+        # Fallback to simple ATR calculation on error
+        try:
+            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df.empty else 0
+            if last_atr > 0:
+                return {'target_price': entry_price + (last_atr * 2.2), 'stop_loss': entry_price - (last_atr * 1.5), 'source': 'ATR_Fallback_On_Error'}
+        except:
+            pass
+        return None
+# --- END: NEW DYNAMIC TP/SL CALCULATION FUNCTION ---
+
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -1220,12 +1316,20 @@ def main_loop_enhanced():
                         continue
                     try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                     except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
+                    
+                    # --- MODIFICATION: Call the new smart TP/SL function with the full DataFrame ---
+                    tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
+                    
+                    if not tp_sl_data: continue # The function already logs the rejection
+                    
                     last_features = df_features.iloc[-1]
-                    tp_sl_data = calculate_tp_sl(symbol, entry_price, last_features.get('atr', 0))
-                    if not tp_sl_data or not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                    if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                    
                     order_book_analysis = analyze_order_book(symbol, entry_price)
                     if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                    new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0)}, 'entry_price': entry_price, **tp_sl_data}
+                    
+                    new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                    
                     with trading_status_lock: is_enabled = is_trading_enabled
                     if is_enabled:
                         quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
@@ -1291,4 +1395,3 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
-
