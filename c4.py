@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة ومنطق الدعم والمقاومة
+# ملف c4.py - نسخة محدثة مع تحسين الذاكرة بناءً على طلب المستخدم
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -11,7 +11,7 @@ import psycopg2
 import pickle
 import redis
 import re
-import gc
+import gc # <-- تم استيراد مكتبة جامع القمامة
 import random
 from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlparse
@@ -69,18 +69,17 @@ MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
-# --- MEMORY OPTIMIZATION: Reduced lookback period significantly ---
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 10 # <-- تخفيض المدة من 90 إلى 10 أيام
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.50
+BUY_CONFIDENCE_THRESHOLD = 0.65
 MIN_PROFIT_PERCENT: float = 1.0
 
-# --- MEMORY OPTIMIZATION: Processing batch size ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 15 # معالجة 15 عملة في كل دفعة
+# --- MEMORY OPTIMIZATION: حجم الدفعة لمعالجة العملات (تم التعديل إلى 10 بناءً على طلب المستخدم) ---
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -111,7 +110,6 @@ conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 enhanced_client: 'EnhancedClient' = None
 redis_client: Optional[redis.Redis] = None
-# --- MEMORY OPTIMIZATION: Removed ML models cache ---
 exchange_info_map: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
@@ -684,7 +682,6 @@ class EnhancedTradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def _load_ml_model_from_file(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # --- MEMORY OPTIMIZATION: Load model directly without caching ---
         model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
         script_dir = os.path.dirname(os.path.abspath(__file__))
         model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
@@ -1017,8 +1014,6 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
-    # The HTML content remains the same as it's for the frontend.
-    # No changes needed here for memory optimization.
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1482,13 +1477,13 @@ def main_loop_enhanced():
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
             
+            # --- تعديل الحلقة الرئيسية لمعالجة العملات على دفعات ---
             for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
                 logger.info(f"🔄 Processing batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}/{total_batches} ({len(batch)} symbols)...")
 
                 for symbol in batch:
-                    # --- MEMORY OPTIMIZATION: Define variables to be cleaned up ---
                     strategy, df_15m, df_4h, df_features = None, None, None, None
                     try:
                         with signal_cache_lock:
@@ -1540,9 +1535,12 @@ def main_loop_enhanced():
                     except Exception as e:
                         logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
                     finally:
-                        # --- MEMORY OPTIMIZATION: Aggressive cleanup after each symbol ---
+                        # --- MEMORY OPTIMIZATION: تنظيف المتغيرات بعد كل عملة ---
                         del strategy, df_15m, df_4h, df_features
-                        gc.collect()
+                
+                # --- MEMORY OPTIMIZATION: استدعاء جامع القمامة بعد كل دفعة ---
+                logger.info(f"✅ انتهت معالجة الدفعة. جاري استدعاء جامع القمامة لتحرير الذاكرة...")
+                gc.collect()
 
             logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
