@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة ومنطق الدعم والمقاومة
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -611,62 +611,36 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: UPDATED S/R BASED TP/SL FUNCTIONS ---
+# --- START: NEW S/R BASED TP/SL FUNCTIONS ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
-SR_SWING_THRESHOLD  = 0.02 # <-- New constant for the updated function
 
-def find_sr_levels(df: pd.DataFrame, lookback: int = 50, swing_threshold: float = 0.02, min_bounces: int = 2) -> Dict[str, Optional[float]]:
+def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
     """
-    تحسين دقة حساب الدعم والمقاومة باستخدام نقاط التأرجح (Swing Points)
+    Very simple pivot-based S/R detector.
+    Returns {'support': float, 'resistance': float} for the latest bar.
     """
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
 
-    df = df.iloc[-lookback:].copy()
-    highs = df['high']
-    lows = df['low']
+    highs = df['high'].iloc[-lookback:]
+    lows  = df['low'].iloc[-lookback:]
 
-    # تحديد القمم والقيعان باستخدام التغير النسبي
-    resistance_candidates = []
-    support_candidates = []
+    # identify swing highs / lows
+    pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
+    pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
 
-    # We need at least 2 candles on each side to identify a swing point
-    for i in range(2, len(df) - 2):
-        # Potential swing high
-        is_swing_high = highs.iloc[i] > highs.iloc[i-1] and highs.iloc[i] > highs.iloc[i+1]
-        if is_swing_high:
-            # Check if it's a significant swing
-            is_significant = (highs.iloc[i] - max(highs.iloc[i-2], highs.iloc[i+2])) / highs.iloc[i] > swing_threshold
-            if is_significant:
-                resistance_candidates.append(highs.iloc[i])
+    highs_list = highs[pivot_high].dropna().tolist()
+    lows_list  = lows[pivot_low].dropna().tolist()
 
-        # Potential swing low
-        is_swing_low = lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i+1]
-        if is_swing_low:
-            # Check if it's a significant swing
-            is_significant = (min(lows.iloc[i-2], lows.iloc[i+2]) - lows.iloc[i]) / lows.iloc[i] > swing_threshold
-            if is_significant:
-                support_candidates.append(lows.iloc[i])
+    # Count occurrences to keep only the strongest
+    if not highs_list or not lows_list:
+        return {'support': None, 'resistance': None}
 
-    # Select the nearest support and resistance to the current price
-    current_price = df['close'].iloc[-1]
-
-    resistance = None
-    support = None
-
-    if resistance_candidates:
-        # Find the closest resistance level above the current price
-        above = [r for r in resistance_candidates if r > current_price]
-        resistance = min(above) if above else max(resistance_candidates)
-
-    if support_candidates:
-        # Find the closest support level below the current price
-        below = [s for s in support_candidates if s < current_price]
-        support = max(below) if below else min(support_candidates)
+    resistance = Counter(highs_list).most_common(1)[0][0]   # highest frequent
+    support    = Counter(lows_list).most_common(1)[0][0]    # lowest frequent
 
     return {'support': support, 'resistance': resistance}
-
 
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """
@@ -678,12 +652,12 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
 
-        # --- 1. Find nearest S/R using the new method
-        sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, swing_threshold=SR_SWING_THRESHOLD, min_bounces=SR_MIN_BOUNCES)
+        # --- 1. Find nearest S/R
+        sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
         resistance = sr['resistance']
         support    = sr['support']
 
-        # Fallback if no clear levels are found
+        # Fallback if no clear levels
         if resistance is None or support is None:
             last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
             if last_atr <= 0:
@@ -697,31 +671,31 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
             return None
 
-        # --- 3. Ensure SL is below entry price
+        # --- 3. Ensure SL is below entry
         if support >= entry_price:
-            # If calculated support is above entry, push it slightly below as a failsafe
+            # If support is above entry, push it slightly below
             support = entry_price * 0.98
 
-        # --- 4. Prevent extremely tight Stop Loss
+        # --- 4. Prevent extremely tight SL
         risk_pct = ((entry_price - support) / entry_price) * 100
-        if risk_pct < 0.3:  # A stop loss less than 0.3% is often too tight
+        if risk_pct < 0.3:  # < 0.3 % is too tight
             support = entry_price * (1 - 0.003)
 
         return {
             'target_price': round(resistance, 6),
             'stop_loss':    round(support, 6),
-            'source':       'SR_LEVELS_V2',
+            'source':       'SR_LEVELS',
             'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
 
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
-        # Fallback to the original ATR method in case of any error
+        # Fallback to old ATR method
         last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: UPDATED S/R BASED TP/SL FUNCTIONS ---
+# --- END: NEW S/R BASED TP/SL FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
