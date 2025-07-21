@@ -75,7 +75,7 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.55
+BUY_CONFIDENCE_THRESHOLD = 0.40
 MIN_PROFIT_PERCENT: float = 1.0
 
 # --- MEMORY OPTIMIZATION: حجم الدفعة لمعالجة العملات (تم التعديل إلى 10 بناءً على طلب المستخدم) ---
