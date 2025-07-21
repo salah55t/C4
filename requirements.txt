@@ -15,8 +15,8 @@ pandas-ta>=0.3.14b
 ta>=0.10.2
 redis
 optuna
-
-
+tenacity
+scipy
 
 
 
