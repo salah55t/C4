@@ -71,10 +71,10 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
-MAX_OPEN_TRADES: int = 10
-BUY_CONFIDENCE_THRESHOLD = 0.85
+MAX_OPEN_TRADES: int = 4
+BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
