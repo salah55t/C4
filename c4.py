@@ -297,17 +297,35 @@ def get_exchange_info_map() -> None:
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     if not enhanced_client: return []
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(script_dir, filename)
     try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(script_dir, filename)
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
-        if not exchange_info_map: get_exchange_info_map()
-        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
+        
+        if not exchange_info_map or time.time() - exchange_info_map.get('_timestamp', 0) > 3600:
+            get_exchange_info_map()
+
+        # --- FIX: Check if 'info' is a dictionary before calling .get() ---
+        active = {
+            s for s, info in exchange_info_map.items() 
+            if isinstance(info, dict) and info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'
+        }
+        
         validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"✅ [Validation] سيقوم البوت بمراقبة {len(validated)} عملة.")
+        
+        if not validated:
+            logger.warning("⚠️ [Validation] لم يتم العثور على عملات صالحة بعد الفلترة.")
+        else:
+            logger.info(f"✅ [Validation] سيقوم البوت بمراقبة {len(validated)} عملة.")
+        
         return validated
+        
+    except FileNotFoundError:
+        logger.error(f"❌ [Validation] ملف العملات '{filename}' غير موجود في المسار: {file_path}")
+        return []
     except Exception as e:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
@@ -562,7 +580,7 @@ class AdvancedStrategies:
         
         # اختلاف RSI
         price_peaks = argrelextrema(df['close'].values, np.greater, order=5)[0]
-        rsi_peaks = argrelextrema(df['rsi'].values, np.greater, order=5)[0]
+        rsi_peaks = argrelelextrema(df['rsi'].values, np.greater, order=5)[0]
         
         # التأكد من وجود قمم كافية للمقارنة
         if len(price_peaks) < 2 or len(rsi_peaks) < 2:
@@ -1854,11 +1872,13 @@ def initialize_bot_services():
         
         init_db()
         init_redis()
-        get_exchange_info_map()
+        # get_exchange_info_map() is now called inside get_validated_symbols if needed
         load_open_signals_to_cache()
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
-        if not validated_symbols_to_scan: logger.critical("❌ لا توجد عملات صالحة للمسح."); return
+        if not validated_symbols_to_scan: 
+            log_and_notify("critical", "لا توجد عملات صالحة للمسح. سيتم إيقاف البوت.", "SYSTEM")
+            return
         
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
