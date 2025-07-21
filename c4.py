@@ -1,4 +1,4 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة والتحقق من الرصيد
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -68,10 +68,10 @@ MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 60
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 5.0
+STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.80
@@ -706,7 +706,7 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         for f in symbol_info['filters']:
             if f['filterType'] == 'LOT_SIZE':
                 step_size = Decimal(f['stepSize'])
-                return (Decimal(str(quantity)) // step_size) * step_size
+                return (Decimal(str(quantity)).quantize(step_size, rounding=ROUND_DOWN))
         return Decimal(str(quantity))
     except Exception as e:
         logger.error(f"[{symbol}] خطأ في تعديل الكمية: {e}"); return None
@@ -738,7 +738,8 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
-        order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=float(quantity))
+        # Use str() to avoid float precision issues with the API
+        order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
     except Exception as e:
@@ -764,12 +765,52 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
         
         if signal_to_close.get('is_real_trade'):
-            quantity_to_sell = Decimal(str(signal_to_close.get('quantity')))
-            if quantity_to_sell > 0:
-                sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
-                if not sell_order:
-                    log_and_notify('error', f"CRITICAL: Failed to place SELL order for {symbol_to_close}. Signal remains open.", "TRADE_ERROR")
+            # --- START: MODIFICATION FOR BALANCE CHECK ---
+            try:
+                # 1. Get the base asset (e.g., 'BTC' from 'BTCUSDT')
+                symbol_info = exchange_info_map.get(symbol_to_close)
+                if not symbol_info:
+                    logger.error(f"❌ [{symbol_to_close}] لا يمكن العثور على معلومات العملة لإغلاق الصفقة.")
                     return False
+                base_asset = symbol_info['baseAsset']
+
+                # 2. Query the actual available balance from Binance
+                balance_response = client.get_asset_balance(asset=base_asset)
+                available_balance = Decimal(balance_response['free'])
+                logger.info(f"ℹ️ [{symbol_to_close}] الرصيد المتاح للبيع من {base_asset}: {available_balance}")
+
+                # 3. Check if there is anything to sell
+                if available_balance <= 0:
+                    logger.warning(f"⚠️ [{symbol_to_close}] لا يوجد رصيد متاح للبيع من {base_asset}. سيتم إغلاق الصفقة في النظام فقط.")
+                else:
+                    # 4. Adjust the quantity to meet LOT_SIZE rules
+                    quantity_to_sell = adjust_quantity_to_lot_size(symbol_to_close, float(available_balance))
+                    if quantity_to_sell is None or quantity_to_sell <= 0:
+                        logger.error(f"❌ [{symbol_to_close}] فشل تعديل كمية البيع حسب قواعد LOT_SIZE. الكمية المتاحة: {available_balance}")
+                        return False # Do not proceed if adjustment fails
+
+                    # 5. Check against MIN_NOTIONAL before selling
+                    notional_value = quantity_to_sell * Decimal(str(closing_price))
+                    min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+                    
+                    min_notional_ok = True
+                    if min_notional_filter:
+                        min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                        if notional_value < min_notional:
+                            logger.warning(f"⚠️ [{symbol_to_close}] قيمة البيع ({notional_value:.2f}) أقل من الحد الأدنى ({min_notional}). سيتم إغلاق الصفقة في النظام فقط.")
+                            min_notional_ok = False
+
+                    # 6. Place the sell order with the actual available quantity if all checks pass
+                    if min_notional_ok:
+                        sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
+                        if not sell_order:
+                            log_and_notify('error', f"CRITICAL: فشل تنفيذ أمر البيع لـ {symbol_to_close}. ستبقى الصفقة مفتوحة.", "TRADE_ERROR")
+                            return False # Critical failure, stop the closing process
+
+            except Exception as e:
+                logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
+                return False # Stop if any unexpected error occurs
+            # --- END: MODIFICATION FOR BALANCE CHECK ---
         
         if not check_db_connection() or not conn:
             log_and_notify('critical', "DB connection lost during trade closure. Data might be inconsistent.", "DB_ERROR")
