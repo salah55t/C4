@@ -1,5 +1,6 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة والتحقق من الرصيد
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة وإصلاح LOT_SIZE
 # تم التحديث بواسطة Gemini
+# --- تعديل: تم تحديث منطق المقاومة ليعتمد على جسم الشمعة ---
 import time
 import os
 import json
@@ -68,13 +69,13 @@ MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 60
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80
+BUY_CONFIDENCE_THRESHOLD = 0.85
 MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
@@ -611,36 +612,46 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: NEW S/R BASED TP/SL FUNCTIONS ---
+# --- START: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
 def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
     """
-    Very simple pivot-based S/R detector.
+    مكتشف بسيط للدعم والمقاومة يعتمد على النقاط المحورية.
+    يُرجع {'support': float, 'resistance': float} لآخر شمعة.
+    تعديل: تم تغيير حساب المقاومة ليعتمد على أعلى جسم الشمعة (أقصى قيمة بين سعر الفتح والإغلاق) بدلاً من الذيل العلوي (أعلى سعر).
+    
+    Simple pivot-based S/R detector.
     Returns {'support': float, 'resistance': float} for the latest bar.
+    MODIFIED: Resistance is now based on candle body top (max(open, close)) instead of the high wick.
     """
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
 
-    highs = df['high'].iloc[-lookback:]
+    # --- تعديل: استخدام أعلى جسم الشمعة للمقاومة ---
+    # --- MODIFICATION: Use the top of the candle body for resistance ---
+    candle_body_tops = df[['open', 'close']].max(axis=1)
+    highs = candle_body_tops.iloc[-lookback:]
     lows  = df['low'].iloc[-lookback:]
 
-    # identify swing highs / lows
+    # تحديد القمم والقيعان المتأرجحة
+    # The logic remains the same, but it's now applied to candle bodies for resistance
     pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
     pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
 
     highs_list = highs[pivot_high].dropna().tolist()
     lows_list  = lows[pivot_low].dropna().tolist()
 
-    # Count occurrences to keep only the strongest
+    # عد التكرارات للاحتفاظ بالأقوى فقط
     if not highs_list or not lows_list:
         return {'support': None, 'resistance': None}
 
-    resistance = Counter(highs_list).most_common(1)[0][0]   # highest frequent
-    support    = Counter(lows_list).most_common(1)[0][0]    # lowest frequent
+    resistance = Counter(highs_list).most_common(1)[0][0] if highs_list else None
+    support    = Counter(lows_list).most_common(1)[0][0] if lows_list else None
 
     return {'support': support, 'resistance': resistance}
+
 
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     """
@@ -695,21 +706,40 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: NEW S/R BASED TP/SL FUNCTIONS ---
+# --- END: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
+    """
+    Adjusts the quantity to conform to the LOT_SIZE filter's stepSize.
+    This version is more robust to prevent filter failures.
+    """
     try:
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info: return None
-        for f in symbol_info['filters']:
-            if f['filterType'] == 'LOT_SIZE':
-                step_size = Decimal(f['stepSize'])
-                return (Decimal(str(quantity)).quantize(step_size, rounding=ROUND_DOWN))
+        if not symbol_info:
+            logger.error(f"[{symbol}] لم يتم العثور على معلومات الرمز لضبط LOT_SIZE.")
+            return None
+        
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        
+        if lot_size_filter:
+            step_size = Decimal(lot_size_filter['stepSize'])
+            quantity_decimal = Decimal(str(quantity))
+            
+            # Formula: floor(quantity / step_size) * step_size
+            # This correctly truncates the quantity to the required precision.
+            adjusted_quantity = (quantity_decimal // step_size) * step_size
+            
+            logger.info(f"[{symbol}] تعديل الكمية: الأصلية={quantity_decimal}, حجم الخطوة={step_size}, المعدلة={adjusted_quantity}")
+            return adjusted_quantity
+            
+        # If for some reason LOT_SIZE filter is not found, return the original quantity as a Decimal
         return Decimal(str(quantity))
+        
     except Exception as e:
-        logger.error(f"[{symbol}] خطأ في تعديل الكمية: {e}"); return None
+        logger.error(f"[{symbol}] خطأ في تعديل الكمية لـ LOT_SIZE: {e}", exc_info=True)
+        return None
 
 def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
     if not client: return None
@@ -765,31 +795,25 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
         
         if signal_to_close.get('is_real_trade'):
-            # --- START: MODIFICATION FOR BALANCE CHECK ---
             try:
-                # 1. Get the base asset (e.g., 'BTC' from 'BTCUSDT')
                 symbol_info = exchange_info_map.get(symbol_to_close)
                 if not symbol_info:
                     logger.error(f"❌ [{symbol_to_close}] لا يمكن العثور على معلومات العملة لإغلاق الصفقة.")
                     return False
                 base_asset = symbol_info['baseAsset']
 
-                # 2. Query the actual available balance from Binance
                 balance_response = client.get_asset_balance(asset=base_asset)
                 available_balance = Decimal(balance_response['free'])
                 logger.info(f"ℹ️ [{symbol_to_close}] الرصيد المتاح للبيع من {base_asset}: {available_balance}")
 
-                # 3. Check if there is anything to sell
                 if available_balance <= 0:
                     logger.warning(f"⚠️ [{symbol_to_close}] لا يوجد رصيد متاح للبيع من {base_asset}. سيتم إغلاق الصفقة في النظام فقط.")
                 else:
-                    # 4. Adjust the quantity to meet LOT_SIZE rules
                     quantity_to_sell = adjust_quantity_to_lot_size(symbol_to_close, float(available_balance))
                     if quantity_to_sell is None or quantity_to_sell <= 0:
-                        logger.error(f"❌ [{symbol_to_close}] فشل تعديل كمية البيع حسب قواعد LOT_SIZE. الكمية المتاحة: {available_balance}")
-                        return False # Do not proceed if adjustment fails
+                        logger.error(f"❌ [{symbol_to_close}] فشل تعديل كمية البيع أو الكمية المعدلة صفر. الكمية المتاحة: {available_balance}")
+                        return False
 
-                    # 5. Check against MIN_NOTIONAL before selling
                     notional_value = quantity_to_sell * Decimal(str(closing_price))
                     min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
                     
@@ -800,17 +824,15 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                             logger.warning(f"⚠️ [{symbol_to_close}] قيمة البيع ({notional_value:.2f}) أقل من الحد الأدنى ({min_notional}). سيتم إغلاق الصفقة في النظام فقط.")
                             min_notional_ok = False
 
-                    # 6. Place the sell order with the actual available quantity if all checks pass
                     if min_notional_ok:
                         sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
                         if not sell_order:
                             log_and_notify('error', f"CRITICAL: فشل تنفيذ أمر البيع لـ {symbol_to_close}. ستبقى الصفقة مفتوحة.", "TRADE_ERROR")
-                            return False # Critical failure, stop the closing process
+                            return False
 
             except Exception as e:
                 logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
-                return False # Stop if any unexpected error occurs
-            # --- END: MODIFICATION FOR BALANCE CHECK ---
+                return False
         
         if not check_db_connection() or not conn:
             log_and_notify('critical', "DB connection lost during trade closure. Data might be inconsistent.", "DB_ERROR")
@@ -829,7 +851,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
             
-            # --- إشعار تليجرام بالإغلاق ---
             reason_map = {'take_profit': '🎯 Take Profit', 'stop_loss': '🛑 Stop Loss', 'manual': '🖐️ Manual Close'}
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -853,7 +874,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as cur:
-            # Explicitly convert numpy types to standard Python floats before insertion
             entry_price = float(signal_data['entry_price'])
             target_price = float(signal_data['target_price'])
             stop_loss = float(signal_data['stop_loss'])
@@ -872,13 +892,12 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 signal_data.get('is_real_trade', False),
                 quantity,
                 signal_data.get('order_id'),
-                entry_price  # current_peak_price starts at entry_price
+                entry_price
             ))
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
             
-            # --- إشعار تليجرام بالتوصية الجديدة ---
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
