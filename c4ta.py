@@ -12,20 +12,41 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('EmergencyBacktest')
 
+
+# ==============================================================================
+# --- CONFIGURATION - قم بتعديل هذه الإعدادات لاختبار سيناريوهات مختلفة ---
+# ==============================================================================
+CONFIG = {
+    # كم يوماً في الماضي تريد اختباره؟ (فترة أطول تزيد من فرصة إيجاد انهيار)
+    "BACKTEST_DAYS": 90,
+
+    # درجة الطوارئ المطلوبة لتفعيل الإنذار (قيمة أقل = أكثر حساسية)
+    "TRIGGER_SCORE_THRESHOLD": 60.0,
+
+    # مضاعف حجم التداول الذي يعتبر طارئاً (مثال: 5.0 يعني أن الحجم الحالي 5 أضعاف المتوسط)
+    "VOLUME_SPIKE_THRESHOLD": 5.0,
+
+    # الأصول المراقبة، أوزانها في حساب الدرجة، وعتبة الهبوط المئوية لكل منها
+    "ASSETS": {
+        'BTCUSDT': {'weight': 0.4, 'threshold': -3.0},
+        'ETHUSDT': {'weight': 0.3, 'threshold': -4.0},
+        'BNBUSDT': {'weight': 0.2, 'threshold': -5.0},
+        'SOLUSDT': {'weight': 0.1, 'threshold': -6.0}
+    }
+}
+# ==============================================================================
+
+
 # --- فئة كاشف الطوارئ المعدلة للاختبار الخلفي ---
 class BacktestEmergencyDetector:
     """
     نسخة معدلة من كاشف الطوارئ مصممة للعمل مع بيانات تاريخية (DataFrame)
     بدلاً من استدعاءات API الحية.
     """
-    def __init__(self):
-        self.emergency_assets = {
-            'BTCUSDT': {'weight': 0.4, 'threshold': -3.0},
-            'ETHUSDT': {'weight': 0.3, 'threshold': -4.0},
-            'BNBUSDT': {'weight': 0.2, 'threshold': -5.0},
-            'SOLUSDT': {'weight': 0.1, 'threshold': -6.0}
-        }
-        self.volume_spike_threshold = 5.0
+    def __init__(self, config_dict: Dict):
+        self.config = config_dict
+        self.emergency_assets = self.config["ASSETS"]
+        self.volume_spike_threshold = self.config["VOLUME_SPIKE_THRESHOLD"]
 
     def get_15m_change(self, candle: pd.Series) -> float:
         """يحسب التغير من شمعة واحدة (DataFrame row)."""
@@ -43,8 +64,6 @@ class BacktestEmergencyDetector:
     def calculate_emergency_score(self, data_slice: Dict[str, pd.Series], history_slice: Dict[str, pd.DataFrame]) -> Tuple[float, Dict]:
         """
         يحسب درجة الطوارئ بناءً على شريحة من البيانات التاريخية.
-        - data_slice: يحتوي على الشمعة الحالية لكل أصل.
-        - history_slice: يحتوي على الشموع السابقة لكل أصل لحساب المتوسطات.
         """
         total_score = 0.0
         details = {}
@@ -82,9 +101,10 @@ class BacktestEmergencyDetector:
 
 
 class EmergencyBacktest:
-    def __init__(self, client: Client):
+    def __init__(self, client: Client, config_dict: Dict):
         self.client = client
-        self.detector = BacktestEmergencyDetector()
+        self.config = config_dict
+        self.detector = BacktestEmergencyDetector(config_dict)
         
     def fetch_historical_data(self, symbol: str, interval: str, start_date_str: str) -> Optional[pd.DataFrame]:
         """يجلب البيانات التاريخية من تاريخ محدد."""
@@ -105,15 +125,17 @@ class EmergencyBacktest:
             df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
             df.set_index('timestamp', inplace=True)
             logger.info(f"✅ Fetched {len(df)} records for {symbol}.")
-            return df
+            return df.dropna(subset=numeric_cols)
         except Exception as e:
             logger.error(f"❌ Error fetching {symbol}: {e}")
             return None
     
-    def simulate_emergency_triggers(self, days: int = 10) -> Dict:
+    def simulate_emergency_triggers(self) -> Dict:
         """يُحاكي تفعيلات الطوارئ خلال فترة زمنية محددة."""
+        days = self.config["BACKTEST_DAYS"]
         results = {
             'backtest_period_days': days,
+            'trigger_threshold': self.config["TRIGGER_SCORE_THRESHOLD"],
             'total_triggers': 0,
             'trigger_events': [],
             'max_score': 0.0,
@@ -123,7 +145,6 @@ class EmergencyBacktest:
         start_date = datetime.now() - timedelta(days=days)
         start_date_str = start_date.strftime("%d %b, %Y")
 
-        # جلب البيانات التاريخية لكل الأصول مرة واحدة
         all_data = {}
         for symbol in self.detector.emergency_assets.keys():
             df = self.fetch_historical_data(symbol, '15m', start_date_str)
@@ -134,53 +155,40 @@ class EmergencyBacktest:
             logger.critical("No historical data fetched. Aborting backtest.")
             return results
         
-        # دمج البيانات ومحاذاتها حسب الطابع الزمني
         logger.info("Merging and aligning data...")
         merged_df = pd.concat(
             [df.add_prefix(f"{symbol}_") for symbol, df in all_data.items()],
             axis=1
         )
-        # نملأ القيم المفقودة بالقيم السابقة ثم نحذف أي صفوف لا تزال تحتوي على NaN
         merged_df.ffill(inplace=True)
         merged_df.dropna(inplace=True)
 
         logger.info(f"Simulation will run on {len(merged_df)} common timestamps.")
 
-        # المحاكاة شمعة بشمعة
         for timestamp, row in tqdm(merged_df.iterrows(), total=len(merged_df), desc="Simulating"):
-            data_slice = {}
-            history_slice = {}
+            data_slice, history_slice = {}, {}
             
-            # تحضير البيانات لكل أصل في هذه النقطة الزمنية
             for symbol in self.detector.emergency_assets.keys():
                 prefix = f"{symbol}_"
                 cols = [c for c in row.index if c.startswith(prefix)]
                 if not cols: continue
                 
-                # الشمعة الحالية
                 current_candle_data = row[cols]
                 current_candle_data.index = [c.replace(prefix, '') for c in current_candle_data.index]
                 data_slice[symbol] = pd.Series(current_candle_data)
                 
-                # الشموع السابقة (لآخر ساعتين = 8 شمعات)
                 history_df = all_data[symbol]
-                # نأخذ الشموع التي تسبق الشمعة الحالية بـ 15 دقيقة
                 previous_candles = history_df[(history_df.index < timestamp) & (history_df.index >= timestamp - timedelta(hours=2))]
-                history_slice[symbol] = previous_candles.tail(7) # متوسط آخر 7 شمعات
+                history_slice[symbol] = previous_candles.tail(7)
 
-            # حساب درجة الطوارئ لهذه النقطة الزمنية
             score, details = self.detector.calculate_emergency_score(data_slice, history_slice)
             
             results['daily_scores'].append({'date': timestamp.isoformat(), 'score': score})
             results['max_score'] = max(results['max_score'], score)
 
-            if score >= 60.0:
+            if score >= self.config["TRIGGER_SCORE_THRESHOLD"]:
                 results['total_triggers'] += 1
-                trigger_event = {
-                    'date': timestamp.isoformat(),
-                    'score': score,
-                    'details': details
-                }
+                trigger_event = {'date': timestamp.isoformat(), 'score': score, 'details': details}
                 results['trigger_events'].append(trigger_event)
                 logger.warning(f"🚨 Trigger! Date: {timestamp.isoformat()}, Score: {score:.1f}")
 
@@ -198,24 +206,22 @@ if __name__ == "__main__":
         api_key = config('BINANCE_API_KEY')
         api_secret = config('BINANCE_API_SECRET')
     except Exception as e:
-        logger.critical(f"❌ لم يتم العثور على مفاتيح API في ملف .env. يرجى إضافتها.")
-        logger.critical("Example: BINANCE_API_KEY=your_key")
+        logger.critical("❌ لم يتم العثور على مفاتيح API في ملف .env. يرجى إضافتها.")
         exit(1)
         
     client = Client(api_key, api_secret)
     
-    backtest = EmergencyBacktest(client)
-    # يمكنك تغيير عدد الأيام للاختبار
-    test_days = 10
-    results = backtest.simulate_emergency_triggers(days=test_days)
+    backtest = EmergencyBacktest(client, CONFIG)
+    results = backtest.simulate_emergency_triggers()
     backtest.save_results(results)
     
     print("\n" + "="*50)
     print("📊 Backtest Results Summary 📊")
     print("="*50)
-    print(f"  Total Triggers (>60 score): {results['total_triggers']}")
-    print(f"  Max Score Reached: {results['max_score']:.2f}")
     print(f"  Backtest Period: {results['backtest_period_days']} days")
+    print(f"  Trigger Threshold: {results['trigger_threshold']}")
+    print(f"  Total Triggers: {results['total_triggers']}")
+    print(f"  Max Score Reached: {results['max_score']:.2f}")
     print("\n--- Trigger Events ---")
     if results['trigger_events']:
         for event in results['trigger_events']:
