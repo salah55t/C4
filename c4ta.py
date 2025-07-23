@@ -110,7 +110,7 @@ class EmergencyBacktest:
             logger.error(f"❌ Error fetching {symbol}: {e}")
             return None
     
-    def simulate_emergency_triggers(self, days: int = 365) -> Dict:
+    def simulate_emergency_triggers(self, days: int = 10) -> Dict:
         """يُحاكي تفعيلات الطوارئ خلال فترة زمنية محددة."""
         results = {
             'backtest_period_days': days,
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     
     backtest = EmergencyBacktest(client)
     # يمكنك تغيير عدد الأيام للاختبار
-    test_days = 30 
+    test_days = 10
     results = backtest.simulate_emergency_triggers(days=test_days)
     backtest.save_results(results)
     
