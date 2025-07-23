@@ -1,6 +1,5 @@
 # ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع نظام الطوارئ
-# تم التحديث بواسطة Gemini
-# --- تعديل: إضافة نظام الطوارئ لإغلاق الصفقات عند انهيار السوق ---
+# --- تم التحديث بواسطة Gemini مع نظام طوارئ متعدد الأصول ---
 import time
 import os
 import json
@@ -26,9 +25,6 @@ from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Set, Tuple
-from sklearn.preprocessing import StandardScaler
-from collections import deque, Counter
-import warnings
 
 # --- إعدادات التجاهل واللوجر ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -50,15 +46,13 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
-    # --- إعدادات تليجرام ---
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
-
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
+# --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 are_filters_disabled: bool = False
@@ -76,17 +70,14 @@ STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.75
-MIN_PROFIT_PERCENT: float = 1.0 
-
-# --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 20 
+MIN_PROFIT_PERCENT: float = 1.0
+SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 
 # --- NEW: Emergency System Settings ---
 CRASH_PROTECTION_ENABLED: bool = True
-BTC_CRASH_THRESHOLD_PCT: float = 3.0  # نسبة هبوط BTC في 15 دقيقة لتفعيل النظام
-VOLUME_SPIKE_MULTIPLIER: float = 5.0 # مضاعف حجم التداول المفاجئ
+emergency_detector = None # سيتم تهيئته عند أول استدعاء
 
-# --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
+# --- إعدادات المؤشرات الفنية ---
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
@@ -130,7 +121,6 @@ last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 last_market_state_check = 0
 
-# --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً",
     "BTC Correlation": "ارتباط ضعيف بالبيتكوين", "RRR Filter": "نسبة المخاطرة/العائد غير كافية",
@@ -144,7 +134,152 @@ REJECTION_REASONS_AR = {
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)"
 }
 
-# --- دالة إرسال رسائل تليجرام ---
+# --- START: NEW Multi-Asset Emergency System ---
+class MultiAssetEmergencyDetector:
+    """
+    نظام كشف الطوارئ متعدد الأصول لحماية المحفظة من الانهيارات المفاجئة.
+    """
+    def __init__(self, client: Client):
+        self.client = client
+        # تعريف الأصول المراقبة، أوزانها، وعتبات الهبوط
+        self.emergency_assets = {
+            'BTCUSDT': {'weight': 0.4, 'threshold': -3.0},
+            'ETHUSDT': {'weight': 0.3, 'threshold': -4.0},
+            'BNBUSDT': {'weight': 0.2, 'threshold': -5.0},
+            'SOLUSDT': {'weight': 0.1, 'threshold': -6.0}
+        }
+        self.volume_spike_threshold = 5.0  # مضاعف حجم التداول الذي يعتبر طارئاً
+
+    def get_15m_change(self, symbol: str) -> float:
+        """يحسب نسبة التغير في آخر 15 دقيقة مكتملة."""
+        try:
+            # نجلب شمعتين: الحالية (غير مكتملة) والسابقة (مكتملة)
+            klines = self.client.get_historical_klines(
+                symbol, '15m', "30 minutes ago UTC", limit=2
+            )
+            if len(klines) < 2:
+                logger.warning(f"[{symbol}] بيانات غير كافية لحساب تغير 15 دقيقة.")
+                return 0.0
+            # نستخدم الشمعة قبل الأخيرة لضمان أنها مكتملة
+            previous_open = float(klines[-2][1])
+            previous_close = float(klines[-2][4])
+            if previous_open == 0: return 0.0
+            return ((previous_close - previous_open) / previous_open) * 100
+        except Exception as e:
+            logger.error(f"❌ [Emergency] خطأ في جلب تغير 15 دقيقة لـ {symbol}: {e}")
+            return 0.0
+
+    def get_volume_spike(self, symbol: str) -> float:
+        """يتحقق من وجود طفرة في حجم التداول."""
+        try:
+            # نجلب 8 شمعات للمقارنة (آخر شمعة مكتملة مقابل متوسط الـ 7 السابقة)
+            klines = self.client.get_historical_klines(
+                symbol, '15m', "2 hours ago UTC", limit=8
+            )
+            if len(klines) < 8:
+                return 1.0 # لا يمكن الحساب، نفترض عدم وجود طفرة
+            volumes = [float(k[5]) for k in klines]
+            current_vol = volumes[-1] # آخر شمعة
+            avg_vol = np.mean(volumes[:-1]) # متوسط الشمعات السابقة
+            return current_vol / avg_vol if avg_vol > 0 else 1.0
+        except Exception as e:
+            logger.error(f"❌ [Emergency] خطأ في جلب طفرة الحجم لـ {symbol}: {e}")
+            return 1.0
+
+    def calculate_emergency_score(self) -> Tuple[float, Dict]:
+        """
+        يحسب درجة الطوارئ الإجمالية من 0 إلى 100.
+        تتكون الدرجة من مساهمات هبوط الأسعار وطفرات الحجم.
+        """
+        total_score = 0.0
+        details = {}
+
+        for symbol, config in self.emergency_assets.items():
+            # 1. حساب مساهمة هبوط السعر
+            price_change = self.get_15m_change(symbol)
+            if price_change <= config['threshold']:
+                # كلما كان الهبوط أكبر من العتبة، زادت المساهمة
+                asset_score = abs(price_change / config['threshold']) * config['weight'] * 100
+                total_score += asset_score
+                details[symbol] = {
+                    'type': 'Price Drop',
+                    'change_pct': round(price_change, 2),
+                    'threshold_pct': config['threshold'],
+                    'contribution': round(asset_score, 1)
+                }
+
+            # 2. حساب مساهمة طفرة الحجم
+            volume_ratio = self.get_volume_spike(symbol)
+            if volume_ratio >= self.volume_spike_threshold:
+                # مساهمة تصل إلى 20 نقطة بناءً على قوة الطفرة
+                vol_score = min((volume_ratio / self.volume_spike_threshold) * 10, 20) * config['weight'] * 2 # نعطي وزناً إضافياً للحجم
+                total_score += vol_score
+                details[f"{symbol}_volume"] = {
+                    'type': 'Volume Spike',
+                    'ratio': round(volume_ratio, 2),
+                    'threshold_ratio': self.volume_spike_threshold,
+                    'contribution': round(vol_score, 1)
+                }
+        
+        return min(total_score, 100), details
+
+    def is_emergency_triggered(self, threshold: float = 60.0) -> Tuple[bool, Dict]:
+        """يتحقق إذا تجاوزت درجة الطوارئ الإجمالية الحد المطلوب."""
+        score, details = self.calculate_emergency_score()
+        triggered = score >= threshold
+        if triggered:
+            logger.critical(f"🚨🚨 EMERGENCY TRIGGERED! Score: {score:.1f} / {threshold} 🚨🚨")
+        return triggered, {'score': round(score, 1), 'details': details}
+
+def is_market_crashing() -> bool:
+    """
+    يتحقق من وجود سقوط حر في السوق باستخدام نظام الطوارئ متعدد الأصول.
+    """
+    global emergency_detector
+    if not CRASH_PROTECTION_ENABLED:
+        return False
+
+    # تهيئة الكاشف عند أول استدعاء فقط
+    if emergency_detector is None:
+        if client:
+            logger.info("ℹ️ [Emergency] تهيئة نظام كشف الطوارئ متعدد الأصول...")
+            emergency_detector = MultiAssetEmergencyDetector(client)
+        else:
+            logger.warning("⚠️ [Emergency] لا يمكن تهيئة الكاشف، العميل غير موجود.")
+            return False
+
+    try:
+        triggered, details = emergency_detector.is_emergency_triggered(threshold=60.0)
+        
+        if triggered:
+            # تحويل التفاصيل إلى نص JSON لتخزينها في قاعدة البيانات
+            details_json = json.dumps(details, ensure_ascii=False, default=str)
+            log_and_notify(
+                'critical', 
+                f"🚨 Emergency triggered! Score: {details.get('score', 'N/A')}. Details: {details_json}", 
+                "EMERGENCY_TRIGGER"
+            )
+            # حفظ التفاصيل المنظمة في قاعدة البيانات
+            try:
+                if check_db_connection():
+                    with conn.cursor() as cur:
+                        # ملاحظة: تأكد من أنك قمت بتشغيل أمر ALTER TABLE لإضافة عمود details
+                        cur.execute("""
+                            INSERT INTO notifications (type, message, details) 
+                            VALUES ('EMERGENCY_TRIGGER', %s, %s)
+                        """, (f"Emergency Score: {details.get('score', 'N/A')}", details_json))
+                        conn.commit()
+            except Exception as e:
+                logger.error(f"❌ [DB Log] فشل حفظ تفاصيل الطوارئ في قاعدة البيانات: {e}")
+                if conn: conn.rollback()
+        
+        return triggered
+    except Exception as e:
+        logger.error(f"❌ [Emergency] خطأ فادح أثناء التحقق من حالة السوق: {e}", exc_info=True)
+        return False
+# --- END: NEW Multi-Asset Emergency System ---
+
+
 def send_telegram_message(message: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.warning("[Telegram] Token أو Chat ID غير معين، تم تخطي الإرسال.")
@@ -158,7 +293,6 @@ def send_telegram_message(message: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
     logger.info("[DB] تهيئة الاتصال بقاعدة البيانات...")
@@ -188,6 +322,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
+                # -- قم بتشغيل هذا الأمر مرة واحدة يدوياً في قاعدة بياناتك --
+                # ALTER TABLE notifications ADD COLUMN IF NOT EXISTS details JSONB;
+                cur.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS details JSONB;")
+                logger.info("✅ [DB] تم التأكد من وجود عمود 'details' في جدول 'notifications'.")
+
             conn.commit()
             logger.info("✅ [DB] الاتصال بقاعدة البيانات وتحديث المخطط بنجاح.")
             return
@@ -197,6 +336,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if attempt < retries - 1: time.sleep(delay)
             else: logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات.")
 
+# ... (بقية الكود يبقى كما هو بدون تغيير) ...
+# --- دوال تهيئة الخدمات ---
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
@@ -219,6 +360,9 @@ def check_db_connection() -> bool:
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
     log_methods.get(level.lower(), logger.info)(message)
+    # The new is_market_crashing function will handle DB logging for emergencies
+    if notification_type == "EMERGENCY_TRIGGER":
+        return
     if not check_db_connection() or not conn: return
     try:
         new_notification = {"timestamp": datetime.now(timezone.utc).isoformat(), "type": notification_type, "message": message}
@@ -278,11 +422,9 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V9) ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # For 15m interval, days=1 is enough to get a few candles. Let's get a bit more to be safe.
         limit = 100 if interval == '15m' else None
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC", limit=limit)
 
@@ -299,7 +441,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
-
+# ... (The rest of the file remains unchanged) ...
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
@@ -458,7 +600,6 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- أنظمة التحليل المتقدمة ----------------------
 class MarketConditionsAnalyzer:
     def __init__(self):
         self.conditions_cache = {}
@@ -489,7 +630,7 @@ class MarketConditionsAnalyzer:
             elif ratio < 1.5: return "normal"
             else: return "high"
         except: return "normal"
-    def _get_correlation_regime(self) -> str: return "normal" # تبسيط مؤقت
+    def _get_correlation_regime(self) -> str: return "normal"
     def _get_session_type(self) -> str: return get_session_state()[1]
     def _get_default_conditions(self) -> Dict[str, Any]: return {'volatility_regime': 'normal', 'volume_regime': 'normal', 'correlation_regime': 'normal', 'session_type': 'NORMAL_LIQUIDITY'}
 
@@ -506,7 +647,6 @@ class EnhancedFilterSystem:
 
 enhanced_filter_system = EnhancedFilterSystem()
 
-# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V9) ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -618,7 +758,6 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
@@ -667,56 +806,10 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: MODIFIED S/R BASED TP/SL FUNCTIONS ---
-
-# --- START: Emergency System Functions ---
-def get_btc_15m_change() -> float:
-    """يحسب نسبة تغير BTC في آخر 15 دقيقة"""
-    try:
-        # Fetch the last 2 15-minute candles to ensure we have open and close for the last full candle
-        btc_15m = fetch_historical_data(BTC_SYMBOL, '15m', 1)
-        if btc_15m is None or btc_15m.empty:
-            logger.warning("⚠️ [Emergency] لم يتمكن من جلب بيانات BTC لحساب التغير.")
-            return 0.0
-        # Use the last complete candle's data
-        last_candle = btc_15m.iloc[-1]
-        return ((last_candle['close'] - last_candle['open']) / last_candle['open']) * 100
-    except Exception as e:
-        logger.error(f"❌ [Emergency] خطأ في حساب تغير BTC: {e}")
-        return 0.0
-
-def is_market_crashing() -> bool:
-    """يتحقق من وجود سقوط حر في السوق بناءً على BTC"""
-    btc_drop = get_btc_15m_change()
-    
-    # 1. Check for significant price drop
-    price_crash = btc_drop <= -BTC_CRASH_THRESHOLD_PCT
-    if price_crash:
-        logger.critical(f"🚨 سقوط مفاجئ في السعر: BTC منخفض بـ {btc_drop:.2f}% (الحد: -{BTC_CRASH_THRESHOLD_PCT}%)")
-        return True
-
-    # 2. Check for sudden volume spike (can indicate panic selling)
-    try:
-        # Fetch last 10 candles to get a more stable average volume
-        btc_volume_df = fetch_historical_data(BTC_SYMBOL, '15m', 2)
-        if btc_volume_df is not None and not btc_volume_df.empty and len(btc_volume_df) > 2:
-            current_vol = btc_volume_df['volume'].iloc[-1]
-            # Average of previous candles, excluding the current one
-            avg_vol = btc_volume_df['volume'].iloc[:-1].mean()
-            if avg_vol > 0 and (current_vol / avg_vol) > VOLUME_SPIKE_MULTIPLIER:
-                logger.critical(f"🚨 حجم تداول مفاجئ مكتشف! النسبة: {current_vol / avg_vol:.2f}x (الحد: {VOLUME_SPIKE_MULTIPLIER}x)")
-                return True
-    except Exception as e:
-        logger.error(f"❌ خطأ في التحقق من حجم التداول الطارئ: {e}")
-        # Don't trigger a crash just because volume check failed, rely on price.
-        pass
-    
-    return False
 
 def emergency_close_all_positions(reason: str = "سوق متهاوٍ"):
     """يغلق جميع الصفقات المفتوحة فورًا بسبب حالة الطوارئ"""
     with signal_cache_lock:
-        # Create a copy to avoid issues with modifying the cache while iterating
         open_trades = list(open_signals_cache.values())
     
     if not open_trades:
@@ -727,7 +820,6 @@ def emergency_close_all_positions(reason: str = "سوق متهاوٍ"):
     for signal in open_trades:
         try:
             current_price = float(client.get_symbol_ticker(symbol=signal['symbol'])['price'])
-            # The close_signal function already contains the sell order and verification logic
             success = close_signal(signal['id'], current_price, f"emergency_{reason}")
             if success:
                 send_telegram_message(
@@ -737,14 +829,10 @@ def emergency_close_all_positions(reason: str = "سوق متهاوٍ"):
                     f"سعر الإغلاق: `{current_price}`"
                 )
             else:
-                # close_signal already sends a critical alert if verification fails
                 logger.error(f"❌ فشل إغلاق {signal['symbol']} في حالة الطوارئ. تم إرسال تنبيه.")
         except Exception as e:
             logger.error(f"❌ خطأ فادح أثناء محاولة إغلاق {signal['symbol']} في حالة الطوارئ: {e}")
-# --- END: Emergency System Functions ---
 
-
-# ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -936,7 +1024,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
-# ---------------------- دوال النظام الرئيسية ----------------------
 def determine_market_state_enhanced():
     global current_market_state, last_market_state_check
     if time.time() - last_market_state_check < 180: return
@@ -978,7 +1065,6 @@ def analyze_market_and_create_dynamic_profile_enhanced():
         last_dynamic_filter_analysis_time = time.time()
     logger.info(f"✅ [Filter] تم توليد فلاتر جديدة: {description}")
 
-# ---------------------- واجهة Flask ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1276,7 +1362,6 @@ def manual_close_trade_endpoint(signal_id):
     else:
         return jsonify({"success": False, "message": "Failed to close signal. Check logs."}), 500
 
-# ---------------------- حلقات النظام ----------------------
 def trade_management_loop():
     logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات...")
     while True:
@@ -1359,12 +1444,12 @@ def main_loop_enhanced():
 
     while True:
         try:
-            # --- NEW: Emergency Crash Protection ---
-            if CRASH_PROTECTION_ENABLED and is_market_crashing():
+            # --- Emergency Crash Protection ---
+            if is_market_crashing():
                 emergency_close_all_positions()
                 log_and_notify("warning", "نظام الطوارئ مفعل. تم إيقاف البوت مؤقتاً لمدة 5 دقائق.", "EMERGENCY_HALT")
-                time.sleep(300)  # Wait 5 minutes before re-evaluating
-                continue # Skip to the next cycle
+                time.sleep(300)
+                continue
             # --- End of Emergency Crash Protection ---
 
             logger.info("🔄 بدء دورة مسح جديدة...")
@@ -1497,7 +1582,6 @@ def initialize_bot_services():
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
-# ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
     logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Final with Telegram) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
