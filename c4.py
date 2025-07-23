@@ -160,7 +160,7 @@ class MultiAssetEmergencyDetector:
             'BNBUSDT': {'weight': 0.2, 'threshold': -2.5},
             'SOLUSDT': {'weight': 0.1, 'threshold': -4.0}
         }
-        self.volume_spike_threshold = 5.0
+        self.volume_spike_threshold = 4.0
 
     def get_15m_change(self, symbol: str) -> float:
         try:
@@ -202,7 +202,7 @@ class MultiAssetEmergencyDetector:
                 details[f"{symbol}_volume"] = {'type': 'Volume Spike', 'ratio': round(volume_ratio, 2), 'threshold_ratio': self.volume_spike_threshold, 'contribution': round(vol_score, 1)}
         return min(total_score, 100), details
 
-    def is_emergency_triggered(self, threshold: float = 60.0) -> Tuple[bool, Dict]:
+    def is_emergency_triggered(self, threshold: float = 30.0) -> Tuple[bool, Dict]:
         score, details = self.calculate_emergency_score()
         triggered = score >= threshold
         if triggered:
