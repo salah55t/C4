@@ -1,5 +1,5 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع نظام الطوارئ
-# --- تم التحديث بواسطة Gemini مع نظام طوارئ متعدد الأصول ---
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع نظام الطوارئ ونظام الإيقاف الوقائي
+# --- تم التحديث بواسطة Gemini مع نظام طوارئ متعدد الأصول ونظام إيقاف وقائي ---
 import time
 import os
 import json
@@ -13,7 +13,7 @@ import redis
 import re
 import gc
 import random
-import warnings # <-- تمت إضافة هذا السطر لإصلاح الخطأ
+import warnings
 from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
@@ -78,6 +78,19 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 # --- NEW: Emergency System Settings ---
 CRASH_PROTECTION_ENABLED: bool = True
 emergency_detector = None # سيتم تهيئته عند أول استدعاء
+
+# --- START: NEW Proactive Stop System Settings ---
+# --- إعدادات نظام الإيقاف الوقائي ---
+# الساعات (بتوقيت UTC) التي تسبقها تقلبات عالية متوقعة
+HIGH_RISK_HOURS_UTC: Set[int] = {0, 4, 8, 12, 16, 20}
+# إيقاف البحث عن إشارات قبل ساعة الخطر بـ (دقائق)
+QUIET_PERIOD_MINUTES_BEFORE: int = 15
+# إرسال تنبيه قبل بدء فترة الهدوء بـ (دقائق)
+ALERT_MINUTES_BEFORE: int = 30
+# لتتبع التنبيهات التي تم إرسالها وتجنب التكرار
+last_alert_sent_for_hour: Dict[str, bool] = {}
+# --- END: NEW Proactive Stop System Settings ---
+
 
 # --- إعدادات المؤشرات الفنية ---
 ADX_PERIOD: int = 14
@@ -145,24 +158,22 @@ class MultiAssetEmergencyDetector:
         self.client = client
         # تعريف الأصول المراقبة، أوزانها، وعتبات الهبوط
         self.emergency_assets = {
-            'BTCUSDT': {'weight': 0.4, 'threshold': -1.5},
-            'ETHUSDT': {'weight': 0.3, 'threshold': -2.0},
-            'BNBUSDT': {'weight': 0.2, 'threshold': -2.5},
-            'SOLUSDT': {'weight': 0.1, 'threshold': -3.0}
+            'BTCUSDT': {'weight': 0.4, 'threshold': -2.0},
+            'ETHUSDT': {'weight': 0.3, 'threshold': -3.0},
+            'BNBUSDT': {'weight': 0.2, 'threshold': -4.0},
+            'SOLUSDT': {'weight': 0.1, 'threshold': -5.0}
         }
         self.volume_spike_threshold = 5.0  # مضاعف حجم التداول الذي يعتبر طارئاً
 
     def get_15m_change(self, symbol: str) -> float:
         """يحسب نسبة التغير في آخر 15 دقيقة مكتملة."""
         try:
-            # نجلب شمعتين: الحالية (غير مكتملة) والسابقة (مكتملة)
             klines = self.client.get_historical_klines(
                 symbol, '15m', "30 minutes ago UTC", limit=2
             )
             if len(klines) < 2:
                 logger.warning(f"[{symbol}] بيانات غير كافية لحساب تغير 15 دقيقة.")
                 return 0.0
-            # نستخدم الشمعة قبل الأخيرة لضمان أنها مكتملة
             previous_open = float(klines[-2][1])
             previous_close = float(klines[-2][4])
             if previous_open == 0: return 0.0
@@ -174,15 +185,14 @@ class MultiAssetEmergencyDetector:
     def get_volume_spike(self, symbol: str) -> float:
         """يتحقق من وجود طفرة في حجم التداول."""
         try:
-            # نجلب 8 شمعات للمقارنة (آخر شمعة مكتملة مقابل متوسط الـ 7 السابقة)
             klines = self.client.get_historical_klines(
                 symbol, '15m', "2 hours ago UTC", limit=8
             )
             if len(klines) < 8:
-                return 1.0 # لا يمكن الحساب، نفترض عدم وجود طفرة
+                return 1.0
             volumes = [float(k[5]) for k in klines]
-            current_vol = volumes[-1] # آخر شمعة
-            avg_vol = np.mean(volumes[:-1]) # متوسط الشمعات السابقة
+            current_vol = volumes[-1]
+            avg_vol = np.mean(volumes[:-1])
             return current_vol / avg_vol if avg_vol > 0 else 1.0
         except Exception as e:
             logger.error(f"❌ [Emergency] خطأ في جلب طفرة الحجم لـ {symbol}: {e}")
@@ -191,16 +201,13 @@ class MultiAssetEmergencyDetector:
     def calculate_emergency_score(self) -> Tuple[float, Dict]:
         """
         يحسب درجة الطوارئ الإجمالية من 0 إلى 100.
-        تتكون الدرجة من مساهمات هبوط الأسعار وطفرات الحجم.
         """
         total_score = 0.0
         details = {}
 
         for symbol, config in self.emergency_assets.items():
-            # 1. حساب مساهمة هبوط السعر
             price_change = self.get_15m_change(symbol)
             if price_change <= config['threshold']:
-                # كلما كان الهبوط أكبر من العتبة، زادت المساهمة
                 asset_score = abs(price_change / config['threshold']) * config['weight'] * 100
                 total_score += asset_score
                 details[symbol] = {
@@ -210,11 +217,9 @@ class MultiAssetEmergencyDetector:
                     'contribution': round(asset_score, 1)
                 }
 
-            # 2. حساب مساهمة طفرة الحجم
             volume_ratio = self.get_volume_spike(symbol)
             if volume_ratio >= self.volume_spike_threshold:
-                # مساهمة تصل إلى 20 نقطة بناءً على قوة الطفرة
-                vol_score = min((volume_ratio / self.volume_spike_threshold) * 10, 20) * config['weight'] * 2 # نعطي وزناً إضافياً للحجم
+                vol_score = min((volume_ratio / self.volume_spike_threshold) * 10, 20) * config['weight'] * 2
                 total_score += vol_score
                 details[f"{symbol}_volume"] = {
                     'type': 'Volume Spike',
@@ -225,7 +230,7 @@ class MultiAssetEmergencyDetector:
         
         return min(total_score, 100), details
 
-    def is_emergency_triggered(self, threshold: float = 35.0) -> Tuple[bool, Dict]:
+    def is_emergency_triggered(self, threshold: float = 60.0) -> Tuple[bool, Dict]:
         """يتحقق إذا تجاوزت درجة الطوارئ الإجمالية الحد المطلوب."""
         score, details = self.calculate_emergency_score()
         triggered = score >= threshold
@@ -241,7 +246,6 @@ def is_market_crashing() -> bool:
     if not CRASH_PROTECTION_ENABLED:
         return False
 
-    # تهيئة الكاشف عند أول استدعاء فقط
     if emergency_detector is None:
         if client:
             logger.info("ℹ️ [Emergency] تهيئة نظام كشف الطوارئ متعدد الأصول...")
@@ -254,18 +258,15 @@ def is_market_crashing() -> bool:
         triggered, details = emergency_detector.is_emergency_triggered(threshold=60.0)
         
         if triggered:
-            # تحويل التفاصيل إلى نص JSON لتخزينها في قاعدة البيانات
             details_json = json.dumps(details, ensure_ascii=False, default=str)
             log_and_notify(
                 'critical', 
                 f"🚨 Emergency triggered! Score: {details.get('score', 'N/A')}. Details: {details_json}", 
                 "EMERGENCY_TRIGGER"
             )
-            # حفظ التفاصيل المنظمة في قاعدة البيانات
             try:
                 if check_db_connection():
                     with conn.cursor() as cur:
-                        # ملاحظة: تأكد من أنك قمت بتشغيل أمر ALTER TABLE لإضافة عمود details
                         cur.execute("""
                             INSERT INTO notifications (type, message, details) 
                             VALUES ('EMERGENCY_TRIGGER', %s, %s)
@@ -280,6 +281,96 @@ def is_market_crashing() -> bool:
         logger.error(f"❌ [Emergency] خطأ فادح أثناء التحقق من حالة السوق: {e}", exc_info=True)
         return False
 # --- END: NEW Multi-Asset Emergency System ---
+
+
+# --- START: NEW Proactive Stop System ---
+def cleanup_old_alerts():
+    """Removes alerts for past events to prevent the dictionary from growing indefinitely."""
+    global last_alert_sent_for_hour
+    now_utc = datetime.now(timezone.utc)
+    # We consider "old" to be anything from more than one day ago
+    yesterday = (now_utc - timedelta(days=1)).date()
+    keys_to_delete = []
+    for key in last_alert_sent_for_hour:
+        try:
+            # Key format is "HOUR-YYYY-MM-DD"
+            _, date_str = key.split('-', 1)
+            alert_date = datetime.fromisoformat(date_str).date()
+            if alert_date < yesterday:
+                keys_to_delete.append(key)
+        except (ValueError, IndexError):
+            # If key is not in the expected format, mark for deletion
+            keys_to_delete.append(key)
+    
+    for key in keys_to_delete:
+        del last_alert_sent_for_hour[key]
+    if keys_to_delete:
+        logger.info(f"🧹 Cleaned up {len(keys_to_delete)} old alert keys.")
+
+def check_and_send_quiet_period_alert():
+    """
+    Checks if an alert needs to be sent before a high-risk period and sends a Telegram notification.
+    """
+    global last_alert_sent_for_hour
+    now_utc = datetime.now(timezone.utc)
+    
+    # Total minutes before the risk hour to send the alert
+    alert_total_offset = QUIET_PERIOD_MINUTES_BEFORE + ALERT_MINUTES_BEFORE
+    
+    for risk_hour in HIGH_RISK_HOURS_UTC:
+        # Calculate at which minute of the day the alert should trigger
+        # (risk_hour * 60) is the minute of day for the risk event
+        # Add 1440 (minutes in a day) for correct modulo operation with negative results
+        alert_minute_of_day = (risk_hour * 60 - alert_total_offset + 1440) % 1440
+        
+        alert_hour = alert_minute_of_day // 60
+        alert_minute = alert_minute_of_day % 60
+        
+        # Check if the current time matches the calculated alert time
+        if now_utc.hour == alert_hour and now_utc.minute == alert_minute:
+            # To prevent re-sending, we create a unique key for the specific risk event
+            # The key is composed of the risk hour and the date the risk event will occur on
+            risk_event_date = now_utc.date()
+            if now_utc.hour > risk_hour: # e.g., it's 23:15, for risk hour 00:00, so the event is tomorrow
+                risk_event_date += timedelta(days=1)
+            
+            alert_key = f"{risk_hour}-{risk_event_date.isoformat()}"
+
+            if not last_alert_sent_for_hour.get(alert_key):
+                logger.info(f"Triggering pre-quiet period alert for {risk_hour:02}:00 UTC on {risk_event_date}.")
+                message = (
+                    f"🔔 *تنبيه وقائي* 🔔\n\n"
+                    f"سيتم إيقاف البحث عن توصيات جديدة مؤقتاً خلال *{ALERT_MINUTES_BEFORE} دقيقة*.\n"
+                    f"السبب: الاستعداد لفترة تقلبات عالية متوقعة عند الساعة *{risk_hour:02}:00 UTC*."
+                )
+                send_telegram_message(message)
+                last_alert_sent_for_hour[alert_key] = True
+                cleanup_old_alerts() # Clean up old keys after adding a new one
+
+def is_currently_in_quiet_period() -> bool:
+    """
+    Checks if the bot should be in a quiet period, not generating signals.
+    """
+    now_utc = datetime.now(timezone.utc)
+
+    for risk_hour in HIGH_RISK_HOURS_UTC:
+        # Define the risk event time for today
+        risk_time = now_utc.replace(hour=risk_hour, minute=0, second=0, microsecond=0)
+        # Calculate the start of the quiet period before the risk event
+        quiet_start_time = risk_time - timedelta(minutes=QUIET_PERIOD_MINUTES_BEFORE)
+
+        # Handle the special case for the 00:00 UTC risk hour
+        # If it's currently 23:xx, the next 00:00 risk hour is on the next day
+        if risk_hour == 0 and now_utc.hour == 23:
+            risk_time = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            quiet_start_time = risk_time - timedelta(minutes=QUIET_PERIOD_MINUTES_BEFORE)
+
+        # Check if the current time is within the quiet window [quiet_start, risk_time)
+        if quiet_start_time <= now_utc < risk_time:
+            return True
+            
+    return False
+# --- END: NEW Proactive Stop System ---
 
 
 def send_telegram_message(message: str):
@@ -651,8 +742,6 @@ class EnhancedTradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def _load_ml_model_from_file(self, symbol: str) -> Optional[Dict[str, Any]]:
-        # This function requires 'sklearn' which might not be in the base environment.
-        # Let's add a placeholder for now to avoid import errors during startup.
         try:
             from sklearn.preprocessing import StandardScaler
         except ImportError:
@@ -1449,6 +1538,14 @@ def main_loop_enhanced():
 
     while True:
         try:
+            # --- MODIFIED: Proactive Stop Logic ---
+            check_and_send_quiet_period_alert()
+            if is_currently_in_quiet_period():
+                logger.info("🤫 فترة هدوء نشطة. تم إيقاف البحث عن إشارات مؤقتاً.")
+                time.sleep(60) # Check again in a minute
+                continue
+            # --- END OF MODIFICATION ---
+            
             if is_market_crashing():
                 emergency_close_all_positions()
                 log_and_notify("warning", "نظام الطوارئ مفعل. تم إيقاف البوت مؤقتاً لمدة 5 دقائق.", "EMERGENCY_HALT")
