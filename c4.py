@@ -1,6 +1,6 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع آلية التحقق من البيع
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع نظام الطوارئ
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة التحقق من تنفيذ أمر البيع قبل إغلاق الصفقة في قاعدة البيانات ---
+# --- تعديل: إضافة نظام الطوارئ لإغلاق الصفقات عند انهيار السوق ---
 import time
 import os
 import json
@@ -72,14 +72,19 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 5.0
+STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.75
-MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
+MIN_PROFIT_PERCENT: float = 1.0 
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 20 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
+SYMBOL_PROCESSING_BATCH_SIZE: int = 20 
+
+# --- NEW: Emergency System Settings ---
+CRASH_PROTECTION_ENABLED: bool = True
+BTC_CRASH_THRESHOLD_PCT: float = 3.0  # نسبة هبوط BTC في 15 دقيقة لتفعيل النظام
+VOLUME_SPIKE_MULTIPLIER: float = 5.0 # مضاعف حجم التداول المفاجئ
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -94,8 +99,8 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.8
-TRAILING_DISTANCE_PERCENT: float = 1.0
+TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
+TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
 PULLBACK_THRESHOLD_PCT: float = 0.988
@@ -277,9 +282,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
-        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        klines = client.get_historical_klines(symbol, interval, start_str)
+        # For 15m interval, days=1 is enough to get a few candles. Let's get a bit more to be safe.
+        limit = 100 if interval == '15m' else None
+        klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC", limit=limit)
+
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
@@ -617,126 +623,142 @@ SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
 def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
-    """
-    مكتشف بسيط للدعم والمقاومة يعتمد على النقاط المحورية.
-    يُرجع {'support': float, 'resistance': float} لآخر شمعة.
-    تعديل: تم تغيير حساب المقاومة ليعتمد على أعلى جسم الشمعة (أقصى قيمة بين سعر الفتح والإغلاق) بدلاً من الذيل العلوي (أعلى سعر).
-    
-    Simple pivot-based S/R detector.
-    Returns {'support': float, 'resistance': float} for the latest bar.
-    MODIFIED: Resistance is now based on candle body top (max(open, close)) instead of the high wick.
-    """
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
-
-    # --- تعديل: استخدام أعلى جسم الشمعة للمقاومة ---
-    # --- MODIFICATION: Use the top of the candle body for resistance ---
     candle_body_tops = df[['open', 'close']].max(axis=1)
     highs = candle_body_tops.iloc[-lookback:]
     lows  = df['low'].iloc[-lookback:]
-
-    # تحديد القمم والقيعان المتأرجحة
-    # The logic remains the same, but it's now applied to candle bodies for resistance
     pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
     pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
-
     highs_list = highs[pivot_high].dropna().tolist()
     lows_list  = lows[pivot_low].dropna().tolist()
-
-    # عد التكرارات للاحتفاظ بالأقوى فقط
-    if not highs_list or not lows_list:
-        return {'support': None, 'resistance': None}
-
     resistance = Counter(highs_list).most_common(1)[0][0] if highs_list else None
     support    = Counter(lows_list).most_common(1)[0][0] if lows_list else None
-
     return {'support': support, 'resistance': resistance}
 
-
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    TP = nearest resistance, SL = nearest support (or ATR fallback).
-    Enforces MIN_PROFIT_PERCENT vs entry.
-    """
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
-
-        # --- 1. Find nearest S/R
         sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
         resistance = sr['resistance']
         support    = sr['support']
-
-        # Fallback if no clear levels
         if resistance is None or support is None:
             last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
-            if last_atr <= 0:
-                return None
+            if last_atr <= 0: return None
             resistance = entry_price + last_atr * 2.5
             support    = entry_price - last_atr * 1.5
-
-        # --- 2. Validate profit ≥ MIN_PROFIT_PERCENT
         potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
         if potential_profit_pct < MIN_PROFIT_PERCENT:
             log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
             return None
-
-        # --- 3. Ensure SL is below entry
-        if support >= entry_price:
-            # If support is above entry, push it slightly below
-            support = entry_price * 0.98
-
-        # --- 4. Prevent extremely tight SL
+        if support >= entry_price: support = entry_price * 0.98
         risk_pct = ((entry_price - support) / entry_price) * 100
-        if risk_pct < 0.3:  # < 0.3 % is too tight
-            support = entry_price * (1 - 0.003)
-
+        if risk_pct < 0.3: support = entry_price * (1 - 0.003)
         return {
-            'target_price': round(resistance, 6),
-            'stop_loss':    round(support, 6),
-            'source':       'SR_LEVELS',
-            'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
+            'target_price': round(resistance, 6), 'stop_loss': round(support, 6),
+            'source': 'SR_LEVELS',
+            'rr_ratio': round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
-
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
-        # Fallback to old ATR method
         last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 # --- END: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 
+# --- START: Emergency System Functions ---
+def get_btc_15m_change() -> float:
+    """يحسب نسبة تغير BTC في آخر 15 دقيقة"""
+    try:
+        # Fetch the last 2 15-minute candles to ensure we have open and close for the last full candle
+        btc_15m = fetch_historical_data(BTC_SYMBOL, '15m', 1)
+        if btc_15m is None or btc_15m.empty:
+            logger.warning("⚠️ [Emergency] لم يتمكن من جلب بيانات BTC لحساب التغير.")
+            return 0.0
+        # Use the last complete candle's data
+        last_candle = btc_15m.iloc[-1]
+        return ((last_candle['close'] - last_candle['open']) / last_candle['open']) * 100
+    except Exception as e:
+        logger.error(f"❌ [Emergency] خطأ في حساب تغير BTC: {e}")
+        return 0.0
+
+def is_market_crashing() -> bool:
+    """يتحقق من وجود سقوط حر في السوق بناءً على BTC"""
+    btc_drop = get_btc_15m_change()
+    
+    # 1. Check for significant price drop
+    price_crash = btc_drop <= -BTC_CRASH_THRESHOLD_PCT
+    if price_crash:
+        logger.critical(f"🚨 سقوط مفاجئ في السعر: BTC منخفض بـ {btc_drop:.2f}% (الحد: -{BTC_CRASH_THRESHOLD_PCT}%)")
+        return True
+
+    # 2. Check for sudden volume spike (can indicate panic selling)
+    try:
+        # Fetch last 10 candles to get a more stable average volume
+        btc_volume_df = fetch_historical_data(BTC_SYMBOL, '15m', 2)
+        if btc_volume_df is not None and not btc_volume_df.empty and len(btc_volume_df) > 2:
+            current_vol = btc_volume_df['volume'].iloc[-1]
+            # Average of previous candles, excluding the current one
+            avg_vol = btc_volume_df['volume'].iloc[:-1].mean()
+            if avg_vol > 0 and (current_vol / avg_vol) > VOLUME_SPIKE_MULTIPLIER:
+                logger.critical(f"🚨 حجم تداول مفاجئ مكتشف! النسبة: {current_vol / avg_vol:.2f}x (الحد: {VOLUME_SPIKE_MULTIPLIER}x)")
+                return True
+    except Exception as e:
+        logger.error(f"❌ خطأ في التحقق من حجم التداول الطارئ: {e}")
+        # Don't trigger a crash just because volume check failed, rely on price.
+        pass
+    
+    return False
+
+def emergency_close_all_positions(reason: str = "سوق متهاوٍ"):
+    """يغلق جميع الصفقات المفتوحة فورًا بسبب حالة الطوارئ"""
+    with signal_cache_lock:
+        # Create a copy to avoid issues with modifying the cache while iterating
+        open_trades = list(open_signals_cache.values())
+    
+    if not open_trades:
+        return
+    
+    log_and_notify("critical", f"🚨 نظام الطوارئ: بدء إغلاق {len(open_trades)} صفقة بسبب: {reason}", "EMERGENCY_CLOSE")
+    
+    for signal in open_trades:
+        try:
+            current_price = float(client.get_symbol_ticker(symbol=signal['symbol'])['price'])
+            # The close_signal function already contains the sell order and verification logic
+            success = close_signal(signal['id'], current_price, f"emergency_{reason}")
+            if success:
+                send_telegram_message(
+                    f"🚨 *إغلاق طارئ ناجح*\n"
+                    f"العملة: `{signal['symbol']}`\n"
+                    f"السبب: {reason}\n"
+                    f"سعر الإغلاق: `{current_price}`"
+                )
+            else:
+                # close_signal already sends a critical alert if verification fails
+                logger.error(f"❌ فشل إغلاق {signal['symbol']} في حالة الطوارئ. تم إرسال تنبيه.")
+        except Exception as e:
+            logger.error(f"❌ خطأ فادح أثناء محاولة إغلاق {signal['symbol']} في حالة الطوارئ: {e}")
+# --- END: Emergency System Functions ---
+
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
-    """
-    Adjusts the quantity to conform to the LOT_SIZE filter's stepSize.
-    This version is more robust to prevent filter failures.
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
             logger.error(f"[{symbol}] لم يتم العثور على معلومات الرمز لضبط LOT_SIZE.")
             return None
-        
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-        
         if lot_size_filter:
             step_size = Decimal(lot_size_filter['stepSize'])
             quantity_decimal = Decimal(str(quantity))
-            
-            # Formula: floor(quantity / step_size) * step_size
-            # This correctly truncates the quantity to the required precision.
             adjusted_quantity = (quantity_decimal // step_size) * step_size
-            
             logger.info(f"[{symbol}] تعديل الكمية: الأصلية={quantity_decimal}, حجم الخطوة={step_size}, المعدلة={adjusted_quantity}")
             return adjusted_quantity
-            
-        # If for some reason LOT_SIZE filter is not found, return the original quantity as a Decimal
         return Decimal(str(quantity))
-        
     except Exception as e:
         logger.error(f"[{symbol}] خطأ في تعديل الكمية لـ LOT_SIZE: {e}", exc_info=True)
         return None
@@ -768,7 +790,6 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
-        # Use str() to avoid float precision issues with the API
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
@@ -777,16 +798,8 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         log_and_notify('error', f"REAL TRADE FAILED: {symbol} | {e}", "REAL_TRADE_ERROR")
         return None
 
-# --- NEW: Order Verification Function ---
 def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -> bool:
-    """
-    Verifies if an order has been filled by polling the exchange.
-    Waits for the order status to become 'FILLED'.
-    التحقق من تنفيذ الأمر عن طريق الاستعلام من المنصة.
-    الانتظار حتى يصبح حالة الأمر 'FILLED'.
-    """
-    if not client:
-        return False
+    if not client: return False
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
         try:
@@ -797,17 +810,14 @@ def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -
             elif order_status['status'] in ['CANCELED', 'EXPIRED', 'REJECTED']:
                 logger.error(f"❌ [{symbol}] Order {order_id} has failed status: {order_status['status']}.")
                 return False
-            # If PARTIALLY_FILLED or NEW, continue waiting
             logger.info(f"⏳ [{symbol}] Waiting for order {order_id} to be filled. Current status: {order_status['status']}")
-            time.sleep(2)  # Wait 2 seconds before polling again
+            time.sleep(2)
         except BinanceAPIException as e:
             logger.error(f"❌ [{symbol}] API Error while verifying order {order_id}: {e}")
-            # Don't return false immediately, could be a temporary API issue
             time.sleep(5)
         except Exception as e:
             logger.error(f"❌ [{symbol}] Unexpected error while verifying order {order_id}: {e}", exc_info=True)
-            return False  # Exit on unexpected errors
-    
+            return False
     logger.error(f"⌛️ [{symbol}] Timeout reached while waiting for order {order_id} to be filled.")
     return False
 
@@ -820,14 +830,11 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 signal_to_close = signal_data
                 symbol_to_close = symbol
                 break
-        
         if not signal_to_close:
             logger.warning(f"⚠️ [Close] محاولة إغلاق صفقة غير موجودة في الكاش ID: {signal_id}")
             return False
-
         entry_price = float(signal_to_close['entry_price'])
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
-        
         if signal_to_close.get('is_real_trade'):
             try:
                 symbol_info = exchange_info_map.get(symbol_to_close)
@@ -835,11 +842,9 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     logger.error(f"❌ [{symbol_to_close}] لا يمكن العثور على معلومات العملة لإغلاق الصفقة.")
                     return False
                 base_asset = symbol_info['baseAsset']
-
                 balance_response = client.get_asset_balance(asset=base_asset)
                 available_balance = Decimal(balance_response['free'])
                 logger.info(f"ℹ️ [{symbol_to_close}] الرصيد المتاح للبيع من {base_asset}: {available_balance}")
-
                 if available_balance <= 0:
                     logger.warning(f"⚠️ [{symbol_to_close}] لا يوجد رصيد متاح للبيع من {base_asset}. سيتم إغلاق الصفقة في النظام فقط.")
                 else:
@@ -847,51 +852,31 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     if quantity_to_sell is None or quantity_to_sell <= 0:
                         logger.error(f"❌ [{symbol_to_close}] فشل تعديل كمية البيع أو الكمية المعدلة صفر. الكمية المتاحة: {available_balance}")
                         return False
-
                     notional_value = quantity_to_sell * Decimal(str(closing_price))
                     min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
-                    
                     min_notional_ok = True
                     if min_notional_filter:
                         min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
                         if notional_value < min_notional:
                             logger.warning(f"⚠️ [{symbol_to_close}] قيمة البيع ({notional_value:.2f}) أقل من الحد الأدنى ({min_notional}). سيتم إغلاق الصفقة في النظام فقط.")
                             min_notional_ok = False
-
                     if min_notional_ok:
                         sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
                         if not sell_order:
                             log_and_notify('error', f"CRITICAL: Sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                             return False
-
-                        # --- NEW: Verification Step ---
                         order_id = sell_order.get('orderId')
                         if not verify_order_filled(symbol_to_close, order_id):
-                            # If verification fails, do NOT close the signal in the DB.
-                            # Send a critical alert for manual intervention.
-                            log_and_notify(
-                                'critical',
-                                f"🚨 MANUAL ACTION REQUIRED: Sell order for {symbol_to_close} (ID: {order_id}) was placed but NOT confirmed as FILLED. The trade remains open in the bot. Please verify on Binance.",
-                                "CRITICAL_SELL_FAILURE"
-                            )
-                            send_telegram_message(
-                                f"🚨 *فشل إغلاق صفقة حرجة*\n\n"
-                                f"*العملة:* `{symbol_to_close}`\n"
-                                f"*المشكلة:* تم إرسال أمر البيع لكن لم يتم تأكيد تنفيذه.\n"
-                                f"الصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*"
-                            )
-                            return False # Stop the closing process
-                        
+                            log_and_notify('critical', f"🚨 MANUAL ACTION REQUIRED: Sell order for {symbol_to_close} (ID: {order_id}) was placed but NOT confirmed as FILLED. The trade remains open in the bot. Please verify on Binance.", "CRITICAL_SELL_FAILURE")
+                            send_telegram_message(f"🚨 *فشل إغلاق صفقة حرجة*\n\n*العملة:* `{symbol_to_close}`\n*المشكلة:* تم إرسال أمر البيع لكن لم يتم تأكيد تنفيذه.\nالصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*")
+                            return False
                         logger.info(f"✅ [{symbol_to_close}] Sell order {order_id} successfully filled and verified.")
-
             except Exception as e:
                 logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
                 return False
-        
         if not check_db_connection() or not conn:
             log_and_notify('critical', "DB connection lost during trade closure. Data might be inconsistent.", "DB_ERROR")
             return False
-            
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -899,25 +884,20 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     profit_percentage = %s, closing_reason = %s WHERE id = %s;
                 """, (closing_price, profit_percentage, reason, signal_id))
             conn.commit()
-            
             if symbol_to_close in open_signals_cache:
                 del open_signals_cache[symbol_to_close]
-            
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
-            
             reason_map = {'take_profit': '🎯 Take Profit', 'stop_loss': '🛑 Stop Loss', 'manual': '🖐️ Manual Close'}
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
-            telegram_message = (
-                f"{emoji} *إغلاق صفقة {trade_type}*\n\n"
-                f"*العملة:* `{symbol_to_close}`\n"
-                f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
-                f"*سعر الدخول:* `{entry_price:.4f}`\n"
-                f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
-                f"*الربح/الخسارة:* `{profit_percentage:.2f}%`"
-            )
-            send_telegram_message(telegram_message)
-
+            if not reason.startswith('emergency'):
+                telegram_message = (f"{emoji} *إغلاق صفقة {trade_type}*\n\n"
+                                    f"*العملة:* `{symbol_to_close}`\n"
+                                    f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
+                                    f"*سعر الدخول:* `{entry_price:.4f}`\n"
+                                    f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
+                                    f"*الربح/الخسارة:* `{profit_percentage:.2f}%`")
+                send_telegram_message(telegram_message)
             return True
         except Exception as e:
             logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}")
@@ -932,37 +912,26 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             target_price = float(signal_data['target_price'])
             stop_loss = float(signal_data['stop_loss'])
             quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
-
             cur.execute("""
                 INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price, closing_reason)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) RETURNING *;
             """, (
-                signal_data['symbol'],
-                entry_price,
-                target_price,
-                stop_loss,
-                signal_data['strategy_name'],
-                json.dumps(signal_data['signal_details']),
-                signal_data.get('is_real_trade', False),
-                quantity,
-                signal_data.get('order_id'),
-                entry_price
+                signal_data['symbol'], entry_price, target_price, stop_loss,
+                signal_data['strategy_name'], json.dumps(signal_data['signal_details']),
+                signal_data.get('is_real_trade', False), quantity,
+                signal_data.get('order_id'), entry_price
             ))
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
-            
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
-            telegram_message = (
-                f"💡 *توصية شراء {trade_type} جديدة*\n\n"
-                f"*العملة:* `{signal_data['symbol']}`\n"
-                f"*سعر الدخول:* `{entry_price:.4f}`\n"
-                f"*الهدف (TP):* `{target_price:.4f}`\n"
-                f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
-                f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
-            )
+            telegram_message = (f"💡 *توصية شراء {trade_type} جديدة*\n\n"
+                                f"*العملة:* `{signal_data['symbol']}`\n"
+                                f"*سعر الدخول:* `{entry_price:.4f}`\n"
+                                f"*الهدف (TP):* `{target_price:.4f}`\n"
+                                f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
+                                f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}")
             send_telegram_message(telegram_message)
-
             return dict(saved_signal)
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
@@ -1390,6 +1359,14 @@ def main_loop_enhanced():
 
     while True:
         try:
+            # --- NEW: Emergency Crash Protection ---
+            if CRASH_PROTECTION_ENABLED and is_market_crashing():
+                emergency_close_all_positions()
+                log_and_notify("warning", "نظام الطوارئ مفعل. تم إيقاف البوت مؤقتاً لمدة 5 دقائق.", "EMERGENCY_HALT")
+                time.sleep(300)  # Wait 5 minutes before re-evaluating
+                continue # Skip to the next cycle
+            # --- End of Emergency Crash Protection ---
+
             logger.info("🔄 بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
             analyze_market_and_create_dynamic_profile_enhanced()
@@ -1405,7 +1382,6 @@ def main_loop_enhanced():
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
             
-            # --- START: Memory Optimization with Batch Processing ---
             for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
@@ -1473,14 +1449,12 @@ def main_loop_enhanced():
                     except Exception as e:
                         logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
                     finally:
-                        time.sleep(0.5) # Small delay between symbols
+                        time.sleep(0.5) 
 
-                # --- Memory Management after each batch ---
                 logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches and collecting garbage.")
                 ml_models_cache.clear()
                 gc.collect()
                 logger.info("✅ Memory cleanup for batch complete.")
-            # --- END: Memory Optimization with Batch Processing ---
 
             logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
