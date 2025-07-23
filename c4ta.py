@@ -21,7 +21,7 @@ CONFIG = {
     "BACKTEST_DAYS": 90,
 
     # درجة الطوارئ المطلوبة لتفعيل الإنذار (قيمة أقل = أكثر حساسية)
-    "TRIGGER_SCORE_THRESHOLD": 60.0,
+    "TRIGGER_SCORE_THRESHOLD": 35.0,
 
     # مضاعف حجم التداول الذي يعتبر طارئاً (مثال: 5.0 يعني أن الحجم الحالي 5 أضعاف المتوسط)
     "VOLUME_SPIKE_THRESHOLD": 5.0,
