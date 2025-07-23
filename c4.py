@@ -13,6 +13,7 @@ import redis
 import re
 import gc
 import random
+import warnings # <-- تمت إضافة هذا السطر لإصلاح الخطأ
 from decimal import Decimal, ROUND_DOWN
 from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
@@ -25,6 +26,7 @@ from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Set, Tuple
+from collections import deque, Counter
 
 # --- إعدادات التجاهل واللوجر ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -322,8 +324,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-                # -- قم بتشغيل هذا الأمر مرة واحدة يدوياً في قاعدة بياناتك --
-                # ALTER TABLE notifications ADD COLUMN IF NOT EXISTS details JSONB;
                 cur.execute("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS details JSONB;")
                 logger.info("✅ [DB] تم التأكد من وجود عمود 'details' في جدول 'notifications'.")
 
@@ -336,8 +336,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             if attempt < retries - 1: time.sleep(delay)
             else: logger.critical("❌ [DB] فشل الاتصال بقاعدة البيانات.")
 
-# ... (بقية الكود يبقى كما هو بدون تغيير) ...
-# --- دوال تهيئة الخدمات ---
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
@@ -360,7 +358,6 @@ def check_db_connection() -> bool:
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
     log_methods.get(level.lower(), logger.info)(message)
-    # The new is_market_crashing function will handle DB logging for emergencies
     if notification_type == "EMERGENCY_TRIGGER":
         return
     if not check_db_connection() or not conn: return
@@ -441,7 +438,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
-# ... (The rest of the file remains unchanged) ...
+
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
@@ -654,6 +651,14 @@ class EnhancedTradingStrategy:
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
     def _load_ml_model_from_file(self, symbol: str) -> Optional[Dict[str, Any]]:
+        # This function requires 'sklearn' which might not be in the base environment.
+        # Let's add a placeholder for now to avoid import errors during startup.
+        try:
+            from sklearn.preprocessing import StandardScaler
+        except ImportError:
+            logger.warning("scikit-learn not found. ML features will be disabled.")
+            return None
+
         model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
         if model_name in ml_models_cache: return ml_models_cache[model_name]
         
@@ -982,7 +987,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 telegram_message = (f"{emoji} *إغلاق صفقة {trade_type}*\n\n"
                                     f"*العملة:* `{symbol_to_close}`\n"
                                     f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
-                                    f"*سعر الدخول:* `{entry_price:.4f}`\n"
+                                    f"*سعر الدخول:* `{float(entry_price):.4f}`\n"
                                     f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
                                     f"*الربح/الخسارة:* `{profit_percentage:.2f}%`")
                 send_telegram_message(telegram_message)
@@ -1444,13 +1449,11 @@ def main_loop_enhanced():
 
     while True:
         try:
-            # --- Emergency Crash Protection ---
             if is_market_crashing():
                 emergency_close_all_positions()
                 log_and_notify("warning", "نظام الطوارئ مفعل. تم إيقاف البوت مؤقتاً لمدة 5 دقائق.", "EMERGENCY_HALT")
                 time.sleep(300)
                 continue
-            # --- End of Emergency Crash Protection ---
 
             logger.info("🔄 بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
