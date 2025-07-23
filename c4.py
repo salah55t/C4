@@ -1,5 +1,5 @@
 # ملف c4.py - نسخة نهائية مع تحسين الذاكرة ورسائل تيليجرام محسنة
-# --- تم التحديث بواسطة Gemini ---
+# --- تم التحديث بواسطة Gemini لتعديل آلية الإيقاف المؤقت ---
 import time
 import os
 import json
@@ -75,12 +75,14 @@ BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 1.0
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 
-# --- NEW: Scheduled Pause System Settings ---
-is_bot_paused: bool = False
+# --- MODIFIED: Scheduled Pause System Settings ---
+is_recommendation_paused: bool = False
 pause_reason: str = ""
+pause_end_time: Optional[datetime] = None
 pause_lock = Lock()
 last_telegram_alert_hour: int = -1
 PAUSE_SCHEDULE = {
+    # الساعات بتوقيت UTC لبدء الإيقاف المؤقت
     0: "الاستعداد لبداية الجلسة الآسيوية وإغلاق الشمعة اليومية.",
     4: "فترة ضعف سيولة محتملة في منتصف الجلسة الآسيوية.",
     8: "الاستعداد لافتتاح جلسة لندن وتداخلها مع إغلاق طوكيو.",
@@ -88,6 +90,7 @@ PAUSE_SCHEDULE = {
     16: "الاستعداد لإغلاق جلسة لندن وجني الأرباح الأوروبية.",
     20: "اقتراب نهاية جلسة نيويورك وجني الأرباح الأمريكية."
 }
+PAUSE_DURATION_MINUTES: int = 90 # مدة الإيقاف بالدقائق (ساعة ونصف)
 
 # --- NEW: Emergency System Settings ---
 CRASH_PROTECTION_ENABLED: bool = True
@@ -964,44 +967,58 @@ def analyze_market_and_create_dynamic_profile_enhanced():
         last_dynamic_filter_analysis_time = time.time()
     logger.info(f"✅ [Filter] تم توليد فلاتر جديدة: {enhanced_profile['description']}")
 
-# --- MODIFIED: pause_management_loop with enhanced Telegram messages ---
+# --- MODIFIED: pause_management_loop with new 90-minute pause logic ---
 def pause_management_loop():
-    global is_bot_paused, pause_reason, last_telegram_alert_hour
+    global is_recommendation_paused, pause_reason, pause_end_time, last_telegram_alert_hour
     logger.info("✅ [Pause Manager] بدء حلقة إدارة الإيقاف المؤقت...")
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
-            currently_in_pause_window = False
-            
-            for hour, reason_text in PAUSE_SCHEDULE.items():
-                if now_utc.hour == (hour - 1 + 24) % 24 and now_utc.minute >= 30:
-                    with pause_lock:
-                        if not is_bot_paused:
-                            log_and_notify('warning', f"PAUSE ACTIVATED: Bot paused. Reason: {reason_text}", "BOT_PAUSE")
-                            send_telegram_message(f"⏸️ *إيقاف مؤقت للبوت*\n\nتم إيقاف توليد توصيات جديدة.\n*السبب:* {reason_text}")
-                        is_bot_paused = True
-                        pause_reason = reason_text
-                    currently_in_pause_window = True
-                    break
 
-                if now_utc.hour == (hour - 1 + 24) % 24 and now_utc.minute == 15:
-                    with pause_lock:
-                        if last_telegram_alert_hour != now_utc.hour:
-                            alert_message = f"🔔 *تنبيه إيقاف مؤقت*\n\nسيتم إيقاف توليد التوصيات خلال *15 دقيقة*.\n*السبب:* {reason_text}"
-                            send_telegram_message(alert_message)
-                            last_telegram_alert_hour = now_utc.hour
-            
-            if not currently_in_pause_window:
-                with pause_lock:
-                    if is_bot_paused:
-                        log_and_notify('info', "PAUSE ENDED: Bot resumed generating signals.", "BOT_RESUME")
-                        send_telegram_message("▶️ *استئناف عمل البوت*\n\nعاد البوت لتوليد التوصيات بشكل طبيعي.")
-                    is_bot_paused = False
+            # --- 1. التحقق من انتهاء فترة الإيقاف الحالية ---
+            with pause_lock:
+                if is_recommendation_paused and pause_end_time and now_utc >= pause_end_time:
+                    log_and_notify('info', "PAUSE ENDED: Bot resumed generating recommendations.", "BOT_RESUME")
+                    send_telegram_message("▶️ *استئناف توليد التوصيات*\n\nعاد البوت لتوليد التوصيات بشكل طبيعي.")
+                    is_recommendation_paused = False
                     pause_reason = ""
+                    pause_end_time = None
+
+            # --- 2. التحقق من بدء فترة إيقاف جديدة ---
+            with pause_lock:
+                if not is_recommendation_paused:
+                    for hour, reason_text in PAUSE_SCHEDULE.items():
+                        # بدء الإيقاف في الدقيقة 00 من الساعة المجدولة
+                        if now_utc.hour == hour and now_utc.minute == 0:
+                            is_recommendation_paused = True
+                            pause_reason = reason_text
+                            pause_end_time = now_utc + timedelta(minutes=PAUSE_DURATION_MINUTES)
+                            
+                            end_time_local = pause_end_time.astimezone().strftime('%H:%M')
+                            log_and_notify('warning', f"RECOMMENDATION PAUSE ACTIVATED: Reason: {reason_text}. Resuming at {pause_end_time.isoformat()}", "BOT_PAUSE")
+                            send_telegram_message(
+                                f"⏸️ *إيقاف مؤقت لتوليد التوصيات*\n\n"
+                                f"*السبب:* {reason_text}\n"
+                                f"سيتم استئناف التوليد تلقائياً بعد *{PAUSE_DURATION_MINUTES} دقيقة* (حوالي الساعة {end_time_local} بالتوقيت المحلي)."
+                            )
+                            # الخروج من الحلقة بعد تفعيل الإيقاف لتجنب التكرار في نفس الدقيقة
+                            break 
+            
+            # --- 3. إرسال تنبيه قبل 15 دقيقة من الإيقاف ---
+            for hour, reason_text in PAUSE_SCHEDULE.items():
+                 # إرسال تنبيه في الدقيقة 45 من الساعة التي تسبق ساعة الإيقاف
+                 if now_utc.hour == (hour - 1 + 24) % 24 and now_utc.minute == 45:
+                     with pause_lock:
+                         # التأكد من إرسال التنبيه مرة واحدة فقط لكل ساعة
+                         if last_telegram_alert_hour != now_utc.hour:
+                             alert_message = f"🔔 *تنبيه إيقاف قادم*\n\nسيتم إيقاف توليد التوصيات خلال *15 دقيقة*.\n*السبب:* {reason_text}"
+                             send_telegram_message(alert_message)
+                             last_telegram_alert_hour = now_utc.hour
 
         except Exception as e:
             logger.error(f"❌ [Pause Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
         
+        # التحقق كل 60 ثانية
         time.sleep(60)
 
 app = Flask(__name__)
@@ -1048,7 +1065,7 @@ def get_dashboard_html():
         </header>
         
         <div id="pause-status-banner" class="hidden card bg-yellow-900/50 border-yellow-600 text-yellow-200 p-4 mb-6 text-center">
-            <h3 class="font-bold text-lg">⚠️ البوت متوقف مؤقتاً</h3>
+            <h3 class="font-bold text-lg">⚠️ توليد التوصيات متوقف مؤقتاً</h3>
             <p id="pause-reason-text" class="mt-1"></p>
         </div>
 
@@ -1209,7 +1226,7 @@ def get_market_status():
     with trading_status_lock: is_enabled = is_trading_enabled
     with dynamic_filter_lock: profile_copy = dict(dynamic_filter_profile_cache)
     with pause_lock:
-        bot_paused = is_bot_paused
+        bot_paused = is_recommendation_paused # MODIFIED: Use the new flag
         reason_text = pause_reason
     active_sessions, _, _ = get_session_state()
     usdt_balance = None
@@ -1223,7 +1240,7 @@ def get_market_status():
         "usdt_balance": usdt_balance, 
         "is_trading_enabled": is_enabled, 
         "are_filters_disabled": is_disabled,
-        "is_bot_paused": bot_paused,
+        "is_bot_paused": bot_paused, # Keep the key for frontend compatibility
         "pause_reason": reason_text
     })
 
@@ -1369,9 +1386,10 @@ def main_loop_enhanced():
                 time.sleep(300)
                 continue
 
+            # MODIFIED: Check the new pause flag
             with pause_lock:
-                if is_bot_paused:
-                    logger.info(f"PAUSED: Bot is currently paused. Reason: {pause_reason}. Waiting...")
+                if is_recommendation_paused:
+                    logger.info(f"PAUSED: توليد التوصيات متوقف حالياً. السبب: {pause_reason}. سيتم الاستئناف تلقائياً.")
                     time.sleep(60)
                     continue
 
