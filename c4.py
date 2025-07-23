@@ -1,6 +1,6 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع تحسين الذاكرة وإصلاح LOT_SIZE
+# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع آلية التحقق من البيع
 # تم التحديث بواسطة Gemini
-# --- تعديل: تم تحديث منطق المقاومة ليعتمد على جسم الشمعة ---
+# --- تعديل: إضافة التحقق من تنفيذ أمر البيع قبل إغلاق الصفقة في قاعدة البيانات ---
 import time
 import os
 import json
@@ -75,7 +75,7 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.85
+BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
@@ -94,7 +94,7 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 2.5
+TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.8
 TRAILING_DISTANCE_PERCENT: float = 1.0
 USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
@@ -777,6 +777,40 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         log_and_notify('error', f"REAL TRADE FAILED: {symbol} | {e}", "REAL_TRADE_ERROR")
         return None
 
+# --- NEW: Order Verification Function ---
+def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -> bool:
+    """
+    Verifies if an order has been filled by polling the exchange.
+    Waits for the order status to become 'FILLED'.
+    التحقق من تنفيذ الأمر عن طريق الاستعلام من المنصة.
+    الانتظار حتى يصبح حالة الأمر 'FILLED'.
+    """
+    if not client:
+        return False
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        try:
+            order_status = client.get_order(symbol=symbol, orderId=order_id)
+            if order_status['status'] == 'FILLED':
+                logger.info(f"✅ [{symbol}] Order {order_id} confirmed as FILLED.")
+                return True
+            elif order_status['status'] in ['CANCELED', 'EXPIRED', 'REJECTED']:
+                logger.error(f"❌ [{symbol}] Order {order_id} has failed status: {order_status['status']}.")
+                return False
+            # If PARTIALLY_FILLED or NEW, continue waiting
+            logger.info(f"⏳ [{symbol}] Waiting for order {order_id} to be filled. Current status: {order_status['status']}")
+            time.sleep(2)  # Wait 2 seconds before polling again
+        except BinanceAPIException as e:
+            logger.error(f"❌ [{symbol}] API Error while verifying order {order_id}: {e}")
+            # Don't return false immediately, could be a temporary API issue
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"❌ [{symbol}] Unexpected error while verifying order {order_id}: {e}", exc_info=True)
+            return False  # Exit on unexpected errors
+    
+    logger.error(f"⌛️ [{symbol}] Timeout reached while waiting for order {order_id} to be filled.")
+    return False
+
 def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
     with signal_cache_lock:
         signal_to_close = None
@@ -827,8 +861,28 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     if min_notional_ok:
                         sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
                         if not sell_order:
-                            log_and_notify('error', f"CRITICAL: فشل تنفيذ أمر البيع لـ {symbol_to_close}. ستبقى الصفقة مفتوحة.", "TRADE_ERROR")
+                            log_and_notify('error', f"CRITICAL: Sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                             return False
+
+                        # --- NEW: Verification Step ---
+                        order_id = sell_order.get('orderId')
+                        if not verify_order_filled(symbol_to_close, order_id):
+                            # If verification fails, do NOT close the signal in the DB.
+                            # Send a critical alert for manual intervention.
+                            log_and_notify(
+                                'critical',
+                                f"🚨 MANUAL ACTION REQUIRED: Sell order for {symbol_to_close} (ID: {order_id}) was placed but NOT confirmed as FILLED. The trade remains open in the bot. Please verify on Binance.",
+                                "CRITICAL_SELL_FAILURE"
+                            )
+                            send_telegram_message(
+                                f"🚨 *فشل إغلاق صفقة حرجة*\n\n"
+                                f"*العملة:* `{symbol_to_close}`\n"
+                                f"*المشكلة:* تم إرسال أمر البيع لكن لم يتم تأكيد تنفيذه.\n"
+                                f"الصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*"
+                            )
+                            return False # Stop the closing process
+                        
+                        logger.info(f"✅ [{symbol_to_close}] Sell order {order_id} successfully filled and verified.")
 
             except Exception as e:
                 logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
