@@ -1,5 +1,5 @@
 # ملف c4.py - نسخة محدثة مع لوحة التحكم الأصلية ونظام الإيقاف المؤقت
-# --- تم التحديث بواسطة Gemini ---
+# --- تم التحديث بواسطة Gemini لإضافة إشعارات التوصيات ---
 import time
 import os
 import json
@@ -106,7 +106,7 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
+TRAILING_ACTIVATION_PROFIT_PERCENT: float = 2.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
@@ -155,10 +155,10 @@ class MultiAssetEmergencyDetector:
     def __init__(self, client: Client):
         self.client = client
         self.emergency_assets = {
-            'BTCUSDT': {'weight': 0.4, 'threshold': -1.5},
-            'ETHUSDT': {'weight': 0.3, 'threshold': -2.0},
-            'BNBUSDT': {'weight': 0.2, 'threshold': -2.5},
-            'SOLUSDT': {'weight': 0.1, 'threshold': -4.0}
+            'BTCUSDT': {'weight': 0.4, 'threshold': -2.0},
+            'ETHUSDT': {'weight': 0.3, 'threshold': -3.0},
+            'BNBUSDT': {'weight': 0.2, 'threshold': -4.0},
+            'SOLUSDT': {'weight': 0.1, 'threshold': -5.0}
         }
         self.volume_spike_threshold = 4.0
 
@@ -202,7 +202,7 @@ class MultiAssetEmergencyDetector:
                 details[f"{symbol}_volume"] = {'type': 'Volume Spike', 'ratio': round(volume_ratio, 2), 'threshold_ratio': self.volume_spike_threshold, 'contribution': round(vol_score, 1)}
         return min(total_score, 100), details
 
-    def is_emergency_triggered(self, threshold: float = 30.0) -> Tuple[bool, Dict]:
+    def is_emergency_triggered(self, threshold: float = 60.0) -> Tuple[bool, Dict]:
         score, details = self.calculate_emergency_score()
         triggered = score >= threshold
         if triggered:
@@ -851,6 +851,32 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 cur.execute("UPDATE signals SET status = 'closed', closing_price = %s, closed_at = NOW(), profit_percentage = %s, closing_reason = %s WHERE id = %s;", (closing_price, profit_percentage, reason, signal_id))
             conn.commit()
             if symbol_to_close in open_signals_cache: del open_signals_cache[symbol_to_close]
+            
+            # --- START: NEW TELEGRAM NOTIFICATION FOR CLOSING TRADE ---
+            try:
+                trade_type = "حقيقي" if signal_to_close.get('is_real_trade') else "تجريبي"
+                profit_str = f"{profit_percentage:.2f}%"
+                reason_ar = {
+                    'take_profit': '✅ تحقيق الهدف',
+                    'stop_loss': '❌ وقف الخسارة',
+                    'manual': 'إغلاق يدوي',
+                }.get(reason, reason)
+                if reason.startswith('emergency'):
+                    reason_ar = '🚨 إغلاق طارئ'
+                
+                message = (
+                    f"🔴 *إغلاق صفقة ({trade_type})*\n\n"
+                    f"العملة: *{symbol_to_close}*\n"
+                    f"سعر الدخول: `{entry_price:.4f}`\n"
+                    f"سعر الإغلاق: `{closing_price:.4f}`\n"
+                    f"الربح/الخسارة: *{profit_str}*\n"
+                    f"السبب: {reason_ar}"
+                )
+                send_telegram_message(message)
+            except Exception as tg_e:
+                logger.error(f"❌ [Telegram Notify] فشل إرسال إشعار إغلاق الصفقة: {tg_e}")
+            # --- END: NEW TELEGRAM NOTIFICATION ---
+
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
             return True
         except Exception as e:
@@ -1378,6 +1404,22 @@ def main_loop_enhanced():
                     saved_signal = insert_signal_into_db(new_signal)
                     if saved_signal:
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
+                        
+                        # --- START: NEW TELEGRAM NOTIFICATION FOR NEW SIGNAL ---
+                        try:
+                            trade_type = "حقيقي" if saved_signal.get('is_real_trade') else "تجريبي"
+                            message = (
+                                f"💡 *توصية جديدة ({trade_type})*\n\n"
+                                f"العملة: *{saved_signal['symbol']}*\n"
+                                f"استراتيجية: *{saved_signal['strategy_name']}*\n\n"
+                                f"🔹 سعر الدخول: `{float(saved_signal['entry_price']):.4f}`\n"
+                                f"🔸 الهدف (TP): `{float(saved_signal['target_price']):.4f}`\n"
+                                f"🔻 وقف الخسارة (SL): `{float(saved_signal['stop_loss']):.4f}`"
+                            )
+                            send_telegram_message(message)
+                        except Exception as tg_e:
+                            logger.error(f"❌ [Telegram Notify] فشل إرسال إشعار التوصية الجديدة: {tg_e}")
+                        # --- END: NEW TELEGRAM NOTIFICATION ---
 
                 except Exception as e:
                     logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
