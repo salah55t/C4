@@ -1,5 +1,5 @@
 # ملف c4.py - نسخة نهائية مع تحسين الذاكرة ورسائل تيليجرام محسنة
-# --- تم التحديث بواسطة Gemini لتعديل آلية الإيقاف المؤقت ---
+# --- تم التحديث بواسطة Gemini لإضافة تنبيه ما قبل الإيقاف ---
 import time
 import os
 import json
@@ -68,10 +68,10 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.75
+BUY_CONFIDENCE_THRESHOLD = 0.85
 MIN_PROFIT_PERCENT: float = 1.0
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 
@@ -109,7 +109,7 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.0
+TRAILING_ACTIVATION_PROFIT_PERCENT: float = 2.0
 TRAILING_DISTANCE_PERCENT: float = 0.8
 USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
@@ -158,12 +158,12 @@ class MultiAssetEmergencyDetector:
     def __init__(self, client: Client):
         self.client = client
         self.emergency_assets = {
-            'BTCUSDT': {'weight': 0.4, 'threshold': -3.0},
-            'ETHUSDT': {'weight': 0.3, 'threshold': -4.0},
-            'BNBUSDT': {'weight': 0.2, 'threshold': -5.0},
-            'SOLUSDT': {'weight': 0.1, 'threshold': -6.0}
+            'BTCUSDT': {'weight': 0.4, 'threshold': -2.0},
+            'ETHUSDT': {'weight': 0.3, 'threshold': -3.0},
+            'BNBUSDT': {'weight': 0.2, 'threshold': -4.0},
+            'SOLUSDT': {'weight': 0.1, 'threshold': -5.0}
         }
-        self.volume_spike_threshold = 5.0
+        self.volume_spike_threshold = 4.0
 
     def get_15m_change(self, symbol: str) -> float:
         try:
@@ -205,7 +205,7 @@ class MultiAssetEmergencyDetector:
                 details[f"{symbol}_volume"] = {'type': 'Volume Spike', 'ratio': round(volume_ratio, 2), 'threshold_ratio': self.volume_spike_threshold, 'contribution': round(vol_score, 1)}
         return min(total_score, 100), details
 
-    def is_emergency_triggered(self, threshold: float = 60.0) -> Tuple[bool, Dict]:
+    def is_emergency_triggered(self, threshold: float = 35.0) -> Tuple[bool, Dict]:
         score, details = self.calculate_emergency_score()
         triggered = score >= threshold
         if triggered:
@@ -967,7 +967,7 @@ def analyze_market_and_create_dynamic_profile_enhanced():
         last_dynamic_filter_analysis_time = time.time()
     logger.info(f"✅ [Filter] تم توليد فلاتر جديدة: {enhanced_profile['description']}")
 
-# --- MODIFIED: pause_management_loop with new 90-minute pause logic ---
+# --- MODIFIED: pause_management_loop with new 30-minute warning alert ---
 def pause_management_loop():
     global is_recommendation_paused, pause_reason, pause_end_time, last_telegram_alert_hour
     logger.info("✅ [Pause Manager] بدء حلقة إدارة الإيقاف المؤقت...")
@@ -1001,24 +1001,30 @@ def pause_management_loop():
                                 f"*السبب:* {reason_text}\n"
                                 f"سيتم استئناف التوليد تلقائياً بعد *{PAUSE_DURATION_MINUTES} دقيقة* (حوالي الساعة {end_time_local} بالتوقيت المحلي)."
                             )
-                            # الخروج من الحلقة بعد تفعيل الإيقاف لتجنب التكرار في نفس الدقيقة
                             break 
             
-            # --- 3. إرسال تنبيه قبل 15 دقيقة من الإيقاف ---
+            # --- 3. إرسال تحذير قبل 30 دقيقة من الإيقاف ---
             for hour, reason_text in PAUSE_SCHEDULE.items():
-                 # إرسال تنبيه في الدقيقة 45 من الساعة التي تسبق ساعة الإيقاف
-                 if now_utc.hour == (hour - 1 + 24) % 24 and now_utc.minute == 45:
+                 # إرسال تنبيه في الدقيقة 30 من الساعة التي تسبق ساعة الإيقاف
+                 if now_utc.hour == (hour - 1 + 24) % 24 and now_utc.minute == 30:
                      with pause_lock:
                          # التأكد من إرسال التنبيه مرة واحدة فقط لكل ساعة
                          if last_telegram_alert_hour != now_utc.hour:
-                             alert_message = f"🔔 *تنبيه إيقاف قادم*\n\nسيتم إيقاف توليد التوصيات خلال *15 دقيقة*.\n*السبب:* {reason_text}"
-                             send_telegram_message(alert_message)
-                             last_telegram_alert_hour = now_utc.hour
+                            with signal_cache_lock:
+                                open_trades_count = len(open_signals_cache)
+                            
+                            alert_message = (
+                                f"⚠️ *تحذير: اقتراب فترة تقلبات عالية*\n\n"
+                                f"سيتم إيقاف توليد توصيات جديدة خلال *30 دقيقة*.\n"
+                                f"*{reason_text}*\n\n"
+                                f"❗️**ينصح بشدة بإغلاق الصفقات المفتوحة ({open_trades_count}) لتجنب الخسائر المحتملة.**"
+                            )
+                            send_telegram_message(alert_message)
+                            last_telegram_alert_hour = now_utc.hour
 
         except Exception as e:
             logger.error(f"❌ [Pause Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
         
-        # التحقق كل 60 ثانية
         time.sleep(60)
 
 app = Flask(__name__)
