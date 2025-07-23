@@ -155,10 +155,10 @@ class MultiAssetEmergencyDetector:
     def __init__(self, client: Client):
         self.client = client
         self.emergency_assets = {
-            'BTCUSDT': {'weight': 0.4, 'threshold': -3.0},
-            'ETHUSDT': {'weight': 0.3, 'threshold': -4.0},
-            'BNBUSDT': {'weight': 0.2, 'threshold': -5.0},
-            'SOLUSDT': {'weight': 0.1, 'threshold': -6.0}
+            'BTCUSDT': {'weight': 0.4, 'threshold': -1.5},
+            'ETHUSDT': {'weight': 0.3, 'threshold': -2.0},
+            'BNBUSDT': {'weight': 0.2, 'threshold': -2.5},
+            'SOLUSDT': {'weight': 0.1, 'threshold': -4.0}
         }
         self.volume_spike_threshold = 5.0
 
