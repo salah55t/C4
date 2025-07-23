@@ -28,10 +28,10 @@ CONFIG = {
 
     # الأصول المراقبة، أوزانها في حساب الدرجة، وعتبة الهبوط المئوية لكل منها
     "ASSETS": {
-        'BTCUSDT': {'weight': 0.2, 'threshold': -3.0},
-        'ETHUSDT': {'weight': 0.1, 'threshold': -4.0},
-        'BNBUSDT': {'weight': 0.05, 'threshold': -5.0},
-        'SOLUSDT': {'weight': 0.02, 'threshold': -6.0}
+        'BTCUSDT': {'weight': 0.4, 'threshold': -2.0},
+        'ETHUSDT': {'weight': 0.3, 'threshold': -3.0},
+        'BNBUSDT': {'weight': 0.2, 'threshold': -4.0},
+        'SOLUSDT': {'weight': 0.1, 'threshold': -5.0}
     }
 }
 # ==============================================================================
