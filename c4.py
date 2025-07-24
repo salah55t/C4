@@ -1,5 +1,5 @@
 # --- ملف: c4_complete_v10_caution_time_full.py ---
-# --- تم التحديث بواسطة Gemini (مع تعديل الفلاتر) ---
+# --- تم التحديث بواسطة Gemini (مع تحليل السوق المتعدد) ---
 # --- نسخة كاملة: تتضمن جميع الدوال مع إضافة آلية التوقف المؤقت بناءً على أوقات الهبوط المتكررة ---
 
 import time
@@ -77,6 +77,7 @@ MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.85
 MIN_PROFIT_PERCENT: float = 1.0
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20
+MARKET_LEADERS_FOR_ANALYSIS: List[str] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'] # <-- متغير جديد لتحليل السوق
 
 # --- إعدادات المؤشرات الفنية ---
 ADX_PERIOD: int = 14
@@ -146,7 +147,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "RSI Filter": "فلتر مؤشر القوة النسبية" # تمت إضافة هذا السطر
+    "RSI Filter": "فلتر مؤشر القوة النسبية"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -894,34 +895,89 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
 # ---------------------- دوال النظام الرئيسية ----------------------
+# --- START: MODIFIED determine_market_state_enhanced FUNCTION ---
 def determine_market_state_enhanced():
+    """
+    Determines the market state by analyzing a basket of leading cryptocurrencies.
+    This provides a more robust and comprehensive view of the overall market trend.
+    
+    يحدد حالة السوق من خلال تحليل سلة من العملات الرقمية الرائدة.
+    يوفر هذا رؤية أكثر قوة وشمولية للاتجاه العام للسوق.
+    """
     global current_market_state, last_market_state_check
-    if time.time() - last_market_state_check < 180: return
-    logger.info("🧠 [Market State] تحديث حالة السوق...")
+    if time.time() - last_market_state_check < 180:  # 3-minute cache
+        return
+    
+    logger.info("🧠 [Market State] تحديث حالة السوق باستخدام رموز متعددة...")
     try:
-        trend_details = {}
+        all_final_trends = []
+        trend_details_by_tf = {}
+
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            df = fetch_historical_data(BTC_SYMBOL, tf, 20)
-            if df is not None and not df.empty:
-                ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
-                ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-                adx_features = calculate_all_features(df, None)
-                adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
-                if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
-                elif ema_fast > ema_slow: trend = "Uptrend"
-                elif ema_fast < ema_slow and adx > 25: trend = "Strong Downtrend"
-                elif ema_fast < ema_slow: trend = "Downtrend"
-                else: trend = "Ranging"
-                trend_details[tf] = {"trend": trend, "adx": float(adx)}
-            else: trend_details[tf] = {"trend": "Uncertain", "adx": 0}
-        trends = [d['trend'] for d in trend_details.values()]
-        overall_regime = max(set(trends), key=trends.count) if trends else "Uncertain"
+            tf_trends = []
+            tf_adx_values = []
+            
+            for symbol in MARKET_LEADERS_FOR_ANALYSIS:
+                # Fetch data for each market leader
+                df = fetch_historical_data(symbol, tf, 30) # Lookback of 30 periods is enough
+                if df is not None and not df.empty and len(df) >= 26: # Need enough data for EMA and ADX
+                    try:
+                        ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
+                        ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
+                        
+                        # Calculate ADX for the symbol
+                        adx_features = calculate_all_features(df, None) # Pass None for btc_df
+                        adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
+                        
+                        tf_adx_values.append(adx)
+
+                        # Determine trend for this specific symbol
+                        if ema_fast > ema_slow and adx > 25:
+                            trend = "Strong Uptrend"
+                        elif ema_fast > ema_slow:
+                            trend = "Uptrend"
+                        elif ema_fast < ema_slow and adx > 25:
+                            trend = "Strong Downtrend"
+                        elif ema_fast < ema_slow:
+                            trend = "Downtrend"
+                        else:
+                            trend = "Ranging"
+                        tf_trends.append(trend)
+                    except Exception as e:
+                        logger.warning(f"⚠️ [Market State] لم يتمكن من معالجة {symbol} على {tf}: {e}")
+                else:
+                    logger.warning(f"⚠️ [Market State] لا توجد بيانات كافية لـ {symbol} على {tf}, تم التخطي.")
+            
+            if tf_trends:
+                # Aggregate results for the timeframe by finding the most common trend (mode)
+                final_tf_trend = max(set(tf_trends), key=tf_trends.count)
+                avg_adx = np.mean(tf_adx_values) if tf_adx_values else 0
+                trend_details_by_tf[tf] = {"trend": final_tf_trend, "adx": float(avg_adx)}
+                all_final_trends.append(final_tf_trend)
+            else:
+                # Fallback if no data could be fetched for this timeframe
+                trend_details_by_tf[tf] = {"trend": "Uncertain", "adx": 0}
+                all_final_trends.append("Uncertain")
+
+        # Determine the overall market regime from the aggregated trends of each timeframe
+        overall_regime = max(set(all_final_trends), key=all_final_trends.count) if all_final_trends else "Uncertain"
+        
         with market_state_lock:
-            current_market_state = {"overall_regime": overall_regime.upper().replace(" ", "_"), "trend_details_by_tf": trend_details, "last_updated": datetime.now(timezone.utc).isoformat()}
+            current_market_state = {
+                "overall_regime": overall_regime.upper().replace(" ", "_"), 
+                "trend_details_by_tf": trend_details_by_tf, 
+                "last_updated": datetime.now(timezone.utc).isoformat()
+            }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] الحالة العامة: {overall_regime}")
+        
+        logger.info(f"✅ [Market State] الحالة العامة المجمعة: {overall_regime}")
+        for tf, details in trend_details_by_tf.items():
+            logger.info(f"   - {tf}: {details['trend']} (متوسط ADX: {details['adx']:.2f})")
+
     except Exception as e:
-        logger.error(f"❌ [Market State] خطأ: {e}", exc_info=True)
+        logger.error(f"❌ [Market State] خطأ في التحليل المجمع: {e}", exc_info=True)
+# --- END: MODIFIED determine_market_state_enhanced FUNCTION ---
+
 
 def analyze_market_and_create_dynamic_profile_enhanced():
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
@@ -1383,13 +1439,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (V10 - مع أوقات الحذر)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (V10 - مع تحليل السوق المتعدد)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V10 - مع أوقات الحذر) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V10 - مع تحليل السوق المتعدد) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
