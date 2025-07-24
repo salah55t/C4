@@ -1,5 +1,5 @@
 # --- ملف: c4_complete_v10_caution_time_full.py ---
-# --- تم التحديث بواسطة Gemini ---
+# --- تم التحديث بواسطة Gemini (مع تعديل الفلاتر) ---
 # --- نسخة كاملة: تتضمن جميع الدوال مع إضافة آلية التوقف المؤقت بناءً على أوقات الهبوط المتكررة ---
 
 import time
@@ -91,8 +91,8 @@ EMA_SLOPE_PERIOD: int = 5
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 2.4
-TRAILING_DISTANCE_PERCENT: float = 1.2
+TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.8
+TRAILING_DISTANCE_PERCENT: float = 1.0
 USE_PEAK_FILTER: bool = True
 PEAK_CHECK_PERIOD: int = 50
 PULLBACK_THRESHOLD_PCT: float = 0.988
@@ -145,7 +145,8 @@ REJECTION_REASONS_AR = {
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
-    "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)"
+    "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
+    "RSI Filter": "فلتر مؤشر القوة النسبية" # تمت إضافة هذا السطر
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -601,32 +602,42 @@ class EnhancedTradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}")
             return None
 
+# --- START: MODIFIED passes_filters FUNCTION ---
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
+    """
+    This function has been modified to only use the RSI filter as requested.
+    All other manual filters (Volatility, Correlation, RRR, etc.) have been disabled.
+    The "Confidence" filter is applied before this function is called.
+    Indicators like "Stoch RSI" are used as features for the ML model, so they are still part of the decision process.
+    """
     with filters_disabled_lock:
         if are_filters_disabled:
             logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
             return True
             
     filters = profile.get("filters", {})
-    if not filters: log_rejection(symbol, "Filters Not Loaded"); return False
-    volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
-    if volatility < filters.get('min_volatility_pct', 0.0): log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%"}); return False
-    correlation = last_features.get('btc_correlation', 0)
-    if correlation < filters.get('min_btc_correlation', -1.0): log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}"}); return False
-    risk = entry_price - float(tp_sl_data['stop_loss']); reward = float(tp_sl_data['target_price']) - entry_price
-    if risk <= 0 or reward <= 0 or (reward / risk) < filters.get('min_rrr', 0.0): log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); return False
-    adx, rel_vol, rsi, roc, slope = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0), last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
+    if not filters: 
+        log_rejection(symbol, "Filters Not Loaded")
+        return False
+
+    # --- فلتر مؤشر القوة النسبية (RSI) ---
+    # هذا هو الفلتر الوحيد المتبقي في هذه الدالة بناءً على طلب المستخدم
+    rsi = last_features.get('rsi', 50) # Default to 50 to avoid errors
     rsi_min, rsi_max = filters.get('rsi_range', (0, 100))
-    if not (adx >= filters.get('adx', 0) and rel_vol >= filters.get('rel_vol', 0) and rsi_min <= rsi < rsi_max and roc > filters.get('roc', -100) and slope > filters.get('slope', -100)):
-        log_rejection(symbol, "Momentum/Strength Filter", {"ADX": f"{adx:.2f}", "RSI": f"{rsi:.2f}"}); return False
-    if USE_PEAK_FILTER and df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
-        recent_candles = df_15m.iloc[-PEAK_CHECK_PERIOD:-1]
-        if not recent_candles.empty:
-            highest_high = recent_candles['high'].max()
-            with market_state_lock: is_strong_uptrend = (current_market_state.get("overall_regime") == "STRONG_UPTREND")
-            price_limit = highest_high * (BREAKOUT_ALLOWANCE_PCT if is_strong_uptrend else PULLBACK_THRESHOLD_PCT)
-            if not (entry_price <= price_limit): log_rejection(symbol, "Peak/Pullback Filter", {"entry": f"{entry_price:.4f}", "limit": f"{price_limit:.4f}"}); return False
+    
+    if not (rsi_min <= rsi < rsi_max):
+        # A new rejection key is used for clarity in logs
+        log_rejection(symbol, "RSI Filter", {"RSI": f"{rsi:.2f}", "Range": f"({rsi_min}, {rsi_max})"})
+        return False
+
+    # Note: The "Confidence" filter is applied via `BUY_CONFIDENCE_THRESHOLD` before this function.
+    # Note: Indicators like "Stoch RSI" are used as features for the machine learning model and are part of the decision-making process, but not as a direct filter here.
+    
+    # All other filters in this function have been disabled as per user request.
+    
+    logger.info(f"✅ [{symbol}] Passed filters (RSI only).")
     return True
+# --- END: MODIFIED passes_filters FUNCTION ---
 
 def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, Any]]:
     if not client: return None
