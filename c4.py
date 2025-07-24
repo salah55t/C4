@@ -109,7 +109,7 @@ CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
 # مدة التوقف قبل الوقت المحدد (بالدقائق)
 CAUTION_PRE_BUFFER_MINUTES: int = 30
 # مدة التوقف الإجمالية (بالساعات)
-CAUTION_DURATION_HOURS: int = 2
+CAUTION_DURATION_HOURS: int = 1
 # متغير لتتبع حالة التحذير لتجنب التكرار
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
