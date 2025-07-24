@@ -79,7 +79,7 @@ BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 0.8 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 30 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
