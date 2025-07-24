@@ -115,8 +115,8 @@ SL_ATR_MULTIPLIER: float = 1.5
 
 # --- إعدادات أوقات الحذر ---
 CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
-CAUTION_PRE_BUFFER_MINUTES: int = 30
-CAUTION_DURATION_HOURS: int = 2
+CAUTION_PRE_BUFFER_MINUTES: int = 15
+CAUTION_DURATION_HOURS: int = 1
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
 
