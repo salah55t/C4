@@ -1,7 +1,3 @@
-# --- ملف: c4_complete_v11_stochrsi_filter.py ---
-# --- تم التحديث بواسطة Gemini (مع إضافة فلتر StochRSI الديناميكي وترجمة الواجهة) ---
-# --- نسخة كاملة: تتضمن جميع الدوال مع فلتر StochRSI المضاف ---
-
 import time
 import os
 import json
@@ -74,8 +70,8 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.85
-MIN_PROFIT_PERCENT: float = 1.0
+BUY_CONFIDENCE_THRESHOLD = 0.75
+MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 MARKET_LEADERS_FOR_ANALYSIS: List[str] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']
 
@@ -111,8 +107,8 @@ ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
 
 # --- إعدادات أوقات الحذر ---
 CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
-CAUTION_PRE_BUFFER_MINUTES: int = 30
-CAUTION_DURATION_HOURS: int = 2
+CAUTION_PRE_BUFFER_MINUTES: int = 15
+CAUTION_DURATION_HOURS: int = 1
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
 
@@ -559,7 +555,7 @@ class EnhancedFilterSystem:
     def __init__(self): self.analyzer = MarketConditionsAnalyzer()
     def generate_filters(self) -> Dict[str, Any]:
         conditions = self.analyzer.analyze_conditions()
-        base_profile = {"adx": 25.0, "rel_vol": 0.4, "rsi_range": (52, 88), "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.15}
+        base_profile = {"adx": 25.0, "rel_vol": 0.4, "rsi_range": (25, 90), "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.15}
         if conditions['volatility_regime'] == "low": base_profile['min_volatility_pct'] *= 0.7; base_profile['min_rrr'] *= 1.2
         elif conditions['volatility_regime'] == "high": base_profile['min_volatility_pct'] *= 1.3; base_profile['min_rrr'] *= 0.8
         if conditions['volume_regime'] == "low": base_profile['rel_vol'] *= 0.5
