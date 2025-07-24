@@ -559,7 +559,7 @@ class EnhancedFilterSystem:
     def __init__(self): self.analyzer = MarketConditionsAnalyzer()
     def generate_filters(self) -> Dict[str, Any]:
         conditions = self.analyzer.analyze_conditions()
-        base_profile = {"adx": 25.0, "rel_vol": 0.4, "rsi_range": (40, 90), "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.15}
+        base_profile = {"adx": 25.0, "rel_vol": 0.4, "rsi_range": (30, 90), "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.15}
         if conditions['volatility_regime'] == "low": base_profile['min_volatility_pct'] *= 0.7; base_profile['min_rrr'] *= 1.2
         elif conditions['volatility_regime'] == "high": base_profile['min_volatility_pct'] *= 1.3; base_profile['min_rrr'] *= 0.8
         if conditions['volume_regime'] == "low": base_profile['rel_vol'] *= 0.5
