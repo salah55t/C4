@@ -1,6 +1,6 @@
-# --- ملف: c4_complete_v10_caution_time_full.py ---
-# --- تم التحديث بواسطة Gemini (مع تحليل السوق المتعدد) ---
-# --- نسخة كاملة: تتضمن جميع الدوال مع إضافة آلية التوقف المؤقت بناءً على أوقات الهبوط المتكررة ---
+# --- ملف: c4_complete_v11_stochrsi_filter.py ---
+# --- تم التحديث بواسطة Gemini (مع إضافة فلتر StochRSI الديناميكي وترجمة الواجهة) ---
+# --- نسخة كاملة: تتضمن جميع الدوال مع فلتر StochRSI المضاف ---
 
 import time
 import os
@@ -39,11 +39,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10_telegram_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11_telegram_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10_Telegram')
+logger = logging.getLogger('CryptoBotV11_Telegram')
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -69,7 +69,7 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
-REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
+REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v11"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
@@ -77,7 +77,7 @@ MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.85
 MIN_PROFIT_PERCENT: float = 1.0
 SYMBOL_PROCESSING_BATCH_SIZE: int = 20
-MARKET_LEADERS_FOR_ANALYSIS: List[str] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT'] # <-- متغير جديد لتحليل السوق
+MARKET_LEADERS_FOR_ANALYSIS: List[str] = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT']
 
 # --- إعدادات المؤشرات الفنية ---
 ADX_PERIOD: int = 14
@@ -89,6 +89,12 @@ BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
+# --- START: NEW StochRSI Settings ---
+STOCH_RSI_PERIOD: int = 14
+STOCH_RSI_K_PERIOD: int = 3
+STOCH_RSI_D_PERIOD: int = 3
+# --- END: NEW StochRSI Settings ---
+
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -103,17 +109,12 @@ ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
 
-# --- START: NEW CAUTION TIME SETTINGS ---
-# أوقات بداية الهبوط (UTC)
+# --- إعدادات أوقات الحذر ---
 CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
-# مدة التوقف قبل الوقت المحدد (بالدقائق)
 CAUTION_PRE_BUFFER_MINUTES: int = 30
-# مدة التوقف الإجمالية (بالساعات)
-CAUTION_DURATION_HOURS: int = 1
-# متغير لتتبع حالة التحذير لتجنب التكرار
+CAUTION_DURATION_HOURS: int = 2
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
-# --- END: NEW CAUTION TIME SETTINGS ---
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -147,8 +148,24 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "RSI Filter": "فلتر مؤشر القوة النسبية"
+    "RSI Filter": "فلتر مؤشر القوة النسبية",
+    "StochRSI Filter": "فلتر مؤشر ستوكاستيك القوة النسبية" # <-- سبب رفض جديد
 }
+
+# --- START: NEW Market State Translations ---
+MARKET_STATE_TRANSLATIONS_AR = {
+    "STRONG_UPTREND": "صعود قوي",
+    "UPTREND": "صعود",
+    "STRONG_DOWNTREND": "هبوط قوي",
+    "DOWNTREND": "هبوط",
+    "RANGING": "تذبذب",
+    "UNCERTAIN": "غير واضح",
+    "INITIALIZING": "جاري التهيئة",
+    # Fallbacks for values that might not have underscores
+    "STRONG UPTREND": "صعود قوي",
+    "STRONG DOWNTREND": "هبوط قوي",
+}
+# --- END: NEW Market State Translations ---
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
@@ -284,7 +301,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V9) ---
+# --- دوال جلب البيانات وحساب الميزات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -305,30 +322,53 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
+# --- START: MODIFIED calculate_advanced_momentum_features ---
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
+    # --- Stochastic Oscillator ---
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
     df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
     df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
     df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+    
+    # --- MACD ---
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp1 - exp2
     df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['macd_histogram'] = df['macd'] - df['macd_signal']
+    
+    # --- Bollinger Bands ---
     bb_period = 20
     df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
     bb_std = df['close'].rolling(window=bb_period).std()
     df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
     df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
+    
+    # --- MFI ---
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
     positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
     negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
     money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
     df['mfi'] = 100 - (100 / (1 + money_ratio))
+    
+    # --- StochRSI Calculation ---
+    if 'rsi' in df.columns:
+        min_rsi = df['rsi'].rolling(window=STOCH_RSI_PERIOD).min()
+        max_rsi = df['rsi'].rolling(window=STOCH_RSI_PERIOD).max()
+        stoch_rsi_val = (df['rsi'] - min_rsi) / (max_rsi - min_rsi).replace(0, 1e-9)
+        
+        df['stoch_rsi_k'] = stoch_rsi_val.rolling(window=STOCH_RSI_K_PERIOD).mean() * 100
+        df['stoch_rsi_d'] = df['stoch_rsi_k'].rolling(window=STOCH_RSI_D_PERIOD).mean()
+    else:
+        # Ensure columns exist even if calculation fails
+        df['stoch_rsi_k'] = 50.0
+        df['stoch_rsi_d'] = 50.0
+        
     return df
+# --- END: MODIFIED calculate_advanced_momentum_features ---
 
 def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
     required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
@@ -382,6 +422,12 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
+    # RSI calculation moved up to ensure it's available for StochRSI
+    delta = df_calc['close'].diff()
+    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -395,10 +441,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
@@ -463,38 +506,19 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# --- START: NEW CAUTION TIME CHECK FUNCTION ---
 def is_in_caution_period() -> bool:
-    """
-    Checks if the current UTC time falls within any of the defined caution periods.
-    A caution period starts 30 minutes before a specified hour and lasts for 2 hours.
-    
-    يتحقق مما إذا كان الوقت الحالي (UTC) يقع ضمن فترات الحذر المحددة.
-    تبدأ فترة الحذر قبل 30 دقيقة من ساعة محددة وتستمر لمدة ساعتين.
-    """
     now_utc = datetime.now(timezone.utc)
-    
     for start_hour in CAUTION_START_HOURS_UTC:
-        # Calculate the start of the caution window for today
         caution_start_time = datetime(now_utc.year, now_utc.month, now_utc.day, start_hour, 0, 0, tzinfo=timezone.utc)
         caution_start_time -= timedelta(minutes=CAUTION_PRE_BUFFER_MINUTES)
-        
-        # Calculate the end of the caution window
         caution_end_time = caution_start_time + timedelta(hours=CAUTION_DURATION_HOURS)
-        
-        # Check if the current time is within this window
         if caution_start_time <= now_utc < caution_end_time:
             return True
-            
-        # Handle day crossover (e.g., for a period starting late at night)
-        # Check the same window for yesterday
         yesterday_caution_start = caution_start_time - timedelta(days=1)
         yesterday_caution_end = caution_end_time - timedelta(days=1)
         if yesterday_caution_start <= now_utc < yesterday_caution_end:
             return True
-            
     return False
-# --- END: NEW CAUTION TIME CHECK FUNCTION ---
 
 # ---------------------- أنظمة التحليل المتقدمة ----------------------
 class MarketConditionsAnalyzer:
@@ -544,7 +568,7 @@ class EnhancedFilterSystem:
 
 enhanced_filter_system = EnhancedFilterSystem()
 
-# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V9) ----------------------
+# ---------------------- استراتيجية التداول والفلاتر ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -603,40 +627,67 @@ class EnhancedTradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}")
             return None
 
-# --- START: MODIFIED passes_filters FUNCTION ---
-def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
-    """
-    This function has been modified to only use the RSI filter as requested.
-    All other manual filters (Volatility, Correlation, RRR, etc.) have been disabled.
-    The "Confidence" filter is applied before this function is called.
-    Indicators like "Stoch RSI" are used as features for the ML model, so they are still part of the decision process.
-    """
+# --- START: MODIFIED passes_filters FUNCTION with StochRSI ---
+def passes_filters(symbol: str, df_features: pd.DataFrame, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
+    global current_market_state
+    
     with filters_disabled_lock:
         if are_filters_disabled:
             logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
             return True
             
+    if len(df_features) < 2:
+        return False # Need at least 2 data points for crossover check
+
+    last_features = df_features.iloc[-1]
+    prev_features = df_features.iloc[-2]
+    
     filters = profile.get("filters", {})
     if not filters: 
         log_rejection(symbol, "Filters Not Loaded")
         return False
 
     # --- فلتر مؤشر القوة النسبية (RSI) ---
-    # هذا هو الفلتر الوحيد المتبقي في هذه الدالة بناءً على طلب المستخدم
-    rsi = last_features.get('rsi', 50) # Default to 50 to avoid errors
+    rsi = last_features.get('rsi', 50)
     rsi_min, rsi_max = filters.get('rsi_range', (0, 100))
-    
     if not (rsi_min <= rsi < rsi_max):
-        # A new rejection key is used for clarity in logs
         log_rejection(symbol, "RSI Filter", {"RSI": f"{rsi:.2f}", "Range": f"({rsi_min}, {rsi_max})"})
         return False
 
-    # Note: The "Confidence" filter is applied via `BUY_CONFIDENCE_THRESHOLD` before this function.
-    # Note: Indicators like "Stoch RSI" are used as features for the machine learning model and are part of the decision-making process, but not as a direct filter here.
+    # --- فلتر StochRSI الديناميكي الجديد ---
+    with market_state_lock:
+        market_regime = current_market_state.get("overall_regime", "RANGING")
+
+    # تحديد مستوى التقاطع الديناميكي بناءً على اتجاه السوق
+    if "UPTREND" in market_regime:
+        crossover_level = 60.0  # أكثر تساهلاً في الاتجاه الصاعد
+    elif "DOWNTREND" in market_regime:
+        crossover_level = 30.0  # أكثر صرامة في الاتجاه الهابط
+    else:  # في حالة التذبذب أو عدم اليقين
+        crossover_level = 40.0
+
+    k_now = last_features.get('stoch_rsi_k')
+    d_now = last_features.get('stoch_rsi_d')
+    k_prev = prev_features.get('stoch_rsi_k')
+    d_prev = prev_features.get('stoch_rsi_d')
     
-    # All other filters in this function have been disabled as per user request.
+    if k_now is None or d_now is None or k_prev is None or d_prev is None:
+        log_rejection(symbol, "StochRSI Filter", {"error": "Missing StochRSI values"})
+        return False
+
+    is_crossover_up = (k_prev < d_prev) and (k_now > d_now)
+    is_below_level = (k_now < crossover_level) and (d_now < crossover_level)
+
+    if not (is_crossover_up and is_below_level):
+        log_rejection(symbol, "StochRSI Filter", {
+            "reason": "No bullish crossover in the required zone",
+            "K": f"{k_now:.2f}", "D": f"{d_now:.2f}",
+            "Prev_K": f"{k_prev:.2f}", "Prev_D": f"{d_prev:.2f}",
+            "Zone": f"< {crossover_level}"
+        })
+        return False
     
-    logger.info(f"✅ [{symbol}] Passed filters (RSI only).")
+    logger.info(f"✅ [{symbol}] Passed all filters (RSI + StochRSI).")
     return True
 # --- END: MODIFIED passes_filters FUNCTION ---
 
@@ -666,7 +717,7 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: MODIFIED S/R BASED TP/SL FUNCTIONS ---
+# --- دوال حساب الأهداف ووقف الخسارة ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
@@ -720,7 +771,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -895,15 +945,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
 # ---------------------- دوال النظام الرئيسية ----------------------
-# --- START: MODIFIED determine_market_state_enhanced FUNCTION ---
 def determine_market_state_enhanced():
-    """
-    Determines the market state by analyzing a basket of leading cryptocurrencies.
-    This provides a more robust and comprehensive view of the overall market trend.
-    
-    يحدد حالة السوق من خلال تحليل سلة من العملات الرقمية الرائدة.
-    يوفر هذا رؤية أكثر قوة وشمولية للاتجاه العام للسوق.
-    """
     global current_market_state, last_market_state_check
     if time.time() - last_market_state_check < 180:  # 3-minute cache
         return
@@ -918,30 +960,20 @@ def determine_market_state_enhanced():
             tf_adx_values = []
             
             for symbol in MARKET_LEADERS_FOR_ANALYSIS:
-                # Fetch data for each market leader
-                df = fetch_historical_data(symbol, tf, 30) # Lookback of 30 periods is enough
-                if df is not None and not df.empty and len(df) >= 26: # Need enough data for EMA and ADX
+                df = fetch_historical_data(symbol, tf, 30)
+                if df is not None and not df.empty and len(df) >= 26:
                     try:
                         ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
                         ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-                        
-                        # Calculate ADX for the symbol
-                        adx_features = calculate_all_features(df, None) # Pass None for btc_df
+                        adx_features = calculate_all_features(df, None)
                         adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
-                        
                         tf_adx_values.append(adx)
 
-                        # Determine trend for this specific symbol
-                        if ema_fast > ema_slow and adx > 25:
-                            trend = "Strong Uptrend"
-                        elif ema_fast > ema_slow:
-                            trend = "Uptrend"
-                        elif ema_fast < ema_slow and adx > 25:
-                            trend = "Strong Downtrend"
-                        elif ema_fast < ema_slow:
-                            trend = "Downtrend"
-                        else:
-                            trend = "Ranging"
+                        if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
+                        elif ema_fast > ema_slow: trend = "Uptrend"
+                        elif ema_fast < ema_slow and adx > 25: trend = "Strong Downtrend"
+                        elif ema_fast < ema_slow: trend = "Downtrend"
+                        else: trend = "Ranging"
                         tf_trends.append(trend)
                     except Exception as e:
                         logger.warning(f"⚠️ [Market State] لم يتمكن من معالجة {symbol} على {tf}: {e}")
@@ -949,17 +981,14 @@ def determine_market_state_enhanced():
                     logger.warning(f"⚠️ [Market State] لا توجد بيانات كافية لـ {symbol} على {tf}, تم التخطي.")
             
             if tf_trends:
-                # Aggregate results for the timeframe by finding the most common trend (mode)
                 final_tf_trend = max(set(tf_trends), key=tf_trends.count)
                 avg_adx = np.mean(tf_adx_values) if tf_adx_values else 0
                 trend_details_by_tf[tf] = {"trend": final_tf_trend, "adx": float(avg_adx)}
                 all_final_trends.append(final_tf_trend)
             else:
-                # Fallback if no data could be fetched for this timeframe
                 trend_details_by_tf[tf] = {"trend": "Uncertain", "adx": 0}
                 all_final_trends.append("Uncertain")
 
-        # Determine the overall market regime from the aggregated trends of each timeframe
         overall_regime = max(set(all_final_trends), key=all_final_trends.count) if all_final_trends else "Uncertain"
         
         with market_state_lock:
@@ -976,8 +1005,6 @@ def determine_market_state_enhanced():
 
     except Exception as e:
         logger.error(f"❌ [Market State] خطأ في التحليل المجمع: {e}", exc_info=True)
-# --- END: MODIFIED determine_market_state_enhanced FUNCTION ---
-
 
 def analyze_market_and_create_dynamic_profile_enhanced():
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
@@ -995,20 +1022,21 @@ def analyze_market_and_create_dynamic_profile_enhanced():
 app = Flask(__name__)
 CORS(app)
 
+# --- START: MODIFIED get_dashboard_html with Arabic translations ---
 def get_dashboard_html():
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V10</title>
+    <title>لوحة تحكم التداول V11</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
         :root { --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D; --text-primary: #E6EDF3; --text-secondary: #848D97; --accent-blue: #58A6FF; --accent-green: #3FB950; --accent-red: #F85149; --accent-yellow: #D29922; }
         body { font-family: 'Tajawal', sans-serif; background-color: var(--bg-main); color: var(--text-primary); }
         .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; }
-        .trend-light { width: 1rem; height: 1rem; border-radius: 9999px; border: 2px solid #30363D; transition: all 0.5s ease; }
+        .trend-light { width: 1rem; height: 1rem; border-radius: 9999px; border: 2px solid #30363D; transition: all 0.5s ease; flex-shrink: 0; }
         .light-on-green { background-color: var(--accent-green); box-shadow: 0 0 10px 2px var(--accent-green); }
         .light-on-red { background-color: var(--accent-red); box-shadow: 0 0 10px 2px var(--accent-red); }
         .light-on-yellow { background-color: var(--accent-yellow); box-shadow: 0 0 10px 2px var(--accent-yellow); }
@@ -1030,8 +1058,8 @@ def get_dashboard_html():
     </div>
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V10</span></h1>
-            <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V11</span></h1>
+            <div id="trend-lights-container" class="flex items-center flex-wrap gap-x-4 gap-y-2 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
@@ -1060,14 +1088,15 @@ async function fetchData(url) { try { const r = await fetch(url); return r.ok ? 
 function updateMarketStatus() {
     fetchData('/api/market_status').then(data => {
         if (!data) return;
-        document.getElementById('overall-regime').textContent = (data.market_state?.overall_regime || 'UNCERTAIN').replace(/_/g, ' ');
+        document.getElementById('overall-regime').textContent = data.market_state?.overall_regime_ar || '...';
         const lights = document.getElementById('trend-lights-container');
         lights.innerHTML = '';
         ['15m', '1h', '4h'].forEach(tf => {
             const trendInfo = data.market_state?.trend_details_by_tf[tf];
-            const trend = trendInfo?.trend || 'Uncertain';
-            let c = trend.includes('Uptrend') ? 'light-on-green' : trend.includes('Downtrend') ? 'light-on-red' : 'light-on-yellow';
-            lights.innerHTML += `<div class="flex items-center gap-2"><div class="trend-light ${c}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
+            const trend_en = trendInfo?.trend || 'Uncertain';
+            const trend_ar = trendInfo?.trend_ar || trend_en;
+            let colorClass = trend_en.toLowerCase().includes('uptrend') ? 'light-on-green' : trend_en.toLowerCase().includes('downtrend') ? 'light-on-red' : 'light-on-yellow';
+            lights.innerHTML += `<div class="flex items-center gap-2"><div class="trend-light ${colorClass}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span><span class="text-sm font-medium">${trend_ar}</span></div>`;
         });
         document.getElementById('filter-profile-name').textContent = data.filter_profile?.name || 'غير متاح';
         const sessions = document.getElementById('active-sessions-list');
@@ -1115,10 +1144,9 @@ document.addEventListener('DOMContentLoaded', () => { ['MarketStatus', 'Signals'
 </script>
 </body></html>
 """
+# --- END: MODIFIED get_dashboard_html ---
 
-@app.route('/')
-def home(): return render_template_string(get_dashboard_html())
-
+# --- START: MODIFIED get_market_status with Arabic translations ---
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
@@ -1130,6 +1158,18 @@ def get_market_status():
     if client:
         try: usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
         except: usdt_balance = 'N/A'
+
+    # Add Arabic translations to the state object
+    overall_regime_key = state_copy.get('overall_regime', 'UNCERTAIN')
+    state_copy['overall_regime_ar'] = MARKET_STATE_TRANSLATIONS_AR.get(overall_regime_key, overall_regime_key)
+
+    if 'trend_details_by_tf' in state_copy:
+        for tf, details in state_copy['trend_details_by_tf'].items():
+            trend_key = details.get('trend', 'Uncertain')
+            # Use a key that matches the translation dictionary format
+            translation_key = trend_key.upper().replace(" ", "_")
+            details['trend_ar'] = MARKET_STATE_TRANSLATIONS_AR.get(translation_key, trend_key)
+
     return jsonify({
         "market_state": state_copy, 
         "filter_profile": profile_copy, 
@@ -1138,6 +1178,10 @@ def get_market_status():
         "is_trading_enabled": is_enabled, 
         "are_filters_disabled": is_disabled
     })
+# --- END: MODIFIED get_market_status ---
+
+@app.route('/')
+def home(): return render_template_string(get_dashboard_html())
 
 @app.route('/api/stats')
 def get_stats():
@@ -1291,6 +1335,7 @@ def trade_management_loop():
             logger.error(f"❌ [Trade Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
             time.sleep(10)
 
+# --- START: MODIFIED main_loop_enhanced to pass full df_features to filter function ---
 def main_loop_enhanced():
     global caution_warning_sent
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1302,7 +1347,6 @@ def main_loop_enhanced():
 
     while True:
         try:
-            # --- NEW: Caution Time Check ---
             if is_in_caution_period():
                 with caution_status_lock:
                     if not caution_warning_sent:
@@ -1321,7 +1365,6 @@ def main_loop_enhanced():
                     if caution_warning_sent:
                         logger.info("✅ [RESUMED] Exited caution period. Resuming trade search.")
                         caution_warning_sent = False
-            # --- END: Caution Time Check ---
 
             logger.info("🔄 بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
@@ -1370,13 +1413,13 @@ def main_loop_enhanced():
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
                         
-                        last_features = df_features.iloc[-1]
-                        if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
+                        # Pass the full features dataframe for crossover checks
+                        if not passes_filters(symbol, df_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
                         
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
                         
-                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V11", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
                         
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
@@ -1411,6 +1454,7 @@ def main_loop_enhanced():
         except Exception as main_err:
             log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM")
             time.sleep(120)
+# --- END: MODIFIED main_loop_enhanced ---
 
 def price_update_loop():
     if not redis_client: return
@@ -1439,13 +1483,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (V10 - مع تحليل السوق المتعدد)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (V11 - مع فلتر StochRSI)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V10 - مع تحليل السوق المتعدد) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V11 - مع فلتر StochRSI) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
