@@ -108,15 +108,11 @@ DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 300
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
-# --- START: NEW ATR Multiplier Settings ---
-TP_ATR_MULTIPLIER: float = 2.5
-SL_ATR_MULTIPLIER: float = 1.5
-# --- END: NEW ATR Multiplier Settings ---
 
 # --- إعدادات أوقات الحذر ---
 CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
-CAUTION_PRE_BUFFER_MINUTES: int = 15
-CAUTION_DURATION_HOURS: int = 1
+CAUTION_PRE_BUFFER_MINUTES: int = 30
+CAUTION_DURATION_HOURS: int = 2
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
 
@@ -153,8 +149,7 @@ REJECTION_REASONS_AR = {
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
     "RSI Filter": "فلتر مؤشر القوة النسبية",
-    "StochRSI Filter": "فلتر مؤشر ستوكاستيك القوة النسبية", # <-- سبب رفض جديد
-    "Invalid TP/SL logic": "منطق الهدف/الوقف غير صالح" # <-- سبب رفض جديد
+    "StochRSI Filter": "فلتر مؤشر ستوكاستيك القوة النسبية" # <-- سبب رفض جديد
 }
 
 # --- START: NEW Market State Translations ---
@@ -742,74 +737,40 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
     support    = Counter(lows_list).most_common(1)[0][0] if lows_list else None
     return {'support': support, 'resistance': resistance}
 
-# --- START: MODIFIED calculate_tp_sl with ATR Multiplier Fallback ---
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     try:
-        # التحقق من البيانات الأساسية
-        if df.empty or len(df) < 50 or 'atr' not in df.columns:
+        if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
-
-        last_atr = df['atr'].iloc[-1]
-        if last_atr <= 0:
-            log_rejection(symbol, "Invalid ATR for TP/SL", {"atr_value": last_atr})
-            return None
-
-        # البحث عن مستويات الدعم والمقاومة
         sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
-        resistance = sr.get('resistance')
-        support = sr.get('support')
-
-        target_price = None
-        stop_loss = None
-        source = ''
-
-        # الخطوة 1: تحديد سعر الهدف (TP)
-        # استخدام المقاومة إذا كانت صالحة وتوفر ربحًا
-        if resistance and resistance > entry_price:
-            target_price = resistance
-            source = 'SR_LEVELS'
-        else:
-            # --- الإجراء الاستثنائي المطلوب: استخدام مضاعف ATR ---
-            # إذا كانت المقاومة غير متاحة أو غير مربحة، استخدم مضاعف ATR
-            target_price = entry_price + (last_atr * TP_ATR_MULTIPLIER)
-            source = 'ATR_FALLBACK'
-            logger.info(f"ℹ️ [{symbol}] لم يتم العثور على مقاومة صالحة. استخدام مضاعف ATR للهدف: {target_price:.4f}")
-
-        # الخطوة 2: تحديد وقف الخسارة (SL)
-        # استخدام الدعم إذا كان صالحًا
-        if support and support < entry_price:
-            stop_loss = support
-        else:
-            # إذا كان الدعم غير متاح/صالح، استخدم مضاعف ATR
-            stop_loss = entry_price - (last_atr * SL_ATR_MULTIPLIER)
-            if source == 'SR_LEVELS': # إذا كان الهدف من الدعم/المقاومة ولكن الوقف ليس كذلك
-                 source = 'SR_TP_ATR_SL'
-            logger.info(f"ℹ️ [{symbol}] لم يتم العثور على دعم صالح. استخدام مضاعف ATR لوقف الخسارة: {stop_loss:.4f}")
-
-        # الخطوة 3: التحقق من صحة الهدف ووقف الخسارة المحسوبين
-        if target_price <= entry_price or stop_loss >= entry_price:
-             log_rejection(symbol, "Invalid TP/SL logic", {"TP": target_price, "SL": stop_loss, "Entry": entry_price})
-             return None
-
-        potential_profit_pct = ((target_price - entry_price) / entry_price) * 100
+        resistance = sr['resistance']
+        support    = sr['support']
+        if resistance is None or support is None:
+            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+            if last_atr <= 0: return None
+            resistance = entry_price + last_atr * 2.5
+            support    = entry_price - last_atr * 1.5
+        potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
         if potential_profit_pct < MIN_PROFIT_PERCENT:
-            log_rejection(symbol, "Potential Profit Below Threshold", {"potential_profit": f"{potential_profit_pct:.2f}%", "source": source})
+            log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
             return None
-
-        rr_ratio = (target_price - entry_price) / (entry_price - stop_loss) if (entry_price - stop_loss) > 0 else 0
-        
+        if support >= entry_price:
+            support = entry_price * 0.98
+        risk_pct = ((entry_price - support) / entry_price) * 100
+        if risk_pct < 0.3:
+            support = entry_price * (1 - 0.003)
         return {
-            'target_price': round(target_price, 6),
-            'stop_loss':    round(stop_loss, 6),
-            'source':       source,
-            'rr_ratio':     round(rr_ratio, 2)
+            'target_price': round(resistance, 6),
+            'stop_loss':    round(support, 6),
+            'source':       'SR_LEVELS',
+            'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
     except Exception as e:
-        logger.error(f"❌ [{symbol}] خطأ في دالة calculate_tp_sl: {e}", exc_info=True)
+        logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
+        last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+        if last_atr > 0:
+            return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: MODIFIED calculate_tp_sl ---
-
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
