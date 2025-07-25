@@ -79,7 +79,7 @@ BUY_CONFIDENCE_THRESHOLD = 0.55
 MIN_PROFIT_PERCENT: float = 0.8 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 40 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -695,29 +695,32 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         return None
 
 # --- NEW: StochRSI Signal Check Functions (MODIFIED) ---
-def check_stoch_rsi_buy_signal(df: pd.DataFrame) -> bool:
+def check_stoch_rsi_buy_signal(df: pd.DataFrame, lookback_period: int = 4) -> bool:
     """
-    Checks for a bullish StochRSI crossover below level 40 in the last 2 candles.
+    Checks for a bullish StochRSI crossover below level 40 in the last N candles.
     K crosses above D from below, with both K and D below 40.
-    يفحص تقاطع StochRSI الإيجابي تحت مستوى 40 في آخر شمعتين.
+    يفحص تقاطع StochRSI الإيجابي تحت مستوى 40 في آخر N شمعات.
     """
-    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 4:
+    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < lookback_period + 2:
         return False
     
     try:
-        # Check for crossover on the most recent candle (index -1) while being below 40
-        crossover_on_current = (df['stoch_rsi_k'].iloc[-2] < df['stoch_rsi_d'].iloc[-2] and 
-                                df['stoch_rsi_k'].iloc[-1] > df['stoch_rsi_d'].iloc[-1] and
-                                df['stoch_rsi_k'].iloc[-1] < 40 and
-                                df['stoch_rsi_d'].iloc[-1] < 40)
+        # Iterate backwards through the last 'lookback_period' candles
+        for i in range(1, lookback_period + 1):
+            # i=1 is the last candle, i=2 is the one before, etc.
+            k_current = df['stoch_rsi_k'].iloc[-i]
+            d_current = df['stoch_rsi_d'].iloc[-i]
+            k_previous = df['stoch_rsi_k'].iloc[-(i + 1)]
+            d_previous = df['stoch_rsi_d'].iloc[-(i + 1)]
 
-        # Check for crossover on the previous candle (index -2) while being below 40
-        crossover_on_previous = (df['stoch_rsi_k'].iloc[-3] < df['stoch_rsi_d'].iloc[-3] and 
-                                 df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and
-                                 df['stoch_rsi_k'].iloc[-2] < 40 and
-                                 df['stoch_rsi_d'].iloc[-2] < 40)
-                                 
-        return crossover_on_current or crossover_on_previous
+            # Check for the crossover condition
+            is_crossover = k_previous < d_previous and k_current > d_current
+            is_below_level = k_current < 40 and d_current < 40
+
+            if is_crossover and is_below_level:
+                return True # Found a valid crossover within the lookback period
+                
+        return False # No valid crossover found
     except IndexError:
         return False
 
@@ -1464,8 +1467,8 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- NEW: StochRSI Crossover Confirmation ---
-                        if not check_stoch_rsi_buy_signal(df_features):
+                        # --- NEW: StochRSI Crossover Confirmation (4 candles) ---
+                        if not check_stoch_rsi_buy_signal(df_features, lookback_period=4):
                             log_rejection(symbol, "StochRSI Crossover Invalid")
                             continue
                         # --- END: StochRSI Crossover Confirmation ---
