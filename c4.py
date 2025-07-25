@@ -715,7 +715,7 @@ def check_stoch_rsi_buy_signal(df: pd.DataFrame, lookback_period: int = 4) -> bo
 
             # Check for the crossover condition
             is_crossover = k_previous < d_previous and k_current > d_current
-            is_below_level = k_current < 40 and d_current < 40
+            is_below_level = k_current < 60 and d_current < 60
 
             if is_crossover and is_below_level:
                 return True # Found a valid crossover within the lookback period
