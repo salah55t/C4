@@ -111,8 +111,8 @@ ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
 
 # --- إعدادات أوقات الحذر ---
 CAUTION_START_HOURS_UTC: List[int] = [4, 12, 0, 16, 20, 8]
-CAUTION_PRE_BUFFER_MINUTES: int = 30
-CAUTION_DURATION_HOURS: int = 2
+CAUTION_PRE_BUFFER_MINUTES: int = 10
+CAUTION_DURATION_HOURS: int = 1
 caution_warning_sent: bool = False
 caution_status_lock = Lock()
 
