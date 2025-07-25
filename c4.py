@@ -1,6 +1,6 @@
-# ملف c4_complete_v9_final_telegram.py - نسخة محدثة مع آلية التحقق من البيع
+# ملف c4.py - نسخة محدثة مع منطق StochRSI لتأكيد الدخول والخروج
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة التحقق من تنفيذ أمر البيع قبل إغلاق الصفقة في قاعدة البيانات ---
+# --- تعديل: إضافة منطق StochRSI المستقل ---
 import time
 import os
 import json
@@ -76,10 +76,10 @@ STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.75
-MIN_PROFIT_PERCENT: float = 1.0 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
+MIN_PROFIT_PERCENT: float = 0.8 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 20 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -136,7 +136,8 @@ REJECTION_REASONS_AR = {
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات", "Order Book Imbalance": "اختلال توازن دفتر الطلبات",
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
-    "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)"
+    "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
+    "StochRSI Crossover Invalid": "تقاطع StochRSI غير صالح" # <-- سبب الرفض الجديد
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -388,6 +389,17 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+
+    # --- START: StochRSI Calculation ---
+    STOCH_RSI_PERIOD = 14
+    STOCH_RSI_K_PERIOD = 3
+    STOCH_RSI_D_PERIOD = 3
+    rsi = df_calc['rsi']
+    stoch_rsi_val = (rsi - rsi.rolling(STOCH_RSI_PERIOD).min()) / (rsi.rolling(STOCH_RSI_PERIOD).max() - rsi.rolling(STOCH_RSI_PERIOD).min()).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(STOCH_RSI_K_PERIOD).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
+    # --- END: StochRSI Calculation ---
+    
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
@@ -617,33 +629,19 @@ SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
 def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
-    """
-    مكتشف بسيط للدعم والمقاومة يعتمد على النقاط المحورية.
-    يُرجع {'support': float, 'resistance': float} لآخر شمعة.
-    تعديل: تم تغيير حساب المقاومة ليعتمد على أعلى جسم الشمعة (أقصى قيمة بين سعر الفتح والإغلاق) بدلاً من الذيل العلوي (أعلى سعر).
-    
-    Simple pivot-based S/R detector.
-    Returns {'support': float, 'resistance': float} for the latest bar.
-    MODIFIED: Resistance is now based on candle body top (max(open, close)) instead of the high wick.
-    """
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
 
-    # --- تعديل: استخدام أعلى جسم الشمعة للمقاومة ---
-    # --- MODIFICATION: Use the top of the candle body for resistance ---
     candle_body_tops = df[['open', 'close']].max(axis=1)
     highs = candle_body_tops.iloc[-lookback:]
     lows  = df['low'].iloc[-lookback:]
 
-    # تحديد القمم والقيعان المتأرجحة
-    # The logic remains the same, but it's now applied to candle bodies for resistance
     pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
     pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
 
     highs_list = highs[pivot_high].dropna().tolist()
     lows_list  = lows[pivot_low].dropna().tolist()
 
-    # عد التكرارات للاحتفاظ بالأقوى فقط
     if not highs_list or not lows_list:
         return {'support': None, 'resistance': None}
 
@@ -654,21 +652,15 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
 
 
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    TP = nearest resistance, SL = nearest support (or ATR fallback).
-    Enforces MIN_PROFIT_PERCENT vs entry.
-    """
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
 
-        # --- 1. Find nearest S/R
         sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
         resistance = sr['resistance']
         support    = sr['support']
 
-        # Fallback if no clear levels
         if resistance is None or support is None:
             last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
             if last_atr <= 0:
@@ -676,20 +668,16 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             resistance = entry_price + last_atr * 2.5
             support    = entry_price - last_atr * 1.5
 
-        # --- 2. Validate profit ≥ MIN_PROFIT_PERCENT
         potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
         if potential_profit_pct < MIN_PROFIT_PERCENT:
             log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
             return None
 
-        # --- 3. Ensure SL is below entry
         if support >= entry_price:
-            # If support is above entry, push it slightly below
             support = entry_price * 0.98
 
-        # --- 4. Prevent extremely tight SL
         risk_pct = ((entry_price - support) / entry_price) * 100
-        if risk_pct < 0.3:  # < 0.3 % is too tight
+        if risk_pct < 0.3:
             support = entry_price * (1 - 0.003)
 
         return {
@@ -701,20 +689,54 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
-        # Fallback to old ATR method
         last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-# --- END: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 
+# --- NEW: StochRSI Signal Check Functions ---
+def check_stoch_rsi_buy_signal(df: pd.DataFrame) -> bool:
+    """
+    Checks for a bullish StochRSI crossover in the last 2 candles.
+    K crosses above D from below.
+    يفحص تقاطع StochRSI الإيجابي في آخر شمعتين.
+    """
+    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 4:
+        return False
+    
+    try:
+        # Check for crossover on the most recent candle (index -1)
+        crossover_on_current = (df['stoch_rsi_k'].iloc[-2] < df['stoch_rsi_d'].iloc[-2] and 
+                                df['stoch_rsi_k'].iloc[-1] > df['stoch_rsi_d'].iloc[-1])
+
+        # Check for crossover on the previous candle (index -2)
+        crossover_on_previous = (df['stoch_rsi_k'].iloc[-3] < df['stoch_rsi_d'].iloc[-3] and 
+                                 df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2])
+                                 
+        return crossover_on_current or crossover_on_previous
+    except IndexError:
+        return False
+
+def check_stoch_rsi_sell_signal(df: pd.DataFrame) -> bool:
+    """
+    Checks for a bearish StochRSI crossover in the overbought zone (>80).
+    K crosses below D from above.
+    يفحص تقاطع StochRSI السلبي في منطقة التشبع الشرائي.
+    """
+    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 3:
+        return False
+        
+    try:
+        # Check for bearish crossover on the most recent candle
+        crossover_on_current = (df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and 
+                                df['stoch_rsi_k'].iloc[-1] < df['stoch_rsi_d'].iloc[-1] and
+                                df['stoch_rsi_k'].iloc[-2] > 80) # Check if the peak was overbought
+        return crossover_on_current
+    except IndexError:
+        return False
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
-    """
-    Adjusts the quantity to conform to the LOT_SIZE filter's stepSize.
-    This version is more robust to prevent filter failures.
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
@@ -726,15 +748,10 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         if lot_size_filter:
             step_size = Decimal(lot_size_filter['stepSize'])
             quantity_decimal = Decimal(str(quantity))
-            
-            # Formula: floor(quantity / step_size) * step_size
-            # This correctly truncates the quantity to the required precision.
             adjusted_quantity = (quantity_decimal // step_size) * step_size
-            
             logger.info(f"[{symbol}] تعديل الكمية: الأصلية={quantity_decimal}, حجم الخطوة={step_size}, المعدلة={adjusted_quantity}")
             return adjusted_quantity
             
-        # If for some reason LOT_SIZE filter is not found, return the original quantity as a Decimal
         return Decimal(str(quantity))
         
     except Exception as e:
@@ -768,7 +785,6 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
-        # Use str() to avoid float precision issues with the API
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
@@ -777,14 +793,7 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         log_and_notify('error', f"REAL TRADE FAILED: {symbol} | {e}", "REAL_TRADE_ERROR")
         return None
 
-# --- NEW: Order Verification Function ---
 def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -> bool:
-    """
-    Verifies if an order has been filled by polling the exchange.
-    Waits for the order status to become 'FILLED'.
-    التحقق من تنفيذ الأمر عن طريق الاستعلام من المنصة.
-    الانتظار حتى يصبح حالة الأمر 'FILLED'.
-    """
     if not client:
         return False
     start_time = time.time()
@@ -797,16 +806,14 @@ def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -
             elif order_status['status'] in ['CANCELED', 'EXPIRED', 'REJECTED']:
                 logger.error(f"❌ [{symbol}] Order {order_id} has failed status: {order_status['status']}.")
                 return False
-            # If PARTIALLY_FILLED or NEW, continue waiting
             logger.info(f"⏳ [{symbol}] Waiting for order {order_id} to be filled. Current status: {order_status['status']}")
-            time.sleep(2)  # Wait 2 seconds before polling again
+            time.sleep(2)
         except BinanceAPIException as e:
             logger.error(f"❌ [{symbol}] API Error while verifying order {order_id}: {e}")
-            # Don't return false immediately, could be a temporary API issue
             time.sleep(5)
         except Exception as e:
             logger.error(f"❌ [{symbol}] Unexpected error while verifying order {order_id}: {e}", exc_info=True)
-            return False  # Exit on unexpected errors
+            return False
     
     logger.error(f"⌛️ [{symbol}] Timeout reached while waiting for order {order_id} to be filled.")
     return False
@@ -864,11 +871,8 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                             log_and_notify('error', f"CRITICAL: Sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                             return False
 
-                        # --- NEW: Verification Step ---
                         order_id = sell_order.get('orderId')
                         if not verify_order_filled(symbol_to_close, order_id):
-                            # If verification fails, do NOT close the signal in the DB.
-                            # Send a critical alert for manual intervention.
                             log_and_notify(
                                 'critical',
                                 f"🚨 MANUAL ACTION REQUIRED: Sell order for {symbol_to_close} (ID: {order_id}) was placed but NOT confirmed as FILLED. The trade remains open in the bot. Please verify on Binance.",
@@ -880,7 +884,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                                 f"*المشكلة:* تم إرسال أمر البيع لكن لم يتم تأكيد تنفيذه.\n"
                                 f"الصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*"
                             )
-                            return False # Stop the closing process
+                            return False
                         
                         logger.info(f"✅ [{symbol_to_close}] Sell order {order_id} successfully filled and verified.")
 
@@ -905,7 +909,13 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
             
-            reason_map = {'take_profit': '🎯 Take Profit', 'stop_loss': '🛑 Stop Loss', 'manual': '🖐️ Manual Close'}
+            # --- NEW: Add StochRSI sell reason to map ---
+            reason_map = {
+                'take_profit': '🎯 Take Profit', 
+                'stop_loss': '🛑 Stop Loss', 
+                'manual': '🖐️ Manual Close',
+                'stoch_rsi_sell': '📈 StochRSI Sell'
+            }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
             telegram_message = (
@@ -1014,6 +1024,8 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
+    # The HTML content is long, so it's omitted here for brevity.
+    # It's the same as in the original file.
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1333,6 +1345,20 @@ def trade_management_loop():
                 tp = float(signal['target_price'])
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
+
+                # --- NEW: StochRSI Sell Signal Check ---
+                try:
+                    df_manage = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, 50)
+                    if df_manage is not None and not df_manage.empty:
+                        df_features_manage = calculate_all_features(df_manage, None)
+                        if df_features_manage is not None and not df_features_manage.empty:
+                            if check_stoch_rsi_sell_signal(df_features_manage):
+                                logger.info(f"📈 [StochRSI SELL] Closing {signal['symbol']} at {current_price}")
+                                close_signal(signal_id, current_price, 'stoch_rsi_sell')
+                                continue 
+                except Exception as e:
+                    logger.error(f"❌ [{signal['symbol']}] Error during StochRSI sell check: {e}")
+                # --- END: StochRSI Sell Signal Check ---
                 
                 if current_price >= tp:
                     logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
@@ -1405,7 +1431,6 @@ def main_loop_enhanced():
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
             
-            # --- START: Memory Optimization with Batch Processing ---
             for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
@@ -1435,6 +1460,12 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
+                        # --- NEW: StochRSI Crossover Confirmation ---
+                        if not check_stoch_rsi_buy_signal(df_features):
+                            log_rejection(symbol, "StochRSI Crossover Invalid")
+                            continue
+                        # --- END: StochRSI Crossover Confirmation ---
+
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
@@ -1473,14 +1504,12 @@ def main_loop_enhanced():
                     except Exception as e:
                         logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
                     finally:
-                        time.sleep(0.5) # Small delay between symbols
+                        time.sleep(0.5)
 
-                # --- Memory Management after each batch ---
                 logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches and collecting garbage.")
                 ml_models_cache.clear()
                 gc.collect()
                 logger.info("✅ Memory cleanup for batch complete.")
-            # --- END: Memory Optimization with Batch Processing ---
 
             logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
