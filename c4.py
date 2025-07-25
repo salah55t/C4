@@ -75,7 +75,7 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.52
+BUY_CONFIDENCE_THRESHOLD = 0.75
 MIN_PROFIT_PERCENT: float = 0.8 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
@@ -694,24 +694,28 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- NEW: StochRSI Signal Check Functions ---
+# --- NEW: StochRSI Signal Check Functions (MODIFIED) ---
 def check_stoch_rsi_buy_signal(df: pd.DataFrame) -> bool:
     """
-    Checks for a bullish StochRSI crossover in the last 2 candles.
-    K crosses above D from below.
-    يفحص تقاطع StochRSI الإيجابي في آخر شمعتين.
+    Checks for a bullish StochRSI crossover below level 40 in the last 2 candles.
+    K crosses above D from below, with both K and D below 40.
+    يفحص تقاطع StochRSI الإيجابي تحت مستوى 40 في آخر شمعتين.
     """
     if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 4:
         return False
     
     try:
-        # Check for crossover on the most recent candle (index -1)
+        # Check for crossover on the most recent candle (index -1) while being below 40
         crossover_on_current = (df['stoch_rsi_k'].iloc[-2] < df['stoch_rsi_d'].iloc[-2] and 
-                                df['stoch_rsi_k'].iloc[-1] > df['stoch_rsi_d'].iloc[-1])
+                                df['stoch_rsi_k'].iloc[-1] > df['stoch_rsi_d'].iloc[-1] and
+                                df['stoch_rsi_k'].iloc[-1] < 40 and
+                                df['stoch_rsi_d'].iloc[-1] < 40)
 
-        # Check for crossover on the previous candle (index -2)
+        # Check for crossover on the previous candle (index -2) while being below 40
         crossover_on_previous = (df['stoch_rsi_k'].iloc[-3] < df['stoch_rsi_d'].iloc[-3] and 
-                                 df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2])
+                                 df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and
+                                 df['stoch_rsi_k'].iloc[-2] < 40 and
+                                 df['stoch_rsi_d'].iloc[-2] < 40)
                                  
         return crossover_on_current or crossover_on_previous
     except IndexError:
