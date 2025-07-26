@@ -79,7 +79,7 @@ BUY_CONFIDENCE_THRESHOLD = 0.55
 MIN_PROFIT_PERCENT: float = 0.8 # <-- الشرط الجديد: الحد الأدنى للربح المقبول
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # معالجة 20 عملة في كل دفعة لتحسين الذاكرة
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # معالجة 10 عملات في كل دفعة لتحسين الذاكرة
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -651,7 +651,15 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
     return {'support': support, 'resistance': resistance}
 
 
+# --- START: MODIFIED TP/SL FUNCTION WITH USER-REQUESTED FALLBACK ---
+# --- بداية: دالة TP/SL المعدلة مع المنطق الاحتياطي المطلوب من المستخدم ---
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    Calculates Take Profit and Stop Loss.
+    Uses S/R levels first. If they fail, it uses the user-requested fallback logic:
+    - Take Profit = entry_price * 1.2
+    - Stop Loss = entry_price - 1.5 * ATR (for safety)
+    """
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
@@ -660,39 +668,65 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
         resistance = sr['resistance']
         support    = sr['support']
+        source = 'SR_LEVELS' # المصدر الافتراضي
 
         if resistance is None or support is None:
-            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+            # --- START: NEW FALLBACK LOGIC as requested ---
+            # --- بداية: منطق احتياطي جديد حسب الطلب ---
+            logger.warning(f"⚠️ [{symbol}] لم يتم العثور على مستويات دعم/مقاومة. استخدام منطق الهدف الاحتياطي (1.2x).")
+            
+            # حساب الهدف عند 1.2 ضعف سعر الدخول حسب الطلب
+            resistance = entry_price * 1.2
+            
+            # استخدام ATR لوقف الخسارة كخيار احتياطي آمن
+            last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df['atr'].empty else 0
             if last_atr <= 0:
-                return None
-            resistance = entry_price + last_atr * 2.5
-            support    = entry_price - last_atr * 1.5
+                log_rejection(symbol, "Invalid ATR for TP/SL", {"details": "S/R failed and ATR is zero/invalid."})
+                return None # لا يمكن المتابعة بدون وقف خسارة صالح
+            
+            support = entry_price - last_atr * 1.5 # الحفاظ على منطق وقف الخسارة الأصلي المستند إلى ATR
+            source = 'Fallback_Target_1.2x'
+            # --- END: NEW FALLBACK LOGIC ---
+            # --- نهاية: منطق احتياطي جديد ---
 
         potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
         if potential_profit_pct < MIN_PROFIT_PERCENT:
-            log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%"})
+            log_rejection(symbol, "Potential Profit Below Threshold (S/R)", {"potential_profit": f"{potential_profit_pct:.2f}%", "source": source})
             return None
 
         if support >= entry_price:
-            support = entry_price * 0.98
+            # إذا كان الدعم المحسوب أعلى من سعر الدخول، اضبطه على نسبة مئوية أقل
+            support = entry_price * 0.98 
+            logger.warning(f"⚠️ [{symbol}] تم تعديل وقف الخسارة إلى {support:.6f} لأنه كان أعلى من سعر الدخول.")
 
         risk_pct = ((entry_price - support) / entry_price) * 100
         if risk_pct < 0.3:
+            # التأكد من أن وقف الخسارة ليس قريبًا جدًا
             support = entry_price * (1 - 0.003)
+            logger.warning(f"⚠️ [{symbol}] تم تعديل وقف الخسارة إلى {support:.6f} لأنه كان قريبًا جدًا.")
 
         return {
             'target_price': round(resistance, 6),
             'stop_loss':    round(support, 6),
-            'source':       'SR_LEVELS',
+            'source':       source,
             'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
 
     except Exception as e:
-        logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
-        last_atr = df['atr'].iloc[-1] if 'atr' in df.columns else 0
+        logger.error(f"❌ [{symbol}] Error in S/R TP/SL calculation: {e}", exc_info=True)
+        # Fallback in case of any other exception during calculation
+        # في حالة حدوث أي استثناء آخر أثناء الحساب
+        last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df['atr'].empty else 0
         if last_atr > 0:
-            return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
+            return {
+                'target_price': entry_price + last_atr * 2.2, 
+                'stop_loss': entry_price - last_atr * 1.5, 
+                'source': 'Exception_ATR_Fallback'
+            }
         return None
+# --- END: MODIFIED TP/SL FUNCTION ---
+# --- نهاية: دالة TP/SL المعدلة ---
+
 
 # --- NEW: StochRSI Signal Check Functions (MODIFIED) ---
 def check_stoch_rsi_buy_signal(df: pd.DataFrame, lookback_period: int = 4) -> bool:
