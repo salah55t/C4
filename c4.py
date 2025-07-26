@@ -716,7 +716,7 @@ def check_stoch_rsi_buy_signal(df: pd.DataFrame, lookback_period: int = 4) -> bo
             k_previous = df['stoch_rsi_k'].iloc[-(i + 1)]
             d_previous = df['stoch_rsi_d'].iloc[-(i + 1)]
             is_crossover = k_previous < d_previous and k_current > d_current
-            is_below_level = k_current < 30 and d_current < 30
+            is_below_level = k_current < 50 and d_current < 50
             if is_crossover and is_below_level: return True
         return False
     except IndexError:
@@ -729,7 +729,7 @@ def check_stoch_rsi_sell_signal(df: pd.DataFrame) -> bool:
     try:
         crossover_on_current = (df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and 
                                 df['stoch_rsi_k'].iloc[-1] < df['stoch_rsi_d'].iloc[-1] and
-                                df['stoch_rsi_k'].iloc[-2] > 80)
+                                df['stoch_rsi_k'].iloc[-2] > 90)
         return crossover_on_current
     except IndexError:
         return False
