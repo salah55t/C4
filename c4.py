@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع منطق StochRSI و MACD لتأكيد الدخول
+# ملف c4.py - نسخة محدثة مع فلتر MACD لتأكيد الدخول
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة فلتر تقاطع الماكد (MACD) المستقل ---
+# --- تعديل: الاعتماد على فلتر تقاطع الماكد (MACD) فقط ---
 import time
 import os
 import json
@@ -137,8 +137,8 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "StochRSI Crossover Invalid": "تقاطع StochRSI غير صالح",
-    "MACD Crossover Invalid": "تقاطع MACD غير صالح" # <-- سبب الرفض الجديد
+    "StochRSI Crossover Invalid": "تقاطع StochRSI غير صالح", # Kept for sell signals
+    "MACD Crossover Invalid": "تقاطع MACD غير صالح"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -705,23 +705,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         return None
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
-def check_stoch_rsi_buy_signal(df: pd.DataFrame, lookback_period: int = 4) -> bool:
-    """يفحص تقاطع StochRSI الإيجابي تحت مستوى 60 في آخر N شمعات."""
-    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < lookback_period + 2:
-        return False
-    try:
-        for i in range(1, lookback_period + 1):
-            k_current = df['stoch_rsi_k'].iloc[-i]
-            d_current = df['stoch_rsi_d'].iloc[-i]
-            k_previous = df['stoch_rsi_k'].iloc[-(i + 1)]
-            d_previous = df['stoch_rsi_d'].iloc[-(i + 1)]
-            is_crossover = k_previous < d_previous and k_current > d_current
-            is_below_level = k_current < 50 and d_current < 50
-            if is_crossover and is_below_level: return True
-        return False
-    except IndexError:
-        return False
-
 def check_stoch_rsi_sell_signal(df: pd.DataFrame) -> bool:
     """يفحص تقاطع StochRSI السلبي في منطقة التشبع الشرائي."""
     if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 3:
@@ -729,12 +712,11 @@ def check_stoch_rsi_sell_signal(df: pd.DataFrame) -> bool:
     try:
         crossover_on_current = (df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and 
                                 df['stoch_rsi_k'].iloc[-1] < df['stoch_rsi_d'].iloc[-1] and
-                                df['stoch_rsi_k'].iloc[-2] > 90)
+                                df['stoch_rsi_k'].iloc[-2] > 80)
         return crossover_on_current
     except IndexError:
         return False
 
-# --- دالة جديدة: التحقق من إشارة شراء الماكد (MACD) ---
 def check_macd_buy_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
     يفحص تقاطع MACD الإيجابي تحت خط الصفر في آخر N شمعات.
@@ -743,7 +725,6 @@ def check_macd_buy_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
         return False
     
     try:
-        # Iterate backwards through the last 'lookback_period' candles
         for i in range(1, lookback_period + 1):
             macd_current = df['macd'].iloc[-i]
             signal_current = df['macd_signal'].iloc[-i]
@@ -754,7 +735,7 @@ def check_macd_buy_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
             is_below_zero = macd_current < 0
 
             if is_crossover and is_below_zero:
-                logger.info(f"✅ [{df.iloc[-1].name}] Bullish MACD crossover detected.")
+                logger.info(f"✅ [{df.index[-i]}] Bullish MACD crossover detected for {df.name}.")
                 return True
         return False
     except IndexError:
@@ -1368,6 +1349,7 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
+                # --- StochRSI Sell Signal Check (for managing open trades) ---
                 try:
                     df_manage = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, 50)
                     if df_manage is not None and not df_manage.empty:
@@ -1468,24 +1450,26 @@ def main_loop_enhanced():
                         
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty: continue
+                        df_15m.name = symbol # Add name for logging
                         
                         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_4h is None or df_4h.empty: continue
                         
                         df_features = strategy.get_features(df_15m, df_4h, btc_data)
                         if df_features is None or df_features.empty: continue
-                        
+                        df_features.name = symbol # Add name for logging
+
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر 1: التحقق من تقاطع StochRSI ---
-                        if not check_stoch_rsi_buy_signal(df_features, lookback_period=4):
-                            log_rejection(symbol, "StochRSI Crossover Invalid")
-                            continue
+                        # --- فلتر 1 (معطل): التحقق من تقاطع StochRSI ---
+                        # if not check_stoch_rsi_buy_signal(df_features, lookback_period=4):
+                        #     log_rejection(symbol, "StochRSI Crossover Invalid")
+                        #     continue
                         
-                        # --- فلتر 2 (جديد): التحقق من تقاطع الماكد MACD ---
+                        # --- فلتر 2 (أساسي): التحقق من تقاطع الماكد MACD ---
                         if not check_macd_buy_signal(df_features, lookback_period=3):
                             log_rejection(symbol, "MACD Crossover Invalid")
                             continue
