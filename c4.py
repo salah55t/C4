@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع منطق الخروج الديناميكي
+# ملف c4.py - نسخة محدثة مع فلتر EMA Crossover لتأكيد الدخول
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة نظام خروج ديناميكي مع أهداف مفتوحة ---
+# --- تعديل: تطبيق شروط تقاطع EMA بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -105,12 +105,6 @@ ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
 
-# --- NEW: إعدادات الخروج الديناميكي (هدف مفتوح) ---
-DYNAMIC_EXIT_ENABLED: bool = True          # تفعيل / تعطيل
-EXIT_LOOKBACK_CANDLES: int = 5             # عدد الشموع 15 د لمراقبة الإشارات
-MIN_EXIT_RSI: float = 45                   # RSI أقل من 45 يؤكد الهبوط
-DYNAMIC_EXIT_CHECK_INTERVAL: int = 60      # الفاصل الزمني (بالثواني) لفحص الخروج الديناميكي
-
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
@@ -130,7 +124,6 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 last_market_state_check = 0
-dynamic_exit_last_check: Dict[str, float] = {} # كاش لتتبع آخر فحص للخروج الديناميكي لكل عملة
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
@@ -144,8 +137,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "EMA Crossover Invalid": "تقاطع EMA غير صالح",
-    "Insufficient data for dynamic exit": "بيانات غير كافية للخروج الديناميكي"
+    "EMA Crossover Invalid": "تقاطع EMA غير صالح" # <-- سبب الرفض الجديد
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -177,7 +169,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION, stop_loss DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                         current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
@@ -185,7 +177,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS closing_reason TEXT;")
-                cur.execute("ALTER TABLE signals ALTER COLUMN target_price DROP NOT NULL;") # Allow NULL for dynamic exit
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -287,14 +278,9 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # Fetch klines based on days for historical, limit for recent data
-        if days > 0:
-            start_dt = datetime.now(timezone.utc) - timedelta(days=days)
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-            klines = client.get_historical_klines(symbol, interval, start_str)
-        else: # Fetch a limited number of recent klines
-            klines = client.get_klines(symbol=symbol, interval=interval, limit=200)
-
+        start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+        start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
@@ -601,12 +587,8 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
     if volatility < filters.get('min_volatility_pct', 0.0): log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%"}); return False
     correlation = last_features.get('btc_correlation', 0)
     if correlation < filters.get('min_btc_correlation', -1.0): log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}"}); return False
-    
-    # RRR check is only for non-dynamic exit strategies
-    if not DYNAMIC_EXIT_ENABLED:
-        risk = entry_price - float(tp_sl_data['stop_loss']); reward = float(tp_sl_data['target_price']) - entry_price
-        if risk <= 0 or reward <= 0 or (reward / risk) < filters.get('min_rrr', 0.0): log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); return False
-
+    risk = entry_price - float(tp_sl_data['stop_loss']); reward = float(tp_sl_data['target_price']) - entry_price
+    if risk <= 0 or reward <= 0 or (reward / risk) < filters.get('min_rrr', 0.0): log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); return False
     adx, rel_vol, rsi, roc, slope = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0), last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
     rsi_min, rsi_max = filters.get('rsi_range', (0, 100))
     if not (adx >= filters.get('adx', 0) and rel_vol >= filters.get('rel_vol', 0) and rsi_min <= rsi < rsi_max and roc > filters.get('roc', -100) and slope > filters.get('slope', -100)):
@@ -646,7 +628,7 @@ def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dic
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
     return True
 
-# --- START: MODIFIED TP/SL AND DYNAMIC EXIT FUNCTIONS ---
+# --- START: MODIFIED S/R BASED TP/SL FUNCTIONS ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
@@ -672,27 +654,8 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
 
     return {'support': support, 'resistance': resistance}
 
+
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    يحسب TP/SL. إذا تم تفعيل DYNAMIC_EXIT، فإنه يستخدم استراتيجية الهدف المفتوح.
-    وإلا، فإنه يستخدم منطق الدعم والمقاومة الأصلي.
-    """
-    # --- منطق الخروج الديناميكي (الهدف المفتوح) ---
-    if DYNAMIC_EXIT_ENABLED:
-        logger.info(f"[{symbol}] Using DYNAMIC EXIT (Open Target) strategy.")
-        if df.empty or len(df) < 5:
-            log_rejection(symbol, "Insufficient data for dynamic exit")
-            return None
-
-        initial_sl = round(entry_price * 0.98, 6)   # وقف خسارة ابتدائي ضيق 2%
-        return {
-            'target_price': None,      # لا يوجد هدف ثابت، سيتم الاعتماد على الخروج الديناميكي
-            'stop_loss': initial_sl,
-            'source': 'DYNAMIC_EXIT',
-            'rr_ratio': None           # غير قابل للتطبيق
-        }
-
-    # --- منطق الدعم والمقاومة الأصلي ---
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
@@ -743,45 +706,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         if last_atr > 0:
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
-
-def should_exit_early(df: pd.DataFrame) -> bool:
-    """
-    تقرر إذا كان يجب الخروج من الصفقة بسبب بداية اتجاه هابط على 15 دقيقة.
-    المعايير:
-      1- تقاطع EMA 9 أسفل EMA 21 خلال آخر X شموع.
-      2- RSI < MIN_EXIT_RSI.
-      3- الإغلاق تحت كلا EMA9 وEMA21.
-    """
-    required_cols = ['ema_9', 'ema_21', 'close', 'rsi']
-    if not all(col in df.columns for col in required_cols) or len(df) < EXIT_LOOKBACK_CANDLES + 2:
-        return False
-
-    try:
-        for i in range(1, EXIT_LOOKBACK_CANDLES + 1):
-            # Data for the candle being checked (from the end of the dataframe)
-            prev_ema9   = df['ema_9'].iloc[-(i+1)]
-            prev_ema21  = df['ema_21'].iloc[-(i+1)]
-            curr_ema9   = df['ema_9'].iloc[-i]
-            curr_ema21  = df['ema_21'].iloc[-i]
-            curr_close  = df['close'].iloc[-i]
-            curr_rsi    = df['rsi'].iloc[-i]
-
-            # Condition 1: Bearish crossover (EMA 9 crosses below EMA 21)
-            bear_cross = prev_ema9 > prev_ema21 and curr_ema9 < curr_ema21
-            
-            # Condition 2: Price closes below both EMAs
-            below_emas = curr_close < curr_ema9 and curr_close < curr_ema21
-            
-            # Condition 3: RSI indicates weakness
-            weak_rsi   = curr_rsi < MIN_EXIT_RSI
-
-            if bear_cross and below_emas and weak_rsi:
-                logger.info(f"⚠️ إشارة خروج مبكر لـ {df.name}: تقاطع EMA هابط + RSI ضعيف في شمعة {df.index[-i]}")
-                return True
-        return False
-    except Exception as e:
-        logger.error(f"❌ [{getattr(df, 'name', 'Unknown')}] Error in should_exit_early: {e}")
-        return False
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
 def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
@@ -1005,8 +929,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             reason_map = {
                 'take_profit': '🎯 Take Profit', 
                 'stop_loss': '🛑 Stop Loss', 
-                'manual': '🖐️ Manual Close',
-                'dynamic_exit': '📉 خروج ديناميكي'
+                'manual': '🖐️ Manual Close'
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1031,8 +954,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     try:
         with conn.cursor() as cur:
             entry_price = float(signal_data['entry_price'])
-            # Handle possible None for target_price in dynamic exit
-            target_price = float(signal_data['target_price']) if signal_data['target_price'] is not None else None
+            target_price = float(signal_data['target_price'])
             stop_loss = float(signal_data['stop_loss'])
             quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
 
@@ -1056,12 +978,11 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
             
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
-            tp_display = f"`{target_price:.4f}`" if target_price is not None else "`مفتوح (ديناميكي)`"
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
                 f"*العملة:* `{signal_data['symbol']}`\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
-                f"*الهدف (TP):* {tp_display}\n"
+                f"*الهدف (TP):* `{target_price:.4f}`\n"
                 f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
                 f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
             )
@@ -1234,21 +1155,9 @@ function updateSignals() {
         data.filter(s => ['open', 'updated'].includes(s.status)).forEach(s => {
             const profit = parseFloat(s.profit_percentage || 0);
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
-            const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss), current = parseFloat(s.current_price || entry);
-            let progress = 0;
-            // Handle dynamic exit where TP can be null
-            if (s.target_price) {
-                const tp = parseFloat(s.target_price);
-                if (tp - sl > 0) {
-                    progress = Math.max(0, Math.min(100, (current - sl) / (tp - sl) * 100));
-                }
-            } else { // For dynamic exit, show progress based on profit
-                progress = Math.max(0, Math.min(100, profit * 10)); // Simple visualization
-            }
-            const typeClass = s.source === 'DYNAMIC_EXIT' ? 'bg-purple-500/20 text-purple-400' : (s.is_real_trade ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400');
-            const typeText = s.source === 'DYNAMIC_EXIT' ? 'ديناميكي' : (s.is_real_trade ? 'حقيقي' : 'تجريبي');
-            
-            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${typeClass}">${typeText}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
+            const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss), tp = parseFloat(s.target_price), current = parseFloat(s.current_price || entry);
+            const progress = (tp - sl > 0) ? Math.max(0, Math.min(100, (current - sl) / (tp - sl) * 100)) : 0;
+            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${s.is_real_trade ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'}">${s.is_real_trade ? 'حقيقي' : 'تجريبي'}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
         });
     });
 }
@@ -1446,32 +1355,10 @@ def trade_management_loop():
                 
                 current_price = float(current_price_str)
                 signal_id = signal['id']
-                # Handle None for target_price in dynamic exit strategy
-                tp = float(signal['target_price']) if signal['target_price'] is not None else float('inf')
+                tp = float(signal['target_price'])
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                # --- NEW: Dynamic Exit Check ---
-                now = time.time()
-                # Check if the global feature is on AND this specific trade was opened with this strategy
-                if DYNAMIC_EXIT_ENABLED and signal.get('source') == 'DYNAMIC_EXIT':
-                    last_check_time = dynamic_exit_last_check.get(signal['symbol'], 0)
-                    if now - last_check_time > DYNAMIC_EXIT_CHECK_INTERVAL:
-                        logger.info(f"⏳ [{signal['symbol']}] Performing dynamic exit check...")
-                        dynamic_exit_last_check[signal['symbol']] = now # Update check time immediately
-                        
-                        # Fetch fresh data for analysis (not too much, just for indicators)
-                        df_15m = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, days=0) # Fetch recent klines
-                        if df_15m is not None and not df_15m.empty:
-                            df_15m.name = signal['symbol']
-                            df_features = calculate_all_features(df_15m, None) # Calculate indicators
-                            
-                            if df_features is not None and not df_features.empty and should_exit_early(df_features):
-                                logger.info(f"📉 [DYNAMIC EXIT] Triggered for {signal['symbol']} at {current_price}")
-                                close_signal(signal_id, current_price, 'dynamic_exit')
-                                continue # Move to the next signal, as this one is now closed
-                
-                # --- Existing TP/SL Logic ---
                 if current_price >= tp:
                     logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
                     close_signal(signal_id, current_price, 'take_profit')
@@ -1481,7 +1368,6 @@ def trade_management_loop():
                     close_signal(signal_id, current_price, 'stop_loss')
                     continue
 
-                # --- Existing Trailing Stop Loss Logic ---
                 if USE_TRAILING_STOP_LOSS:
                     peak_price = float(signal.get('current_peak_price', entry))
                     new_peak = max(peak_price, current_price)
