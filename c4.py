@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر MACD لتأكيد الدخول
+# ملف c4.py - نسخة محدثة مع فلتر MACD للدخول فقط
 # تم التحديث بواسطة Gemini
-# --- تعديل: الاعتماد على فلتر تقاطع الماكد (MACD) فقط ---
+# --- تعديل: إزالة شرط إغلاق الصفقة عند تقاطع StochRSI السلبي ---
 import time
 import os
 import json
@@ -137,7 +137,6 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "StochRSI Crossover Invalid": "تقاطع StochRSI غير صالح", # Kept for sell signals
     "MACD Crossover Invalid": "تقاطع MACD غير صالح"
 }
 
@@ -705,18 +704,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         return None
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
-def check_stoch_rsi_sell_signal(df: pd.DataFrame) -> bool:
-    """يفحص تقاطع StochRSI السلبي في منطقة التشبع الشرائي."""
-    if 'stoch_rsi_k' not in df.columns or 'stoch_rsi_d' not in df.columns or len(df) < 3:
-        return False
-    try:
-        crossover_on_current = (df['stoch_rsi_k'].iloc[-2] > df['stoch_rsi_d'].iloc[-2] and 
-                                df['stoch_rsi_k'].iloc[-1] < df['stoch_rsi_d'].iloc[-1] and
-                                df['stoch_rsi_k'].iloc[-2] > 80)
-        return crossover_on_current
-    except IndexError:
-        return False
-
 def check_macd_buy_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
     يفحص تقاطع MACD الإيجابي تحت خط الصفر في آخر N شمعات.
@@ -918,8 +905,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             reason_map = {
                 'take_profit': '🎯 Take Profit', 
                 'stop_loss': '🛑 Stop Loss', 
-                'manual': '🖐️ Manual Close',
-                'stoch_rsi_sell': '📈 StochRSI Sell'
+                'manual': '🖐️ Manual Close'
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1349,18 +1335,18 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                # --- StochRSI Sell Signal Check (for managing open trades) ---
-                try:
-                    df_manage = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, 50)
-                    if df_manage is not None and not df_manage.empty:
-                        df_features_manage = calculate_all_features(df_manage, None)
-                        if df_features_manage is not None and not df_features_manage.empty:
-                            if check_stoch_rsi_sell_signal(df_features_manage):
-                                logger.info(f"📈 [StochRSI SELL] Closing {signal['symbol']} at {current_price}")
-                                close_signal(signal_id, current_price, 'stoch_rsi_sell')
-                                continue 
-                except Exception as e:
-                    logger.error(f"❌ [{signal['symbol']}] Error during StochRSI sell check: {e}")
+                # --- شرط إغلاق StochRSI (معطل) ---
+                # try:
+                #     df_manage = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, 50)
+                #     if df_manage is not None and not df_manage.empty:
+                #         df_features_manage = calculate_all_features(df_manage, None)
+                #         if df_features_manage is not None and not df_features_manage.empty:
+                #             if check_stoch_rsi_sell_signal(df_features_manage):
+                #                 logger.info(f"📈 [StochRSI SELL] Closing {signal['symbol']} at {current_price}")
+                #                 close_signal(signal_id, current_price, 'stoch_rsi_sell')
+                #                 continue 
+                # except Exception as e:
+                #     logger.error(f"❌ [{signal['symbol']}] Error during StochRSI sell check: {e}")
                 
                 if current_price >= tp:
                     logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
@@ -1450,26 +1436,21 @@ def main_loop_enhanced():
                         
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty: continue
-                        df_15m.name = symbol # Add name for logging
+                        df_15m.name = symbol 
                         
                         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_4h is None or df_4h.empty: continue
                         
                         df_features = strategy.get_features(df_15m, df_4h, btc_data)
                         if df_features is None or df_features.empty: continue
-                        df_features.name = symbol # Add name for logging
+                        df_features.name = symbol 
 
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر 1 (معطل): التحقق من تقاطع StochRSI ---
-                        # if not check_stoch_rsi_buy_signal(df_features, lookback_period=4):
-                        #     log_rejection(symbol, "StochRSI Crossover Invalid")
-                        #     continue
-                        
-                        # --- فلتر 2 (أساسي): التحقق من تقاطع الماكد MACD ---
+                        # --- فلتر الدخول الأساسي: التحقق من تقاطع الماكد MACD ---
                         if not check_macd_buy_signal(df_features, lookback_period=3):
                             log_rejection(symbol, "MACD Crossover Invalid")
                             continue
