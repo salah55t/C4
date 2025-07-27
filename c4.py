@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر MACD للدخول فقط
+# ملف c4.py - نسخة محدثة مع فلتر EMA Crossover لتأكيد الدخول
 # تم التحديث بواسطة Gemini
-# --- تعديل: إزالة شرط إغلاق الصفقة عند تقاطع StochRSI السلبي ---
+# --- تعديل: تطبيق شروط تقاطع EMA بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -137,7 +137,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "MACD Crossover Invalid": "تقاطع MACD غير صالح"
+    "EMA Crossover Invalid": "تقاطع EMA غير صالح" # <-- سبب الرفض الجديد
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -372,6 +372,12 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
+
+    # --- NEW: Add EMA 9, 21 and Volume SMA ---
+    df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
+    df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
+
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -390,7 +396,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # --- START: StochRSI Calculation ---
     STOCH_RSI_PERIOD = 14
     STOCH_RSI_K_PERIOD = 3
     STOCH_RSI_D_PERIOD = 3
@@ -398,7 +403,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     stoch_rsi_val = (rsi - rsi.rolling(STOCH_RSI_PERIOD).min()) / (rsi.rolling(STOCH_RSI_PERIOD).max() - rsi.rolling(STOCH_RSI_PERIOD).min()).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(STOCH_RSI_K_PERIOD).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
-    # --- END: StochRSI Calculation ---
     
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
@@ -704,28 +708,48 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         return None
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
-def check_macd_buy_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
-    يفحص تقاطع MACD الإيجابي تحت خط الصفر في آخر N شمعات.
+    يفحص شروط تقاطع EMA الإيجابي في آخر N شمعات.
+    - EMA 9 يقطع EMA 21 للأعلى.
+    - الإغلاق فوق كلا الخطين.
+    - تأكيد إضافي: RSI > 50 أو حجم تداول مرتفع.
     """
-    if 'macd' not in df.columns or 'macd_signal' not in df.columns or len(df) < lookback_period + 2:
+    required_cols = ['ema_9', 'ema_21', 'close', 'rsi', 'volume', 'volume_sma_20']
+    if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
         return False
-    
+
     try:
         for i in range(1, lookback_period + 1):
-            macd_current = df['macd'].iloc[-i]
-            signal_current = df['macd_signal'].iloc[-i]
-            macd_previous = df['macd'].iloc[-(i + 1)]
-            signal_previous = df['macd_signal'].iloc[-(i + 1)]
+            # Current candle data
+            current_close = df['close'].iloc[-i]
+            current_ema9 = df['ema_9'].iloc[-i]
+            current_ema21 = df['ema_21'].iloc[-i]
+            current_rsi = df['rsi'].iloc[-i]
+            current_volume = df['volume'].iloc[-i]
+            current_volume_sma = df['volume_sma_20'].iloc[-i]
 
-            is_crossover = macd_previous < signal_previous and macd_current > signal_current
-            is_below_zero = macd_current < 0
+            # Previous candle data
+            prev_ema9 = df['ema_9'].iloc[-(i + 1)]
+            prev_ema21 = df['ema_21'].iloc[-(i + 1)]
 
-            if is_crossover and is_below_zero:
-                logger.info(f"✅ [{df.index[-i]}] Bullish MACD crossover detected for {df.name}.")
+            # Condition 1: Crossover (EMA 9 crosses above EMA 21)
+            is_crossover = prev_ema9 < prev_ema21 and current_ema9 > current_ema21
+
+            # Condition 2: Close price is above both EMAs
+            is_close_above = current_close > current_ema9 and current_close > current_ema21
+
+            # Condition 3: Additional confirmation
+            is_rsi_strong = current_rsi > 50
+            is_volume_spike = current_volume_sma > 0 and current_volume > (current_volume_sma * 1.5)
+            has_confirmation = is_rsi_strong or is_volume_spike
+
+            if is_crossover and is_close_above and has_confirmation:
+                logger.info(f"✅ [{df.index[-i]}] EMA Crossover signal confirmed for {df.name}.")
                 return True
+        
         return False
-    except IndexError:
+    except (IndexError, TypeError):
         return False
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1335,19 +1359,6 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                # --- شرط إغلاق StochRSI (معطل) ---
-                # try:
-                #     df_manage = fetch_historical_data(signal['symbol'], SIGNAL_GENERATION_TIMEFRAME, 50)
-                #     if df_manage is not None and not df_manage.empty:
-                #         df_features_manage = calculate_all_features(df_manage, None)
-                #         if df_features_manage is not None and not df_features_manage.empty:
-                #             if check_stoch_rsi_sell_signal(df_features_manage):
-                #                 logger.info(f"📈 [StochRSI SELL] Closing {signal['symbol']} at {current_price}")
-                #                 close_signal(signal_id, current_price, 'stoch_rsi_sell')
-                #                 continue 
-                # except Exception as e:
-                #     logger.error(f"❌ [{signal['symbol']}] Error during StochRSI sell check: {e}")
-                
                 if current_price >= tp:
                     logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
                     close_signal(signal_id, current_price, 'take_profit')
@@ -1450,9 +1461,9 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر الدخول الأساسي: التحقق من تقاطع الماكد MACD ---
-                        if not check_macd_buy_signal(df_features, lookback_period=3):
-                            log_rejection(symbol, "MACD Crossover Invalid")
+                        # --- فلتر الدخول الأساسي: التحقق من شروط تقاطع EMA ---
+                        if not check_ema_crossover_signal(df_features, lookback_period=3):
+                            log_rejection(symbol, "EMA Crossover Invalid")
                             continue
 
                         try:
