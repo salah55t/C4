@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع تنبيهات هبوط الأسعار وإرسالها إلى تليجرام
+# ملف c4.py - نسخة محدثة مع فلتر EMA Crossover لتأكيد الدخول
 # تم التحديث بواسطة Gemini
-# --- إضافة: نظام إشعارات لأوقات الهبوط المتوقعة ---
+# --- تعديل: تطبيق شروط تقاطع EMA بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -75,11 +75,11 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.80
-MIN_PROFIT_PERCENT: float = 0.8
+BUY_CONFIDENCE_THRESHOLD = 0.55
+MIN_PROFIT_PERCENT: float = 0.8 
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 30
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -153,75 +153,6 @@ def send_telegram_message(message: str):
         logger.info(f"✅ [Telegram] تم إرسال الرسالة بنجاح.")
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
-
-# --- START: NEW FUNCTION FOR PRICE DROP NOTIFICATIONS ---
-def price_drop_notifier():
-    """
-    تعمل هذه الدالة في thread منفصل لإرسال تنبيهات حول أوقات هبوط الأسعار المتوقعة.
-    """
-    logger.info("🔔 [Notifier] بدء خدمة تنبيهات هبوط الأسعار...")
-
-    # أوقات الهبوط بتوقيت UTC مع التعليل
-    drop_times_utc = {
-        4: "تقاطع الجلسة الآسيوية والأوروبية، قد تحدث عمليات جني أرباح.",
-        12: "تداخل جلسة لندن مع بداية جلسة نيويورك، تزداد السيولة والتقلبات.",
-        0: "بداية الجلسة الآسيوية (سيدني وطوكيو)، بداية يوم تداول جديد.",
-        16: "إغلاق جلسة لندن وبقاء جلسة نيويورك، قد تحدث تغيرات في الاتجاه.",
-        20: "قرب إغلاق جلسة نيويورك، تصفية المراكز قد تسبب تقلبات.",
-        8: "افتتاح جلسة لندن، تعتبر من أكثر الأوقات تقلباً في اليوم."
-    }
-    
-    # لتتبع الإشعارات التي تم إرسالها في اليوم الحالي
-    last_notification_sent_date = {}
-
-    while True:
-        try:
-            # تجاهل الإشعارات في عطلة نهاية الأسبوع (السبت والأحد)
-            now_utc = datetime.now(timezone.utc)
-            if now_utc.weekday() >= 5:
-                time.sleep(3600) # انتظر ساعة إذا كانت عطلة نهاية أسبوع
-                continue
-
-            for hour_utc, reason in drop_times_utc.items():
-                # حساب وقت الإشعار (30 دقيقة قبل وقت الهبوط)
-                notification_time = time(hour=hour_utc, minute=0)
-                notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc)
-                notification_dt -= timedelta(minutes=30)
-                
-                # التحقق مما إذا كان وقت الإشعار قد حان ولم يتم إرساله اليوم
-                has_been_sent_today = last_notification_sent_date.get(hour_utc) == now_utc.date()
-                
-                if not has_been_sent_today and now_utc >= notification_dt:
-                    # تحويل وقت الهبوط إلى GMT+1
-                    drop_time_gmt1 = (datetime.combine(now_utc.date(), time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
-                    
-                    # إنشاء الرسالة
-                    message = (
-                        f"🚨 *تنبيه هبوط محتمل للسعر*\n\n"
-                        f"🕒 *الوقت المتوقع:* حوالي الساعة *{drop_time_gmt1} بتوقيت GMT+1*.\n\n"
-                        f"📈 *السبب:* {reason}\n\n"
-                        f"⏳ *المدة المتوقعة:* قد يستمر هذا التأثير لعدة ساعات قادمة.\n\n"
-                        f"يرجى توخي الحذر وإدارة المخاطر بحكمة."
-                    )
-                    
-                    # إرسال الرسالة وتحديث السجل
-                    send_telegram_message(message)
-                    last_notification_sent_date[hour_utc] = now_utc.date()
-                    logger.info(f"🔔 [Notifier] تم إرسال تنبيه هبوط للساعة {hour_utc:02d}:00 UTC.")
-
-            # إعادة ضبط السجل في بداية يوم جديد
-            if now_utc.hour == 0 and now_utc.minute < 5:
-                 if any(last_notification_sent_date.values()):
-                    logger.info("🌅 [Notifier] يوم جديد، إعادة ضبط سجل الإشعارات.")
-                    last_notification_sent_date.clear()
-
-            time.sleep(60) # تحقق كل دقيقة
-
-        except Exception as e:
-            logger.error(f"❌ [Notifier] خطأ في حلقة تنبيهات الهبوط: {e}", exc_info=True)
-            time.sleep(300) # انتظر 5 دقائق عند حدوث خطأ
-
-# --- END: NEW FUNCTION ---
 
 # --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -1613,14 +1544,9 @@ def initialize_bot_services():
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan: logger.critical("❌ لا توجد عملات صالحة للمسح."); return
-        
-        # --- تشغيل الخدمات الخلفية ---
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
-        # --- تشغيل خدمة التنبيهات الجديدة ---
-        Thread(target=price_drop_notifier, daemon=True).start()
-
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
         send_telegram_message("✅ *البوت قيد التشغيل الآن*")
     except Exception as e:
@@ -1628,7 +1554,6 @@ def initialize_bot_services():
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    from datetime import time # استيراد time هنا لتجنب التعارض
     logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Final with Telegram) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
