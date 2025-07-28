@@ -1,4 +1,4 @@
-# ملف c4.py - نسخة محدثة بميزات V12 ومنطق التنبيهات
+# ملف c4.py - نسخة محدثة بميزات V12 ومنطق التنبيهات (مع إصلاح الأخطاء)
 # تم التحديث بواسطة Gemini
 import time
 import os
@@ -61,10 +61,8 @@ trading_status_lock = Lock()
 are_filters_disabled: bool = False
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
-# --- START: تحديثات لـ V12 ---
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V12_Structured_Features'
 MODEL_FOLDER: str = 'V12'
-# --- END: تحديثات لـ V12 ---
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
@@ -80,11 +78,11 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 30
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V12) ---
 ATR_PERIOD: int = 14
-RSI_PERIOD: int = 14 # يستخدم الآن لـ 4h RSI و 15m RSI
+RSI_PERIOD: int = 14
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
-ADX_PERIOD: int = 14 # مطلوب للفلتر
-REL_VOL_PERIOD: int = 30 # مطلوب للفلتر
+ADX_PERIOD: int = 14
+REL_VOL_PERIOD: int = 30
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -148,7 +146,7 @@ def send_telegram_message(message: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- START: NEW FUNCTION FOR PRICE DROP NOTIFICATIONS ---
+# --- دالة تنبيهات هبوط السعر (مُصححة) ---
 def price_drop_notifier():
     logger.info("🔔 [Notifier] بدء خدمة تنبيهات هبوط الأسعار...")
     drop_times_utc = {
@@ -167,11 +165,14 @@ def price_drop_notifier():
                 time.sleep(3600)
                 continue
             for hour_utc, reason in drop_times_utc.items():
-                notification_time = time(hour=hour_utc, minute=0)
-                notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc) - timedelta(minutes=30)
+                # --- إصلاح: استخدام datetime.time لتجنب التعارض ---
+                notification_time = datetime.time(hour=hour_utc, minute=0)
+                # --- إصلاح: إرسال التنبيه قبل 15 دقيقة ---
+                notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc) - timedelta(minutes=15)
+                
                 has_been_sent_today = last_notification_sent_date.get(hour_utc) == now_utc.date()
                 if not has_been_sent_today and now_utc >= notification_dt:
-                    drop_time_gmt1 = (datetime.combine(now_utc.date(), time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
+                    drop_time_gmt1 = (datetime.combine(now_utc.date(), datetime.time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
                     message = (
                         f"🚨 *تنبيه هبوط محتمل للسعر*\n\n"
                         f"🕒 *الوقت المتوقع:* حوالي الساعة *{drop_time_gmt1} بتوقيت GMT+1*.\n\n"
@@ -182,10 +183,12 @@ def price_drop_notifier():
                     send_telegram_message(message)
                     last_notification_sent_date[hour_utc] = now_utc.date()
                     logger.info(f"🔔 [Notifier] تم إرسال تنبيه هبوط للساعة {hour_utc:02d}:00 UTC.")
+            
             if now_utc.hour == 0 and now_utc.minute < 5:
                  if any(last_notification_sent_date.values()):
                     logger.info("🌅 [Notifier] يوم جديد، إعادة ضبط سجل الإشعارات.")
                     last_notification_sent_date.clear()
+            
             time.sleep(60)
         except Exception as e:
             logger.error(f"❌ [Notifier] خطأ في حلقة تنبيهات الهبوط: {e}", exc_info=True)
@@ -321,7 +324,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
-        # --- تحديث: إضافة taker_buy_quote للميزات الجديدة ---
         required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base', 'taker_buy_quote']
         df = df[required_cols]
         numeric_cols = {col: 'float' for col in required_cols if col != 'timestamp'}
@@ -333,36 +335,28 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-# --- START: NEW FEATURE FUNCTIONS FROM V12 TRAINING SCRIPT ---
 def calculate_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates microstructure features based on the V12 training script."""
     df['fofi'] = df['taker_buy_quote'] / df['quote_volume'].replace(0, 1e-9)
     df['delta_of_delta'] = df['taker_buy_base'].diff().diff()
     df['spread_proxy_percent'] = (df['high'] - df['low']) / df['close'].replace(0, 1e-9) * 100
     return df
 
 def calculate_technical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates technical features based on the V12 training script."""
-    # Williams %R
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
     df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
     
-    # ATR
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
     df['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
     
-    # Rate of Change (ROC)
     df[f'roc_{MOMENTUM_PERIOD}'] = (df['close'] / df['close'].shift(MOMENTUM_PERIOD) - 1) * 100
     
-    # EMA Slope
     ema_slope = df['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
     
-    # Bollinger Bands Position
     bb_period = 20
     bb_middle = df['close'].rolling(window=bb_period).mean()
     bb_std = df['close'].rolling(window=bb_period).std()
@@ -371,7 +365,6 @@ def calculate_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates temporal features based on the V12 training script."""
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
     df['day_of_week'] = df.index.dayofweek
@@ -380,8 +373,6 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def add_features_for_filters(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Calculates additional features required by the bot's filter system."""
-    # ADX
     up_move = df['high'].diff()
     down_move = -df['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
@@ -391,16 +382,13 @@ def add_features_for_filters(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
     
-    # RSI (15m)
     delta = df['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    # Relative Volume
     df['relative_volume'] = df['volume'] / (df['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
 
-    # BTC Correlation
     if btc_df is not None and not btc_df.empty and 'btc_returns' in btc_df.columns:
         asset_returns = df['close'].pct_change()
         merged_df = pd.merge(df, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
@@ -408,13 +396,11 @@ def add_features_for_filters(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -
     else:
         df['btc_correlation'] = 0.0
 
-    # EMA Crossover features
     df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['volume_sma_20'] = df['volume'].rolling(window=20).mean()
 
     return df
-# --- END: NEW FEATURE FUNCTIONS ---
 
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
@@ -538,25 +524,20 @@ class EnhancedTradingStrategy:
             return None
 
     def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
-        """New get_features method aligned with V12 training."""
         if self.feature_names is None: return None
         try:
-            # Calculate base features from V12 script
             df_featured = calculate_technical_features(df_15m.copy())
             df_featured = calculate_microstructure_features(df_featured)
             df_featured = calculate_temporal_features(df_featured)
             
-            # Calculate and join 4h RSI
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
             df_featured = df_featured.join(df_4h[['rsi_4h']]).fillna(method='ffill')
             
-            # Add extra features needed for bot filters
             df_featured = add_features_for_filters(df_featured, btc_df)
 
-            # Ensure all required model features are present
             for col in self.feature_names:
                 if col not in df_featured.columns:
                     df_featured[col] = 0.0
@@ -993,7 +974,6 @@ def determine_market_state_enhanced():
             if df is not None and not df.empty:
                 ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
                 ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-                # We need ADX for this, so we must calculate it
                 df_with_adx = add_features_for_filters(calculate_technical_features(df), None)
                 adx = df_with_adx['adx'].iloc[-1] if not df_with_adx.empty else 0
                 if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
@@ -1546,7 +1526,6 @@ def initialize_bot_services():
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    from datetime import time 
     logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V12 - Structured Features) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
