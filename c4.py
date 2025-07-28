@@ -1,5 +1,6 @@
-# ملف c4.py - نسخة محدثة بميزات V12 ومنطق التنبيهات (مع إصلاح الأخطاء)
+# ملف c4.py - نسخة محدثة مع تنبيهات هبوط الأسعار وإرسالها إلى تليجرام
 # تم التحديث بواسطة Gemini
+# --- إضافة: نظام إشعارات لأوقات الهبوط المتوقعة ---
 import time
 import os
 import json
@@ -22,9 +23,7 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-# --- إصلاح: استيراد 'time' بشكل صحيح من مكتبة 'datetime' ---
-from datetime import datetime, time as dt_time, timezone, timedelta
-# --- إصلاح: إضافة استيراد مكتبة decouple ---
+from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Set, Tuple
 from sklearn.preprocessing import StandardScaler
@@ -39,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v12_telegram_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v9_telegram_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV12_Telegram')
+logger = logging.getLogger('CryptoBotV9_Telegram')
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -51,40 +50,47 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
+    # --- إعدادات تليجرام ---
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
+
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
 
-# --- متغيرات عامة وإعدادات البوت (محدثة لـ V12) ---
+# --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 are_filters_disabled: bool = False
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V12_Structured_Features'
-MODEL_FOLDER: str = 'V12'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
+MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
-REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v12"
+REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.60
+BUY_CONFIDENCE_THRESHOLD = 0.80
 MIN_PROFIT_PERCENT: float = 0.8
-SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 
-# --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V12) ---
-ATR_PERIOD: int = 14
+# --- NEW: Memory Optimization Setting ---
+SYMBOL_PROCESSING_BATCH_SIZE: int = 30
+
+# --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
+ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
+ATR_PERIOD: int = 14
+EMA_SLOW_PERIOD: int = 200
+EMA_FAST_PERIOD: int = 50
+BTC_CORR_PERIOD: int = 30
+REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
-ADX_PERIOD: int = 14
-REL_VOL_PERIOD: int = 30
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -131,7 +137,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "EMA Crossover Invalid": "تقاطع EMA غير صالح"
+    "EMA Crossover Invalid": "تقاطع EMA غير صالح" # <-- سبب الرفض الجديد
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -148,9 +154,14 @@ def send_telegram_message(message: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- دالة تنبيهات هبوط السعر (مُعدّلة لضمان الإرسال في الوقت المحدد) ---
+# --- START: NEW FUNCTION FOR PRICE DROP NOTIFICATIONS ---
 def price_drop_notifier():
+    """
+    تعمل هذه الدالة في thread منفصل لإرسال تنبيهات حول أوقات هبوط الأسعار المتوقعة.
+    """
     logger.info("🔔 [Notifier] بدء خدمة تنبيهات هبوط الأسعار...")
+
+    # أوقات الهبوط بتوقيت UTC مع التعليل
     drop_times_utc = {
         4: "تقاطع الجلسة الآسيوية والأوروبية، قد تحدث عمليات جني أرباح.",
         12: "تداخل جلسة لندن مع بداية جلسة نيويورك، تزداد السيولة والتقلبات.",
@@ -159,39 +170,32 @@ def price_drop_notifier():
         20: "قرب إغلاق جلسة نيويورك، تصفية المراكز قد تسبب تقلبات.",
         8: "افتتاح جلسة لندن، تعتبر من أكثر الأوقات تقلباً في اليوم."
     }
-    # قاموس لتتبع آخر تاريخ تم فيه إرسال إشعار لكل ساعة
-    last_notification_sent_date = {}
     
-    # حلقة لا نهائية للتحقق من الوقت بشكل دوري
+    # لتتبع الإشعارات التي تم إرسالها في اليوم الحالي
+    last_notification_sent_date = {}
+
     while True:
         try:
-            # الحصول على الوقت الحالي بتوقيت UTC
+            # تجاهل الإشعارات في عطلة نهاية الأسبوع (السبت والأحد)
             now_utc = datetime.now(timezone.utc)
-            
-            # تخطي التحقق في عطلة نهاية الأسبوع (السبت والأحد)
-            if now_utc.weekday() >= 5: # 5 = Saturday, 6 = Sunday
-                time.sleep(3600) # انتظر ساعة في عطلة نهاية الأسبوع
+            if now_utc.weekday() >= 5:
+                time.sleep(3600) # انتظر ساعة إذا كانت عطلة نهاية أسبوع
                 continue
-            
-            # المرور على كل وقت تنبيه محدد
+
             for hour_utc, reason in drop_times_utc.items():
-                # تحديد وقت التنبيه (قبل 15 دقيقة من الحدث)
-                # على سبيل المثال، للحدث في الساعة 8:00، يكون وقت التنبيه 7:45
-                alert_datetime = datetime.combine(now_utc.date(), dt_time(hour=hour_utc, minute=0), tzinfo=timezone.utc) - timedelta(minutes=15)
+                # حساب وقت الإشعار (30 دقيقة قبل وقت الهبوط)
+                notification_time = time(hour=hour_utc, minute=0)
+                notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc)
+                notification_dt -= timedelta(minutes=30)
                 
-                # التحقق مما إذا تم إرسال الإشعار لهذا الوقت اليوم بالفعل
+                # التحقق مما إذا كان وقت الإشعار قد حان ولم يتم إرساله اليوم
                 has_been_sent_today = last_notification_sent_date.get(hour_utc) == now_utc.date()
                 
-                # --- التعديل الرئيسي: ضمان إرسال التنبيه في الدقيقة المحددة فقط ---
-                # يتم التحقق مما إذا كان الوقت الحالي يقع ضمن دقيقة واحدة بعد وقت التنبيه المحدد.
-                # هذا يمنع إرسال جميع التنبيهات الماضية عند بدء تشغيل البوت.
-                is_time_to_send = alert_datetime <= now_utc < (alert_datetime + timedelta(minutes=1))
-
-                if not has_been_sent_today and is_time_to_send:
-                    # تنسيق وقت الحدث المتوقع (بتوقيت GMT+1)
-                    drop_time_gmt1 = (datetime.combine(now_utc.date(), dt_time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
+                if not has_been_sent_today and now_utc >= notification_dt:
+                    # تحويل وقت الهبوط إلى GMT+1
+                    drop_time_gmt1 = (datetime.combine(now_utc.date(), time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
                     
-                    # إنشاء نص الرسالة
+                    # إنشاء الرسالة
                     message = (
                         f"🚨 *تنبيه هبوط محتمل للسعر*\n\n"
                         f"🕒 *الوقت المتوقع:* حوالي الساعة *{drop_time_gmt1} بتوقيت GMT+1*.\n\n"
@@ -200,25 +204,24 @@ def price_drop_notifier():
                         f"يرجى توخي الحذر وإدارة المخاطر بحكمة."
                     )
                     
-                    # إرسال الرسالة عبر تليجرام
+                    # إرسال الرسالة وتحديث السجل
                     send_telegram_message(message)
-                    
-                    # تسجيل أن الإشعار قد تم إرساله لهذا الوقت اليوم
                     last_notification_sent_date[hour_utc] = now_utc.date()
                     logger.info(f"🔔 [Notifier] تم إرسال تنبيه هبوط للساعة {hour_utc:02d}:00 UTC.")
-            
-            # عند منتصف الليل، قم بإعادة تعيين سجل الإشعارات ليوم جديد
-            if now_utc.hour == 0 and now_utc.minute < 1:
+
+            # إعادة ضبط السجل في بداية يوم جديد
+            if now_utc.hour == 0 and now_utc.minute < 5:
                  if any(last_notification_sent_date.values()):
                     logger.info("🌅 [Notifier] يوم جديد، إعادة ضبط سجل الإشعارات.")
                     last_notification_sent_date.clear()
-            
-            # الانتظار لمدة 60 ثانية قبل التحقق مرة أخرى
-            time.sleep(60)
-            
+
+            time.sleep(60) # تحقق كل دقيقة
+
         except Exception as e:
             logger.error(f"❌ [Notifier] خطأ في حلقة تنبيهات الهبوط: {e}", exc_info=True)
-            time.sleep(300) # انتظر 5 دقائق في حالة حدوث خطأ
+            time.sleep(300) # انتظر 5 دقائق عند حدوث خطأ
+
+# --- END: NEW FUNCTION ---
 
 # --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
@@ -340,7 +343,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V12) ---
+# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V9) ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -350,9 +353,9 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
-        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base', 'taker_buy_quote']
+        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base']
         df = df[required_cols]
-        numeric_cols = {col: 'float' for col in required_cols if col != 'timestamp'}
+        numeric_cols = {'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 'volume': 'float', 'quote_volume': 'float', 'taker_buy_base': 'float'}
         df = df.astype(numeric_cols)
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
@@ -361,72 +364,133 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-def calculate_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    df['fofi'] = df['taker_buy_quote'] / df['quote_volume'].replace(0, 1e-9)
-    df['delta_of_delta'] = df['taker_buy_base'].diff().diff()
-    df['spread_proxy_percent'] = (df['high'] - df['low']) / df['close'].replace(0, 1e-9) * 100
-    return df
-
-def calculate_technical_features(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
     df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
-    
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    
-    df[f'roc_{MOMENTUM_PERIOD}'] = (df['close'] / df['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    
-    ema_slope = df['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
-    df[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
-    
+    df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
+    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+    df['macd_histogram'] = df['macd'] - df['macd_signal']
     bb_period = 20
-    bb_middle = df['close'].rolling(window=bb_period).mean()
+    df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
     bb_std = df['close'].rolling(window=bb_period).std()
-    df['bb_position'] = (df['close'] - (bb_middle - (bb_std * 2))) / ((bb_middle + (bb_std * 2)) - (bb_middle - (bb_std * 2))).replace(0, 1e-9)
-    
+    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    money_flow = typical_price * df['volume']
+    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
+    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
+    money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
+    df['mfi'] = 100 - (100 / (1 + money_ratio))
+    return df
+
+def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
+    required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
+    if not all(col in df.columns for col in required_cols): return df
+    df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
+    volume_ma = df['volume'].rolling(20).mean()
+    df['volume_ratio'] = df['volume'] / volume_ma.replace(0, 1e-9)
+    df['price_impact'] = df['quote_volume'] / df['volume'].replace(0, 1e-9)
+    log_hl = np.log(df['high'] / df['low'].replace(0, 1e-9))
+    log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
+    gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
+    df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
+    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
+    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
+    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
+    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
+    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
+    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
+    return df
+
+def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+    high_low = df['high'] - df['low']
+    ema_high_low = high_low.ewm(span=10, adjust=False).mean()
+    ema_high_low_shifted = ema_high_low.shift(10)
+    df['chaikin_volatility'] = (ema_high_low - ema_high_low_shifted) / ema_high_low_shifted.replace(0, 1e-9) * 100
+    period = 14
+    max_close = df['close'].rolling(window=period).max()
+    percentage_drawdown = 100 * (df['close'] - max_close) / max_close.replace(0, 1e-9)
+    df['ulcer_index'] = np.sqrt((percentage_drawdown ** 2).rolling(window=period).mean())
+    if 'atr' not in df.columns: return df
+    high_low_tr = df['high'] - df['low']
+    high_close_prev = (df['high'] - df['close'].shift()).abs()
+    low_close_prev = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low_tr, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    for p in [5, 10, 20]:
+        atr_p = tr.ewm(span=p, adjust=False).mean()
+        df[f'atr_ratio_{p}'] = df['atr'] / atr_p.replace(0, 1e-9)
     return df
 
 def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
     df['day_of_week'] = df.index.dayofweek
+    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
+    df['asia_session'] = ((df.index.hour >= 0) & (df.index.hour < 8)).astype(int)
+    df['london_session'] = ((df.index.hour >= 8) & (df.index.hour < 16)).astype(int)
+    df['ny_session'] = ((df.index.hour >= 13) & (df.index.hour < 21)).astype(int)
     df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
     df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     return df
 
-def add_features_for_filters(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
-    up_move = df['high'].diff()
-    down_move = -df['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df['atr'].replace(0, 1e-9)
+def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    df_calc = df.copy()
+
+    # --- NEW: Add EMA 9, 21 and Volume SMA ---
+    df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
+    df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
+
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
-    delta = df['close'].diff()
+    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
 
-    df['relative_volume'] = df['volume'] / (df['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-
-    if btc_df is not None and not btc_df.empty and 'btc_returns' in btc_df.columns:
-        asset_returns = df['close'].pct_change()
-        merged_df = pd.merge(df, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-        df['btc_correlation'] = asset_returns.rolling(window=30).corr(merged_df['btc_returns'])
+    STOCH_RSI_PERIOD = 14
+    STOCH_RSI_K_PERIOD = 3
+    STOCH_RSI_D_PERIOD = 3
+    rsi = df_calc['rsi']
+    stoch_rsi_val = (rsi - rsi.rolling(STOCH_RSI_PERIOD).min()) / (rsi.rolling(STOCH_RSI_PERIOD).max() - rsi.rolling(STOCH_RSI_PERIOD).min()).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(STOCH_RSI_K_PERIOD).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
+    
+    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    if btc_df is not None and not btc_df.empty:
+        asset_returns = df_calc['close'].pct_change()
+        merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
+        df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     else:
-        df['btc_correlation'] = 0.0
-
-    df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
-    df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
-    df['volume_sma_20'] = df['volume'].rolling(window=20).mean()
-
-    return df
+        df_calc['btc_correlation'] = 0.0
+    df_calc = calculate_advanced_momentum_features(df_calc)
+    df_calc = calculate_market_microstructure_features(df_calc)
+    df_calc = calculate_advanced_volatility_features(df_calc)
+    df_calc = calculate_temporal_features(df_calc)
+    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
+    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+    return df_calc.astype('float32', errors='ignore')
 
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
@@ -504,7 +568,7 @@ class MarketConditionsAnalyzer:
             elif ratio < 1.5: return "normal"
             else: return "high"
         except: return "normal"
-    def _get_correlation_regime(self) -> str: return "normal"
+    def _get_correlation_regime(self) -> str: return "normal" # تبسيط مؤقت
     def _get_session_type(self) -> str: return get_session_state()[1]
     def _get_default_conditions(self) -> Dict[str, Any]: return {'volatility_regime': 'normal', 'volume_regime': 'normal', 'correlation_regime': 'normal', 'session_type': 'NORMAL_LIQUIDITY'}
 
@@ -521,7 +585,7 @@ class EnhancedFilterSystem:
 
 enhanced_filter_system = EnhancedFilterSystem()
 
-# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V12) ----------------------
+# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V9) ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -542,36 +606,28 @@ class EnhancedTradingStrategy:
             with open(model_path, 'rb') as f: model_bundle = pickle.load(f)
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
                 ml_models_cache[model_name] = model_bundle
-                logger.info(f"✅ [{self.symbol}] تم تحميل نموذج V12 من ملف: {model_path}")
+                logger.info(f"✅ [{self.symbol}] تم تحميل نموذج V9 من ملف: {model_path}")
                 return model_bundle
             return None
         except Exception as e:
             logger.error(f"❌ [ML Model File] خطأ في تحميل النموذج لـ {symbol}: {e}")
             return None
 
-    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None: return None
         try:
-            df_featured = calculate_technical_features(df_15m.copy())
-            df_featured = calculate_microstructure_features(df_featured)
-            df_featured = calculate_temporal_features(df_featured)
-            
-            delta_4h = df_4h['close'].diff()
-            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
-            df_featured = df_featured.join(df_4h[['rsi_4h']]).fillna(method='ffill')
-            
-            df_featured = add_features_for_filters(df_featured, btc_df)
-
+            df_featured = calculate_all_features(df_15m, btc_df)
+            df_4h_features = calculate_all_features(df_4h, None)
+            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h")
+            required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
+            df_featured = df_featured.join(df_4h_features[required_4h_cols], how='left')
+            df_featured[required_4h_cols] = df_featured[required_4h_cols].fillna(method='ffill')
             for col in self.feature_names:
-                if col not in df_featured.columns:
-                    df_featured[col] = 0.0
-            
+                if col not in df_featured.columns: df_featured[col] = 0.0
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
-            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات لـ V12: {e}", exc_info=True)
+            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات لـ V9: {e}", exc_info=True)
             return None
 
     def generate_buy_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -722,28 +778,45 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
 def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+    """
+    يفحص شروط تقاطع EMA الإيجابي في آخر N شمعات.
+    - EMA 9 يقطع EMA 21 للأعلى.
+    - الإغلاق فوق كلا الخطين.
+    - تأكيد إضافي: RSI > 50 أو حجم تداول مرتفع.
+    """
     required_cols = ['ema_9', 'ema_21', 'close', 'rsi', 'volume', 'volume_sma_20']
     if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
         return False
 
     try:
         for i in range(1, lookback_period + 1):
+            # Current candle data
             current_close = df['close'].iloc[-i]
             current_ema9 = df['ema_9'].iloc[-i]
             current_ema21 = df['ema_21'].iloc[-i]
             current_rsi = df['rsi'].iloc[-i]
             current_volume = df['volume'].iloc[-i]
             current_volume_sma = df['volume_sma_20'].iloc[-i]
+
+            # Previous candle data
             prev_ema9 = df['ema_9'].iloc[-(i + 1)]
             prev_ema21 = df['ema_21'].iloc[-(i + 1)]
+
+            # Condition 1: Crossover (EMA 9 crosses above EMA 21)
             is_crossover = prev_ema9 < prev_ema21 and current_ema9 > current_ema21
+
+            # Condition 2: Close price is above both EMAs
             is_close_above = current_close > current_ema9 and current_close > current_ema21
+
+            # Condition 3: Additional confirmation
             is_rsi_strong = current_rsi > 50
             is_volume_spike = current_volume_sma > 0 and current_volume > (current_volume_sma * 1.5)
             has_confirmation = is_rsi_strong or is_volume_spike
+
             if is_crossover and is_close_above and has_confirmation:
                 logger.info(f"✅ [{df.index[-i]}] EMA Crossover signal confirmed for {df.name}.")
                 return True
+        
         return False
     except (IndexError, TypeError):
         return False
@@ -1000,8 +1073,8 @@ def determine_market_state_enhanced():
             if df is not None and not df.empty:
                 ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
                 ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-                df_with_adx = add_features_for_filters(calculate_technical_features(df), None)
-                adx = df_with_adx['adx'].iloc[-1] if not df_with_adx.empty else 0
+                adx_features = calculate_all_features(df, None)
+                adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
                 if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
                 elif ema_fast > ema_slow: trend = "Uptrend"
                 elif ema_fast < ema_slow and adx > 25: trend = "Strong Downtrend"
@@ -1040,7 +1113,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V12</title>
+    <title>لوحة تحكم التداول V9</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1070,7 +1143,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V12</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
@@ -1457,6 +1530,7 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
+                        # --- فلتر الدخول الأساسي: التحقق من شروط تقاطع EMA ---
                         if not check_ema_crossover_signal(df_features, lookback_period=3):
                             log_rejection(symbol, "EMA Crossover Invalid")
                             continue
@@ -1476,7 +1550,7 @@ def main_loop_enhanced():
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
                         
-                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V12", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
                         
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
@@ -1540,9 +1614,11 @@ def initialize_bot_services():
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan: logger.critical("❌ لا توجد عملات صالحة للمسح."); return
         
+        # --- تشغيل الخدمات الخلفية ---
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
+        # --- تشغيل خدمة التنبيهات الجديدة ---
         Thread(target=price_drop_notifier, daemon=True).start()
 
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
@@ -1552,7 +1628,8 @@ def initialize_bot_services():
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V12 - Structured Features) 🚀")
+    from datetime import time # استيراد time هنا لتجنب التعارض
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Final with Telegram) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
