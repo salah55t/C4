@@ -1,5 +1,4 @@
-# ملف c4.py - نسخة محدثة مع فلتر EMA Crossover لتأكيد الدخول
-# تم التحديث بواسطة Gemini
+
 # --- تعديل: تطبيق شروط تقاطع EMA بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
@@ -75,11 +74,11 @@ TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.85
+BUY_CONFIDENCE_THRESHOLD = 0.70
 MIN_PROFIT_PERCENT: float = 0.8 
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 10 
+SYMBOL_PROCESSING_BATCH_SIZE: int = 30 
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
