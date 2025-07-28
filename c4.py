@@ -24,6 +24,8 @@ from flask_cors import CORS
 from threading import Thread, Lock
 # --- إصلاح: استيراد 'time' بشكل صحيح من مكتبة 'datetime' ---
 from datetime import datetime, time as dt_time, timezone, timedelta
+# --- إصلاح: إضافة استيراد مكتبة decouple ---
+from decouple import config
 from typing import List, Dict, Optional, Any, Set, Tuple
 from sklearn.preprocessing import StandardScaler
 from collections import deque, Counter
@@ -165,7 +167,6 @@ def price_drop_notifier():
                 time.sleep(3600)
                 continue
             for hour_utc, reason in drop_times_utc.items():
-                # --- إصلاح: استخدام dt_time الذي تم استيراده بشكل صحيح ---
                 notification_time = dt_time(hour=hour_utc, minute=0)
                 notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc) - timedelta(minutes=15)
                 
