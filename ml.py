@@ -20,6 +20,8 @@ from typing import List, Dict, Optional, Any, Tuple
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.preprocessing import StandardScaler
+# --- الإضافات الجديدة لاختيار الميزات ---
+from sklearn.feature_selection import VarianceThreshold, SelectKBest, mutual_info_classif
 from tqdm import tqdm
 from flask import Flask
 from threading import Thread
@@ -33,11 +35,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v9.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v12.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V9_Microstructure')
+logger = logging.getLogger('MLTrainer_V12_Structured_Features')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,19 +53,19 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V12_Structured_Features'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
-HYPERPARAM_TUNING_TRIALS: int = 8
+HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
+K_BEST_FEATURES_PERCENTAGE = 0.9 # النسبة المئوية للميزات التي سيتم اختيارها بواسطة SelectKBest
 
 # --- Indicator & Feature Parameters ---
-ADX_PERIOD: int = 14
-RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
-EMA_SLOW_PERIOD: int = 200
+RSI_PERIOD: int = 14 # For 4h RSI calculation
 EMA_FAST_PERIOD: int = 50
+EMA_SLOW_PERIOD: int = 200
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
@@ -99,29 +101,10 @@ def keep_db_alive():
     if not conn: return
     try:
         with conn.cursor() as cur: cur.execute("SELECT 1;")
-        logger.debug("[DB Keep-Alive] Ping successful.")
-    except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
-        logger.error(f"❌ [DB Keep-Alive] انقطع اتصال قاعدة البيانات: {e}. محاولة إعادة الاتصال...")
+    except (psycopg2.InterfaceError, psycopg2.OperationalError):
+        logger.error(f"❌ [DB Keep-Alive] انقطع اتصال قاعدة البيانات. محاولة إعادة الاتصال...")
         if conn: conn.close()
         init_db()
-    except Exception as e:
-        logger.error(f"❌ [DB Keep-Alive] خطأ غير متوقع أثناء فحص الاتصال: {e}")
-        if conn: conn.rollback()
-
-def get_trained_symbols_from_db() -> set:
-    if not conn: return set()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT model_name FROM ml_models WHERE model_name LIKE %s;", (f"{BASE_ML_MODEL_NAME}_%",))
-            trained_models = cur.fetchall()
-            prefix_to_remove = f"{BASE_ML_MODEL_NAME}_"
-            trained_symbols = {row['model_name'].replace(prefix_to_remove, '') for row in trained_models if row['model_name'].startswith(prefix_to_remove)}
-            logger.info(f"✅ [DB Check] تم العثور على {len(trained_symbols)} نموذج مدرب مسبقاً في قاعدة البيانات.")
-            return trained_symbols
-    except Exception as e:
-        logger.error(f"❌ [DB Check] لا يمكن جلب الرموز المدربة من قاعدة البيانات: {e}")
-        if conn: conn.rollback()
-        return set()
 
 def get_binance_client():
     global client
@@ -148,19 +131,14 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except FileNotFoundError:
         logger.error(f"❌ [Validation] ملف قائمة العملات '{filename}' غير موجود.")
         return []
-    except Exception as e:
-        logger.error(f"❌ [Validation] خطأ في التحقق من الرموز: {e}"); return []
 
 # --- دالة تحسين استهلاك الذاكرة ---
 def optimize_memory_usage(df: pd.DataFrame, log_prefix: str = "") -> pd.DataFrame:
-    """تقليل استهلاك الذاكرة للبيانات عن طريق تحويل أنواع البيانات."""
     start_mem = df.memory_usage().sum() / 1024**2
     for col in df.select_dtypes(include=['float64']).columns:
         df[col] = pd.to_numeric(df[col], downcast='float')
-    
     for col in df.select_dtypes(include=['int64']).columns:
         df[col] = pd.to_numeric(df[col], downcast='integer')
-    
     end_mem = df.memory_usage().sum() / 1024**2
     if start_mem > end_mem:
          logger.info(f"🧠 [{log_prefix}] Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB ({100 * (start_mem - end_mem) / start_mem:.1f}% reduction).")
@@ -178,13 +156,10 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
                 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
         
-        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base']
+        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base', 'taker_buy_quote']
         df = df[required_cols]
         
-        numeric_cols = {
-            'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 
-            'volume': 'float', 'quote_volume': 'float', 'taker_buy_base': 'float'
-        }
+        numeric_cols = {col: 'float' for col in required_cols if col != 'timestamp'}
         df = df.astype(numeric_cols)
         
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -205,137 +180,45 @@ def fetch_and_cache_btc_data():
 
 # --- دوال حساب الميزات ---
 
-def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Flow of Funds Index (FOFI)
+    df['fofi'] = df['taker_buy_quote'] / df['quote_volume'].replace(0, 1e-9)
+    # Delta of Delta
+    df['delta_of_delta'] = df['taker_buy_base'].diff().diff()
+    # Bid-Ask Spread Proxy (%)
+    df['spread_proxy_percent'] = (df['high'] - df['low']) / df['close'].replace(0, 1e-9) * 100
+    return df
+
+def calculate_technical_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Williams %R
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
     df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
-    df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
-    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_histogram'] = df['macd'] - df['macd_signal']
-    bb_period = 20
-    df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
-    bb_std = df['close'].rolling(window=bb_period).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
-    df['kc_middle'] = df['close'].ewm(span=20, adjust=False).mean()
-    if 'atr' in df.columns:
-        df['kc_upper'] = df['kc_middle'] + (df['atr'] * 1.5)
-        df['kc_lower'] = df['kc_middle'] - (df['atr'] * 1.5)
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
-    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
-    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
-    money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
-    df['mfi'] = 100 - (100 / (1 + money_ratio))
-    return df
-
-def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
-    if not all(col in df.columns for col in required_cols):
-        logger.warning("⚠️ [Microstructure] Missing required columns for microstructure features. Skipping.")
-        return df
-    df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
-    volume_ma = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / volume_ma.replace(0, 1e-9)
-    df['price_impact'] = df['quote_volume'] / df['volume'].replace(0, 1e-9)
-    log_hl = np.log(df['high'] / df['low'].replace(0, 1e-9))
-    log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
-    gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
-    df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
-    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
-    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
-    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
-    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
-    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
-    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
-    return df
-
-def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
+    # ATR
     high_low = df['high'] - df['low']
-    ema_high_low = high_low.ewm(span=10, adjust=False).mean()
-    ema_high_low_shifted = ema_high_low.shift(10)
-    df['chaikin_volatility'] = (ema_high_low - ema_high_low_shifted) / ema_high_low_shifted.replace(0, 1e-9) * 100
-    period = 14
-    max_close = df['close'].rolling(window=period).max()
-    percentage_drawdown = 100 * (df['close'] - max_close) / max_close.replace(0, 1e-9)
-    df['ulcer_index'] = np.sqrt((percentage_drawdown ** 2).rolling(window=period).mean())
-    if 'atr' not in df.columns: return df
-    high_low_tr = df['high'] - df['low']
-    high_close_prev = (df['high'] - df['close'].shift()).abs()
-    low_close_prev = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low_tr, high_close_prev, low_close_prev], axis=1).max(axis=1)
-    for p in [5, 10, 20]:
-        atr_p = tr.ewm(span=p, adjust=False).mean()
-        df[f'atr_ratio_{p}'] = df['atr'] / atr_p.replace(0, 1e-9)
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+    df['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+    # Rate of Change (ROC)
+    df[f'roc_{MOMENTUM_PERIOD}'] = (df['close'] / df['close'].shift(MOMENTUM_PERIOD) - 1) * 100
+    # EMA Slope
+    ema_slope = df['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
+    df[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+    # Bollinger Bands Position
+    bb_period = 20
+    bb_middle = df['close'].rolling(window=bb_period).mean()
+    bb_std = df['close'].rolling(window=bb_period).std()
+    df['bb_position'] = (df['close'] - (bb_middle - (bb_std * 2))) / ((bb_middle + (bb_std * 2)) - (bb_middle - (bb_std * 2))).replace(0, 1e-9)
     return df
 
 def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
     df['day_of_week'] = df.index.dayofweek
-    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
-    df['asia_session'] = ((df.index.hour >= 0) & (df.index.hour < 8)).astype(int)
-    df['london_session'] = ((df.index.hour >= 8) & (df.index.hour < 16)).astype(int)
-    df['ny_session'] = ((df.index.hour >= 13) & (df.index.hour < 21)).astype(int)
     df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
     df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     return df
-
-def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    دالة محسنة وشاملة لحساب جميع الميزات مع التقليل من استهلاك الذاكرة.
-    """
-    logger.info("ℹ️ [Features] Calculating all features in a unified function...")
-    df_calc = df.copy()
-
-    # --- 1. Standard Features (Optimized) ---
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['high'].diff()
-    down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
-    asset_returns = df_calc['close'].pct_change()
-    merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
-    df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
-    
-    # --- 2. Advanced & Other Features (Chained) ---
-    df_calc = calculate_advanced_momentum_features(df_calc)
-    df_calc = calculate_market_microstructure_features(df_calc)
-    df_calc = calculate_advanced_volatility_features(df_calc)
-    df_calc = calculate_temporal_features(df_calc)
-
-    # --- 3. Basic Momentum ---
-    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
-    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
-
-    # --- 4. Cleanup and Finalization ---
-    del high_low, high_close, low_close, tr, up_move, down_move, plus_dm, minus_dm, plus_di, minus_di, dx, delta, gain, loss, asset_returns, merged_df, ema_slope
-    gc.collect()
-    
-    logger.info("✅ [Features] All features calculated successfully.")
-    return optimize_memory_usage(df_calc, log_prefix="All Features")
 
 # --- دوال إعداد البيانات والتدريب ---
 
@@ -355,37 +238,38 @@ def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
                 labels.iloc[i] = -1; break
     return labels
 
-def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
-    logger.info(f"ℹ️ [ML Prep] Preparing data for {symbol}...")
+def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
+    logger.info(f"ℹ️ [ML Prep] Preparing data...")
     
-    # --- 1. Feature Engineering (Unified Call) ---
-    df_featured = calculate_all_features(df_15m, btc_df)
+    # --- Feature Calculation ---
+    df_featured = calculate_technical_features(df_15m)
+    df_featured = calculate_microstructure_features(df_featured)
+    df_featured = calculate_temporal_features(df_featured)
     
-    # --- 2. MTF Features ---
+    # --- MTF & Other Features ---
     delta_4h = df_4h['close'].diff()
     gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
-    ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-    df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
     
-    mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
-    df_featured = df_featured.join(mtf_features)
-    df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-    df_featured = optimize_memory_usage(df_featured, log_prefix="After MTF")
+    mtf_features = df_4h[['rsi_4h']]
+    df_featured = df_featured.join(mtf_features).fillna(method='ffill')
     
-    # --- 3. Target Labeling ---
+    df_featured = optimize_memory_usage(df_featured, log_prefix="After Features")
+    
+    # --- Target Labeling ---
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
-    # --- 4. Feature List and Cleaning ---
+    # --- Final Structured Feature List ---
     feature_columns = [
-        'rsi', 'adx', 'atr', 'relative_volume', 'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
-        'rsi_4h', 'price_vs_ema50_4h',
-        f'roc_{MOMENTUM_PERIOD}', 'roc_acceleration', f'ema_slope_{EMA_SLOPE_PERIOD}',
-        'williams_r', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'mfi',
-        'buy_pressure', 'volume_ratio', 'price_impact', 'garman_klass_vol', 'rogers_satchell_vol',
-        'chaikin_volatility', 'ulcer_index', 'atr_ratio_5', 'atr_ratio_10', 'atr_ratio_20',
-        'hour_sin', 'hour_cos', 'day_of_week', 'is_weekend', 'asia_session', 'london_session', 'ny_session', 'month_sin', 'month_cos'
+        # Micro-Structure Features (available)
+        'fofi', 'delta_of_delta', 'spread_proxy_percent',
+        
+        # Technical Clean Features
+        'williams_r', 'rsi_4h', 'atr', f'roc_{MOMENTUM_PERIOD}', f'ema_slope_{EMA_SLOPE_PERIOD}', 'bb_position',
+        
+        # Temporal Features
+        'hour_sin', 'hour_cos', 'day_of_week', 'month_sin', 'month_cos'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -393,13 +277,49 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     df_cleaned.dropna(subset=feature_columns, inplace=True)
 
     if df_cleaned.empty or df_cleaned['target'].nunique() < 2:
-        logger.warning(f"⚠️ [ML Prep] Data for {symbol} has less than 2 classes after cleaning. Skipping.")
+        logger.warning(f"⚠️ [ML Prep] Data has less than 2 classes after cleaning. Skipping.")
         return None
         
-    logger.info(f"📊 [ML Prep] Target distribution for {symbol}:\n{df_cleaned['target'].value_counts(normalize=True)}")
+    logger.info(f"📊 [ML Prep] Target distribution:\n{df_cleaned['target'].value_counts(normalize=True)}")
     X = df_cleaned[feature_columns]
     y = df_cleaned['target']
-    return X, y, feature_columns
+
+    # --- بداية قسم اختيار الميزات (Feature Selection) ---
+    logger.info(f"🔍 [Feature Selection] Starting feature selection process...")
+    logger.info(f"Initial number of features: {X.shape[1]}")
+
+    # 1. VarianceThreshold: إزالة الميزات ذات التباين الصفري
+    selector_var = VarianceThreshold()
+    X_var = selector_var.fit_transform(X)
+    
+    # الاحتفاظ فقط بالأعمدة التي لم يتم حذفها
+    cols_retained_var = X.columns[selector_var.get_support()]
+    X = pd.DataFrame(X_var, index=X.index, columns=cols_retained_var)
+    logger.info(f"Features after VarianceThreshold: {X.shape[1]}")
+
+    # 2. SelectKBest: اختيار أفضل الميزات بناءً على mutual_info_classif
+    # التأكد من وجود ميزات كافية لتطبيق SelectKBest
+    if X.shape[1] > 1:
+        # تحديد عدد الميزات المراد اختيارها (k)
+        k_val = max(1, int(X.shape[1] * K_BEST_FEATURES_PERCENTAGE))
+        logger.info(f"Selecting top {k_val} features using SelectKBest ({K_BEST_FEATURES_PERCENTAGE*100}%)...")
+        
+        selector_kbest = SelectKBest(mutual_info_classif, k=k_val)
+        X_kbest = selector_kbest.fit_transform(X, y)
+        
+        # الاحتفاظ فقط بالأعمدة التي تم اختيارها
+        cols_retained_kbest = X.columns[selector_kbest.get_support()]
+        X = pd.DataFrame(X_kbest, index=X.index, columns=cols_retained_kbest)
+        logger.info(f"Features after SelectKBest: {X.shape[1]}")
+    else:
+        logger.warning("⚠️ [Feature Selection] Skipping SelectKBest as there is only 1 feature left.")
+
+    # تحديث قائمة أسماء الميزات النهائية
+    final_feature_columns = X.columns.tolist()
+    logger.info(f"✅ [Feature Selection] Final selected features ({len(final_feature_columns)}): {final_feature_columns}")
+    # --- نهاية قسم اختيار الميزات ---
+
+    return X, y, final_feature_columns
 
 
 def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], Optional[Any], Optional[Dict[str, Any]]]:
@@ -426,12 +346,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             X_train, X_test = X.iloc[train_index], X.iloc[test_index]
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             scaler = StandardScaler()
-
-            # --- FIX START: Recreate DataFrame after scaling to preserve feature names ---
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
-            # --- FIX END ---
-
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], callbacks=[lgb.early_stopping(20, verbose=False)])
             y_pred = model.predict(X_test_scaled)
@@ -450,9 +366,7 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     final_model_params = {'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced', 'random_state': 42, 'verbosity': -1, **best_params}
     
     final_scaler = StandardScaler()
-    # --- FIX START: Recreate DataFrame after scaling for final model ---
     X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
-    # --- FIX END ---
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
@@ -463,12 +377,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         scaler = StandardScaler()
-        
-        # --- FIX START: Recreate DataFrame in final validation loop ---
         X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
-        # --- FIX END ---
-
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
         y_pred = model.predict(X_test_scaled)
@@ -514,25 +424,18 @@ def send_telegram_message(text: str):
     except Exception as e: logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
 def run_training_job():
-    logger.info(f"🚀 Starting ADVANCED ML model training job ({BASE_ML_MODEL_NAME})...")
+    logger.info(f"🚀 Starting STRUCTURED ML model training job ({BASE_ML_MODEL_NAME})...")
     init_db()
     get_binance_client()
-    fetch_and_cache_btc_data()
     
     all_valid_symbols = get_validated_symbols(filename='crypto_list.txt')
     if not all_valid_symbols:
         logger.critical("❌ [Main] لم يتم العثور على رموز صالحة. سيتم الخروج."); return
     
-    trained_symbols = get_trained_symbols_from_db()
-    symbols_to_train = [s for s in all_valid_symbols if s not in trained_symbols]
-    
-    if not symbols_to_train:
-        logger.info("✅ [Main] جميع الرموز مدربة بالفعل ومحدثة.");
-        if conn: conn.close()
-        return
-
-    logger.info(f"ℹ️ [Main] Total: {len(all_valid_symbols)}. Trained: {len(trained_symbols)}. To Train: {len(symbols_to_train)}.")
-    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill train models for {len(symbols_to_train)} new symbols.")
+    # No need to check for previously trained models for this specific run
+    symbols_to_train = all_valid_symbols
+    logger.info(f"ℹ️ [Main] Will attempt to train models for all {len(symbols_to_train)} valid symbols.")
+    send_telegram_message(f"🚀 *{BASE_ML_MODEL_NAME} Training Started*\nWill process {len(symbols_to_train)} symbols.")
     
     successful_models, failed_models = 0, 0
     for symbol in symbols_to_train:
@@ -544,7 +447,7 @@ def run_training_job():
             if df_15m is None or df_15m.empty or df_4h is None or df_4h.empty:
                 logger.warning(f"⚠️ [Main] لا توجد بيانات كافية لـ {symbol}, سيتم التجاوز."); failed_models += 1; continue
             
-            prepared_data = prepare_data_for_ml(df_15m, df_4h, btc_data_cache, symbol)
+            prepared_data = prepare_data_for_ml(df_15m, df_4h)
             del df_15m, df_4h; gc.collect()
 
             if prepared_data is None:
@@ -576,9 +479,9 @@ def run_training_job():
         time.sleep(1)
 
     completion_message = (f"✅ *{BASE_ML_MODEL_NAME} Training Finished*\n"
-                        f"- Successfully trained: {successful_models} new models\n"
+                        f"- Successfully trained: {successful_models} models\n"
                         f"- Failed/Discarded: {failed_models} models\n"
-                        f"- Processed this run: {len(symbols_to_train)}")
+                        f"- Total processed: {len(symbols_to_train)}")
     send_telegram_message(completion_message)
     logger.info(completion_message)
 
@@ -589,7 +492,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Microstructure features) service is running and healthy.", 200
+    return "ML Trainer (Structured Features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
