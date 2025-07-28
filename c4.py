@@ -22,8 +22,8 @@ from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
-from datetime import datetime, timezone, timedelta
-from decouple import config
+# --- إصلاح: استيراد 'time' بشكل صحيح من مكتبة 'datetime' ---
+from datetime import datetime, time as dt_time, timezone, timedelta
 from typing import List, Dict, Optional, Any, Set, Tuple
 from sklearn.preprocessing import StandardScaler
 from collections import deque, Counter
@@ -74,7 +74,7 @@ BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.60
 MIN_PROFIT_PERCENT: float = 0.8
-SYMBOL_PROCESSING_BATCH_SIZE: int = 30
+SYMBOL_PROCESSING_BATCH_SIZE: int = 20
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V12) ---
 ATR_PERIOD: int = 14
@@ -165,14 +165,13 @@ def price_drop_notifier():
                 time.sleep(3600)
                 continue
             for hour_utc, reason in drop_times_utc.items():
-                # --- إصلاح: استخدام datetime.time لتجنب التعارض ---
-                notification_time = datetime.time(hour=hour_utc, minute=0)
-                # --- إصلاح: إرسال التنبيه قبل 15 دقيقة ---
+                # --- إصلاح: استخدام dt_time الذي تم استيراده بشكل صحيح ---
+                notification_time = dt_time(hour=hour_utc, minute=0)
                 notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc) - timedelta(minutes=15)
                 
                 has_been_sent_today = last_notification_sent_date.get(hour_utc) == now_utc.date()
                 if not has_been_sent_today and now_utc >= notification_dt:
-                    drop_time_gmt1 = (datetime.combine(now_utc.date(), datetime.time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
+                    drop_time_gmt1 = (datetime.combine(now_utc.date(), dt_time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
                     message = (
                         f"🚨 *تنبيه هبوط محتمل للسعر*\n\n"
                         f"🕒 *الوقت المتوقع:* حوالي الساعة *{drop_time_gmt1} بتوقيت GMT+1*.\n\n"
