@@ -148,7 +148,7 @@ def send_telegram_message(message: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Telegram] فشل إرسال الرسالة: {e}")
 
-# --- دالة تنبيهات هبوط السعر (مُصححة) ---
+# --- دالة تنبيهات هبوط السعر (مُعدّلة لضمان الإرسال في الوقت المحدد) ---
 def price_drop_notifier():
     logger.info("🔔 [Notifier] بدء خدمة تنبيهات هبوط الأسعار...")
     drop_times_utc = {
@@ -159,20 +159,39 @@ def price_drop_notifier():
         20: "قرب إغلاق جلسة نيويورك، تصفية المراكز قد تسبب تقلبات.",
         8: "افتتاح جلسة لندن، تعتبر من أكثر الأوقات تقلباً في اليوم."
     }
+    # قاموس لتتبع آخر تاريخ تم فيه إرسال إشعار لكل ساعة
     last_notification_sent_date = {}
+    
+    # حلقة لا نهائية للتحقق من الوقت بشكل دوري
     while True:
         try:
+            # الحصول على الوقت الحالي بتوقيت UTC
             now_utc = datetime.now(timezone.utc)
-            if now_utc.weekday() >= 5:
-                time.sleep(3600)
+            
+            # تخطي التحقق في عطلة نهاية الأسبوع (السبت والأحد)
+            if now_utc.weekday() >= 5: # 5 = Saturday, 6 = Sunday
+                time.sleep(3600) # انتظر ساعة في عطلة نهاية الأسبوع
                 continue
+            
+            # المرور على كل وقت تنبيه محدد
             for hour_utc, reason in drop_times_utc.items():
-                notification_time = dt_time(hour=hour_utc, minute=0)
-                notification_dt = datetime.combine(now_utc.date(), notification_time, tzinfo=timezone.utc) - timedelta(minutes=15)
+                # تحديد وقت التنبيه (قبل 15 دقيقة من الحدث)
+                # على سبيل المثال، للحدث في الساعة 8:00، يكون وقت التنبيه 7:45
+                alert_datetime = datetime.combine(now_utc.date(), dt_time(hour=hour_utc, minute=0), tzinfo=timezone.utc) - timedelta(minutes=15)
                 
+                # التحقق مما إذا تم إرسال الإشعار لهذا الوقت اليوم بالفعل
                 has_been_sent_today = last_notification_sent_date.get(hour_utc) == now_utc.date()
-                if not has_been_sent_today and now_utc >= notification_dt:
+                
+                # --- التعديل الرئيسي: ضمان إرسال التنبيه في الدقيقة المحددة فقط ---
+                # يتم التحقق مما إذا كان الوقت الحالي يقع ضمن دقيقة واحدة بعد وقت التنبيه المحدد.
+                # هذا يمنع إرسال جميع التنبيهات الماضية عند بدء تشغيل البوت.
+                is_time_to_send = alert_datetime <= now_utc < (alert_datetime + timedelta(minutes=1))
+
+                if not has_been_sent_today and is_time_to_send:
+                    # تنسيق وقت الحدث المتوقع (بتوقيت GMT+1)
                     drop_time_gmt1 = (datetime.combine(now_utc.date(), dt_time(hour=hour_utc, minute=0), tzinfo=timezone.utc) + timedelta(hours=1)).strftime('%H:%M')
+                    
+                    # إنشاء نص الرسالة
                     message = (
                         f"🚨 *تنبيه هبوط محتمل للسعر*\n\n"
                         f"🕒 *الوقت المتوقع:* حوالي الساعة *{drop_time_gmt1} بتوقيت GMT+1*.\n\n"
@@ -180,19 +199,26 @@ def price_drop_notifier():
                         f"⏳ *المدة المتوقعة:* قد يستمر هذا التأثير لعدة ساعات قادمة.\n\n"
                         f"يرجى توخي الحذر وإدارة المخاطر بحكمة."
                     )
+                    
+                    # إرسال الرسالة عبر تليجرام
                     send_telegram_message(message)
+                    
+                    # تسجيل أن الإشعار قد تم إرساله لهذا الوقت اليوم
                     last_notification_sent_date[hour_utc] = now_utc.date()
                     logger.info(f"🔔 [Notifier] تم إرسال تنبيه هبوط للساعة {hour_utc:02d}:00 UTC.")
             
-            if now_utc.hour == 0 and now_utc.minute < 5:
+            # عند منتصف الليل، قم بإعادة تعيين سجل الإشعارات ليوم جديد
+            if now_utc.hour == 0 and now_utc.minute < 1:
                  if any(last_notification_sent_date.values()):
                     logger.info("🌅 [Notifier] يوم جديد، إعادة ضبط سجل الإشعارات.")
                     last_notification_sent_date.clear()
             
+            # الانتظار لمدة 60 ثانية قبل التحقق مرة أخرى
             time.sleep(60)
+            
         except Exception as e:
             logger.error(f"❌ [Notifier] خطأ في حلقة تنبيهات الهبوط: {e}", exc_info=True)
-            time.sleep(300)
+            time.sleep(300) # انتظر 5 دقائق في حالة حدوث خطأ
 
 # --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
