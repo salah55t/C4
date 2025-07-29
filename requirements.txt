@@ -17,8 +17,6 @@ redis
 optuna
 tenacity
 scipy
-tensorflow==2.15.0
-
 
 
 
