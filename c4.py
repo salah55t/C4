@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر EMA Crossover لتأكيد الدخول
+# ملف c4.py - نسخة محدثة مع فلتر التقاطع الذهبي و EMA Crossover
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق شروط تقاطع EMA بعد موافقة نموذج تعلم الآلة ---
+# --- تعديل: تطبيق شروط تقاطع EMA أو التقاطع الذهبي بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -137,7 +137,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "EMA Crossover Invalid": "تقاطع EMA غير صالح" # <-- سبب الرفض الجديد
+    "No Valid Crossover": "لا يوجد تقاطع صالح (لا EMA ولا ذهبي)" # <-- سبب الرفض المحدث
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -373,9 +373,11 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # --- NEW: Add EMA 9, 21 and Volume SMA ---
+    # --- NEW: Add EMA 9, 21, Volume SMA, and Golden Cross SMAs ---
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
+    df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
 
     high_low = df_calc['high'] - df_calc['low']
@@ -711,9 +713,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
     يفحص شروط تقاطع EMA الإيجابي في آخر N شمعات.
-    - EMA 9 يقطع EMA 21 للأعلى.
-    - الإغلاق فوق كلا الخطين.
-    - تأكيد إضافي: RSI > 50 أو حجم تداول مرتفع.
     """
     required_cols = ['ema_9', 'ema_21', 'close', 'rsi', 'volume', 'volume_sma_20']
     if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
@@ -721,31 +720,48 @@ def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bo
 
     try:
         for i in range(1, lookback_period + 1):
-            # Current candle data
             current_close = df['close'].iloc[-i]
             current_ema9 = df['ema_9'].iloc[-i]
             current_ema21 = df['ema_21'].iloc[-i]
             current_rsi = df['rsi'].iloc[-i]
             current_volume = df['volume'].iloc[-i]
             current_volume_sma = df['volume_sma_20'].iloc[-i]
-
-            # Previous candle data
             prev_ema9 = df['ema_9'].iloc[-(i + 1)]
             prev_ema21 = df['ema_21'].iloc[-(i + 1)]
 
-            # Condition 1: Crossover (EMA 9 crosses above EMA 21)
             is_crossover = prev_ema9 < prev_ema21 and current_ema9 > current_ema21
-
-            # Condition 2: Close price is above both EMAs
             is_close_above = current_close > current_ema9 and current_close > current_ema21
-
-            # Condition 3: Additional confirmation
             is_rsi_strong = current_rsi > 50
             is_volume_spike = current_volume_sma > 0 and current_volume > (current_volume_sma * 1.5)
             has_confirmation = is_rsi_strong or is_volume_spike
 
             if is_crossover and is_close_above and has_confirmation:
-                logger.info(f"✅ [{df.index[-i]}] EMA Crossover signal confirmed for {df.name}.")
+                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة تقاطع EMA.")
+                return True
+        
+        return False
+    except (IndexError, TypeError):
+        return False
+
+def check_golden_cross_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+    """
+    يفحص شروط التقاطع الذهبي (SMA 50/200) في آخر N شمعات.
+    """
+    required_cols = ['sma_50', 'sma_200']
+    if not all(col in df.columns for col in required_cols) or len(df) < 200 + lookback_period:
+        return False
+
+    try:
+        for i in range(1, lookback_period + 1):
+            current_sma50 = df['sma_50'].iloc[-i]
+            current_sma200 = df['sma_200'].iloc[-i]
+            prev_sma50 = df['sma_50'].iloc[-(i + 1)]
+            prev_sma200 = df['sma_200'].iloc[-(i + 1)]
+
+            is_golden_cross = prev_sma50 < prev_sma200 and current_sma50 > current_sma200
+
+            if is_golden_cross:
+                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة التقاطع الذهبي.")
                 return True
         
         return False
@@ -1461,10 +1477,14 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر الدخول الأساسي: التحقق من شروط تقاطع EMA ---
-                        if not check_ema_crossover_signal(df_features, lookback_period=3):
-                            log_rejection(symbol, "EMA Crossover Invalid")
+                        # --- فلتر الدخول المزدوج: التحقق من تقاطع EMA أو التقاطع الذهبي ---
+                        ema_crossover_ok = check_ema_crossover_signal(df_features, lookback_period=3)
+                        golden_cross_ok = check_golden_cross_signal(df_features, lookback_period=3)
+
+                        if not (ema_crossover_ok or golden_cross_ok):
+                            log_rejection(symbol, "No Valid Crossover", {"EMA_Cross": ema_crossover_ok, "Golden_Cross": golden_cross_ok})
                             continue
+                        # --- نهاية الفلتر المزدوج ---
 
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
