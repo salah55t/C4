@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر التقاطع الذهبي و EMA Crossover
+# ملف c4.py - نسخة محدثة مع فلتر Supertrend والتقاطع الذهبي و EMA Crossover
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق شروط تقاطع EMA أو التقاطع الذهبي بعد موافقة نموذج تعلم الآلة ---
+# --- تعديل: تطبيق شروط (Supertrend أو Golden Cross أو EMA Cross) بعد موافقة نموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -91,6 +91,9 @@ BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
+# --- إعدادات Supertrend ---
+SUPERTREND_ATR_PERIOD: int = 10
+SUPERTREND_MULTIPLIER: float = 3.0
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 USE_TRAILING_STOP_LOSS: bool = True
@@ -137,7 +140,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "No Valid Crossover": "لا يوجد تقاطع صالح (لا EMA ولا ذهبي)" # <-- سبب الرفض المحدث
+    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" # <-- سبب الرفض المحدث
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -370,6 +373,52 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     return df
 
+def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -> pd.DataFrame:
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    # ATR calculation
+    high_low = high - low
+    high_close_prev = np.abs(high - close.shift(1))
+    low_close_prev = np.abs(low - close.shift(1))
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    atr = tr.ewm(com=atr_period - 1, min_periods=atr_period, adjust=False).mean()
+    
+    # Supertrend calculation
+    hl2 = (high + low) / 2
+    final_upper_band = upper_band = hl2 + (multiplier * atr)
+    final_lower_band = lower_band = hl2 - (multiplier * atr)
+    
+    supertrend = pd.Series(np.nan, index=df.index)
+    supertrend_direction = pd.Series(np.nan, index=df.index)
+
+    for i in range(1, len(df)):
+        curr, prev = i, i - 1
+        
+        # if current close price crosses above upper band
+        if close[curr] > final_upper_band[prev]:
+            supertrend_direction[curr] = 1
+        # if current close price crosses below lower band
+        elif close[curr] < final_lower_band[prev]:
+            supertrend_direction[curr] = -1
+        # else, the trend continues
+        else:
+            supertrend_direction[curr] = supertrend_direction[prev]
+            if supertrend_direction[curr] == -1 and final_upper_band[curr] < final_upper_band[prev]:
+                final_upper_band[curr] = final_upper_band[curr]
+            if supertrend_direction[curr] == 1 and final_lower_band[curr] > final_lower_band[prev]:
+                final_lower_band[curr] = final_lower_band[curr]
+
+        if supertrend_direction[curr] == 1:
+            supertrend[curr] = final_lower_band[curr]
+        else:
+            supertrend[curr] = final_upper_band[curr]
+            
+    df['supertrend'] = supertrend
+    df['supertrend_direction'] = supertrend_direction
+    return df
+
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
 
@@ -419,6 +468,10 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc = calculate_market_microstructure_features(df_calc)
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
+    
+    # --- NEW: Add Supertrend Calculation ---
+    df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
+
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
     df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
@@ -762,6 +815,40 @@ def check_golden_cross_signal(df: pd.DataFrame, lookback_period: int = 3) -> boo
 
             if is_golden_cross:
                 logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة التقاطع الذهبي.")
+                return True
+        
+        return False
+    except (IndexError, TypeError):
+        return False
+
+def check_supertrend_breakout_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+    """
+    يفحص اختراق السعر لخط Supertrend للأعلى مع حجم تداول مرتفع.
+    """
+    required_cols = ['supertrend', 'supertrend_direction', 'close', 'volume', 'volume_sma_20']
+    if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
+        return False
+    
+    try:
+        for i in range(1, lookback_period + 1):
+            # Current candle data
+            current_close = df['close'].iloc[-i]
+            current_supertrend = df['supertrend'].iloc[-i]
+            current_volume = df['volume'].iloc[-i]
+            current_volume_sma = df['volume_sma_20'].iloc[-i]
+            
+            # Previous candle data
+            prev_close = df['close'].iloc[-(i + 1)]
+            prev_supertrend = df['supertrend'].iloc[-(i + 1)]
+
+            # Condition 1: Breakout (Price was below, now it's above)
+            is_breakout = prev_close < prev_supertrend and current_close > current_supertrend
+            
+            # Condition 2: Volume confirmation
+            is_volume_strong = current_volume_sma > 0 and current_volume > current_volume_sma
+
+            if is_breakout and is_volume_strong:
+                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة اختراق Supertrend.")
                 return True
         
         return False
@@ -1477,14 +1564,19 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر الدخول المزدوج: التحقق من تقاطع EMA أو التقاطع الذهبي ---
+                        # --- فلتر الدخول الثلاثي: التحقق من أي إشارة إيجابية ---
                         ema_crossover_ok = check_ema_crossover_signal(df_features, lookback_period=3)
                         golden_cross_ok = check_golden_cross_signal(df_features, lookback_period=3)
+                        supertrend_breakout_ok = check_supertrend_breakout_signal(df_features, lookback_period=3)
 
-                        if not (ema_crossover_ok or golden_cross_ok):
-                            log_rejection(symbol, "No Valid Crossover", {"EMA_Cross": ema_crossover_ok, "Golden_Cross": golden_cross_ok})
+                        if not (ema_crossover_ok or golden_cross_ok or supertrend_breakout_ok):
+                            log_rejection(symbol, "No Valid Crossover/Breakout", {
+                                "EMA_Cross": ema_crossover_ok, 
+                                "Golden_Cross": golden_cross_ok,
+                                "Supertrend_Break": supertrend_breakout_ok
+                            })
                             continue
-                        # --- نهاية الفلتر المزدوج ---
+                        # --- نهاية الفلتر الثلاثي ---
 
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
