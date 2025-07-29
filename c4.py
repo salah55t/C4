@@ -761,7 +761,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
         logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
         last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df['atr'].empty else 0
         if last_atr > 0:
-            return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
+            return {'target_price': entry_price + last_atr * 4.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
 # --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
