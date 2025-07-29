@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر Supertrend والتقاطع الذهبي و EMA Crossover
+# ملف c4.py - نسخة محدثة مع منطق إغلاق الصفقة عبر تقاطع EMA 2/8
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق شروط (Supertrend أو Golden Cross أو EMA Cross) بعد موافقة نموذج تعلم الآلة ---
+# --- تعديل: إضافة شرط إغلاق الصفقة عند تقاطع EMA(2) تحت EMA(8) ---
 import time
 import os
 import json
@@ -140,7 +140,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" # <-- سبب الرفض المحدث
+    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" 
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -422,7 +422,9 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # --- NEW: Add EMA 9, 21, Volume SMA, and Golden Cross SMAs ---
+    # --- حساب المؤشرات ---
+    df_calc['ema_2'] = df_calc['close'].ewm(span=2, adjust=False).mean()
+    df_calc['ema_8'] = df_calc['close'].ewm(span=8, adjust=False).mean()
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
@@ -1032,7 +1034,8 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             reason_map = {
                 'take_profit': '🎯 Take Profit', 
                 'stop_loss': '🛑 Stop Loss', 
-                'manual': '🖐️ Manual Close'
+                'manual': '🖐️ Manual Close',
+                'ema_2_8_cross': '❌ تقاطع سلبي EMA(2/8)' # <-- سبب الإغلاق الجديد
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1458,27 +1461,49 @@ def trade_management_loop():
                 
                 current_price = float(current_price_str)
                 signal_id = signal['id']
+                symbol = signal['symbol']
                 tp = float(signal['target_price'])
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
+                # 1. Check for Take Profit
                 if current_price >= tp:
-                    logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
+                    logger.info(f"🎯 [TP HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, 'take_profit')
                     continue
+                
+                # 2. Check for Stop Loss
                 if current_price <= sl:
-                    logger.info(f"🛑 [SL HIT] {signal['symbol']} at {current_price}")
+                    logger.info(f"🛑 [SL HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, 'stop_loss')
                     continue
 
+                # 3. NEW: Check for EMA 2/8 Negative Crossover for closing
+                try:
+                    df_close_check = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 2) # Fetch last 10 days for accuracy
+                    if df_close_check is not None and len(df_close_check) >= 10:
+                        df_close_check['ema_2'] = df_close_check['close'].ewm(span=2, adjust=False).mean()
+                        df_close_check['ema_8'] = df_close_check['close'].ewm(span=8, adjust=False).mean()
+                        
+                        # Check for negative crossover on the most recent completed candle
+                        if df_close_check['ema_2'].iloc[-2] < df_close_check['ema_8'].iloc[-2] and \
+                           df_close_check['ema_2'].iloc[-3] > df_close_check['ema_8'].iloc[-3]:
+                            logger.info(f"❌ [EMA 2/8 CROSS] Negative crossover detected for {symbol}. Closing trade.")
+                            close_signal(signal_id, current_price, 'ema_2_8_cross')
+                            continue
+                except Exception as e:
+                    logger.error(f"❌ [{symbol}] Error during EMA 2/8 close check: {e}")
+
+
+                # 4. Check for Trailing Stop Loss
                 if USE_TRAILING_STOP_LOSS:
                     peak_price = float(signal.get('current_peak_price', entry))
                     new_peak = max(peak_price, current_price)
                     
                     if new_peak > peak_price:
                         with signal_cache_lock:
-                            if signal['symbol'] in open_signals_cache:
-                                open_signals_cache[signal['symbol']]['current_peak_price'] = new_peak
+                            if symbol in open_signals_cache:
+                                open_signals_cache[symbol]['current_peak_price'] = new_peak
                         
                         try:
                             if check_db_connection():
@@ -1486,23 +1511,23 @@ def trade_management_loop():
                                     cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (new_peak, signal_id))
                                 conn.commit()
                         except Exception as e:
-                            logger.error(f"DB error updating peak price for {signal['symbol']}: {e}"); conn.rollback()
+                            logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
 
                     profit_pct = (new_peak / entry - 1) * 100
                     if profit_pct >= TRAILING_ACTIVATION_PROFIT_PERCENT:
                         new_sl = new_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
                         if new_sl > sl:
-                            logger.info(f"📈 [TRAILING SL] {signal['symbol']} SL moved to {new_sl:.4f}")
+                            logger.info(f"📈 [TRAILING SL] {symbol} SL moved to {new_sl:.4f}")
                             with signal_cache_lock:
-                                if signal['symbol'] in open_signals_cache:
-                                    open_signals_cache[signal['symbol']]['stop_loss'] = new_sl
+                                if symbol in open_signals_cache:
+                                    open_signals_cache[symbol]['stop_loss'] = new_sl
                             try:
                                 if check_db_connection():
                                     with conn.cursor() as cur:
                                         cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (new_sl, signal_id))
                                     conn.commit()
                             except Exception as e:
-                                logger.error(f"DB error updating trailing SL for {signal['symbol']}: {e}"); conn.rollback()
+                                logger.error(f"DB error updating trailing SL for {symbol}: {e}"); conn.rollback()
             time.sleep(2)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
