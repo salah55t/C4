@@ -1,6 +1,6 @@
 # ملف c4.py - نسخة مع ذاكرة تخزين مؤقت للإشارات الفنية
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة ذاكرة تخزين مؤقت لتسريع فحص الإشارات الفنية ---
+# --- تعديل: إضافة سجلات تشخيصية نهائية ومفصلة لكل خطوة تحليل ---
 import time
 import os
 import json
@@ -270,13 +270,29 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
+        
+        if not os.path.exists(file_path):
+            logger.critical(f"❌ [Validation] ملف العملات '{filename}' غير موجود! يرجى إنشاء الملف وإضافة رموز العملات.")
+            return []
+            
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+
+        if not raw_symbols:
+            logger.warning(f"⚠️ [Validation] ملف العملات '{filename}' فارغ. لن يتم مسح أي عملات.")
+            return []
+
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         if not exchange_info_map: get_exchange_info_map()
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"✅ [Validation] سيقوم البوت بمراقبة {len(validated)} عملة.")
+        
+        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من ملفك.")
+        if not validated:
+             logger.warning(f"⚠️ [Validation] لم تتطابق أي من العملات في ملفك مع العملات المتاحة للتداول على Binance.")
+        else:
+            logger.info(f"🔍 [Validation] عينة من العملات التي ستتم مراقبتها: {validated[:5]}")
+
         return validated
     except Exception as e:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
@@ -593,13 +609,15 @@ class EnhancedTradingStrategy:
         model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
         model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
 
-        if not os.path.exists(model_path): return None
+        if not os.path.exists(model_path):
+            logger.warning(f"  -> [{self.symbol}] 🛑 ملف النموذج غير موجود في '{model_path}'. تخطي.")
+            return None
 
         try:
             with open(model_path, 'rb') as f: model_bundle = pickle.load(f)
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
                 ml_models_cache[model_name] = model_bundle
-                logger.info(f"✅ [{self.symbol}] تم تحميل نموذج V9 من ملف: {model_path}")
+                logger.info(f"  -> [{self.symbol}] ✅ تم تحميل النموذج بنجاح.")
                 return model_bundle
             return None
         except Exception as e:
@@ -769,95 +787,54 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- دوال التحقق من إشارات المؤشرات (مُعدّلة) ---
+# --- دوال التحقق من إشارات المؤشرات (مُعدّلة وبدون طباعة داخلية) ---
 def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    """
-    يفحص شروط تقاطع EMA الإيجابي في آخر N شمعات.
-    """
     required_cols = ['ema_9', 'ema_21', 'close', 'rsi', 'volume', 'volume_sma_20']
     if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
         return False
-
     try:
         for i in range(1, lookback_period + 1):
-            current_close = df['close'].iloc[-i]
-            current_ema9 = df['ema_9'].iloc[-i]
-            current_ema21 = df['ema_21'].iloc[-i]
-            current_rsi = df['rsi'].iloc[-i]
-            current_volume = df['volume'].iloc[-i]
-            current_volume_sma = df['volume_sma_20'].iloc[-i]
-            prev_ema9 = df['ema_9'].iloc[-(i + 1)]
-            prev_ema21 = df['ema_21'].iloc[-(i + 1)]
-
+            current_close = df['close'].iloc[-i]; current_ema9 = df['ema_9'].iloc[-i]
+            current_ema21 = df['ema_21'].iloc[-i]; current_rsi = df['rsi'].iloc[-i]
+            current_volume = df['volume'].iloc[-i]; current_volume_sma = df['volume_sma_20'].iloc[-i]
+            prev_ema9 = df['ema_9'].iloc[-(i + 1)]; prev_ema21 = df['ema_21'].iloc[-(i + 1)]
             is_crossover = prev_ema9 < prev_ema21 and current_ema9 > current_ema21
             is_close_above = current_close > current_ema9 and current_close > current_ema21
             is_rsi_strong = current_rsi > 50
             is_volume_spike = current_volume_sma > 0 and current_volume > (current_volume_sma * 1.5)
-            has_confirmation = is_rsi_strong or is_volume_spike
-
-            if is_crossover and is_close_above and has_confirmation:
-                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة تقاطع EMA.")
+            if is_crossover and is_close_above and (is_rsi_strong or is_volume_spike):
                 return True
-
         return False
     except (IndexError, TypeError):
         return False
 
 def check_golden_cross_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    """
-    يفحص شروط التقاطع الذهبي (SMA 50/200) في آخر N شمعات.
-    """
     required_cols = ['sma_50', 'sma_200']
     if not all(col in df.columns for col in required_cols) or len(df) < 200 + lookback_period:
         return False
-
     try:
         for i in range(1, lookback_period + 1):
-            current_sma50 = df['sma_50'].iloc[-i]
-            current_sma200 = df['sma_200'].iloc[-i]
-            prev_sma50 = df['sma_50'].iloc[-(i + 1)]
-            prev_sma200 = df['sma_200'].iloc[-(i + 1)]
-
-            is_golden_cross = prev_sma50 < prev_sma200 and current_sma50 > current_sma200
-
-            if is_golden_cross:
-                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة التقاطع الذهبي.")
+            current_sma50 = df['sma_50'].iloc[-i]; current_sma200 = df['sma_200'].iloc[-i]
+            prev_sma50 = df['sma_50'].iloc[-(i + 1)]; prev_sma200 = df['sma_200'].iloc[-(i + 1)]
+            if prev_sma50 < prev_sma200 and current_sma50 > current_sma200:
                 return True
-
         return False
     except (IndexError, TypeError):
         return False
 
 def check_supertrend_breakout_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    """
-    يفحص اختراق السعر لخط Supertrend للأعلى مع حجم تداول مرتفع.
-    """
     required_cols = ['supertrend', 'supertrend_direction', 'close', 'volume', 'volume_sma_20']
     if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
         return False
-
     try:
         for i in range(1, lookback_period + 1):
-            # Current candle data
-            current_close = df['close'].iloc[-i]
-            current_supertrend = df['supertrend'].iloc[-i]
-            current_volume = df['volume'].iloc[-i]
-            current_volume_sma = df['volume_sma_20'].iloc[-i]
-
-            # Previous candle data
-            prev_close = df['close'].iloc[-(i + 1)]
-            prev_supertrend = df['supertrend'].iloc[-(i + 1)]
-
-            # Condition 1: Breakout (Price was below, now it's above)
+            current_close = df['close'].iloc[-i]; current_supertrend = df['supertrend'].iloc[-i]
+            current_volume = df['volume'].iloc[-i]; current_volume_sma = df['volume_sma_20'].iloc[-i]
+            prev_close = df['close'].iloc[-(i + 1)]; prev_supertrend = df['supertrend'].iloc[-(i + 1)]
             is_breakout = prev_close < prev_supertrend and current_close > current_supertrend
-
-            # Condition 2: Volume confirmation
             is_volume_strong = current_volume_sma > 0 and current_volume > current_volume_sma
-
             if is_breakout and is_volume_strong:
-                logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة اختراق Supertrend.")
                 return True
-
         return False
     except (IndexError, TypeError):
         return False
@@ -876,7 +853,6 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
             step_size = Decimal(lot_size_filter['stepSize'])
             quantity_decimal = Decimal(str(quantity))
             adjusted_quantity = (quantity_decimal // step_size) * step_size
-            logger.info(f"[{symbol}] تعديل الكمية: الأصلية={quantity_decimal}, حجم الخطوة={step_size}, المعدلة={adjusted_quantity}")
             return adjusted_quantity
 
         return Decimal(str(quantity))
@@ -933,7 +909,6 @@ def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -
             elif order_status['status'] in ['CANCELED', 'EXPIRED', 'REJECTED']:
                 logger.error(f"❌ [{symbol}] Order {order_id} has failed status: {order_status['status']}.")
                 return False
-            logger.info(f"⏳ [{symbol}] Waiting for order {order_id} to be filled. Current status: {order_status['status']}")
             time.sleep(2)
         except BinanceAPIException as e:
             logger.error(f"❌ [{symbol}] API Error while verifying order {order_id}: {e}")
@@ -1040,7 +1015,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 'take_profit': '🎯 Take Profit',
                 'stop_loss': '🛑 Stop Loss',
                 'manual': '🖐️ Manual Close',
-                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)' # <-- سبب الإغلاق الجديد
+                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)'
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1536,39 +1511,34 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية المحسنة مع ذاكرة تخزين مؤقت للإشارات الفنية.
+    الحلقة الرئيسية المحسنة مع ذاكرة تخزين مؤقت للإشارات الفنية وسجلات تشخيصية.
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
     time.sleep(15)
+    
     if not validated_symbols_to_scan:
-        log_and_notify("critical", "لا توجد عملات صالحة للمسح.", "SYSTEM")
+        log_and_notify("critical", "قائمة العملات للمسح فارغة. يرجى التحقق من ملف 'crypto_list.txt'.", "SYSTEM_ERROR")
         return
+
     log_and_notify("info", f"✅ بدء حلقة المسح لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
 
     while True:
         try:
-            logger.info("🔄 بدء دورة مسح جديدة...")
-            # 1. تحديث حالة السوق والفلاتر
+            logger.info("🔄 [Main Loop] بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
             analyze_market_and_create_dynamic_profile_enhanced()
 
-            # 2. تنظيف ذاكرة الإشارات الفنية القديمة
             current_time = time.time()
-            technical_signals_cache = {
-                s: v for s, v in technical_signals_cache.items()
-                if current_time - v.get('timestamp', 0) < TECHNICAL_SIGNAL_CACHE_DURATION
-            }
+            technical_signals_cache = {s: v for s, v in technical_signals_cache.items() if current_time - v.get('timestamp', 0) < TECHNICAL_SIGNAL_CACHE_DURATION}
 
             with dynamic_filter_lock:
                 filter_profile = dynamic_filter_profile_cache
-
             if not filter_profile:
                 logger.warning("🛑 لم يتم تحميل ملف الفلاتر. الانتظار...")
                 time.sleep(60)
                 continue
 
-            # 3. جلب بيانات البيتكوين
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
 
@@ -1579,62 +1549,53 @@ def main_loop_enhanced():
 
                 for symbol in batch:
                     try:
+                        logger.info(f"---===[ 🔍 تحليل {symbol} ]===---")
+
                         with signal_cache_lock:
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
-
-                        # تحميل البيانات والميزات مرة واحدة
-                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty: continue
-                        df_15m.name = symbol
-
-                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_4h is None or df_4h.empty: continue
-
+                        
                         strategy = EnhancedTradingStrategy(symbol)
                         if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
                             continue
 
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_15m is None or df_15m.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 15m. تخطي.")
+                            continue
+
+                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_4h is None or df_4h.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h. تخطي.")
+                            continue
+                        
                         df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                        if df_features is None or df_features.empty: continue
+                        if df_features is None or df_features.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات. تخطي.")
+                            continue
                         df_features.name = symbol
+                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
-                        # =================================================================
-                        # --- START: NEW CACHING LOGIC ---
-                        # --- تعديل: التحقق من الإشارات الفنية أولاً ---
-                        # =================================================================
+                        ema_cross = check_ema_crossover_signal(df_features, 3)
+                        golden_cross = check_golden_cross_signal(df_features, 3)
+                        super_break = check_supertrend_breakout_signal(df_features, 3)
 
-                        # 4.1 التحقق من الإشارات الفنية أولاً
-                        technical_signal_found = (
-                            check_ema_crossover_signal(df_features, 3) or
-                            check_golden_cross_signal(df_features, 3) or
-                            check_supertrend_breakout_signal(df_features, 3)
-                        )
+                        if not (ema_cross or golden_cross or super_break):
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة فنية أولية. السوق هادئ. انتظار...")
+                            continue
+                        
+                        logger.info(f"  -> [{symbol}] 🔥 إشارة فنية أولية مكتشفة! (EMA: {ema_cross}, Golden: {golden_cross}, SuperT: {super_break}). التحقق من النموذج...")
 
-                        if not technical_signal_found:
-                            continue # لا توجد إشارة أولية، انتقل إلى الرمز التالي
-
-                        # 4.2 تخزين الإشارة في الذاكرة المؤقتة إذا كانت جديدة
-                        if symbol not in technical_signals_cache:
-                            logger.info(f"🔔 [{symbol}] تم العثور على إشارة فنية أولية. تتم إضافته إلى الذاكرة المؤقتة.")
-                            technical_signals_cache[symbol] = {
-                                'timestamp': current_time,
-                                'price': df_features['close'].iloc[-1]
-                            }
-
-                        # 4.3 فحص النموذج فقط إذا كانت الإشارة موجودة
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             if ml_signal:
                                 log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
+                            else:
+                                logger.info(f"  -> [{symbol}] 🤖 النموذج لم يولد إشارة شراء.")
                             continue
 
-                        logger.info(f"✅ [{symbol}] النموذج يؤكد الإشارة الفنية. المتابعة إلى الفلاتر النهائية.")
-                        # =================================================================
-                        # --- END: NEW CACHING LOGIC ---
-                        # --- تستمر بقية العمليات كالمعتاد بعد تأكيد النموذج ---
-                        # =================================================================
-
+                        logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة إلى الفلاتر النهائية.")
+                        
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
@@ -1712,7 +1673,6 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
-        if not validated_symbols_to_scan: logger.critical("❌ لا توجد عملات صالحة للمسح."); return
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
