@@ -84,8 +84,8 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 # --- MODIFICATION: Updated EMA periods for the new strategy ---
-EMA_FAST_PERIOD: int = 50
-EMA_SLOW_PERIOD: int = 120 # Changed from 200 to 120 for the new strategy
+EMA_FAST_PERIOD: int = 9
+EMA_SLOW_PERIOD: int = 21 # Changed from 200 to 120 for the new strategy
 
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
@@ -825,7 +825,7 @@ def check_ema_stochastic_strategy(df: pd.DataFrame, lookback_period: int = 3) ->
             ema_crossover = previous[EMA_FAST_COL] <= previous[EMA_SLOW_COL] and current[EMA_FAST_COL] > current[EMA_SLOW_COL]
 
             # Condition 2: Stochastic K crosses above 20
-            stochastic_crossover = previous[STOCH_K_COL] <= 20 and current[STOCH_K_COL] > 20
+            stochastic_crossover = previous[STOCH_K_COL] <= 30 and current[STOCH_K_COL] > 30
 
             if ema_crossover and stochastic_crossover:
                 logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA/Stochastic عند الشمعة رقم -{i}.")
