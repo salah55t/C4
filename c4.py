@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع ذاكرة تخزين مؤقت للإشارات الفنية
+# ملف c4.py - نسخة مع استراتيجية EMA-Stochastic 15m
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة سجلات تشخيصية نهائية ومفصلة لكل خطوة تحليل ---
+# --- تعديل: تطبيق استراتيجية جديدة وإزالة جميع الفلاتر ---
 import time
 import os
 import json
@@ -61,7 +61,8 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-are_filters_disabled: bool = False
+# --- MODIFICATION: Disable all filters as requested by the user ---
+are_filters_disabled: bool = True
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
@@ -82,11 +83,13 @@ MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
+# --- MODIFICATION: Updated EMA periods for the new strategy ---
+EMA_FAST_PERIOD: int = 50
+EMA_SLOW_PERIOD: int = 120 # Changed from 200 to 120 for the new strategy
+
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
-EMA_SLOW_PERIOD: int = 200
-EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
@@ -451,6 +454,11 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
+    
+    # --- MODIFICATION: Add explicit EMA columns for the new strategy ---
+    df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+
 
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -479,8 +487,8 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
 
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
-    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
-    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
+    df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
+    df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=200, adjust=False).mean()) - 1
     if btc_df is not None and not btc_df.empty:
         asset_returns = df_calc['close'].pct_change()
         merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
@@ -658,7 +666,7 @@ class EnhancedTradingStrategy:
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
     with filters_disabled_lock:
         if are_filters_disabled:
-            logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
+            logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام (are_filters_disabled=True).")
             return True
 
     filters = profile.get("filters", {})
@@ -787,56 +795,46 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- دوال التحقق من إشارات المؤشرات (مُعدّلة وبدون طباعة داخلية) ---
-def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    required_cols = ['ema_9', 'ema_21', 'close', 'rsi', 'volume', 'volume_sma_20']
-    if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
+# --- NEW STRATEGY FUNCTION ---
+def check_ema_stochastic_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+    """
+    Checks for the user-defined EMA/Stochastic strategy signal.
+    - EMA 50 crosses above EMA 120
+    - Stochastic (%K) crosses above 20
+    """
+    EMA_FAST_COL = 'ema_50'
+    EMA_SLOW_COL = 'ema_120'
+    STOCH_K_COL = 'stoch_k'
+
+    required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL]
+    if not all(col in df.columns for col in required_cols):
+        logger.warning(f"  -> [Strategy Check] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة لاستراتيجية EMA/Stochastic.")
         return False
-    try:
-        for i in range(1, lookback_period + 1):
-            current_close = df['close'].iloc[-i]; current_ema9 = df['ema_9'].iloc[-i]
-            current_ema21 = df['ema_21'].iloc[-i]; current_rsi = df['rsi'].iloc[-i]
-            current_volume = df['volume'].iloc[-i]; current_volume_sma = df['volume_sma_20'].iloc[-i]
-            prev_ema9 = df['ema_9'].iloc[-(i + 1)]; prev_ema21 = df['ema_21'].iloc[-(i + 1)]
-            is_crossover = prev_ema9 < prev_ema21 and current_ema9 > current_ema21
-            is_close_above = current_close > current_ema9 and current_close > current_ema21
-            is_rsi_strong = current_rsi > 50
-            is_volume_spike = current_volume_sma > 0 and current_volume > (current_volume_sma * 1.5)
-            if is_crossover and is_close_above and (is_rsi_strong or is_volume_spike):
-                return True
-        return False
-    except (IndexError, TypeError):
+    
+    if len(df) < lookback_period + 2:
+        logger.warning(f"  -> [Strategy Check] 🛑 عدد الشموع غير كافٍ للتحقق من الاستراتيجية.")
         return False
 
-def check_golden_cross_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    required_cols = ['sma_50', 'sma_200']
-    if not all(col in df.columns for col in required_cols) or len(df) < 200 + lookback_period:
-        return False
     try:
+        # Check for buy signal within the lookback period
         for i in range(1, lookback_period + 1):
-            current_sma50 = df['sma_50'].iloc[-i]; current_sma200 = df['sma_200'].iloc[-i]
-            prev_sma50 = df['sma_50'].iloc[-(i + 1)]; prev_sma200 = df['sma_200'].iloc[-(i + 1)]
-            if prev_sma50 < prev_sma200 and current_sma50 > current_sma200:
-                return True
-        return False
-    except (IndexError, TypeError):
-        return False
+            current = df.iloc[-i]
+            previous = df.iloc[-(i + 1)]
 
-def check_supertrend_breakout_signal(df: pd.DataFrame, lookback_period: int = 3) -> bool:
-    required_cols = ['supertrend', 'supertrend_direction', 'close', 'volume', 'volume_sma_20']
-    if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
-        return False
-    try:
-        for i in range(1, lookback_period + 1):
-            current_close = df['close'].iloc[-i]; current_supertrend = df['supertrend'].iloc[-i]
-            current_volume = df['volume'].iloc[-i]; current_volume_sma = df['volume_sma_20'].iloc[-i]
-            prev_close = df['close'].iloc[-(i + 1)]; prev_supertrend = df['supertrend'].iloc[-(i + 1)]
-            is_breakout = prev_close < prev_supertrend and current_close > current_supertrend
-            is_volume_strong = current_volume_sma > 0 and current_volume > current_volume_sma
-            if is_breakout and is_volume_strong:
-                return True
-        return False
-    except (IndexError, TypeError):
+            # Condition 1: EMA 50 crosses above EMA 120
+            ema_crossover = previous[EMA_FAST_COL] <= previous[EMA_SLOW_COL] and current[EMA_FAST_COL] > current[EMA_SLOW_COL]
+
+            # Condition 2: Stochastic K crosses above 20
+            stochastic_crossover = previous[STOCH_K_COL] <= 20 and current[STOCH_K_COL] > 20
+
+            if ema_crossover and stochastic_crossover:
+                logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA/Stochastic عند الشمعة رقم -{i}.")
+                return True  # Buy signal found
+
+        # This bot is long-only, so we don't check for sell signals.
+        return False  # No buy signal found
+    except (IndexError, TypeError) as e:
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من الاستراتيجية: {e}")
         return False
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1576,15 +1574,14 @@ def main_loop_enhanced():
                         df_features.name = symbol
                         logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
-                        ema_cross = check_ema_crossover_signal(df_features, 3)
-                        golden_cross = check_golden_cross_signal(df_features, 3)
-                        super_break = check_supertrend_breakout_signal(df_features, 3)
-
-                        if not (ema_cross or golden_cross or super_break):
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة فنية أولية. السوق هادئ. انتظار...")
+                        # --- START: NEW STRATEGY IMPLEMENTATION ---
+                        is_strategy_signal = check_ema_stochastic_strategy(df_features)
+                        if not is_strategy_signal:
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من استراتيجية EMA/Stochastic. انتظار...")
                             continue
+                        # --- END: NEW STRATEGY IMPLEMENTATION ---
                         
-                        logger.info(f"  -> [{symbol}] 🔥 إشارة فنية أولية مكتشفة! (EMA: {ema_cross}, Golden: {golden_cross}, SuperT: {super_break}). التحقق من النموذج...")
+                        logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stochastic مكتشفة! التحقق من النموذج...")
 
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
@@ -1606,12 +1603,15 @@ def main_loop_enhanced():
                         if not tp_sl_data: continue
 
                         last_features = df_features.iloc[-1]
+                        
+                        # The following filter checks will be bypassed because `are_filters_disabled` is True
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
-
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
+                        logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح (معطلة).")
 
-                        new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+
+                        new_signal = {'symbol': symbol, 'strategy_name': "EMA_Stochastic_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': "DISABLED", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
 
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
