@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع استراتيجية EMA-Stochastic 15m
+# ملف c4.py - نسخة مع استراتيجية EMA(9/21) و Stochastic Momentum
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق استراتيجية جديدة وإزالة جميع الفلاتر ---
+# --- تعديل: تطبيق استراتيجية جديدة بناءً على طلب المستخدم ---
 import time
 import os
 import json
@@ -83,9 +83,9 @@ MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
-# --- MODIFICATION: Updated EMA periods for the new strategy ---
-EMA_FAST_PERIOD: int = 9
-EMA_SLOW_PERIOD: int = 21 # Changed from 200 to 120 for the new strategy
+# --- NOTE: EMA 9 and 21 are calculated in calculate_all_features ---
+EMA_FAST_PERIOD: int = 50
+EMA_SLOW_PERIOD: int = 120
 
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
@@ -449,13 +449,15 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     # --- حساب المؤشرات ---
     df_calc['ema_2'] = df_calc['close'].ewm(span=2, adjust=False).mean()
     df_calc['ema_8'] = df_calc['close'].ewm(span=8, adjust=False).mean()
+    # --- START: NEW STRATEGY EMAs ---
+    # التأكد من حساب المتوسطات المطلوبة للاستراتيجية الجديدة
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    # --- END: NEW STRATEGY EMAs ---
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
     
-    # --- MODIFICATION: Add explicit EMA columns for the new strategy ---
     df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
 
@@ -795,20 +797,22 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- NEW STRATEGY FUNCTION ---
-def check_ema_stochastic_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
+# --- START: NEW STRATEGY FUNCTION ---
+# تم استبدال الدالة القديمة بهذه الدالة الجديدة لتطبيق استراتيجية المستخدم
+def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
-    Checks for the user-defined EMA/Stochastic strategy signal.
-    - EMA 50 crosses above EMA 120
-    - Stochastic (%K) crosses above 20
+    التحقق من استراتيجية المستخدم الجديدة المبنية على تقاطع EMA وتأكيد الزخم من Stochastic.
+    - الشرط 1: تقاطع EMA 9 فوق EMA 21.
+    - الشرط 2: في نفس شمعة التقاطع، يجب أن يكون خط Stochastic %K فوق خط %D.
     """
-    EMA_FAST_COL = 'ema_50'
-    EMA_SLOW_COL = 'ema_120'
+    EMA_FAST_COL = 'ema_9'
+    EMA_SLOW_COL = 'ema_21'
     STOCH_K_COL = 'stoch_k'
+    STOCH_D_COL = 'stoch_d'
 
-    required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL]
+    required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL, STOCH_D_COL]
     if not all(col in df.columns for col in required_cols):
-        logger.warning(f"  -> [Strategy Check] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة لاستراتيجية EMA/Stochastic.")
+        logger.warning(f"  -> [Strategy Check] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة لاستراتيجية EMA/Stochastic Momentum.")
         return False
     
     if len(df) < lookback_period + 2:
@@ -816,26 +820,27 @@ def check_ema_stochastic_strategy(df: pd.DataFrame, lookback_period: int = 3) ->
         return False
 
     try:
-        # Check for buy signal within the lookback period
+        # البحث عن إشارة شراء ضمن فترة المراجعة
         for i in range(1, lookback_period + 1):
             current = df.iloc[-i]
             previous = df.iloc[-(i + 1)]
 
-            # Condition 1: EMA 50 crosses above EMA 120
+            # الشرط 1: تقاطع EMA 9 فوق EMA 21
             ema_crossover = previous[EMA_FAST_COL] <= previous[EMA_SLOW_COL] and current[EMA_FAST_COL] > current[EMA_SLOW_COL]
 
-            # Condition 2: Stochastic K crosses above 20
-            stochastic_crossover = previous[STOCH_K_COL] <= 30 and current[STOCH_K_COL] > 30
+            # الشرط 2: زخم ستوكاستيك إيجابي (K% فوق D%)
+            stochastic_momentum = current[STOCH_K_COL] > current[STOCH_D_COL]
 
-            if ema_crossover and stochastic_crossover:
-                logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA/Stochastic عند الشمعة رقم -{i}.")
-                return True  # Buy signal found
+            if ema_crossover and stochastic_momentum:
+                logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA(9/21)/Stochastic Momentum عند الشمعة رقم -{i}.")
+                return True  # تم العثور على إشارة شراء
 
-        # This bot is long-only, so we don't check for sell signals.
-        return False  # No buy signal found
+        return False  # لم يتم العثور على إشارة شراء
     except (IndexError, TypeError) as e:
         logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من الاستراتيجية: {e}")
         return False
+# --- END: NEW STRATEGY FUNCTION ---
+
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -1065,6 +1070,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
                 f"*العملة:* `{signal_data['symbol']}`\n"
+                f"*الاستراتيجية:* `{signal_data['strategy_name']}`\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
                 f"*الهدف (TP):* `{target_price:.4f}`\n"
                 f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
@@ -1575,13 +1581,14 @@ def main_loop_enhanced():
                         logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
                         # --- START: NEW STRATEGY IMPLEMENTATION ---
-                        is_strategy_signal = check_ema_stochastic_strategy(df_features)
+                        # استدعاء دالة الاستراتيجية الجديدة التي طلبها المستخدم
+                        is_strategy_signal = check_ema_stoch_momentum_strategy(df_features)
                         if not is_strategy_signal:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من استراتيجية EMA/Stochastic. انتظار...")
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من استراتيجية EMA(9/21)/Stochastic Momentum. انتظار...")
                             continue
-                        # --- END: NEW STRATEGY IMPLEMENTATION ---
                         
-                        logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stochastic مكتشفة! التحقق من النموذج...")
+                        logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA(9/21)/Stochastic Momentum مكتشفة! التحقق من النموذج...")
+                        # --- END: NEW STRATEGY IMPLEMENTATION ---
 
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
@@ -1604,14 +1611,13 @@ def main_loop_enhanced():
 
                         last_features = df_features.iloc[-1]
                         
-                        # The following filter checks will be bypassed because `are_filters_disabled` is True
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
                         logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح (معطلة).")
 
-
-                        new_signal = {'symbol': symbol, 'strategy_name': "EMA_Stochastic_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': "DISABLED", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        # --- تحديث اسم الاستراتيجية ---
+                        new_signal = {'symbol': symbol, 'strategy_name': "EMA9_21_Stoch_Momentum_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': "DISABLED", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
 
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
