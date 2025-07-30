@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع فلتر Supertrend والتقاطع الذهبي و EMA Crossover
+# ملف c4.py - نسخة محدثة مع لوحة تحكم متقدمة للإعدادات
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق شروط (Supertrend أو Golden Cross أو EMA Cross) بعد موافقة نموذج تعلم الآلة ---
+# --- تعديل: إضافة لوحة تحكم لتفعيل/تعطيل الفلاتر وتثبيت القيم يدويًا ---
 import time
 import os
 import json
@@ -20,7 +20,7 @@ from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
@@ -61,8 +61,6 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-are_filters_disabled: bool = False
-filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 MODEL_FOLDER: str = 'V9'
@@ -96,17 +94,15 @@ SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
-USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_ACTIVATION_PROFIT_PERCENT: float = 1.8
-TRAILING_DISTANCE_PERCENT: float = 1.0
-USE_PEAK_FILTER: bool = True
-PEAK_CHECK_PERIOD: int = 50
-PULLBACK_THRESHOLD_PCT: float = 0.988
-BREAKOUT_ALLOWANCE_PCT: float = 1.003
 DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 300
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
+
+# --- NEW: Bot Settings Management ---
+bot_settings: Dict[str, Any] = {}
+settings_lock = Lock()
+SETTINGS_FILE_PATH = 'settings.json'
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -140,8 +136,62 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" # <-- سبب الرفض المحدث
+    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" 
 }
+
+# --- NEW: Settings Persistence Functions ---
+def get_default_settings() -> Dict[str, Any]:
+    return {
+        "entry_filters": {
+            "ema_crossover_enabled": True,
+            "golden_cross_enabled": True,
+            "supertrend_breakout_enabled": True
+        },
+        "exit_filters": {
+            "atr_trailing_stop_enabled": True,
+            "atr_ts_period": 14,
+            "atr_ts_multiplier": 2.5
+        },
+        "general_filters": {
+            "peak_pullback_enabled": True
+        },
+        "filter_profile_mode": "dynamic", # "dynamic" or "static"
+        "static_filter_profile": {
+            "adx": 25.0, "rel_vol": 0.4, "rsi_range": [52, 88], 
+            "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, 
+            "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, 
+            "min_bid_ask_ratio": 1.15
+        }
+    }
+
+def save_settings():
+    with settings_lock:
+        try:
+            with open(SETTINGS_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(bot_settings, f, indent=4)
+            logger.info("✅ [Settings] تم حفظ الإعدادات بنجاح.")
+        except Exception as e:
+            logger.error(f"❌ [Settings] فشل حفظ الإعدادات: {e}")
+
+def load_settings():
+    global bot_settings
+    defaults = get_default_settings()
+    try:
+        if os.path.exists(SETTINGS_FILE_PATH):
+            with open(SETTINGS_FILE_PATH, 'r', encoding='utf-8') as f:
+                loaded_settings = json.load(f)
+            # Merge loaded settings with defaults to ensure new keys are added
+            bot_settings = defaults.copy()
+            bot_settings.update(loaded_settings)
+            logger.info("✅ [Settings] تم تحميل الإعدادات من الملف.")
+        else:
+            bot_settings = defaults
+            logger.info("⚠️ [Settings] ملف الإعدادات غير موجود، تم استخدام الإعدادات الافتراضية.")
+            save_settings() # Create the file with defaults
+    except Exception as e:
+        logger.error(f"❌ [Settings] فشل تحميل الإعدادات، تم استخدام الإعدادات الافتراضية: {e}")
+        bot_settings = defaults
+
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
@@ -422,7 +472,9 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
 
-    # --- NEW: Add EMA 9, 21, Volume SMA, and Golden Cross SMAs ---
+    # --- حساب المؤشرات ---
+    df_calc['ema_2'] = df_calc['close'].ewm(span=2, adjust=False).mean()
+    df_calc['ema_8'] = df_calc['close'].ewm(span=8, adjust=False).mean()
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
@@ -562,7 +614,7 @@ class EnhancedFilterSystem:
     def __init__(self): self.analyzer = MarketConditionsAnalyzer()
     def generate_filters(self) -> Dict[str, Any]:
         conditions = self.analyzer.analyze_conditions()
-        base_profile = {"adx": 25.0, "rel_vol": 0.4, "rsi_range": (52, 88), "roc": 0.05, "slope": 0.01, "min_rrr": 1.4, "min_volatility_pct": 0.35, "min_btc_correlation": 0.4, "min_bid_ask_ratio": 1.15}
+        base_profile = get_default_settings()['static_filter_profile']
         if conditions['volatility_regime'] == "low": base_profile['min_volatility_pct'] *= 0.7; base_profile['min_rrr'] *= 1.2
         elif conditions['volatility_regime'] == "high": base_profile['min_volatility_pct'] *= 1.3; base_profile['min_rrr'] *= 0.8
         if conditions['volume_regime'] == "low": base_profile['rel_vol'] *= 0.5
@@ -631,30 +683,34 @@ class EnhancedTradingStrategy:
             return None
 
 def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any], entry_price: float, tp_sl_data: Dict, df_15m: pd.DataFrame) -> bool:
-    with filters_disabled_lock:
-        if are_filters_disabled:
-            logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
-            return True
-            
     filters = profile.get("filters", {})
     if not filters: log_rejection(symbol, "Filters Not Loaded"); return False
+    
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
     if volatility < filters.get('min_volatility_pct', 0.0): log_rejection(symbol, "Low Volatility", {"volatility": f"{volatility:.2f}%"}); return False
+    
     correlation = last_features.get('btc_correlation', 0)
     if correlation < filters.get('min_btc_correlation', -1.0): log_rejection(symbol, "BTC Correlation", {"corr": f"{correlation:.2f}"}); return False
+    
     risk = entry_price - float(tp_sl_data['stop_loss']); reward = float(tp_sl_data['target_price']) - entry_price
     if risk <= 0 or reward <= 0 or (reward / risk) < filters.get('min_rrr', 0.0): log_rejection(symbol, "RRR Filter", {"rrr": f"{(reward/risk):.2f}" if risk > 0 else "N/A"}); return False
+    
     adx, rel_vol, rsi, roc, slope = last_features.get('adx', 0), last_features.get('relative_volume', 0), last_features.get('rsi', 0), last_features.get(f'roc_{MOMENTUM_PERIOD}', 0), last_features.get(f'ema_slope_{EMA_SLOPE_PERIOD}', 0)
-    rsi_min, rsi_max = filters.get('rsi_range', (0, 100))
+    rsi_min, rsi_max = filters.get('rsi_range', [0, 100])
     if not (adx >= filters.get('adx', 0) and rel_vol >= filters.get('rel_vol', 0) and rsi_min <= rsi < rsi_max and roc > filters.get('roc', -100) and slope > filters.get('slope', -100)):
         log_rejection(symbol, "Momentum/Strength Filter", {"ADX": f"{adx:.2f}", "RSI": f"{rsi:.2f}"}); return False
-    if USE_PEAK_FILTER and df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
+    
+    with settings_lock:
+        is_peak_filter_enabled = bot_settings['general_filters']['peak_pullback_enabled']
+
+    if is_peak_filter_enabled and df_15m is not None and len(df_15m) >= PEAK_CHECK_PERIOD:
         recent_candles = df_15m.iloc[-PEAK_CHECK_PERIOD:-1]
         if not recent_candles.empty:
             highest_high = recent_candles['high'].max()
             with market_state_lock: is_strong_uptrend = (current_market_state.get("overall_regime") == "STRONG_UPTREND")
             price_limit = highest_high * (BREAKOUT_ALLOWANCE_PCT if is_strong_uptrend else PULLBACK_THRESHOLD_PCT)
             if not (entry_price <= price_limit): log_rejection(symbol, "Peak/Pullback Filter", {"entry": f"{entry_price:.4f}", "limit": f"{price_limit:.4f}"}); return False
+    
     return True
 
 def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, Any]]:
@@ -675,9 +731,6 @@ def analyze_order_book(symbol: str, entry_price: float) -> Optional[Dict[str, An
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)}); return None
 
 def passes_order_book_check(symbol: str, order_book_analysis: Dict, profile: Dict) -> bool:
-    with filters_disabled_lock:
-        if are_filters_disabled:
-            return True
     filters = profile.get("filters", {})
     if order_book_analysis.get('has_large_sell_wall', True): log_rejection(symbol, "Large Sell Wall Detected", {"details": order_book_analysis.get('wall_details')}); return False
     if order_book_analysis.get('bid_ask_ratio', 0) < filters.get('min_bid_ask_ratio', 1.0): log_rejection(symbol, "Order Book Imbalance", {"ratio": f"{order_book_analysis.get('bid_ask_ratio', 0):.2f}"}); return False
@@ -1032,7 +1085,8 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             reason_map = {
                 'take_profit': '🎯 Take Profit', 
                 'stop_loss': '🛑 Stop Loss', 
-                'manual': '🖐️ Manual Close'
+                'manual': '🖐️ Manual Close',
+                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)'
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1128,6 +1182,22 @@ def determine_market_state_enhanced():
 def analyze_market_and_create_dynamic_profile_enhanced():
     global dynamic_filter_profile_cache, last_dynamic_filter_analysis_time
     if time.time() - last_dynamic_filter_analysis_time < DYNAMIC_FILTER_ANALYSIS_INTERVAL: return
+    
+    with settings_lock:
+        mode = bot_settings.get('filter_profile_mode', 'dynamic')
+        if mode == 'static':
+            static_profile = bot_settings.get('static_filter_profile', get_default_settings()['static_filter_profile'])
+            with dynamic_filter_lock:
+                dynamic_filter_profile_cache = {
+                    "name": "ملف ثابت",
+                    "description": "تم تحديد الفلاتر يدويًا من لوحة التحكم.",
+                    "strategy": "STATIC",
+                    "filters": static_profile,
+                    "last_updated": datetime.now(timezone.utc).isoformat()
+                }
+            logger.info("✅ [Filter] تم تحميل ملف الفلاتر الثابت.")
+            return
+
     logger.info("🔬 [Filter] توليد فلاتر متكيفة...")
     enhanced_profile = enhanced_filter_system.generate_filters()
     description = enhanced_profile['description']
@@ -1161,6 +1231,10 @@ def get_dashboard_html():
         .tab-btn.active { border-bottom-color: var(--accent-blue); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
         #modal-overlay { transition: opacity 0.3s ease; }
+        .form-input { background-color: #0D1117; border: 1px solid #30363D; color: #E6EDF3; border-radius: 0.375rem; padding: 0.5rem 0.75rem; }
+        .form-input:focus { outline: none; border-color: var(--accent-blue); box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.5); }
+        .form-input:disabled { background-color: #21262d; cursor: not-allowed; }
+        .toast { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1174,26 +1248,27 @@ def get_dashboard_html():
             </div>
         </div>
     </div>
+    <div id="toast-notification" class="toast hidden bg-accent-green text-white py-2 px-6 rounded-lg shadow-lg">تم حفظ الإعدادات بنجاح!</div>
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
-        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">ملف الفلاتر</h3><div id="filter-profile-name" class="text-xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">التداول الحقيقي</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="trading-status-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div></div>
-            <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">تعطيل الفلاتر</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="disable-filters-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="disable-filters-toggle" class="sr-only" onchange="toggleFilters()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div></div>
         </section>
-        <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button><button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button><button onclick="showTab('filters', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الفلاتر الحالية</button></nav></div>
+        <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button><button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button><button onclick="showTab('filters', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الفلاتر الحالية</button><button onclick="showTab('settings', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإعدادات</button></nav></div>
         <main>
             <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[25%]">التقدم</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="filters-tab" class="tab-content hidden"><div id="filters-display" class="card p-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"></div></div>
+            <div id="settings-tab" class="tab-content hidden card p-6"><form id="settings-form" onsubmit="saveSettings(event)"></form></div>
         </main>
     </div>
 <script>
@@ -1218,8 +1293,9 @@ function showConfirmation(title, bodyText, onConfirm) {
 function showTab(tabId, el) {
     document.querySelectorAll('.tab-content').forEach(t => t.classList.add('hidden'));
     document.getElementById(tabId + '-tab').classList.remove('hidden');
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active', 'text-white'));
+    document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active', 'text-white'); b.classList.add('text-text-secondary'); });
     el.classList.add('active', 'text-white');
+    el.classList.remove('text-text-secondary');
 }
 async function fetchData(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { console.error('Fetch Error:', e); return null; } }
 function updateMarketStatus() {
@@ -1242,12 +1318,7 @@ function updateMarketStatus() {
         tradeToggle.checked = data.is_trading_enabled;
         tradeText.textContent = data.is_trading_enabled ? 'مُفعَّل' : 'غير مُفعَّل';
         tradeText.className = `font-bold text-lg ${data.is_trading_enabled ? 'text-accent-green' : 'text-accent-red'}`;
-        document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
         
-        const filtersToggle = document.getElementById('disable-filters-toggle'), filtersText = document.getElementById('disable-filters-text');
-        filtersToggle.checked = data.are_filters_disabled;
-        filtersText.textContent = data.are_filters_disabled ? 'معطلة' : 'مفعلة';
-        filtersText.className = `font-bold text-lg ${data.are_filters_disabled ? 'text-accent-red' : 'text-accent-green'}`;
     });
 }
 function updateSignals() {
@@ -1307,9 +1378,149 @@ function manualClose(signalId, symbol) {
     });
 }
 function toggleTrading() { fetch('/api/trading/toggle', { method: 'POST' }).then(() => updateMarketStatus()); }
-function toggleFilters() { fetch('/api/filters/disable/toggle', { method: 'POST' }).then(() => updateMarketStatus()); }
+
+// --- NEW: Settings Panel Functions ---
+function buildSettingsForm(settings) {
+    const form = document.getElementById('settings-form');
+    const createToggle = (id, label, checked) => `
+        <label for="${id}" class="flex items-center justify-between cursor-pointer">
+            <span>${label}</span>
+            <div class="relative"><input type="checkbox" id="${id}" class="sr-only" ${checked ? 'checked' : ''}><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div>
+        </label>`;
+
+    const createInput = (id, label, value, type='number', step='any', disabled=false) => `
+        <div class="flex items-center justify-between">
+            <label for="${id}" class="text-text-secondary">${label}</label>
+            <input type="${type}" id="${id}" value="${value}" step="${step}" class="form-input w-28 text-left" ${disabled ? 'disabled' : ''}>
+        </div>`;
+    
+    const createRsiRangeInput = (id, label, values, disabled=false) => `
+        <div class="flex items-center justify-between">
+            <label for="${id}-min" class="text-text-secondary">${label}</label>
+            <div class="flex items-center gap-2">
+                <input type="number" id="${id}-min" value="${values[0]}" class="form-input w-20 text-left" ${disabled ? 'disabled' : ''}>
+                <span>-</span>
+                <input type="number" id="${id}-max" value="${values[1]}" class="form-input w-20 text-left" ${disabled ? 'disabled' : ''}>
+            </div>
+        </div>`;
+
+    form.innerHTML = `
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+            <!-- Filter Activation Column -->
+            <div class="space-y-4">
+                <h3 class="text-xl font-bold border-b border-border-color pb-2 mb-4">تفعيل الفلاتر</h3>
+                <div class="card p-4 space-y-3">
+                    <h4 class="font-semibold text-accent-blue">فلاتر الدخول</h4>
+                    ${createToggle('ema_crossover_enabled', 'تقاطع EMA (9/21)', settings.entry_filters.ema_crossover_enabled)}
+                    ${createToggle('golden_cross_enabled', 'التقاطع الذهبي (50/200)', settings.entry_filters.golden_cross_enabled)}
+                    ${createToggle('supertrend_breakout_enabled', 'اختراق Supertrend', settings.entry_filters.supertrend_breakout_enabled)}
+                </div>
+                <div class="card p-4 space-y-3">
+                    <h4 class="font-semibold text-accent-blue">فلاتر عامة</h4>
+                    ${createToggle('peak_pullback_enabled', 'فلتر القمة/التصحيح', settings.general_filters.peak_pullback_enabled)}
+                </div>
+                <div class="card p-4 space-y-3">
+                    <h4 class="font-semibold text-accent-blue">فلاتر الإغلاق</h4>
+                    ${createToggle('atr_trailing_stop_enabled', 'وقف متحرك (ATR)', settings.exit_filters.atr_trailing_stop_enabled)}
+                </div>
+            </div>
+            <!-- Filter Profile Column -->
+            <div class="space-y-4">
+                <h3 class="text-xl font-bold border-b border-border-color pb-2 mb-4">ملف الفلاتر</h3>
+                <div class="card p-4 space-y-4">
+                    <div class="flex items-center justify-between">
+                        <span class="font-semibold">الوضع الديناميكي</span>
+                        <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="filter_profile_mode" class="sr-only" ${settings.filter_profile_mode === 'dynamic' ? 'checked' : ''} onchange="toggleStaticInputs()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                    </div>
+                    <div id="static-filters-container" class="space-y-3">
+                        ${createInput('static_adx', 'ADX', settings.static_filter_profile.adx)}
+                        ${createInput('static_rel_vol', 'Relative Volume', settings.static_filter_profile.rel_vol)}
+                        ${createRsiRangeInput('static_rsi_range', 'RSI Range', settings.static_filter_profile.rsi_range)}
+                        ${createInput('static_roc', 'ROC', settings.static_filter_profile.roc)}
+                        ${createInput('static_slope', 'EMA Slope', settings.static_filter_profile.slope)}
+                        ${createInput('static_min_rrr', 'Min RRR', settings.static_filter_profile.min_rrr)}
+                        ${createInput('static_min_volatility_pct', 'Min Volatility %', settings.static_filter_profile.min_volatility_pct)}
+                        ${createInput('static_min_btc_correlation', 'Min BTC Correlation', settings.static_filter_profile.min_btc_correlation)}
+                        ${createInput('static_min_bid_ask_ratio', 'Min Bid/Ask Ratio', settings.static_filter_profile.min_bid_ask_ratio)}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="mt-8 flex justify-end">
+            <button type="submit" class="bg-accent-blue hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-lg">حفظ الإعدادات</button>
+        </div>
+    `;
+    toggleStaticInputs(); // Set initial state
+}
+
+function toggleStaticInputs() {
+    const isDynamic = document.getElementById('filter_profile_mode').checked;
+    const container = document.getElementById('static-filters-container');
+    container.querySelectorAll('input').forEach(input => {
+        input.disabled = isDynamic;
+    });
+}
+
+function updateSettings() {
+    fetchData('/api/settings').then(settings => {
+        if (settings) {
+            buildSettingsForm(settings);
+        }
+    });
+}
+
+function saveSettings(event) {
+    event.preventDefault();
+    const form = document.getElementById('settings-form');
+    const settings = {
+        entry_filters: {
+            ema_crossover_enabled: form.querySelector('#ema_crossover_enabled').checked,
+            golden_cross_enabled: form.querySelector('#golden_cross_enabled').checked,
+            supertrend_breakout_enabled: form.querySelector('#supertrend_breakout_enabled').checked,
+        },
+        exit_filters: {
+            atr_trailing_stop_enabled: form.querySelector('#atr_trailing_stop_enabled').checked,
+            // These values could be made editable too in the future
+            atr_ts_period: 14, 
+            atr_ts_multiplier: 2.5
+        },
+        general_filters: {
+            peak_pullback_enabled: form.querySelector('#peak_pullback_enabled').checked,
+        },
+        filter_profile_mode: form.querySelector('#filter_profile_mode').checked ? 'dynamic' : 'static',
+        static_filter_profile: {
+            adx: parseFloat(form.querySelector('#static_adx').value),
+            rel_vol: parseFloat(form.querySelector('#static_rel_vol').value),
+            rsi_range: [
+                parseInt(form.querySelector('#static_rsi_range-min').value),
+                parseInt(form.querySelector('#static_rsi_range-max').value)
+            ],
+            roc: parseFloat(form.querySelector('#static_roc').value),
+            slope: parseFloat(form.querySelector('#static_slope').value),
+            min_rrr: parseFloat(form.querySelector('#static_min_rrr').value),
+            min_volatility_pct: parseFloat(form.querySelector('#static_min_volatility_pct').value),
+            min_btc_correlation: parseFloat(form.querySelector('#static_min_btc_correlation').value),
+            min_bid_ask_ratio: parseFloat(form.querySelector('#static_min_bid_ask_ratio').value),
+        }
+    };
+
+    fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+    }).then(res => {
+        if (res.ok) {
+            const toast = document.getElementById('toast-notification');
+            toast.classList.remove('hidden');
+            setTimeout(() => toast.classList.add('hidden'), 3000);
+        } else {
+            alert('فشل حفظ الإعدادات. يرجى مراجعة السجلات.');
+        }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    ['MarketStatus', 'Signals', 'Stats', 'Notifications', 'Rejections', 'Filters'].forEach(f => window[`update${f}`]());
+    ['MarketStatus', 'Signals', 'Stats', 'Notifications', 'Rejections', 'Filters', 'Settings'].forEach(f => window[`update${f}`]());
     setInterval(updateMarketStatus, 5000); setInterval(updateSignals, 7000); setInterval(updateStats, 60000);
     setInterval(updateNotifications, 15000); setInterval(updateRejections, 15000); setInterval(updateFilters, 60000);
 });
@@ -1323,7 +1534,6 @@ def home(): return render_template_string(get_dashboard_html())
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
-    with filters_disabled_lock: is_disabled = are_filters_disabled
     with trading_status_lock: is_enabled = is_trading_enabled
     with dynamic_filter_lock: profile_copy = dict(dynamic_filter_profile_cache)
     active_sessions, _, _ = get_session_state()
@@ -1337,7 +1547,6 @@ def get_market_status():
         "active_sessions": active_sessions, 
         "usdt_balance": usdt_balance, 
         "is_trading_enabled": is_enabled, 
-        "are_filters_disabled": is_disabled
     })
 
 @app.route('/api/stats')
@@ -1406,15 +1615,6 @@ def toggle_trading_status():
         log_and_notify('warning', f"🚨 Real trading status changed to: {status_msg}", "TRADING_STATUS_CHANGE")
         return jsonify({"message": f"Trading status set to {status_msg}"})
 
-@app.route('/api/filters/disable/toggle', methods=['POST'])
-def toggle_disable_filters():
-    global are_filters_disabled
-    with filters_disabled_lock:
-        are_filters_disabled = not are_filters_disabled
-        status_msg = "DISABLED" if are_filters_disabled else "ENABLED"
-        log_and_notify('warning', f"⚙️ Filters status changed to: {status_msg}", "FILTER_STATUS_CHANGE")
-        return jsonify({"message": f"Filters status set to {status_msg}"})
-
 @app.route('/api/signals/close/<int:signal_id>', methods=['POST'])
 def manual_close_trade_endpoint(signal_id):
     if not redis_client or not client: return jsonify({"success": False, "message": "Services not ready"}), 503
@@ -1434,6 +1634,21 @@ def manual_close_trade_endpoint(signal_id):
         return jsonify({"success": True, "message": f"Signal for {signal_to_close['symbol']} closed successfully."})
     else:
         return jsonify({"success": False, "message": "Failed to close signal. Check logs."}), 500
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def handle_settings():
+    global bot_settings
+    if request.method == 'GET':
+        with settings_lock:
+            return jsonify(bot_settings)
+    
+    if request.method == 'POST':
+        new_settings = request.json
+        with settings_lock:
+            bot_settings.update(new_settings)
+        save_settings()
+        log_and_notify('warning', "⚙️ تم تحديث إعدادات البوت من لوحة التحكم.", "SETTINGS_CHANGE")
+        return jsonify({"success": True, "message": "Settings updated successfully."})
 
 # ---------------------- حلقات النظام ----------------------
 def trade_management_loop():
@@ -1458,51 +1673,74 @@ def trade_management_loop():
                 
                 current_price = float(current_price_str)
                 signal_id = signal['id']
+                symbol = signal['symbol']
                 tp = float(signal['target_price'])
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
+                # 1. Check for Take Profit
                 if current_price >= tp:
-                    logger.info(f"🎯 [TP HIT] {signal['symbol']} at {current_price}")
+                    logger.info(f"🎯 [TP HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, 'take_profit')
                     continue
+
+                # 2. Update Peak Price
+                peak_price = float(signal.get('current_peak_price', entry))
+                new_peak = max(peak_price, current_price)
+                if new_peak > peak_price:
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache:
+                            open_signals_cache[symbol]['current_peak_price'] = new_peak
+                    try:
+                        if check_db_connection():
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (new_peak, signal_id))
+                            conn.commit()
+                    except Exception as e:
+                        logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
+                    signal['current_peak_price'] = new_peak
+
+                # 3. Calculate and Update ATR Trailing Stop
+                with settings_lock:
+                    is_atr_ts_enabled = bot_settings['exit_filters']['atr_trailing_stop_enabled']
+                    atr_ts_period = bot_settings['exit_filters']['atr_ts_period']
+                    atr_ts_multiplier = bot_settings['exit_filters']['atr_ts_multiplier']
+
+                if is_atr_ts_enabled:
+                    try:
+                        df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
+                        if df_atr is not None and len(df_atr) > atr_ts_period:
+                            high_low = df_atr['high'] - df_atr['low']
+                            high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
+                            low_close_prev = (df_atr['low'] - df_atr['close'].shift()).abs()
+                            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+                            latest_atr = tr.ewm(span=atr_ts_period, adjust=False).mean().iloc[-1]
+
+                            if latest_atr > 0:
+                                new_trailing_stop_price = new_peak - (latest_atr * atr_ts_multiplier)
+                                if new_trailing_stop_price > sl:
+                                    logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
+                                    sl = new_trailing_stop_price
+                                    with signal_cache_lock:
+                                        if symbol in open_signals_cache:
+                                            open_signals_cache[symbol]['stop_loss'] = new_trailing_stop_price
+                                    try:
+                                        if check_db_connection():
+                                            with conn.cursor() as cur:
+                                                cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (new_trailing_stop_price, signal_id))
+                                            conn.commit()
+                                    except Exception as e:
+                                        logger.error(f"DB error updating ATR trailing SL for {symbol}: {e}"); conn.rollback()
+                    except Exception as e:
+                        logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
+
+                # 4. Check for Stop Loss Hit (original or trailed)
                 if current_price <= sl:
-                    logger.info(f"🛑 [SL HIT] {signal['symbol']} at {current_price}")
-                    close_signal(signal_id, current_price, 'stop_loss')
+                    reason = 'atr_trailing_stop' if is_atr_ts_enabled and sl > float(signal['stop_loss']) else 'stop_loss'
+                    logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
+                    close_signal(signal_id, current_price, reason)
                     continue
 
-                if USE_TRAILING_STOP_LOSS:
-                    peak_price = float(signal.get('current_peak_price', entry))
-                    new_peak = max(peak_price, current_price)
-                    
-                    if new_peak > peak_price:
-                        with signal_cache_lock:
-                            if signal['symbol'] in open_signals_cache:
-                                open_signals_cache[signal['symbol']]['current_peak_price'] = new_peak
-                        
-                        try:
-                            if check_db_connection():
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (new_peak, signal_id))
-                                conn.commit()
-                        except Exception as e:
-                            logger.error(f"DB error updating peak price for {signal['symbol']}: {e}"); conn.rollback()
-
-                    profit_pct = (new_peak / entry - 1) * 100
-                    if profit_pct >= TRAILING_ACTIVATION_PROFIT_PERCENT:
-                        new_sl = new_peak * (1 - TRAILING_DISTANCE_PERCENT / 100)
-                        if new_sl > sl:
-                            logger.info(f"📈 [TRAILING SL] {signal['symbol']} SL moved to {new_sl:.4f}")
-                            with signal_cache_lock:
-                                if signal['symbol'] in open_signals_cache:
-                                    open_signals_cache[signal['symbol']]['stop_loss'] = new_sl
-                            try:
-                                if check_db_connection():
-                                    with conn.cursor() as cur:
-                                        cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (new_sl, signal_id))
-                                    conn.commit()
-                            except Exception as e:
-                                logger.error(f"DB error updating trailing SL for {signal['symbol']}: {e}"); conn.rollback()
             time.sleep(2)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
@@ -1519,7 +1757,6 @@ def main_loop_enhanced():
     while True:
         try:
             logger.info("🔄 بدء دورة مسح جديدة...")
-            determine_market_state_enhanced()
             analyze_market_and_create_dynamic_profile_enhanced()
             
             with dynamic_filter_lock:
@@ -1564,10 +1801,12 @@ def main_loop_enhanced():
                             if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             continue
                         
-                        # --- فلتر الدخول الثلاثي: التحقق من أي إشارة إيجابية ---
-                        ema_crossover_ok = check_ema_crossover_signal(df_features, lookback_period=3)
-                        golden_cross_ok = check_golden_cross_signal(df_features, lookback_period=3)
-                        supertrend_breakout_ok = check_supertrend_breakout_signal(df_features, lookback_period=3)
+                        with settings_lock:
+                            entry_filters = bot_settings['entry_filters']
+                        
+                        ema_crossover_ok = entry_filters['ema_crossover_enabled'] and check_ema_crossover_signal(df_features, lookback_period=3)
+                        golden_cross_ok = entry_filters['golden_cross_enabled'] and check_golden_cross_signal(df_features, lookback_period=3)
+                        supertrend_breakout_ok = entry_filters['supertrend_breakout_enabled'] and check_supertrend_breakout_signal(df_features, lookback_period=3)
 
                         if not (ema_crossover_ok or golden_cross_ok or supertrend_breakout_ok):
                             log_rejection(symbol, "No Valid Crossover/Breakout", {
@@ -1576,7 +1815,6 @@ def main_loop_enhanced():
                                 "Supertrend_Break": supertrend_breakout_ok
                             })
                             continue
-                        # --- نهاية الفلتر الثلاثي ---
 
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -1648,6 +1886,7 @@ def initialize_bot_services():
     global client, validated_symbols_to_scan
     logger.info("🤖 [Bot Services] بدء التهيئة...")
     try:
+        load_settings() # Load settings from file on startup
         client = Client(API_KEY, API_SECRET)
         init_db()
         init_redis()
