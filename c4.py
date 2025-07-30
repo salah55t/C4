@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة بترتيب فحص محسن
+# ملف c4.py - نسخة مع إصلاح خطأ قاعدة البيانات
 # تم التحديث بواسطة Gemini
-# --- تعديل: تغيير منطق الفحص للبحث عن الإشارات الفنية أولاً قبل تمريرها لنموذج تعلم الآلة ---
+# --- تعديل: إصلاح خطأ عدم توافق أنواع البيانات عند تحديث قاعدة البيانات ---
 import time
 import os
 import json
@@ -1483,7 +1483,8 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (new_peak, signal_id))
+                                # FIX: Cast to standard Python float
+                                cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (float(new_peak), signal_id))
                             conn.commit()
                     except Exception as e:
                         logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
@@ -1515,7 +1516,8 @@ def trade_management_loop():
                                     try:
                                         if check_db_connection():
                                             with conn.cursor() as cur:
-                                                cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (new_trailing_stop_price, signal_id))
+                                                # FIX: Cast to standard Python float to prevent DB error
+                                                cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (float(new_trailing_stop_price), signal_id))
                                             conn.commit()
                                     except Exception as e:
                                         logger.error(f"DB error updating ATR trailing SL for {symbol}: {e}"); conn.rollback()
