@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع إصلاح خطأ قاعدة البيانات
+# ملف c4.py - نسخة مع ذاكرة تخزين مؤقت للإشارات الفنية
 # تم التحديث بواسطة Gemini
-# --- تعديل: إصلاح خطأ عدم توافق أنواع البيانات عند تحديث قاعدة البيانات ---
+# --- تعديل: إضافة ذاكرة تخزين مؤقت لتسريع فحص الإشارات الفنية ---
 import time
 import os
 import json
@@ -76,10 +76,10 @@ STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.55
-MIN_PROFIT_PERCENT: float = 0.8 
+MIN_PROFIT_PERCENT: float = 0.8
 
 # --- NEW: Memory Optimization Setting ---
-SYMBOL_PROCESSING_BATCH_SIZE: int = 10 
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
 ADX_PERIOD: int = 14
@@ -129,6 +129,10 @@ last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 last_market_state_check = 0
 
+# --- NEW: ذاكرة التخزين المؤقت للإشارات الفنية ---
+technical_signals_cache: Dict[str, Dict] = {}
+TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5  # 5 دقائق
+
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً",
@@ -141,7 +145,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "No Valid Crossover/Breakout": "فشل الفلتر الأولي: لم يتحقق أي تقاطع أو اختراق فني" 
+    "No Valid Crossover/Breakout": "فشل الفلتر الأولي: لم يتحقق أي تقاطع أو اختراق فني"
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -378,25 +382,25 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
     high = df['high']
     low = df['low']
     close = df['close']
-    
+
     # ATR calculation
     high_low = high - low
     high_close_prev = np.abs(high - close.shift(1))
     low_close_prev = np.abs(low - close.shift(1))
     tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
     atr = tr.ewm(com=atr_period - 1, min_periods=atr_period, adjust=False).mean()
-    
+
     # Supertrend calculation
     hl2 = (high + low) / 2
     final_upper_band = upper_band = hl2 + (multiplier * atr)
     final_lower_band = lower_band = hl2 - (multiplier * atr)
-    
+
     supertrend = pd.Series(np.nan, index=df.index)
     supertrend_direction = pd.Series(np.nan, index=df.index)
 
     for i in range(1, len(df)):
         curr, prev = i, i - 1
-        
+
         # if current close price crosses above upper band
         if close[curr] > final_upper_band[prev]:
             supertrend_direction[curr] = 1
@@ -415,7 +419,7 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
             supertrend[curr] = final_lower_band[curr]
         else:
             supertrend[curr] = final_upper_band[curr]
-            
+
     df['supertrend'] = supertrend
     df['supertrend_direction'] = supertrend_direction
     return df
@@ -457,7 +461,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     stoch_rsi_val = (rsi - rsi.rolling(STOCH_RSI_PERIOD).min()) / (rsi.rolling(STOCH_RSI_PERIOD).max() - rsi.rolling(STOCH_RSI_PERIOD).min()).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(STOCH_RSI_K_PERIOD).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
-    
+
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
@@ -471,7 +475,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc = calculate_market_microstructure_features(df_calc)
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
-    
+
     # --- NEW: Add Supertrend Calculation ---
     df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
 
@@ -584,13 +588,13 @@ class EnhancedTradingStrategy:
     def _load_ml_model_from_file(self, symbol: str) -> Optional[Dict[str, Any]]:
         model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
         if model_name in ml_models_cache: return ml_models_cache[model_name]
-        
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
         model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
         model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
-        
+
         if not os.path.exists(model_path): return None
-        
+
         try:
             with open(model_path, 'rb') as f: model_bundle = pickle.load(f)
             if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
@@ -638,7 +642,7 @@ def passes_filters(symbol: str, last_features: pd.Series, profile: Dict[str, Any
         if are_filters_disabled:
             logger.warning(f"⚠️ [{symbol}] تجاوز الفلاتر بسبب الإعداد العام.")
             return True
-            
+
     filters = profile.get("filters", {})
     if not filters: log_rejection(symbol, "Filters Not Loaded"); return False
     volatility = (last_features.get('atr', 0) / entry_price * 100) if entry_price > 0 else 0
@@ -732,11 +736,11 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
                 log_message = f"[{symbol}] لم يتم العثور على دعم/مقاومة. سيتم استخدام TP/SL بنسبة ثابتة."
             else:
                 log_message = f"[{symbol}] الربح من المقاومة ({potential_profit_pct:.2f}%) أقل من الحد الأدنى. سيتم استخدام TP/SL بنسبة ثابتة."
-            
+
             logger.info(log_message)
             new_target_price = entry_price * (1 + 1.2 / 100)
             new_stop_loss = entry_price * (1 - 1.5 / 100)
-            
+
             return {
                 'target_price': round(new_target_price, 6),
                 'stop_loss':    round(new_stop_loss, 6),
@@ -794,7 +798,7 @@ def check_ema_crossover_signal(df: pd.DataFrame, lookback_period: int = 3) -> bo
             if is_crossover and is_close_above and has_confirmation:
                 logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة تقاطع EMA.")
                 return True
-        
+
         return False
     except (IndexError, TypeError):
         return False
@@ -819,7 +823,7 @@ def check_golden_cross_signal(df: pd.DataFrame, lookback_period: int = 3) -> boo
             if is_golden_cross:
                 logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة التقاطع الذهبي.")
                 return True
-        
+
         return False
     except (IndexError, TypeError):
         return False
@@ -831,7 +835,7 @@ def check_supertrend_breakout_signal(df: pd.DataFrame, lookback_period: int = 3)
     required_cols = ['supertrend', 'supertrend_direction', 'close', 'volume', 'volume_sma_20']
     if not all(col in df.columns for col in required_cols) or len(df) < lookback_period + 2:
         return False
-    
+
     try:
         for i in range(1, lookback_period + 1):
             # Current candle data
@@ -839,21 +843,21 @@ def check_supertrend_breakout_signal(df: pd.DataFrame, lookback_period: int = 3)
             current_supertrend = df['supertrend'].iloc[-i]
             current_volume = df['volume'].iloc[-i]
             current_volume_sma = df['volume_sma_20'].iloc[-i]
-            
+
             # Previous candle data
             prev_close = df['close'].iloc[-(i + 1)]
             prev_supertrend = df['supertrend'].iloc[-(i + 1)]
 
             # Condition 1: Breakout (Price was below, now it's above)
             is_breakout = prev_close < prev_supertrend and current_close > current_supertrend
-            
+
             # Condition 2: Volume confirmation
             is_volume_strong = current_volume_sma > 0 and current_volume > current_volume_sma
 
             if is_breakout and is_volume_strong:
                 logger.info(f"✅ [{df.name} @ {df.index[-i]}] تم تأكيد إشارة اختراق Supertrend.")
                 return True
-        
+
         return False
     except (IndexError, TypeError):
         return False
@@ -865,18 +869,18 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         if not symbol_info:
             logger.error(f"[{symbol}] لم يتم العثور على معلومات الرمز لضبط LOT_SIZE.")
             return None
-        
+
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-        
+
         if lot_size_filter:
             step_size = Decimal(lot_size_filter['stepSize'])
             quantity_decimal = Decimal(str(quantity))
             adjusted_quantity = (quantity_decimal // step_size) * step_size
             logger.info(f"[{symbol}] تعديل الكمية: الأصلية={quantity_decimal}, حجم الخطوة={step_size}, المعدلة={adjusted_quantity}")
             return adjusted_quantity
-            
+
         return Decimal(str(quantity))
-        
+
     except Exception as e:
         logger.error(f"[{symbol}] خطأ في تعديل الكمية لـ LOT_SIZE: {e}", exc_info=True)
         return None
@@ -937,7 +941,7 @@ def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -
         except Exception as e:
             logger.error(f"❌ [{symbol}] Unexpected error while verifying order {order_id}: {e}", exc_info=True)
             return False
-    
+
     logger.error(f"⌛️ [{symbol}] Timeout reached while waiting for order {order_id} to be filled.")
     return False
 
@@ -950,14 +954,14 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 signal_to_close = signal_data
                 symbol_to_close = symbol
                 break
-        
+
         if not signal_to_close:
             logger.warning(f"⚠️ [Close] محاولة إغلاق صفقة غير موجودة في الكاش ID: {signal_id}")
             return False
 
         entry_price = float(signal_to_close['entry_price'])
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
-        
+
         if signal_to_close.get('is_real_trade'):
             try:
                 symbol_info = exchange_info_map.get(symbol_to_close)
@@ -980,7 +984,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
 
                     notional_value = quantity_to_sell * Decimal(str(closing_price))
                     min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
-                    
+
                     min_notional_ok = True
                     if min_notional_filter:
                         min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
@@ -1008,17 +1012,17 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                                 f"الصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*"
                             )
                             return False
-                        
+
                         logger.info(f"✅ [{symbol_to_close}] Sell order {order_id} successfully filled and verified.")
 
             except Exception as e:
                 logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
                 return False
-        
+
         if not check_db_connection() or not conn:
             log_and_notify('critical', "DB connection lost during trade closure. Data might be inconsistent.", "DB_ERROR")
             return False
-            
+
         try:
             with conn.cursor() as cur:
                 cur.execute("""
@@ -1026,15 +1030,15 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     profit_percentage = %s, closing_reason = %s WHERE id = %s;
                 """, (closing_price, profit_percentage, reason, signal_id))
             conn.commit()
-            
+
             if symbol_to_close in open_signals_cache:
                 del open_signals_cache[symbol_to_close]
-            
+
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
-            
+
             reason_map = {
-                'take_profit': '🎯 Take Profit', 
-                'stop_loss': '🛑 Stop Loss', 
+                'take_profit': '🎯 Take Profit',
+                'stop_loss': '🛑 Stop Loss',
                 'manual': '🖐️ Manual Close',
                 'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)' # <-- سبب الإغلاق الجديد
             }
@@ -1083,7 +1087,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
-            
+
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
@@ -1241,13 +1245,13 @@ function updateMarketStatus() {
         document.getElementById('filter-profile-name').textContent = data.filter_profile?.name || 'غير متاح';
         const sessions = document.getElementById('active-sessions-list');
         sessions.innerHTML = data.active_sessions.length > 0 ? data.active_sessions.map(s => `<span class="bg-accent-blue/20 text-accent-blue text-xs font-bold px-2 py-1 rounded">${s}</span>`).join('') : `<span class="bg-gray-700 text-text-secondary text-xs font-bold px-2 py-1 rounded">لا توجد</span>`;
-        
+
         const tradeToggle = document.getElementById('trading-toggle'), tradeText = document.getElementById('trading-status-text');
         tradeToggle.checked = data.is_trading_enabled;
         tradeText.textContent = data.is_trading_enabled ? 'مُفعَّل' : 'غير مُفعَّل';
         tradeText.className = `font-bold text-lg ${data.is_trading_enabled ? 'text-accent-green' : 'text-accent-red'}`;
         document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
-        
+
         const filtersToggle = document.getElementById('disable-filters-toggle'), filtersText = document.getElementById('disable-filters-text');
         filtersToggle.checked = data.are_filters_disabled;
         filtersText.textContent = data.are_filters_disabled ? 'معطلة' : 'مفعلة';
@@ -1302,8 +1306,8 @@ function manualClose(signalId, symbol) {
         fetch(`/api/signals/close/${signalId}`, { method: 'POST' })
             .then(res => res.json())
             .then(data => {
-                if(data.success) { 
-                    updateSignals(); 
+                if(data.success) {
+                    updateSignals();
                 } else {
                     alert(data.message);
                 }
@@ -1336,11 +1340,11 @@ def get_market_status():
         try: usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
         except: usdt_balance = 'N/A'
     return jsonify({
-        "market_state": state_copy, 
-        "filter_profile": profile_copy, 
-        "active_sessions": active_sessions, 
-        "usdt_balance": usdt_balance, 
-        "is_trading_enabled": is_enabled, 
+        "market_state": state_copy,
+        "filter_profile": profile_copy,
+        "active_sessions": active_sessions,
+        "usdt_balance": usdt_balance,
+        "is_trading_enabled": is_enabled,
         "are_filters_disabled": is_disabled
     })
 
@@ -1352,12 +1356,12 @@ def get_stats():
         with conn.cursor() as cur:
             cur.execute("SELECT profit_percentage, is_real_trade, quantity, entry_price FROM signals WHERE status = 'closed';")
             closed_trades = cur.fetchall()
-        
+
         if not closed_trades:
             return jsonify({"net_profit_usdt": 0, "win_rate": 0, "profit_factor": 0, "total_closed_trades": 0})
 
         total_net_profit_usdt = sum(
-            ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT) 
+            ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
             for t in closed_trades
         )
         wins = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0]
@@ -1365,11 +1369,11 @@ def get_stats():
         win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
         total_loss = abs(sum(losses))
         profit_factor = sum(wins) / total_loss if total_loss > 0 else "Infinity"
-        
+
         return jsonify({
-            "net_profit_usdt": total_net_profit_usdt, 
-            "win_rate": win_rate, 
-            "profit_factor": profit_factor, 
+            "net_profit_usdt": total_net_profit_usdt,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
             "total_closed_trades": len(closed_trades)
         })
     except Exception as e:
@@ -1422,18 +1426,18 @@ def toggle_disable_filters():
 @app.route('/api/signals/close/<int:signal_id>', methods=['POST'])
 def manual_close_trade_endpoint(signal_id):
     if not redis_client or not client: return jsonify({"success": False, "message": "Services not ready"}), 503
-    
+
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
-    
+
     if not signal_to_close: return jsonify({"success": False, "message": "Signal not found or already closed"}), 404
-    
+
     try:
         current_price = float(redis_client.hget(REDIS_PRICES_HASH_NAME, signal_to_close['symbol']))
     except (TypeError, ValueError):
         try: current_price = float(client.get_symbol_ticker(symbol=signal_to_close['symbol'])['price'])
         except Exception as e: return jsonify({"success": False, "message": f"Could not fetch current price: {e}"}), 500
-    
+
     if close_signal(signal_id, current_price, 'manual'):
         return jsonify({"success": True, "message": f"Signal for {signal_to_close['symbol']} closed successfully."})
     else:
@@ -1449,17 +1453,17 @@ def trade_management_loop():
                     time.sleep(5)
                     continue
                 signals_to_check = list(open_signals_cache.values())
-            
+
             if not redis_client:
                 time.sleep(5)
                 continue
-                
+
             current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
-            
+
             for signal in signals_to_check:
                 current_price_str = current_prices.get(signal['symbol'])
                 if not current_price_str: continue
-                
+
                 current_price = float(current_price_str)
                 signal_id = signal['id']
                 symbol = signal['symbol']
@@ -1483,21 +1487,17 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
-                                # FIX: Cast to standard Python float
                                 cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (float(new_peak), signal_id))
                             conn.commit()
                     except Exception as e:
                         logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
-                    # Update signal in memory for the current loop iteration
                     signal['current_peak_price'] = new_peak
 
                 # 3. Calculate and Update ATR Trailing Stop
                 if USE_ATR_TRAILING_STOP:
                     try:
-                        # Fetch enough data for a stable ATR calculation
-                        df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3) # 3 days of 15m data
+                        df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
                         if df_atr is not None and len(df_atr) > ATR_TS_PERIOD:
-                            # Recalculate ATR
                             high_low = df_atr['high'] - df_atr['low']
                             high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
                             low_close_prev = (df_atr['low'] - df_atr['close'].shift()).abs()
@@ -1506,17 +1506,15 @@ def trade_management_loop():
 
                             if latest_atr > 0:
                                 new_trailing_stop_price = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
-                                # The new stop loss must be higher than the current one
                                 if new_trailing_stop_price > sl:
                                     logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
-                                    sl = new_trailing_stop_price # Update SL for the current check
+                                    sl = new_trailing_stop_price
                                     with signal_cache_lock:
                                         if symbol in open_signals_cache:
                                             open_signals_cache[symbol]['stop_loss'] = new_trailing_stop_price
                                     try:
                                         if check_db_connection():
                                             with conn.cursor() as cur:
-                                                # FIX: Cast to standard Python float to prevent DB error
                                                 cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (float(new_trailing_stop_price), signal_id))
                                             conn.commit()
                                     except Exception as e:
@@ -1537,6 +1535,10 @@ def trade_management_loop():
             time.sleep(10)
 
 def main_loop_enhanced():
+    """
+    الحلقة الرئيسية المحسنة مع ذاكرة تخزين مؤقت للإشارات الفنية.
+    """
+    global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
     time.sleep(15)
     if not validated_symbols_to_scan:
@@ -1547,20 +1549,29 @@ def main_loop_enhanced():
     while True:
         try:
             logger.info("🔄 بدء دورة مسح جديدة...")
+            # 1. تحديث حالة السوق والفلاتر
             determine_market_state_enhanced()
             analyze_market_and_create_dynamic_profile_enhanced()
-            
+
+            # 2. تنظيف ذاكرة الإشارات الفنية القديمة
+            current_time = time.time()
+            technical_signals_cache = {
+                s: v for s, v in technical_signals_cache.items()
+                if current_time - v.get('timestamp', 0) < TECHNICAL_SIGNAL_CACHE_DURATION
+            }
+
             with dynamic_filter_lock:
                 filter_profile = dynamic_filter_profile_cache
-            
+
             if not filter_profile:
                 logger.warning("🛑 لم يتم تحميل ملف الفلاتر. الانتظار...")
                 time.sleep(60)
                 continue
 
+            # 3. جلب بيانات البيتكوين
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
-            
+
             for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
@@ -1571,55 +1582,56 @@ def main_loop_enhanced():
                         with signal_cache_lock:
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
-                        
+
+                        # تحميل البيانات والميزات مرة واحدة
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_15m is None or df_15m.empty: continue
+                        df_15m.name = symbol
+
+                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_4h is None or df_4h.empty: continue
+
                         strategy = EnhancedTradingStrategy(symbol)
                         if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
                             continue
-                        
-                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty: continue
-                        df_15m.name = symbol 
-                        
-                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_4h is None or df_4h.empty: continue
-                        
+
                         df_features = strategy.get_features(df_15m, df_4h, btc_data)
                         if df_features is None or df_features.empty: continue
-                        df_features.name = symbol 
+                        df_features.name = symbol
 
                         # =================================================================
-                        # --- START: NEW LOGIC - Check technical signals FIRST ---
+                        # --- START: NEW CACHING LOGIC ---
                         # --- تعديل: التحقق من الإشارات الفنية أولاً ---
                         # =================================================================
-                        
-                        # الخطوة 1: التحقق من الفلاتر الفنية المستقلة (التقاطعات والاختراقات)
-                        ema_crossover_ok = check_ema_crossover_signal(df_features, lookback_period=3)
-                        golden_cross_ok = check_golden_cross_signal(df_features, lookback_period=3)
-                        supertrend_breakout_ok = check_supertrend_breakout_signal(df_features, lookback_period=3)
 
-                        # إذا لم يتحقق أي من الشروط الأولية، يتم رفض الرمز والانتقال إلى التالي
-                        if not (ema_crossover_ok or golden_cross_ok or supertrend_breakout_ok):
-                            log_rejection(symbol, "No Valid Crossover/Breakout", {
-                                "EMA_Cross": ema_crossover_ok, 
-                                "Golden_Cross": golden_cross_ok,
-                                "Supertrend_Break": supertrend_breakout_ok
-                            })
-                            continue
-                        
-                        # إذا تم العثور على إشارة أولية، يتم تسجيل ذلك وتمرير الرمز إلى نموذج تعلم الآلة
-                        logger.info(f"✅ [{symbol}] Initial technical signal found. Passing to ML model for confirmation.")
+                        # 4.1 التحقق من الإشارات الفنية أولاً
+                        technical_signal_found = (
+                            check_ema_crossover_signal(df_features, 3) or
+                            check_golden_cross_signal(df_features, 3) or
+                            check_supertrend_breakout_signal(df_features, 3)
+                        )
 
-                        # الخطوة 2: الآن فقط يتم استدعاء نموذج تعلم الآلة للتأكيد النهائي
+                        if not technical_signal_found:
+                            continue # لا توجد إشارة أولية، انتقل إلى الرمز التالي
+
+                        # 4.2 تخزين الإشارة في الذاكرة المؤقتة إذا كانت جديدة
+                        if symbol not in technical_signals_cache:
+                            logger.info(f"🔔 [{symbol}] تم العثور على إشارة فنية أولية. تتم إضافته إلى الذاكرة المؤقتة.")
+                            technical_signals_cache[symbol] = {
+                                'timestamp': current_time,
+                                'price': df_features['close'].iloc[-1]
+                            }
+
+                        # 4.3 فحص النموذج فقط إذا كانت الإشارة موجودة
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
-                            if ml_signal: 
+                            if ml_signal:
                                 log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
-                            else:
-                                log_rejection(symbol, "ML Model Rejected Signal", {"details": "Model did not return a signal."})
                             continue
-                        
+
+                        logger.info(f"✅ [{symbol}] النموذج يؤكد الإشارة الفنية. المتابعة إلى الفلاتر النهائية.")
                         # =================================================================
-                        # --- END: NEW LOGIC ---
+                        # --- END: NEW CACHING LOGIC ---
                         # --- تستمر بقية العمليات كالمعتاد بعد تأكيد النموذج ---
                         # =================================================================
 
@@ -1628,18 +1640,18 @@ def main_loop_enhanced():
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
                             continue
-                        
+
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
-                        
+
                         last_features = df_features.iloc[-1]
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
-                        
+
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                        
+
                         new_signal = {'symbol': symbol, 'strategy_name': "Momentum_ML_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': f"{filter_profile['name']}", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
-                        
+
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
                             quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
@@ -1651,7 +1663,7 @@ def main_loop_enhanced():
                                     continue
                             else:
                                 continue
-                        
+
                         saved_signal = insert_signal_into_db(new_signal)
                         if saved_signal:
                             with signal_cache_lock:
@@ -1670,7 +1682,7 @@ def main_loop_enhanced():
 
             logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
-            
+
         except (KeyboardInterrupt, SystemExit):
             log_and_notify("info", "إيقاف البوت.", "SYSTEM")
             break
