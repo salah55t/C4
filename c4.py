@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة محدثة مع وقف خسارة متحرك عبر ATR
+# ملف c4.py - نسخة محدثة بترتيب فحص محسن
 # تم التحديث بواسطة Gemini
-# --- تعديل: تغيير منطق إغلاق الصفقات ليعتمد على ATR Trailing Stop ---
+# --- تعديل: تغيير منطق الفحص للبحث عن الإشارات الفنية أولاً قبل تمريرها لنموذج تعلم الآلة ---
 import time
 import os
 import json
@@ -141,7 +141,7 @@ REJECTION_REASONS_AR = {
     "Large Sell Wall Detected": "تم كشف جدار بيع ضخم", "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Potential Profit Below Threshold": "الربح المحتمل أقل من الحد الأدنى",
     "Potential Profit Below Threshold (S/R)": "الربح المحتمل أقل من الحد الأدنى (دعم/مقاومة)",
-    "No Valid Crossover/Breakout": "لم يتحقق أي شرط دخول (تقاطع أو اختراق)" 
+    "No Valid Crossover/Breakout": "فشل الفلتر الأولي: لم يتحقق أي تقاطع أو اختراق فني" 
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -1585,16 +1585,17 @@ def main_loop_enhanced():
                         if df_features is None or df_features.empty: continue
                         df_features.name = symbol 
 
-                        ml_signal = strategy.generate_buy_signal(df_features)
-                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
-                            if ml_signal: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
-                            continue
+                        # =================================================================
+                        # --- START: NEW LOGIC - Check technical signals FIRST ---
+                        # --- تعديل: التحقق من الإشارات الفنية أولاً ---
+                        # =================================================================
                         
-                        # --- فلتر الدخول الثلاثي: التحقق من أي إشارة إيجابية ---
+                        # الخطوة 1: التحقق من الفلاتر الفنية المستقلة (التقاطعات والاختراقات)
                         ema_crossover_ok = check_ema_crossover_signal(df_features, lookback_period=3)
                         golden_cross_ok = check_golden_cross_signal(df_features, lookback_period=3)
                         supertrend_breakout_ok = check_supertrend_breakout_signal(df_features, lookback_period=3)
 
+                        # إذا لم يتحقق أي من الشروط الأولية، يتم رفض الرمز والانتقال إلى التالي
                         if not (ema_crossover_ok or golden_cross_ok or supertrend_breakout_ok):
                             log_rejection(symbol, "No Valid Crossover/Breakout", {
                                 "EMA_Cross": ema_crossover_ok, 
@@ -1602,7 +1603,23 @@ def main_loop_enhanced():
                                 "Supertrend_Break": supertrend_breakout_ok
                             })
                             continue
-                        # --- نهاية الفلتر الثلاثي ---
+                        
+                        # إذا تم العثور على إشارة أولية، يتم تسجيل ذلك وتمرير الرمز إلى نموذج تعلم الآلة
+                        logger.info(f"✅ [{symbol}] Initial technical signal found. Passing to ML model for confirmation.")
+
+                        # الخطوة 2: الآن فقط يتم استدعاء نموذج تعلم الآلة للتأكيد النهائي
+                        ml_signal = strategy.generate_buy_signal(df_features)
+                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
+                            if ml_signal: 
+                                log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
+                            else:
+                                log_rejection(symbol, "ML Model Rejected Signal", {"details": "Model did not return a signal."})
+                            continue
+                        
+                        # =================================================================
+                        # --- END: NEW LOGIC ---
+                        # --- تستمر بقية العمليات كالمعتاد بعد تأكيد النموذج ---
+                        # =================================================================
 
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
