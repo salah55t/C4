@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع استراتيجية EMA(9/21) و Stochastic Momentum + استراتيجية BB/RSI
+# ملف c4.py - نسخة مع 3 استراتيجيات: EMA/Stoch + BB/RSI + MACD Divergence
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة استراتيجية تداول جديدة ودمجها مع الاستراتيجية الحالية ---
+# --- تعديل: إضافة استراتيجية تداول ثالثة ودمجها مع الاستراتيجيات الحالية ---
 import time
 import os
 import json
@@ -61,7 +61,6 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-# --- MODIFICATION: Disable all filters as requested by the user ---
 are_filters_disabled: bool = True
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
@@ -83,10 +82,8 @@ MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
-# --- NOTE: EMA 9 and 21 are calculated in calculate_all_features ---
 EMA_FAST_PERIOD: int = 50
 EMA_SLOW_PERIOD: int = 120
-
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
@@ -94,7 +91,6 @@ BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
-# --- إعدادات Supertrend ---
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 
@@ -107,7 +103,6 @@ DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 300
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
-# --- NEW: ATR Trailing Stop Settings ---
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.5
@@ -131,8 +126,6 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 last_market_state_check = 0
-
-# --- NEW: ذاكرة التخزين المؤقت للإشارات الفنية ---
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5  # 5 دقائق
 
@@ -336,8 +329,8 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     bb_period = 20
     df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
     bb_std = df['close'].rolling(window=bb_period).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 2.0)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 2.0)
+    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
@@ -449,18 +442,13 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     # --- حساب المؤشرات ---
     df_calc['ema_2'] = df_calc['close'].ewm(span=2, adjust=False).mean()
     df_calc['ema_8'] = df_calc['close'].ewm(span=8, adjust=False).mean()
-    # --- START: NEW STRATEGY EMAs ---
-    # التأكد من حساب المتوسطات المطلوبة للاستراتيجية الجديدة
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
-    # --- END: NEW STRATEGY EMAs ---
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
-    
     df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
-
 
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -501,8 +489,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc = calculate_market_microstructure_features(df_calc)
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
-
-    # --- NEW: Add Supertrend Calculation ---
     df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
 
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
@@ -819,9 +805,6 @@ def is_doji(candle: pd.Series) -> bool:
 def check_bb_rsi_reversal_strategy(df: pd.DataFrame) -> bool:
     """
     التحقق من استراتيجية الانعكاس الجديدة المبنية على Bollinger Bands و RSI.
-    - الشرط 1: السعر يلامس أو يكسر الحد السفلي للبولينجر باند.
-    - الشرط 2: مؤشر القوة النسبية (RSI) في منطقة التشبع البيعي (أقل من 30).
-    - الشرط 3: وجود شمعة يابانية إيجابية مؤكدة (مطرقة، ابتلاع شرائي، دوجي).
     """
     required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'rsi']
     if not all(col in df.columns for col in required_cols):
@@ -835,14 +818,10 @@ def check_bb_rsi_reversal_strategy(df: pd.DataFrame) -> bool:
         last_candle = df.iloc[-1]
         prev_candle = df.iloc[-2]
 
-        # الشرط 1: السعر عند الحد السفلي للبولينجر
         price_at_lower_band = last_candle['low'] <= last_candle['bb_lower']
-        
-        # الشرط 2: مؤشر القوة النسبية في منطقة التشبع البيعي
         rsi_oversold = last_candle['rsi'] < 30
 
         if price_at_lower_band and rsi_oversold:
-            # الشرط 3: البحث عن شمعة تأكيد إيجابية
             is_hammer_candle = is_hammer(last_candle)
             is_engulfing_candle = is_bullish_engulfing(last_candle, prev_candle)
             is_doji_candle = is_doji(last_candle)
@@ -859,16 +838,9 @@ def check_bb_rsi_reversal_strategy(df: pd.DataFrame) -> bool:
 
 def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
-    التحقق من استراتيجية المستخدم الجديدة المبنية على تقاطع EMA وتأكيد الزخم من Stochastic.
-    - الشرط 1: تقاطع EMA 9 فوق EMA 21.
-    - الشرط 2: في نفس شمعة التقاطع، يجب أن يكون خط Stochastic %K فوق خط %D.
+    التحقق من استراتيجية تقاطع EMA وتأكيد الزخم من Stochastic.
     """
-    EMA_FAST_COL = 'ema_9'
-    EMA_SLOW_COL = 'ema_21'
-    STOCH_K_COL = 'stoch_k'
-    STOCH_D_COL = 'stoch_d'
-
-    required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL, STOCH_D_COL]
+    required_cols = ['ema_9', 'ema_21', 'stoch_k', 'stoch_d']
     if not all(col in df.columns for col in required_cols):
         logger.warning(f"  -> [Strategy Check - EMA/Stoch] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة.")
         return False
@@ -878,24 +850,78 @@ def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3
         return False
 
     try:
-        # البحث عن إشارة شراء ضمن فترة المراجعة
         for i in range(1, lookback_period + 1):
             current = df.iloc[-i]
             previous = df.iloc[-(i + 1)]
 
-            # الشرط 1: تقاطع EMA 9 فوق EMA 21
-            ema_crossover = previous[EMA_FAST_COL] <= previous[EMA_SLOW_COL] and current[EMA_FAST_COL] > current[EMA_SLOW_COL]
-
-            # الشرط 2: زخم ستوكاستيك إيجابي (K% فوق D%)
-            stochastic_momentum = current[STOCH_K_COL] > current[STOCH_D_COL]
+            ema_crossover = previous['ema_9'] <= previous['ema_21'] and current['ema_9'] > current['ema_21']
+            stochastic_momentum = current['stoch_k'] > current['stoch_d']
 
             if ema_crossover and stochastic_momentum:
                 logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA(9/21)/Stochastic Momentum عند الشمعة رقم -{i}.")
-                return True  # تم العثور على إشارة شراء
+                return True
 
-        return False  # لم يتم العثور على إشارة شراء
+        return False
     except (IndexError, TypeError) as e:
         logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية EMA/Stoch: {e}")
+        return False
+
+def check_macd_divergence_volume_strategy(df: pd.DataFrame) -> bool:
+    """
+    استراتيجية MACD دايفرجنس + ارتفاع حجم
+    """
+    if len(df) < 60:
+        return False
+
+    try:
+        # حساب MACD
+        exp1 = df['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['close'].ewm(span=26, adjust=False).mean()
+        macd = exp1 - exp2
+
+        # كشف القيعان (pivot lows)
+        lows = df['low']
+        pivot_low_idx = []
+
+        for i in range(2, len(df) - 2):
+            # تعريف القاع: شمعة أدنى من الشمعتين السابقتين واللاحقتين
+            if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i-2] and \
+               lows.iloc[i] < lows.iloc[i+1] and lows.iloc[i] < lows.iloc[i+2]:
+                pivot_low_idx.append(i)
+
+        if len(pivot_low_idx) < 2:
+            return False
+
+        # اختبار الدايفرجنس الصاعد بين آخر قاعين
+        p1_idx, p2_idx = pivot_low_idx[-2], pivot_low_idx[-1]
+        
+        # الشرط 1: السعر يسجل قاع أدنى
+        price_lower_low = lows.iloc[p2_idx] < lows.iloc[p1_idx]
+        
+        # الشرط 2: الماكد يسجل قاع أعلى
+        macd_higher_low = macd.iloc[p2_idx] > macd.iloc[p1_idx]
+
+        bullish_div = price_lower_low and macd_higher_low
+
+        if not bullish_div:
+            return False
+
+        # اختبار ارتفاع حجم التداول عند آخر شمعة
+        vol_ma = df['volume'].rolling(20).mean()
+        vol_spike = df['volume'].iloc[-1] > vol_ma.iloc[-1] * 1.5
+
+        # السعر فوق EMA8 لتأكيد الصعود
+        ema8 = df['close'].ewm(span=8, adjust=False).mean()
+        above_ema8 = df['close'].iloc[-1] > ema8.iloc[-1]
+
+        if bullish_div and vol_spike and above_ema8:
+            logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية MACD Divergence + Volume.")
+            return True
+            
+        return False
+
+    except Exception as e:
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية MACD Divergence: {e}")
         return False
 # --- END: NEW STRATEGY FUNCTIONS ---
 
@@ -1638,8 +1664,8 @@ def main_loop_enhanced():
                         df_features.name = symbol
                         logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
-                        # --- START: NEW DUAL STRATEGY LOGIC ---
-                        # آلية التحقق من الاستراتيجيتين بالتتابع
+                        # --- START: NEW TRIPLE STRATEGY LOGIC ---
+                        # آلية التحقق من الاستراتيجيات الثلاث بالتتابع
                         strategy_signal_found = False
                         strategy_name = None
 
@@ -1655,10 +1681,16 @@ def main_loop_enhanced():
                             strategy_name = "BB_RSI_Reversal_V9"
                             logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/RSI مكتشفة! التحقق من النموذج...")
                         
+                        # 3. إذا لم توجد إشارة، تحقق من الاستراتيجية الثالثة (MACD Divergence)
+                        elif check_macd_divergence_volume_strategy(df_features):
+                            strategy_signal_found = True
+                            strategy_name = "MACD_Divergence_Volume_V9"
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية MACD Divergence مكتشفة! التحقق من النموذج...")
+
                         if not strategy_signal_found:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيتين. انتظار...")
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. انتظار...")
                             continue
-                        # --- END: NEW DUAL STRATEGY LOGIC ---
+                        # --- END: NEW TRIPLE STRATEGY LOGIC ---
 
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
