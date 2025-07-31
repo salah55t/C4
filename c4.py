@@ -1,5 +1,5 @@
 # ملف c4.py - نسخة نهائية مع لوحة تحكم كاملة واستراتيجية ديناميكية (StochRSI + Candlesticks + Volume Spike)
-# تم التحديث بواسطة Gemini
+# تم التحديث والإصلاح بواسطة Gemini
 import time
 import os
 import json
@@ -114,10 +114,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # FIX: Made target_price nullable by default to match dynamic strategy
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION, stop_loss DOUBLE PRECISION,
+                        target_price DOUBLE PRECISION DEFAULT NULL, stop_loss DOUBLE PRECISION,
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                         current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
@@ -448,11 +449,12 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     if not check_db_connection() or not conn: return None
     try:
         with conn.cursor() as cur:
+            # FIX: Removed target_price from INSERT statement to avoid not-null constraint violation
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
+                INSERT INTO signals (symbol, entry_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
-                signal_data['symbol'], signal_data['entry_price'], None,
+                signal_data['symbol'], signal_data['entry_price'],
                 signal_data['stop_loss'], signal_data['strategy_name'],
                 json.dumps(signal_data['signal_details']), signal_data.get('is_real_trade', False),
                 signal_data.get('quantity'), signal_data.get('order_id'), signal_data['entry_price']
@@ -500,7 +502,6 @@ def determine_market_state():
 # ---------------------- واجهة Flask ----------------------
 app = Flask(__name__)
 CORS(app)
-# ... (دوال الواجهة الكاملة من الإصدار القديم)
 def get_dashboard_html():
     return """
 <!DOCTYPE html>
@@ -535,7 +536,7 @@ def get_dashboard_html():
         </section>
         <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button></nav></div>
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">نمط الدخول</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">نمط الدخول</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"><tr><td colspan="6" class="p-4 text-center text-text-secondary">جاري التحميل...</td></tr></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
         </main>
@@ -570,16 +571,23 @@ function updateMarketStatus() {
 }
 function updateSignals() {
     fetchData('/api/signals').then(data => {
-        if (!data) return;
         const tableBody = document.getElementById('signals-table');
-        tableBody.innerHTML = '';
-        data.filter(s => ['open', 'updated'].includes(s.status)).forEach(s => {
+        if (!data) {
+            tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-accent-red">فشل تحميل بيانات الصفقات.</td></tr>`;
+            return;
+        }
+        const openSignals = data.filter(s => ['open', 'updated'].includes(s.status));
+        if (openSignals.length === 0) {
+            tableBody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-text-secondary">لا توجد صفقات مفتوحة حالياً.</td></tr>`;
+            return;
+        }
+        tableBody.innerHTML = openSignals.map(s => {
             const profit = parseFloat(s.profit_percentage || 0);
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
             const entry = parseFloat(s.entry_price), current = parseFloat(s.current_price || entry);
             const entryPattern = s.signal_details?.entry_pattern || 'N/A';
-            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${s.is_real_trade ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'}">${s.is_real_trade ? 'حقيقي' : 'تجريبي'}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4 text-text-secondary">${entryPattern}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
-        });
+            return `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${s.is_real_trade ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'}">${s.is_real_trade ? 'حقيقي' : 'تجريبي'}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4 text-text-secondary">${entryPattern}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
+        }).join('');
     });
 }
 function updateStats() {
@@ -819,4 +827,3 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
-
