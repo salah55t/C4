@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع استراتيجية EMA(9/21) و Stochastic Momentum
+# ملف c4.py - نسخة مع استراتيجية EMA(9/21) و Stochastic Momentum + استراتيجية BB/RSI
 # تم التحديث بواسطة Gemini
-# --- تعديل: تطبيق استراتيجية جديدة بناءً على طلب المستخدم ---
+# --- تعديل: إضافة استراتيجية تداول جديدة ودمجها مع الاستراتيجية الحالية ---
 import time
 import os
 import json
@@ -73,10 +73,10 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 3.3
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
-BUY_CONFIDENCE_THRESHOLD = 0.70
+BUY_CONFIDENCE_THRESHOLD = 0.55
 MIN_PROFIT_PERCENT: float = 0.8
 
 # --- NEW: Memory Optimization Setting ---
@@ -797,8 +797,66 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: NEW STRATEGY FUNCTION ---
-# تم استبدال الدالة القديمة بهذه الدالة الجديدة لتطبيق استراتيجية المستخدم
+# --- START: NEW STRATEGY FUNCTIONS ---
+# دوال مساعدة للتعرف على أنماط الشموع
+def is_hammer(candle: pd.Series) -> bool:
+    body = abs(candle['close'] - candle['open'])
+    lower_wick = candle['open'] - candle['low'] if candle['close'] > candle['open'] else candle['close'] - candle['low']
+    upper_wick = candle['high'] - candle['close'] if candle['close'] > candle['open'] else candle['high'] - candle['open']
+    return body > 0 and lower_wick > 2 * body and upper_wick < body
+
+def is_bullish_engulfing(current: pd.Series, previous: pd.Series) -> bool:
+    return (current['close'] > current['open'] and # شمعة خضراء حالية
+            previous['open'] > previous['close'] and # شمعة حمراء سابقة
+            current['close'] > previous['open'] and
+            current['open'] < previous['close'])
+
+def is_doji(candle: pd.Series) -> bool:
+    body = abs(candle['close'] - candle['open'])
+    total_range = candle['high'] - candle['low']
+    return total_range > 0 and body / total_range < 0.1
+
+def check_bb_rsi_reversal_strategy(df: pd.DataFrame) -> bool:
+    """
+    التحقق من استراتيجية الانعكاس الجديدة المبنية على Bollinger Bands و RSI.
+    - الشرط 1: السعر يلامس أو يكسر الحد السفلي للبولينجر باند.
+    - الشرط 2: مؤشر القوة النسبية (RSI) في منطقة التشبع البيعي (أقل من 30).
+    - الشرط 3: وجود شمعة يابانية إيجابية مؤكدة (مطرقة، ابتلاع شرائي، دوجي).
+    """
+    required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'rsi']
+    if not all(col in df.columns for col in required_cols):
+        logger.warning(f"  -> [Strategy Check - BB/RSI] 🛑 الأعمدة المطلوبة مفقودة.")
+        return False
+
+    if len(df) < 2:
+        return False
+
+    try:
+        last_candle = df.iloc[-1]
+        prev_candle = df.iloc[-2]
+
+        # الشرط 1: السعر عند الحد السفلي للبولينجر
+        price_at_lower_band = last_candle['low'] <= last_candle['bb_lower']
+        
+        # الشرط 2: مؤشر القوة النسبية في منطقة التشبع البيعي
+        rsi_oversold = last_candle['rsi'] < 30
+
+        if price_at_lower_band and rsi_oversold:
+            # الشرط 3: البحث عن شمعة تأكيد إيجابية
+            is_hammer_candle = is_hammer(last_candle)
+            is_engulfing_candle = is_bullish_engulfing(last_candle, prev_candle)
+            is_doji_candle = is_doji(last_candle)
+
+            if is_hammer_candle or is_engulfing_candle or is_doji_candle:
+                pattern_found = "Hammer" if is_hammer_candle else "Bullish Engulfing" if is_engulfing_candle else "Doji"
+                logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية BB/RSI Reversal. (Pattern: {pattern_found})")
+                return True
+
+        return False
+    except Exception as e:
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية BB/RSI: {e}")
+        return False
+
 def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
     التحقق من استراتيجية المستخدم الجديدة المبنية على تقاطع EMA وتأكيد الزخم من Stochastic.
@@ -812,11 +870,11 @@ def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3
 
     required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL, STOCH_D_COL]
     if not all(col in df.columns for col in required_cols):
-        logger.warning(f"  -> [Strategy Check] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة لاستراتيجية EMA/Stochastic Momentum.")
+        logger.warning(f"  -> [Strategy Check - EMA/Stoch] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة.")
         return False
     
     if len(df) < lookback_period + 2:
-        logger.warning(f"  -> [Strategy Check] 🛑 عدد الشموع غير كافٍ للتحقق من الاستراتيجية.")
+        logger.warning(f"  -> [Strategy Check - EMA/Stoch] 🛑 عدد الشموع غير كافٍ للتحقق.")
         return False
 
     try:
@@ -837,9 +895,9 @@ def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3
 
         return False  # لم يتم العثور على إشارة شراء
     except (IndexError, TypeError) as e:
-        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من الاستراتيجية: {e}")
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية EMA/Stoch: {e}")
         return False
-# --- END: NEW STRATEGY FUNCTION ---
+# --- END: NEW STRATEGY FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1580,15 +1638,27 @@ def main_loop_enhanced():
                         df_features.name = symbol
                         logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
-                        # --- START: NEW STRATEGY IMPLEMENTATION ---
-                        # استدعاء دالة الاستراتيجية الجديدة التي طلبها المستخدم
-                        is_strategy_signal = check_ema_stoch_momentum_strategy(df_features)
-                        if not is_strategy_signal:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من استراتيجية EMA(9/21)/Stochastic Momentum. انتظار...")
-                            continue
+                        # --- START: NEW DUAL STRATEGY LOGIC ---
+                        # آلية التحقق من الاستراتيجيتين بالتتابع
+                        strategy_signal_found = False
+                        strategy_name = None
+
+                        # 1. التحقق من الاستراتيجية الأولى (EMA/Stoch)
+                        if check_ema_stoch_momentum_strategy(df_features):
+                            strategy_signal_found = True
+                            strategy_name = "EMA9_21_Stoch_Momentum_V9"
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stoch مكتشفة! التحقق من النموذج...")
                         
-                        logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA(9/21)/Stochastic Momentum مكتشفة! التحقق من النموذج...")
-                        # --- END: NEW STRATEGY IMPLEMENTATION ---
+                        # 2. إذا لم توجد إشارة، تحقق من الاستراتيجية الثانية (BB/RSI)
+                        elif check_bb_rsi_reversal_strategy(df_features):
+                            strategy_signal_found = True
+                            strategy_name = "BB_RSI_Reversal_V9"
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/RSI مكتشفة! التحقق من النموذج...")
+                        
+                        if not strategy_signal_found:
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيتين. انتظار...")
+                            continue
+                        # --- END: NEW DUAL STRATEGY LOGIC ---
 
                         ml_signal = strategy.generate_buy_signal(df_features)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
@@ -1614,10 +1684,10 @@ def main_loop_enhanced():
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
-                        logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح (معطلة).")
+                        logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح.")
 
-                        # --- تحديث اسم الاستراتيجية ---
-                        new_signal = {'symbol': symbol, 'strategy_name': "EMA9_21_Stoch_Momentum_V9", 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': "DISABLED", 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        # --- استخدام اسم الاستراتيجية الذي تم اكتشافه ---
+                        new_signal = {'symbol': symbol, 'strategy_name': strategy_name, 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': filter_profile.get('name', 'N/A'), 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
 
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
