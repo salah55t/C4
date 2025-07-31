@@ -1,6 +1,6 @@
 # ملف c4.py - نسخة مع 3 استراتيجيات: EMA/Stoch + BB/RSI + MACD Divergence
 # تم التحديث بواسطة Gemini
-# --- تعديل: إضافة استراتيجية تداول ثالثة ودمجها مع الاستراتيجيات الحالية ---
+# --- تعديل: تحسين تحميل النماذج لتكون مشروطة بوجود إشارة من الاستراتيجيات ---
 import time
 import os
 import json
@@ -594,6 +594,8 @@ enhanced_filter_system = EnhancedFilterSystem()
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
+        # --- GEMINI MODIFICATION: Model loading is now conditional in the main loop ---
+        # The model is loaded here, so this class should only be instantiated when needed.
         model_bundle = self._load_ml_model_from_file(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
@@ -1643,10 +1645,8 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        strategy = EnhancedTradingStrategy(symbol)
-                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                            continue
-
+                        # --- GEMINI MODIFICATION START: Conditional Model Loading ---
+                        # الخطوة 1: جلب البيانات وحساب الميزات أولاً
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty:
                             logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 15m. تخطي.")
@@ -1657,42 +1657,53 @@ def main_loop_enhanced():
                             logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h. تخطي.")
                             continue
                         
-                        df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                        if df_features is None or df_features.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات. تخطي.")
+                        # حساب الميزات الأساسية اللازمة للاستراتيجيات
+                        df_features_for_strategies = calculate_all_features(df_15m, btc_data)
+                        if df_features_for_strategies is None or df_features_for_strategies.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات للاستراتيجيات. تخطي.")
                             continue
-                        df_features.name = symbol
-                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
+                        df_features_for_strategies.name = symbol
+                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات الأولية.")
 
-                        # --- START: NEW TRIPLE STRATEGY LOGIC ---
-                        # آلية التحقق من الاستراتيجيات الثلاث بالتتابع
+                        # الخطوة 2: التحقق من الاستراتيجيات الفنية أولاً
                         strategy_signal_found = False
                         strategy_name = None
 
-                        # 1. التحقق من الاستراتيجية الأولى (EMA/Stoch)
-                        if check_ema_stoch_momentum_strategy(df_features):
+                        if check_ema_stoch_momentum_strategy(df_features_for_strategies):
                             strategy_signal_found = True
                             strategy_name = "EMA9_21_Stoch_Momentum_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stoch مكتشفة! التحقق من النموذج...")
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stoch مكتشفة!")
                         
-                        # 2. إذا لم توجد إشارة، تحقق من الاستراتيجية الثانية (BB/RSI)
-                        elif check_bb_rsi_reversal_strategy(df_features):
+                        elif check_bb_rsi_reversal_strategy(df_features_for_strategies):
                             strategy_signal_found = True
                             strategy_name = "BB_RSI_Reversal_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/RSI مكتشفة! التحقق من النموذج...")
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/RSI مكتشفة!")
                         
-                        # 3. إذا لم توجد إشارة، تحقق من الاستراتيجية الثالثة (MACD Divergence)
-                        elif check_macd_divergence_volume_strategy(df_features):
+                        elif check_macd_divergence_volume_strategy(df_features_for_strategies):
                             strategy_signal_found = True
                             strategy_name = "MACD_Divergence_Volume_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية MACD Divergence مكتشفة! التحقق من النموذج...")
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية MACD Divergence مكتشفة!")
 
+                        # الخطوة 3: إذا لم توجد إشارة، انتقل للعملة التالية
                         if not strategy_signal_found:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. انتظار...")
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. تخطي تحميل النموذج.")
                             continue
-                        # --- END: NEW TRIPLE STRATEGY LOGIC ---
 
-                        ml_signal = strategy.generate_buy_signal(df_features)
+                        # الخطوة 4: الآن فقط، بعد وجود إشارة، قم بتحميل النموذج والتحقق منه
+                        logger.info(f"  -> [{symbol}] 🔑 إشارة فنية موجودة. جاري تحميل النموذج للتحقق...")
+                        strategy = EnhancedTradingStrategy(symbol)
+                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                            logger.warning(f"  -> [{symbol}] 🛑 فشل تحميل النموذج بعد وجود إشارة. تخطي.")
+                            continue
+                        
+                        # إعادة حساب الميزات للتأكد من توافقها مع النموذج
+                        df_features_for_model = strategy.get_features(df_15m, df_4h, btc_data)
+                        if df_features_for_model is None or df_features_for_model.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب ميزات النموذج. تخطي.")
+                            continue
+                        # --- GEMINI MODIFICATION END ---
+
+                        ml_signal = strategy.generate_buy_signal(df_features_for_model)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             if ml_signal:
                                 log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
@@ -1711,7 +1722,7 @@ def main_loop_enhanced():
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        last_features = df_features.iloc[-1]
+                        last_features = df_features_for_model.iloc[-1]
                         
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
                         order_book_analysis = analyze_order_book(symbol, entry_price)
