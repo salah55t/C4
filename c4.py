@@ -333,11 +333,11 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     df['macd'] = exp1 - exp2
     df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
     df['macd_histogram'] = df['macd'] - df['macd_signal']
-    bb_period = 15
+    bb_period = 20
     df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
     bb_std = df['close'].rolling(window=bb_period).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 1.5)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 1.5)
+    df['bb_upper'] = df['bb_middle'] + (bb_std * 2.0)
+    df['bb_lower'] = df['bb_middle'] - (bb_std * 2.0)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
