@@ -1,6 +1,6 @@
 # ملف c4.py - نسخة مع 3 استراتيجيات: EMA/Stoch + BB/RSI + MACD Divergence
 # تم التحديث بواسطة Gemini
-# --- تعديل: تحسين تحميل النماذج لتكون مشروطة بوجود إشارة من الاستراتيجيات ---
+# --- تعديل: تجاوز فحص النموذج لاستراتيجية BB/RSI ---
 import time
 import os
 import json
@@ -1645,7 +1645,6 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        # --- GEMINI MODIFICATION START: Conditional Model Loading ---
                         # الخطوة 1: جلب البيانات وحساب الميزات أولاً
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty:
@@ -1686,32 +1685,43 @@ def main_loop_enhanced():
 
                         # الخطوة 3: إذا لم توجد إشارة، انتقل للعملة التالية
                         if not strategy_signal_found:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. تخطي تحميل النموذج.")
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. تخطي.")
                             continue
 
-                        # الخطوة 4: الآن فقط، بعد وجود إشارة، قم بتحميل النموذج والتحقق منه
-                        logger.info(f"  -> [{symbol}] 🔑 إشارة فنية موجودة. جاري تحميل النموذج للتحقق...")
-                        strategy = EnhancedTradingStrategy(symbol)
-                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                            logger.warning(f"  -> [{symbol}] 🛑 فشل تحميل النموذج بعد وجود إشارة. تخطي.")
-                            continue
-                        
-                        # إعادة حساب الميزات للتأكد من توافقها مع النموذج
-                        df_features_for_model = strategy.get_features(df_15m, df_4h, btc_data)
-                        if df_features_for_model is None or df_features_for_model.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب ميزات النموذج. تخطي.")
-                            continue
-                        # --- GEMINI MODIFICATION END ---
+                        # --- MODIFICATION: Conditional ML Check based on strategy ---
+                        # الخطوة 4: التحقق من النموذج بشكل مشروط
+                        ml_signal = None
+                        df_features_for_model = df_features_for_strategies 
 
-                        ml_signal = strategy.generate_buy_signal(df_features_for_model)
-                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
-                            if ml_signal:
+                        if strategy_name == "BB_RSI_Reversal_V9":
+                            logger.info(f"  -> [{symbol}] 🟡 استراتيجية BB/RSI لا تتطلب فحص النموذج. التجاوز إلى الفلاتر النهائية.")
+                            ml_signal = {'confidence': 1.0, 'prediction': 1} # إنشاء إشارة وهمية ناجحة للمتابعة
+                        else:
+                            # بالنسبة للاستراتيجيات الأخرى، قم بتشغيل فحص النموذج كالمعتاد
+                            logger.info(f"  -> [{symbol}] 🔑 إشارة فنية من '{strategy_name}'. جاري تحميل النموذج للتحقق...")
+                            strategy = EnhancedTradingStrategy(symbol)
+                            if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                                logger.warning(f"  -> [{symbol}] 🛑 فشل تحميل النموذج بعد وجود إشارة. تخطي.")
+                                continue
+                            
+                            df_features_for_model = strategy.get_features(df_15m, df_4h, btc_data)
+                            if df_features_for_model is None or df_features_for_model.empty:
+                                logger.info(f"  -> [{symbol}] 🛑 فشل حساب ميزات النموذج. تخطي.")
+                                continue
+                            
+                            ml_signal = strategy.generate_buy_signal(df_features_for_model)
+
+                        # الآن، تحقق من إشارة النموذج (سواء كانت حقيقية أو وهمية)
+                        if not ml_signal or ml_signal.get('confidence', 0) < BUY_CONFIDENCE_THRESHOLD:
+                            if ml_signal and strategy_name != "BB_RSI_Reversal_V9":
                                 log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             else:
-                                logger.info(f"  -> [{symbol}] 🤖 النموذج لم يولد إشارة شراء.")
+                                logger.info(f"  -> [{symbol}] 🤖 النموذج لم يولد إشارة شراء أو أن الإشارة ضعيفة.")
                             continue
 
-                        logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة إلى الفلاتر النهائية.")
+                        if strategy_name != "BB_RSI_Reversal_V9":
+                            logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة إلى الفلاتر النهائية.")
+                        # --- END MODIFICATION ---
                         
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -1729,8 +1739,9 @@ def main_loop_enhanced():
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
                         logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح.")
 
-                        # --- استخدام اسم الاستراتيجية الذي تم اكتشافه ---
-                        new_signal = {'symbol': symbol, 'strategy_name': strategy_name, 'signal_details': {'ML_Confidence': f"{ml_signal['confidence']:.2%}", 'Filter_Profile': filter_profile.get('name', 'N/A'), 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        # --- MODIFICATION: Adjust ML Confidence string for bypassed strategy ---
+                        ml_confidence_str = "N/A (Bypassed)" if strategy_name == "BB_RSI_Reversal_V9" else f"{ml_signal['confidence']:.2%}"
+                        new_signal = {'symbol': symbol, 'strategy_name': strategy_name, 'signal_details': {'ML_Confidence': ml_confidence_str, 'Filter_Profile': filter_profile.get('name', 'N/A'), 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
 
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
