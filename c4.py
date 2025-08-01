@@ -601,16 +601,113 @@ def trade_management_loop():
     pass
 
 def main_loop_new_strategy():
-    # ... (main bot logic remains the same)
-    # Add a call to the market state analysis function in the loop
+    """
+    الحلقة الرئيسية لمسح الرموز وتوليد الإشارات وإنشاء الصفقات.
+    يحل هذا الإصدار محل الدالة الناقصة التي كانت تسبب التكرار اللانهائي.
+    """
+    ml_confirm = MLConfirmation()
+    logger.info("▶️ بدء حلقة الاستراتيجية الرئيسية...")
+
     while True:
         try:
             logger.info("🔄 بدء دورة مسح جديدة...")
-            determine_market_state_enhanced() # <<<--- ADD THIS CALL
-            # ... rest of the loop
+            determine_market_state_enhanced()
+
+            with trading_status_lock:
+                is_real_mode = is_trading_enabled
+
+            with signal_cache_lock:
+                open_trades = [s for s in open_signals_cache.values() if s.get('is_real_trade') == is_real_mode]
+                open_symbols = {s['symbol'] for s in open_trades}
+            
+            if len(open_trades) >= MAX_OPEN_TRADES:
+                logger.info(f"⏸️ الحد الأقصى للصفقات المفتوحة ({MAX_OPEN_TRADES}). إيقاف البحث عن إشارات جديدة مؤقتاً.")
+                time.sleep(60)
+                continue
+
+            symbols_to_scan = [s for s in validated_symbols_to_scan if s not in open_symbols]
+            random.shuffle(symbols_to_scan)
+            
+            logger.info(f"🔍 التحضير لمسح {len(symbols_to_scan)} عملة.")
+
+            for symbol in symbols_to_scan:
+                # إعادة التحقق من الحد الأقصى للصفقات قبل معالجة كل رمز
+                with signal_cache_lock:
+                    if len([s for s in open_signals_cache.values() if s.get('is_real_trade') == is_real_mode]) >= MAX_OPEN_TRADES:
+                        logger.info("⏸️ تم الوصول للحد الأقصى للصفقات المفتوحة أثناء المسح. إيقاف الدورة الحالية.")
+                        break
+
+                try:
+                    df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df is None or len(df) < BB_PERIOD:
+                        continue # لا توجد بيانات كافية
+
+                    df_features = calculate_all_features(df)
+                    
+                    signal_details = check_bb_stoch_signal(df_features)
+                    if not signal_details:
+                        continue # لا توجد إشارة أولية
+
+                    entry_price = signal_details['price']
+                    
+                    bullish_pattern = detect_bullish_patterns(df_features)
+                    if not bullish_pattern:
+                        log_rejection(symbol, "No Bullish Pattern")
+                        continue
+
+                    if not passes_order_book_filter(symbol, entry_price):
+                        log_rejection(symbol, "Order Book Check Failed", {"price": entry_price})
+                        continue
+
+                    ml_prediction = ml_confirm.get_prediction(symbol, df_features)
+                    if ml_prediction is None:
+                        log_rejection(symbol, "ML Model Load Failed")
+                        continue
+                    if ml_prediction < BUY_CONFIDENCE_THRESHOLD:
+                        log_rejection(symbol, "ML Model Rejected", {"prediction": f"{ml_prediction:.2f}"})
+                        continue
+
+                    tp_sl_data = calculate_tp_sl(symbol, entry_price, df_features)
+                    if not tp_sl_data:
+                        log_rejection(symbol, "TP/SL Calculation Failed")
+                        continue
+
+                    if is_real_mode:
+                        quantity = calculate_position_size(symbol, entry_price, tp_sl_data['stop_loss'])
+                    else:
+                        quantity = adjust_quantity_to_lot_size(symbol, STATS_TRADE_SIZE_USDT / entry_price)
+
+                    if not quantity or quantity <= 0:
+                        log_rejection(symbol, "Invalid Position Size", {"quantity": quantity})
+                        continue
+                    
+                    signal_data = {
+                        "symbol": symbol, "entry_price": entry_price, "quantity": float(quantity),
+                        "target_price": tp_sl_data['target_price'], "stop_loss": tp_sl_data['stop_loss'],
+                        "trailing_stop_loss": USE_TRAILING_STOP_LOSS, "trailing_activation_price": tp_sl_data.get('trailing_activation_price'),
+                        "trailing_distance": TRAILING_DISTANCE_PERCENT, "is_real_trade": is_real_mode,
+                        "ml_model_name": ml_confirm.get_model_name(symbol), "ml_prediction_score": float(ml_prediction),
+                        "strategy_name": "BB_STOCH_CANDLE_ML_V9", "bullish_pattern_detected": bullish_pattern
+                    }
+                    
+                    # هذه الدالة ستتعامل مع إدخال البيانات في قاعدة البيانات وتنفيذ الأمر
+                    insert_signal_into_db(signal_data)
+                    time.sleep(1) # تأخير بسيط بعد العثور على إشارة
+
+                except Exception as e:
+                    logger.error(f"❌ خطأ أثناء معالجة العملة {symbol}: {e}", exc_info=False)
+
+            logger.info(f"✅ دورة المسح اكتملت. الانتظار لمدة {60} ثانية.")
+            time.sleep(60)
+
+        except KeyboardInterrupt:
+            logger.info("🛑 تم إيقاف البوت يدوياً.")
+            break
         except Exception as main_err:
-            # ... error handling
-            pass
+            logger.error(f"❌ خطأ فادح في الحلقة الرئيسية: {main_err}", exc_info=True)
+            log_and_notify('error', f"Critical error in main loop: {main_err}", "SYSTEM_ERROR")
+            time.sleep(120)
+
 
 def price_update_loop():
     # ... (code remains the same)
@@ -651,4 +748,3 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
-
