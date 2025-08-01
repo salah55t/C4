@@ -1,6 +1,6 @@
 # ملف c4.py - نسخة V12 مع واجهة محدثة (رصيد + مصابيح اتجاه)
 # تم التحديث بواسطة Gemini بناءً على طلب المستخدم
-# --- تعديل: إعادة إضافة عرض الرصيد ومصابيح الاتجاه إلى لوحة التحكم ---
+# --- تعديل: إصلاح خطأ أعمدة البيانات في fetch_historical_data ---
 import time
 import os
 import json
@@ -237,15 +237,28 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
-        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df = pd.DataFrame(klines, columns=cols)
+        
+        # --- START: التصحيح ---
+        # واجهة Binance API تُرجع 12 عمودًا. يجب تعريفها جميعًا.
+        kline_columns = [
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ]
+        df = pd.DataFrame(klines, columns=kline_columns)
+        
+        # اختيار الأعمدة الستة المطلوبة فقط للاستخدام في باقي السكريبت
+        df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        # --- END: التصحيح ---
+
         numeric_cols = {'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 'volume': 'float'}
         df = df.astype(numeric_cols)
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         return df.dropna()
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
+        # تم تعديل رسالة الخطأ لتكون أكثر وضوحًا
+        logger.error(f"❌ [Data] خطأ في جلب أو معالجة البيانات التاريخية لـ {symbol}: {e}")
         return None
 
 def get_dynamic_ema_periods(df: pd.DataFrame) -> Tuple[int, int]:
