@@ -1,11 +1,8 @@
-# ملف c4.py - نسخة محدثة مع استراتيجية BB/Stochastic/Candlestick وفلتر دفتر الطلبات
+# ملف c4.py - نسخة محسنة مع تحميل متأخر للنموذج
 # تم التحديث بواسطة Gemini بناءً على طلب المستخدم
 # --- التغييرات الرئيسية:
-# 1. إزالة الاستراتيجيات السابقة.
-# 2. تطبيق استراتيجية جديدة تعتمد على (Bollinger Bands + Stochastic + Bullish Candlesticks).
-# 3. إضافة مجموعة واسعة من أنماط الشموع الانعكاسية الصاعدة.
-# 4. تعطيل جميع الفلاتر باستثناء فلتر دفتر الطلبات كشرط نهائي.
-# 5. تعديل فلتر دفتر الطلبات ليتوافق مع الشروط الجديدة (Bids > 1.3 * Asks).
+# 1. تم تعديل الحلقة الرئيسية لتأخير تحميل نموذج التعلم الآلي.
+# 2. الآن يتم تحميل النموذج فقط بعد العثور على إشارة فنية صالحة، مما يسرع عملية المسح بشكل كبير.
 
 import time
 import os
@@ -56,7 +53,6 @@ try:
     API_SECRET: str = config('BINANCE_API_SECRET')
     DB_URL: str = config('DATABASE_URL')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
-    # --- إعدادات تليجرام ---
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
 
@@ -67,7 +63,6 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-# --- MODIFICATION: Disable all filters by default as requested by the user ---
 are_filters_disabled: bool = True
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
@@ -84,8 +79,6 @@ BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.55
 MIN_PROFIT_PERCENT: float = 0.8
-
-# --- NEW: Memory Optimization Setting ---
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية ---
@@ -102,18 +95,9 @@ SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
-# --- NOTE: These are now mostly bypassed due to are_filters_disabled=True ---
-USE_PEAK_FILTER: bool = True
-PEAK_CHECK_PERIOD: int = 50
-PULLBACK_THRESHOLD_PCT: float = 0.988
-BREAKOUT_ALLOWANCE_PCT: float = 1.003
-DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 300
-# --- NEW: Order book filter settings as per user request ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005 # ±0.5%
 ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.3 # Bids must be > 30% of Asks
-
-# --- NEW: ATR Trailing Stop Settings ---
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.5
@@ -133,9 +117,6 @@ rejection_logs_cache = deque(maxlen=100)
 rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
 market_state_lock = Lock()
-dynamic_filter_profile_cache: Dict[str, Any] = {}
-last_dynamic_filter_analysis_time: float = 0
-dynamic_filter_lock = Lock()
 last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
@@ -144,6 +125,7 @@ TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 REJECTION_REASONS_AR = {
     "Strategy Signal Not Found": "لم يتم العثور على إشارة من الاستراتيجية",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
+    "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
     "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
     "Invalid Position Size": "حجم الصفقة غير صالح",
     "Lot Size Adjustment Failed": "فشل ضبط حجم العقد",
@@ -151,10 +133,6 @@ REJECTION_REASONS_AR = {
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
-    # --- Kept for historical reference, but mostly disabled ---
-    "Filters Not Loaded": "الفلاتر غير محملة", "Low Volatility": "تقلب منخفض جداً",
-    "BTC Correlation": "ارتباط ضعيف بالبيتكوين", "RRR Filter": "نسبة المخاطرة/العائد غير كافية",
-    "Momentum/Strength Filter": "فلتر الزخم والقوة", "Peak/Pullback Filter": "فلتر القمة/التصحيح",
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -535,95 +513,80 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- أنظمة التحليل المتقدمة ----------------------
-class MarketConditionsAnalyzer:
-    def __init__(self):
-        self.conditions_cache = {}
-        self.last_analysis = 0
-    def analyze_conditions(self) -> Dict[str, Any]:
-        if time.time() - self.last_analysis < 300: return self.conditions_cache
-        try:
-            conditions = {'volatility_regime': self._get_volatility_regime(), 'volume_regime': self._get_volume_regime(), 'correlation_regime': self._get_correlation_regime(), 'session_type': self._get_session_type()}
-            self.conditions_cache = conditions; self.last_analysis = time.time()
-            return conditions
-        except Exception as e:
-            logger.error(f"❌ [Market Conditions] خطأ: {e}"); return self._get_default_conditions()
-    def _get_volatility_regime(self) -> str:
-        try:
-            btc_data = fetch_historical_data(BTC_SYMBOL, '1h', 7)
-            if btc_data is None: return "normal"
-            volatility = btc_data['close'].pct_change().rolling(24).std().iloc[-1] * np.sqrt(24 * 365) * 100
-            if volatility < 20: return "low"
-            elif volatility < 60: return "normal"
-            else: return "high"
-        except: return "normal"
-    def _get_volume_regime(self) -> str:
-        try:
-            btc_data = fetch_historical_data(BTC_SYMBOL, '1h', 7)
-            if btc_data is None: return "normal"
-            ratio = btc_data['volume'].iloc[-1] / btc_data['volume'].rolling(24).mean().iloc[-1]
-            if ratio < 0.7: return "low"
-            elif ratio < 1.5: return "normal"
-            else: return "high"
-        except: return "normal"
-    def _get_correlation_regime(self) -> str: return "normal" # تبسيط مؤقت
-    def _get_session_type(self) -> str: return get_session_state()[1]
-    def _get_default_conditions(self) -> Dict[str, Any]: return {'volatility_regime': 'normal', 'volume_regime': 'normal', 'correlation_regime': 'normal', 'session_type': 'NORMAL_LIQUIDITY'}
-
 # ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V9) ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        model_bundle = self._load_ml_model_from_file(symbol)
-        self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
+        # OPTIMIZATION: Model is no longer loaded here. It's loaded on-demand.
+        self.ml_model, self.scaler, self.feature_names = None, None, None
 
-    def _load_ml_model_from_file(self, symbol: str) -> Optional[Dict[str, Any]]:
-        model_name = f"{BASE_ML_MODEL_NAME}_{symbol}"
-        if model_name in ml_models_cache: return ml_models_cache[model_name]
+    def load_model(self) -> bool:
+        """Loads the ML model from file into the instance. Returns True on success."""
+        model_name = f"{BASE_ML_MODEL_NAME}_{self.symbol}"
+        if model_name in ml_models_cache:
+            model_bundle = ml_models_cache[model_name]
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
+            model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
-        model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
-
-        if not os.path.exists(model_path):
-            logger.warning(f"  -> [{self.symbol}] 🛑 ملف النموذج غير موجود في '{model_path}'. تخطي.")
-            return None
-
-        try:
-            with open(model_path, 'rb') as f: model_bundle = pickle.load(f)
-            if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+            if not os.path.exists(model_path):
+                logger.warning(f"  -> [{self.symbol}] 🛑 ملف النموذج غير موجود في '{model_path}'.")
+                return False
+            try:
+                with open(model_path, 'rb') as f:
+                    model_bundle = pickle.load(f)
                 ml_models_cache[model_name] = model_bundle
-                logger.info(f"  -> [{self.symbol}] ✅ تم تحميل النموذج بنجاح.")
-                return model_bundle
-            return None
-        except Exception as e:
-            logger.error(f"❌ [ML Model File] خطأ في تحميل النموذج لـ {symbol}: {e}")
-            return None
+            except Exception as e:
+                logger.error(f"❌ [ML Model File] خطأ في تحميل النموذج لـ {self.symbol}: {e}")
+                return False
+        
+        if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
+            self.ml_model = model_bundle['model']
+            self.scaler = model_bundle['scaler']
+            self.feature_names = model_bundle['feature_names']
+            logger.info(f"  -> [{self.symbol}] ✅ تم تحميل النموذج بنجاح.")
+            return True
+        else:
+            logger.error(f"  -> [{self.symbol}] 🛑 ملف النموذج غير مكتمل.")
+            return False
 
-    def get_features(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        if self.feature_names is None: return None
+    def get_features_for_model(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """Prepares the final dataframe with all required features for the model."""
+        if self.feature_names is None:
+            logger.error(f"  -> [{self.symbol}] 🛑 لا يمكن إعداد الميزات لأن أسماء الميزات غير محملة.")
+            return None
         try:
+            # Recalculate features to ensure consistency and add 4h context
             df_featured = calculate_all_features(df_15m, btc_df)
             df_4h_features = calculate_all_features(df_4h, None)
             df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h")
-            required_4h_cols = ['rsi_4h', 'price_vs_ema50_4h']
+            
+            # Dynamically find required 4h columns from the model's feature list
+            required_4h_cols = [f for f in self.feature_names if f.endswith('_4h')]
+            
             df_featured = df_featured.join(df_4h_features[required_4h_cols], how='left')
             df_featured[required_4h_cols] = df_featured[required_4h_cols].fillna(method='ffill')
+
             for col in self.feature_names:
-                if col not in df_featured.columns: df_featured[col] = 0.0
+                if col not in df_featured.columns:
+                    df_featured[col] = 0.0
+            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
-            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات لـ V9: {e}", exc_info=True)
+            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات للنموذج: {e}", exc_info=True)
             return None
 
     def generate_buy_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty: return None
+        if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty:
+            return None
         try:
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
             features_scaled = self.scaler.transform(last_row_ordered_df)
             prediction = self.ml_model.predict(features_scaled)[0]
-            if prediction != 1: return None
+            if prediction != 1:
+                return None
             prediction_proba = self.ml_model.predict_proba(features_scaled)
             confidence = float(np.max(prediction_proba[0]))
             return {'prediction': int(prediction), 'confidence': confidence}
@@ -829,7 +792,6 @@ def check_new_bb_strategy(df: pd.DataFrame) -> tuple[bool, str]:
             
             for pattern_name, is_found in patterns.items():
                 if is_found:
-                    logger.info(f"  -> [{symbol_name}] ✅ إشارة شراء من استراتيجية BB/Stoch/Candle. (Pattern: {pattern_name})")
                     return True, pattern_name # تم العثور على إشارة ونمط
 
         return False, "" # لم يتم العثور على إشارة
@@ -1120,7 +1082,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9 - استراتيجية BB</title>
+    <title>لوحة تحكم التداول V9 - استراتيجية BB المحسنة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1150,7 +1112,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9 (BB Strategy)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9 (Optimized)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1425,13 +1387,11 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                # 1. Check for Take Profit
                 if current_price >= tp:
                     logger.info(f"🎯 [TP HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, 'take_profit')
                     continue
 
-                # 2. Update Peak Price
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1447,7 +1407,6 @@ def trade_management_loop():
                         logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
                     signal['current_peak_price'] = new_peak
 
-                # 3. Calculate and Update ATR Trailing Stop
                 if USE_ATR_TRAILING_STOP:
                     try:
                         df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
@@ -1476,7 +1435,6 @@ def trade_management_loop():
                     except Exception as e:
                         logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
 
-                # 4. Check for Stop Loss Hit (original or trailed)
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal['stop_loss']) else 'stop_loss'
                     logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
@@ -1490,7 +1448,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية التي تستخدم الاستراتيجية الجديدة وفلتر دفتر الطلبات فقط.
+    الحلقة الرئيسية المحسنة مع تحميل متأخر للنموذج لزيادة السرعة.
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1523,59 +1481,68 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        strategy = EnhancedTradingStrategy(symbol)
-                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                            continue
-
+                        # --- OPTIMIZATION: Step 1 - Technical Analysis First ---
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty:
                             logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 15m. تخطي.")
                             continue
-
-                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_4h is None or df_4h.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h. تخطي.")
-                            continue
                         
-                        df_features = strategy.get_features(df_15m, df_4h, btc_data)
-                        if df_features is None or df_features.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات. تخطي.")
+                        df_with_indicators = calculate_all_features(df_15m, btc_data)
+                        if df_with_indicators is None or df_with_indicators.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب المؤشرات الأولية. تخطي.")
                             continue
-                        df_features.name = symbol
-                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
+                        df_with_indicators.name = symbol
 
-                        # --- NEW STRATEGY LOGIC ---
-                        # 1. التحقق من استراتيجية الانعكاس (BB/Stoch/Candle)
-                        strategy_signal_found, pattern_name = check_new_bb_strategy(df_features)
+                        strategy_signal_found, pattern_name = check_new_bb_strategy(df_with_indicators)
                         
                         if not strategy_signal_found:
-                            log_rejection(symbol, "Strategy Signal Not Found")
+                            # No technical signal, so we skip loading the model and move to the next symbol.
+                            # A rejection is not logged here to avoid clutter, as this is the most common case.
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة فنية.")
                             continue
                         
-                        # 2. التحقق من نموذج التعلم الآلي
-                        ml_signal = strategy.generate_buy_signal(df_features)
+                        # --- OPTIMIZATION: Step 2 - Load Model ONLY if Technical Signal is Found ---
+                        logger.info(f"  -> [{symbol}] 🔥 إشارة فنية مكتشفة (نمط: {pattern_name}). تحميل النموذج للتحقق...")
+                        
+                        strategy = EnhancedTradingStrategy(symbol)
+                        if not strategy.load_model():
+                            log_rejection(symbol, "ML Model Load Failed")
+                            continue
+
+                        # --- Step 3: Prepare full features and get ML confirmation ---
+                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        if df_4h is None or df_4h.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h للتأكيد. تخطي.")
+                            continue
+
+                        df_features_for_model = strategy.get_features_for_model(df_15m, df_4h, btc_data)
+                        if df_features_for_model is None or df_features_for_model.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل إعداد الميزات للنموذج. تخطي.")
+                            continue
+                        
+                        ml_signal = strategy.generate_buy_signal(df_features_for_model)
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence'] if ml_signal else 'N/A'})
                             continue
 
                         logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة للفلتر النهائي.")
                         
+                        # --- Step 4: Final Checks and Trade Execution ---
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
                             continue
 
-                        # 3. التحقق من فلتر دفتر الطلبات (الشرط النهائي)
                         if not passes_final_order_book_check(symbol, entry_price):
-                            continue # The rejection is logged inside the function
+                            continue
                         
                         logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
 
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        strategy_name = "BB_Stoch_Reversal_V2"
+                        strategy_name = "BB_Stoch_Reversal_V2_Opt"
                         signal_details = {
                             'ML_Confidence': f"{ml_signal['confidence']:.2%}",
                             'Pattern': pattern_name,
@@ -1598,9 +1565,9 @@ def main_loop_enhanced():
                                 if order_result:
                                     new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
                                 else:
-                                    continue # Failed to place order
+                                    continue
                             else:
-                                continue # Failed to calculate position size
+                                continue
                         
                         saved_signal = insert_signal_into_db(new_signal)
                         if saved_signal:
@@ -1654,13 +1621,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (استراتيجية BB المخصصة)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة محسنة وسريعة)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - BB Strategy) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Optimized BB Strategy) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
