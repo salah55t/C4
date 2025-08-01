@@ -1,6 +1,6 @@
-# ملف c4.py - نسخة مع 3 استراتيجيات: EMA/Stoch + BB/RSI + MACD Divergence
-# تم التحديث بواسطة Gemini
-# --- تعديل: تجاوز فحص النموذج لاستراتيجية BB/RSI ---
+# ملف c4.py - نسخة مع استراتيجية EMA(9/21) و Stochastic Momentum + استراتيجية BB/Stochastic المعدلة
+# تم التحديث بواسطة Gemini بناءً على طلب المستخدم
+# --- تعديل: تحديث استراتيجية BB/RSI إلى BB/Stochastic مع شموع إضافية ---
 import time
 import os
 import json
@@ -61,6 +61,7 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت (محدثة لـ V9) ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
+# --- MODIFICATION: Disable all filters as requested by the user ---
 are_filters_disabled: bool = True
 filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
@@ -82,8 +83,10 @@ MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات المؤشرات الفنية (مطابقة لملف التدريب V9) ---
+# --- NOTE: EMA 9 and 21 are calculated in calculate_all_features ---
 EMA_FAST_PERIOD: int = 50
 EMA_SLOW_PERIOD: int = 120
+
 ADX_PERIOD: int = 14
 RSI_PERIOD: int = 14
 ATR_PERIOD: int = 14
@@ -91,6 +94,7 @@ BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
 MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
+# --- إعدادات Supertrend ---
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 
@@ -103,6 +107,7 @@ DYNAMIC_FILTER_ANALYSIS_INTERVAL: int = 300
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_WALL_MULTIPLIER: float = 10.0
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.02
+# --- NEW: ATR Trailing Stop Settings ---
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.5
@@ -126,6 +131,8 @@ dynamic_filter_profile_cache: Dict[str, Any] = {}
 last_dynamic_filter_analysis_time: float = 0
 dynamic_filter_lock = Lock()
 last_market_state_check = 0
+
+# --- NEW: ذاكرة التخزين المؤقت للإشارات الفنية ---
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5  # 5 دقائق
 
@@ -442,13 +449,18 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     # --- حساب المؤشرات ---
     df_calc['ema_2'] = df_calc['close'].ewm(span=2, adjust=False).mean()
     df_calc['ema_8'] = df_calc['close'].ewm(span=8, adjust=False).mean()
+    # --- START: NEW STRATEGY EMAs ---
+    # التأكد من حساب المتوسطات المطلوبة للاستراتيجية الجديدة
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    # --- END: NEW STRATEGY EMAs ---
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
+    
     df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+
 
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -489,6 +501,8 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc = calculate_market_microstructure_features(df_calc)
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
+
+    # --- NEW: Add Supertrend Calculation ---
     df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
 
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
@@ -594,8 +608,6 @@ enhanced_filter_system = EnhancedFilterSystem()
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # --- GEMINI MODIFICATION: Model loading is now conditional in the main loop ---
-        # The model is loaded here, so this class should only be instantiated when needed.
         model_bundle = self._load_ml_model_from_file(symbol)
         self.ml_model, self.scaler, self.feature_names = (model_bundle.get('model'), model_bundle.get('scaler'), model_bundle.get('feature_names')) if model_bundle else (None, None, None)
 
@@ -785,7 +797,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: NEW STRATEGY FUNCTIONS ---
+# --- START: MODIFIED STRATEGY FUNCTIONS ---
 # دوال مساعدة للتعرف على أنماط الشموع
 def is_hammer(candle: pd.Series) -> bool:
     body = abs(candle['close'] - candle['open'])
@@ -804,45 +816,108 @@ def is_doji(candle: pd.Series) -> bool:
     total_range = candle['high'] - candle['low']
     return total_range > 0 and body / total_range < 0.1
 
-def check_bb_rsi_reversal_strategy(df: pd.DataFrame) -> bool:
-    """
-    التحقق من استراتيجية الانعكاس الجديدة المبنية على Bollinger Bands و RSI.
-    """
-    required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'rsi']
-    if not all(col in df.columns for col in required_cols):
-        logger.warning(f"  -> [Strategy Check - BB/RSI] 🛑 الأعمدة المطلوبة مفقودة.")
+def is_piercing_line(current: pd.Series, previous: pd.Series) -> bool:
+    """التحقق من نمط الخط الثاقب"""
+    # الشمعة السابقة هابطة، والحالية صاعدة
+    if not (previous['open'] > previous['close'] and current['close'] > current['open']):
         return False
+    # الحالية تفتح تحت قاع السابقة
+    if not (current['open'] < previous['low']):
+        return False
+    # الحالية تغلق داخل جسم السابقة، فوق المنتصف
+    midpoint = (previous['open'] + previous['close']) / 2
+    return current['close'] > midpoint and current['close'] < previous['open']
 
-    if len(df) < 2:
+def is_morning_star(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool: # c3 هي الأحدث
+    """التحقق من نمط نجمة الصباح"""
+    # c1 شمعة هابطة طويلة
+    c1_is_bearish = c1['open'] > c1['close']
+    c1_body = c1['open'] - c1['close']
+    # تقدير تقريبي لكون الشمعة "طويلة"
+    c1_is_long = c1_body > (c1['high'] - c1['low']) * 0.5
+
+    # c2 جسم صغير، وفجوة لأسفل
+    c2_body = abs(c2['open'] - c2['close'])
+    # تقدير تقريبي لكون الجسم "صغير"
+    c2_is_small = c2_body < (c2['high'] - c2['low']) * 0.3
+    gapped_down = c2['high'] < c1['close']
+
+    # c3 شمعة صاعدة، تغلق فوق منتصف c1
+    c3_is_bullish = c3['close'] > c3['open']
+    midpoint_c1 = (c1['open'] + c1['close']) / 2
+    closes_above_mid = c3['close'] > midpoint_c1
+
+    return c1_is_bearish and c1_is_long and c2_is_small and gapped_down and c3_is_bullish and closes_above_mid
+
+def is_tweezer_bottom(current: pd.Series, previous: pd.Series) -> bool:
+    """التحقق من نمط الملقط السفلي"""
+    # السابقة هابطة، الحالية صاعدة
+    if not (previous['open'] > previous['close'] and current['close'] > current['open']):
         return False
+    # القيعان متطابقة تقريبًا
+    return np.isclose(previous['low'], current['low'], rtol=0.002) # تسامح 0.2%
+
+def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> tuple[bool, str]:
+    """
+    التحقق من استراتيجية الانعكاس المعدلة بناءً على طلب المستخدم.
+    - الشرط 1: تقاطع إيجابي لـ K و D لمؤشر ستوكاستيك تحت مستوى 15.
+    - الشرط 2: السعر يلامس أو يكسر الحد السفلي للبولينجر باند.
+    - الشرط 3: ظهور نمط شموع انعكاسي صاعد.
+    """
+    required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'stoch_k', 'stoch_d']
+    if not all(col in df.columns for col in required_cols):
+        logger.warning(f"  -> [{df.name if hasattr(df, 'name') else 'DataFrame'}] [Strategy Check - BB/Stoch] 🛑 الأعمدة المطلوبة مفقودة.")
+        return False, ""
+
+    if len(df) < 3: # نحتاج 3 شموع على الأقل لنمط نجمة الصباح
+        return False, ""
 
     try:
         last_candle = df.iloc[-1]
         prev_candle = df.iloc[-2]
+        third_last_candle = df.iloc[-3]
 
+        # الشرط 1: تقاطع ستوكاستيك إيجابي تحت 15
+        stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
+        stoch_below_15 = last_candle['stoch_k'] < 15 and last_candle['stoch_d'] < 15
+        stochastic_signal = stoch_k_cross_above_d and stoch_below_15
+
+        # الشرط 2: السعر عند الحد السفلي للبولينجر
         price_at_lower_band = last_candle['low'] <= last_candle['bb_lower']
-        rsi_oversold = last_candle['rsi'] < 30
 
-        if price_at_lower_band and rsi_oversold:
-            is_hammer_candle = is_hammer(last_candle)
-            is_engulfing_candle = is_bullish_engulfing(last_candle, prev_candle)
-            is_doji_candle = is_doji(last_candle)
+        if stochastic_signal and price_at_lower_band:
+            # الشرط 3: البحث عن شمعة تأكيد إيجابية
+            patterns = {
+                "Hammer": is_hammer(last_candle),
+                "Bullish Engulfing": is_bullish_engulfing(last_candle, prev_candle),
+                "Doji": is_doji(last_candle),
+                "Piercing Line": is_piercing_line(last_candle, prev_candle),
+                "Tweezer Bottom": is_tweezer_bottom(last_candle, prev_candle),
+                "Morning Star": is_morning_star(third_last_candle, prev_candle, last_candle)
+            }
+            
+            for pattern_name, is_found in patterns.items():
+                if is_found:
+                    logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية BB/Stoch Reversal. (Pattern: {pattern_name})")
+                    return True, pattern_name # تم العثور على إشارة ونمط
 
-            if is_hammer_candle or is_engulfing_candle or is_doji_candle:
-                pattern_found = "Hammer" if is_hammer_candle else "Bullish Engulfing" if is_engulfing_candle else "Doji"
-                logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية BB/RSI Reversal. (Pattern: {pattern_found})")
-                return True
-
-        return False
+        return False, "" # لم يتم العثور على إشارة
     except Exception as e:
-        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية BB/RSI: {e}")
-        return False
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية BB/Stoch: {e}")
+        return False, ""
 
 def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3) -> bool:
     """
-    التحقق من استراتيجية تقاطع EMA وتأكيد الزخم من Stochastic.
+    التحقق من استراتيجية المستخدم الجديدة المبنية على تقاطع EMA وتأكيد الزخم من Stochastic.
+    - الشرط 1: تقاطع EMA 9 فوق EMA 21.
+    - الشرط 2: في نفس شمعة التقاطع، يجب أن يكون خط Stochastic %K فوق خط %D.
     """
-    required_cols = ['ema_9', 'ema_21', 'stoch_k', 'stoch_d']
+    EMA_FAST_COL = 'ema_9'
+    EMA_SLOW_COL = 'ema_21'
+    STOCH_K_COL = 'stoch_k'
+    STOCH_D_COL = 'stoch_d'
+
+    required_cols = [EMA_FAST_COL, EMA_SLOW_COL, STOCH_K_COL, STOCH_D_COL]
     if not all(col in df.columns for col in required_cols):
         logger.warning(f"  -> [Strategy Check - EMA/Stoch] 🛑 البيانات غير كافية أو الأعمدة المطلوبة مفقودة.")
         return False
@@ -852,80 +927,26 @@ def check_ema_stoch_momentum_strategy(df: pd.DataFrame, lookback_period: int = 3
         return False
 
     try:
+        # البحث عن إشارة شراء ضمن فترة المراجعة
         for i in range(1, lookback_period + 1):
             current = df.iloc[-i]
             previous = df.iloc[-(i + 1)]
 
-            ema_crossover = previous['ema_9'] <= previous['ema_21'] and current['ema_9'] > current['ema_21']
-            stochastic_momentum = current['stoch_k'] > current['stoch_d']
+            # الشرط 1: تقاطع EMA 9 فوق EMA 21
+            ema_crossover = previous[EMA_FAST_COL] <= previous[EMA_SLOW_COL] and current[EMA_FAST_COL] > current[EMA_SLOW_COL]
+
+            # الشرط 2: زخم ستوكاستيك إيجابي (K% فوق D%)
+            stochastic_momentum = current[STOCH_K_COL] > current[STOCH_D_COL]
 
             if ema_crossover and stochastic_momentum:
                 logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية EMA(9/21)/Stochastic Momentum عند الشمعة رقم -{i}.")
-                return True
+                return True  # تم العثور على إشارة شراء
 
-        return False
+        return False  # لم يتم العثور على إشارة شراء
     except (IndexError, TypeError) as e:
         logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية EMA/Stoch: {e}")
         return False
-
-def check_macd_divergence_volume_strategy(df: pd.DataFrame) -> bool:
-    """
-    استراتيجية MACD دايفرجنس + ارتفاع حجم
-    """
-    if len(df) < 60:
-        return False
-
-    try:
-        # حساب MACD
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
-
-        # كشف القيعان (pivot lows)
-        lows = df['low']
-        pivot_low_idx = []
-
-        for i in range(2, len(df) - 2):
-            # تعريف القاع: شمعة أدنى من الشمعتين السابقتين واللاحقتين
-            if lows.iloc[i] < lows.iloc[i-1] and lows.iloc[i] < lows.iloc[i-2] and \
-               lows.iloc[i] < lows.iloc[i+1] and lows.iloc[i] < lows.iloc[i+2]:
-                pivot_low_idx.append(i)
-
-        if len(pivot_low_idx) < 2:
-            return False
-
-        # اختبار الدايفرجنس الصاعد بين آخر قاعين
-        p1_idx, p2_idx = pivot_low_idx[-2], pivot_low_idx[-1]
-        
-        # الشرط 1: السعر يسجل قاع أدنى
-        price_lower_low = lows.iloc[p2_idx] < lows.iloc[p1_idx]
-        
-        # الشرط 2: الماكد يسجل قاع أعلى
-        macd_higher_low = macd.iloc[p2_idx] > macd.iloc[p1_idx]
-
-        bullish_div = price_lower_low and macd_higher_low
-
-        if not bullish_div:
-            return False
-
-        # اختبار ارتفاع حجم التداول عند آخر شمعة
-        vol_ma = df['volume'].rolling(20).mean()
-        vol_spike = df['volume'].iloc[-1] > vol_ma.iloc[-1] * 1.5
-
-        # السعر فوق EMA8 لتأكيد الصعود
-        ema8 = df['close'].ewm(span=8, adjust=False).mean()
-        above_ema8 = df['close'].iloc[-1] > ema8.iloc[-1]
-
-        if bullish_div and vol_spike and above_ema8:
-            logger.info(f"  -> [{df.name}] ✅ إشارة شراء من استراتيجية MACD Divergence + Volume.")
-            return True
-            
-        return False
-
-    except Exception as e:
-        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من استراتيجية MACD Divergence: {e}")
-        return False
-# --- END: NEW STRATEGY FUNCTIONS ---
+# --- END: MODIFIED STRATEGY FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1645,7 +1666,10 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        # الخطوة 1: جلب البيانات وحساب الميزات أولاً
+                        strategy = EnhancedTradingStrategy(symbol)
+                        if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
+                            continue
+
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty:
                             logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 15m. تخطي.")
@@ -1656,72 +1680,47 @@ def main_loop_enhanced():
                             logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h. تخطي.")
                             continue
                         
-                        # حساب الميزات الأساسية اللازمة للاستراتيجيات
-                        df_features_for_strategies = calculate_all_features(df_15m, btc_data)
-                        if df_features_for_strategies is None or df_features_for_strategies.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات للاستراتيجيات. تخطي.")
+                        df_features = strategy.get_features(df_15m, df_4h, btc_data)
+                        if df_features is None or df_features.empty:
+                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب الميزات. تخطي.")
                             continue
-                        df_features_for_strategies.name = symbol
-                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات الأولية.")
+                        df_features.name = symbol
+                        logger.info(f"  -> [{symbol}] ✅ تم جلب البيانات وحساب الميزات.")
 
-                        # الخطوة 2: التحقق من الاستراتيجيات الفنية أولاً
+                        # --- START: NEW DUAL STRATEGY LOGIC ---
+                        # آلية التحقق من الاستراتيجيتين بالتتابع
                         strategy_signal_found = False
                         strategy_name = None
+                        pattern_name = ""
 
-                        if check_ema_stoch_momentum_strategy(df_features_for_strategies):
+                        # 1. التحقق من الاستراتيجية الأولى (EMA/Stoch)
+                        if check_ema_stoch_momentum_strategy(df_features):
                             strategy_signal_found = True
                             strategy_name = "EMA9_21_Stoch_Momentum_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stoch مكتشفة!")
+                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية EMA/Stoch مكتشفة! التحقق من النموذج...")
                         
-                        elif check_bb_rsi_reversal_strategy(df_features_for_strategies):
-                            strategy_signal_found = True
-                            strategy_name = "BB_RSI_Reversal_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/RSI مكتشفة!")
-                        
-                        elif check_macd_divergence_volume_strategy(df_features_for_strategies):
-                            strategy_signal_found = True
-                            strategy_name = "MACD_Divergence_Volume_V9"
-                            logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية MACD Divergence مكتشفة!")
-
-                        # الخطوة 3: إذا لم توجد إشارة، انتقل للعملة التالية
-                        if not strategy_signal_found:
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيات. تخطي.")
-                            continue
-
-                        # --- MODIFICATION: Conditional ML Check based on strategy ---
-                        # الخطوة 4: التحقق من النموذج بشكل مشروط
-                        ml_signal = None
-                        df_features_for_model = df_features_for_strategies 
-
-                        if strategy_name == "BB_RSI_Reversal_V9":
-                            logger.info(f"  -> [{symbol}] 🟡 استراتيجية BB/RSI لا تتطلب فحص النموذج. التجاوز إلى الفلاتر النهائية.")
-                            ml_signal = {'confidence': 1.0, 'prediction': 1} # إنشاء إشارة وهمية ناجحة للمتابعة
+                        # 2. إذا لم توجد إشارة، تحقق من استراتيجية الانعكاس المعدلة (BB/Stoch)
                         else:
-                            # بالنسبة للاستراتيجيات الأخرى، قم بتشغيل فحص النموذج كالمعتاد
-                            logger.info(f"  -> [{symbol}] 🔑 إشارة فنية من '{strategy_name}'. جاري تحميل النموذج للتحقق...")
-                            strategy = EnhancedTradingStrategy(symbol)
-                            if not all([strategy.ml_model, strategy.scaler, strategy.feature_names]):
-                                logger.warning(f"  -> [{symbol}] 🛑 فشل تحميل النموذج بعد وجود إشارة. تخطي.")
-                                continue
-                            
-                            df_features_for_model = strategy.get_features(df_15m, df_4h, btc_data)
-                            if df_features_for_model is None or df_features_for_model.empty:
-                                logger.info(f"  -> [{symbol}] 🛑 فشل حساب ميزات النموذج. تخطي.")
-                                continue
-                            
-                            ml_signal = strategy.generate_buy_signal(df_features_for_model)
+                            bb_stoch_signal, pattern_name = check_bb_stoch_reversal_strategy(df_features)
+                            if bb_stoch_signal:
+                                strategy_signal_found = True
+                                strategy_name = "BB_Stoch_Reversal_MODIFIED"
+                                logger.info(f"  -> [{symbol}] 🔥 إشارة من استراتيجية BB/Stoch Reversal المكتشفة! (نمط: {pattern_name}). التحقق من النموذج...")
+                        
+                        if not strategy_signal_found:
+                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة من أي من الاستراتيجيتين. انتظار...")
+                            continue
+                        # --- END: NEW DUAL STRATEGY LOGIC ---
 
-                        # الآن، تحقق من إشارة النموذج (سواء كانت حقيقية أو وهمية)
-                        if not ml_signal or ml_signal.get('confidence', 0) < BUY_CONFIDENCE_THRESHOLD:
-                            if ml_signal and strategy_name != "BB_RSI_Reversal_V9":
+                        ml_signal = strategy.generate_buy_signal(df_features)
+                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
+                            if ml_signal:
                                 log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence']})
                             else:
-                                logger.info(f"  -> [{symbol}] 🤖 النموذج لم يولد إشارة شراء أو أن الإشارة ضعيفة.")
+                                logger.info(f"  -> [{symbol}] 🤖 النموذج لم يولد إشارة شراء.")
                             continue
 
-                        if strategy_name != "BB_RSI_Reversal_V9":
-                            logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة إلى الفلاتر النهائية.")
-                        # --- END MODIFICATION ---
+                        logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة إلى الفلاتر النهائية.")
                         
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -1732,16 +1731,30 @@ def main_loop_enhanced():
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        last_features = df_features_for_model.iloc[-1]
+                        last_features = df_features.iloc[-1]
                         
                         if not passes_filters(symbol, last_features, filter_profile, entry_price, tp_sl_data, df_15m): continue
                         order_book_analysis = analyze_order_book(symbol, entry_price)
                         if not order_book_analysis or not passes_order_book_check(symbol, order_book_analysis, filter_profile): continue
                         logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الفلاتر بنجاح.")
 
-                        # --- MODIFICATION: Adjust ML Confidence string for bypassed strategy ---
-                        ml_confidence_str = "N/A (Bypassed)" if strategy_name == "BB_RSI_Reversal_V9" else f"{ml_signal['confidence']:.2%}"
-                        new_signal = {'symbol': symbol, 'strategy_name': strategy_name, 'signal_details': {'ML_Confidence': ml_confidence_str, 'Filter_Profile': filter_profile.get('name', 'N/A'), 'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0), **tp_sl_data}, 'entry_price': entry_price, **tp_sl_data}
+                        # --- استخدام اسم الاستراتيجية الذي تم اكتشافه ---
+                        signal_details = {
+                            'ML_Confidence': f"{ml_signal['confidence']:.2%}",
+                            'Filter_Profile': filter_profile.get('name', 'N/A'),
+                            'Bid_Ask_Ratio': order_book_analysis.get('bid_ask_ratio', 0),
+                            **tp_sl_data
+                        }
+                        if pattern_name:
+                            signal_details['Pattern'] = pattern_name
+
+                        new_signal = {
+                            'symbol': symbol,
+                            'strategy_name': strategy_name,
+                            'signal_details': signal_details,
+                            'entry_price': entry_price,
+                            **tp_sl_data
+                        }
 
                         with trading_status_lock: is_enabled = is_trading_enabled
                         if is_enabled:
