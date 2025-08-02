@@ -1,8 +1,9 @@
-# ملف c4.py - نسخة محسنة مع تحميل متأخر للنموذج
+# ملف c4.py - نسخة مصححة مع استراتيجية معدلة ولوحة تحكم شفافة
 # تم التحديث بواسطة Gemini بناءً على طلب المستخدم
 # --- التغييرات الرئيسية:
-# 1. تم تعديل الحلقة الرئيسية لتأخير تحميل نموذج التعلم الآلي.
-# 2. الآن يتم تحميل النموذج فقط بعد العثور على إشارة فنية صالحة، مما يسرع عملية المسح بشكل كبير.
+# 1. (إصلاح خطأ) تم تعديل شرط الاستوكاستك ليصبح أكثر واقعية (التحقق من أن التقاطع بدأ من منطقة ذروة البيع).
+# 2. (تحسين) تم تفعيل عرض الصفقات المرفوضة في لوحة التحكم لإعطاء رؤية واضحة لعمل البوت.
+# 3. (تحسين) يتم الآن تسجيل جميع حالات الرفض، بما في ذلك عندما لا يتم العثور على إشارة فنية.
 
 import time
 import os
@@ -123,7 +124,7 @@ TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
-    "Strategy Signal Not Found": "لم يتم العثور على إشارة من الاستراتيجية",
+    "Strategy Signal Not Found": "لم تتحقق شروط الاستراتيجية",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
     "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
@@ -517,11 +518,9 @@ def load_notifications_to_cache():
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
-        # OPTIMIZATION: Model is no longer loaded here. It's loaded on-demand.
         self.ml_model, self.scaler, self.feature_names = None, None, None
 
     def load_model(self) -> bool:
-        """Loads the ML model from file into the instance. Returns True on success."""
         model_name = f"{BASE_ML_MODEL_NAME}_{self.symbol}"
         if model_name in ml_models_cache:
             model_bundle = ml_models_cache[model_name]
@@ -552,17 +551,14 @@ class EnhancedTradingStrategy:
             return False
 
     def get_features_for_model(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        """Prepares the final dataframe with all required features for the model."""
         if self.feature_names is None:
             logger.error(f"  -> [{self.symbol}] 🛑 لا يمكن إعداد الميزات لأن أسماء الميزات غير محملة.")
             return None
         try:
-            # Recalculate features to ensure consistency and add 4h context
             df_featured = calculate_all_features(df_15m, btc_df)
             df_4h_features = calculate_all_features(df_4h, None)
             df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h")
             
-            # Dynamically find required 4h columns from the model's feature list
             required_4h_cols = [f for f in self.feature_names if f.endswith('_4h')]
             
             df_featured = df_featured.join(df_4h_features[required_4h_cols], how='left')
@@ -596,10 +592,6 @@ class EnhancedTradingStrategy:
 
 # --- NEW: Final Order Book Check as per user request ---
 def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
-    """
-    Final check on order book. Bids volume must be > 30% of asks volume
-    in a ±0.5% range around the current price.
-    """
     if not client:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": "Client not initialized"})
         return False
@@ -614,7 +606,7 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         relevant_bids_vol = bids[bids['price'].between(price_range_lower, entry_price)]['qty'].sum()
         relevant_asks_vol = asks[asks['price'].between(entry_price, price_range_upper)]['qty'].sum()
 
-        if relevant_asks_vol == 0: # Avoid division by zero, if no asks, it's a strong buy signal
+        if relevant_asks_vol == 0:
             return True
 
         bid_ask_ratio = relevant_bids_vol / relevant_asks_vol
@@ -736,9 +728,11 @@ def is_piercing_line(current: pd.Series, previous: pd.Series) -> bool:
 def is_morning_star(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool: # c3 is the latest
     c1_is_bearish = c1['open'] > c1['close']
     c1_body = c1['open'] - c1['close']
-    c1_is_long = c1_body > (c1['high'] - c1['low']) * 0.5
+    if (c1['high'] - c1['low']) == 0: return False # Avoid division by zero
+    c1_is_long = c1_body / (c1['high'] - c1['low']) > 0.5
     c2_body = abs(c2['open'] - c2['close'])
-    c2_is_small = c2_body < (c2['high'] - c2['low']) * 0.3
+    if (c2['high'] - c2['low']) == 0: return False
+    c2_is_small = c2_body / (c2['high'] - c2['low']) < 0.3
     gapped_down = c2['high'] < c1['close']
     c3_is_bullish = c3['close'] > c3['open']
     midpoint_c1 = (c1['open'] + c1['close']) / 2
@@ -752,19 +746,19 @@ def is_tweezer_bottom(current: pd.Series, previous: pd.Series) -> bool:
 
 def check_new_bb_strategy(df: pd.DataFrame) -> tuple[bool, str]:
     """
-    التحقق من استراتيجية الانعكاس الجديدة بناءً على طلب المستخدم.
+    التحقق من استراتيجية الانعكاس المصححة.
     - الشرط 1: السعر يلامس أو يكسر الحد السفلي للبولينجر باند.
-    - الشرط 2: تقاطع إيجابي لـ K و D لمؤشر ستوكاستيك تحت مستوى 15.
-    - الشرط 3: ظهور نمط شموع انعكاسي صاعد.
+    - الشرط 2: تقاطع إيجابي لـ K و D لمؤشر ستوكاستيك.
+    - الشرط 3: التقاطع بدأ من منطقة ذروة البيع (K كان تحت 20 في الشمعة السابقة).
+    - الشرط 4: ظهور نمط شموع انعكاسي صاعد.
     """
     required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'stoch_k', 'stoch_d']
     symbol_name = df.name if hasattr(df, 'name') else 'DataFrame'
     
     if not all(col in df.columns for col in required_cols):
-        logger.warning(f"  -> [{symbol_name}] [Strategy Check] 🛑 الأعمدة المطلوبة مفقودة.")
         return False, ""
 
-    if len(df) < 3: # نحتاج 3 شموع على الأقل لنمط نجمة الصباح
+    if len(df) < 3:
         return False, ""
 
     try:
@@ -775,13 +769,14 @@ def check_new_bb_strategy(df: pd.DataFrame) -> tuple[bool, str]:
         # الشرط 1: السعر عند الحد السفلي للبولينجر
         price_at_lower_band = last_candle['low'] <= last_candle['bb_lower']
         
-        # الشرط 2: تقاطع ستوكاستيك إيجابي تحت 15
+        # الشرط 2: تقاطع ستوكاستيك إيجابي
         stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
-        stoch_below_15 = last_candle['stoch_k'] < 15 and last_candle['stoch_d'] < 15
-        stochastic_signal = stoch_k_cross_above_d and stoch_below_15
+        
+        # الشرط 3 (المصحح): التقاطع بدأ من منطقة ذروة البيع
+        crossover_started_oversold = prev_candle['stoch_k'] < 20
 
-        if price_at_lower_band and stochastic_signal:
-            # الشرط 3: البحث عن شمعة تأكيد إيجابية
+        if price_at_lower_band and stoch_k_cross_above_d and crossover_started_oversold:
+            # الشرط 4: البحث عن شمعة تأكيد إيجابية
             patterns = {
                 "Hammer": is_hammer(last_candle),
                 "Bullish Engulfing": is_bullish_engulfing(last_candle, prev_candle),
@@ -792,11 +787,11 @@ def check_new_bb_strategy(df: pd.DataFrame) -> tuple[bool, str]:
             
             for pattern_name, is_found in patterns.items():
                 if is_found:
-                    return True, pattern_name # تم العثور على إشارة ونمط
+                    return True, pattern_name
 
-        return False, "" # لم يتم العثور على إشارة
+        return False, ""
     except Exception as e:
-        logger.error(f"  -> [{symbol_name}] ❌ خطأ أثناء التحقق من الاستراتيجية الجديدة: {e}")
+        logger.error(f"  -> [{symbol_name}] ❌ خطأ أثناء التحقق من الاستراتيجية المصححة: {e}")
         return False, ""
 # --- END: NEW STRATEGY FUNCTIONS ---
 
@@ -1082,7 +1077,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9 - استراتيجية BB المحسنة</title>
+    <title>لوحة تحكم التداول V9 - نسخة مصححة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1112,7 +1107,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9 (Optimized)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9 (FIXED)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1448,7 +1443,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية المحسنة مع تحميل متأخر للنموذج لزيادة السرعة.
+    الحلقة الرئيسية المصححة مع تسجيل جميع حالات الرفض.
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1481,27 +1476,21 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        # --- OPTIMIZATION: Step 1 - Technical Analysis First ---
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_15m is None or df_15m.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 15m. تخطي.")
                             continue
                         
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
                         if df_with_indicators is None or df_with_indicators.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل حساب المؤشرات الأولية. تخطي.")
                             continue
                         df_with_indicators.name = symbol
 
                         strategy_signal_found, pattern_name = check_new_bb_strategy(df_with_indicators)
                         
                         if not strategy_signal_found:
-                            # No technical signal, so we skip loading the model and move to the next symbol.
-                            # A rejection is not logged here to avoid clutter, as this is the most common case.
-                            logger.info(f"  -> [{symbol}] ⏳ لا توجد إشارة فنية.")
+                            log_rejection(symbol, "Strategy Signal Not Found")
                             continue
                         
-                        # --- OPTIMIZATION: Step 2 - Load Model ONLY if Technical Signal is Found ---
                         logger.info(f"  -> [{symbol}] 🔥 إشارة فنية مكتشفة (نمط: {pattern_name}). تحميل النموذج للتحقق...")
                         
                         strategy = EnhancedTradingStrategy(symbol)
@@ -1509,15 +1498,12 @@ def main_loop_enhanced():
                             log_rejection(symbol, "ML Model Load Failed")
                             continue
 
-                        # --- Step 3: Prepare full features and get ML confirmation ---
                         df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         if df_4h is None or df_4h.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل جلب بيانات 4h للتأكيد. تخطي.")
                             continue
 
                         df_features_for_model = strategy.get_features_for_model(df_15m, df_4h, btc_data)
                         if df_features_for_model is None or df_features_for_model.empty:
-                            logger.info(f"  -> [{symbol}] 🛑 فشل إعداد الميزات للنموذج. تخطي.")
                             continue
                         
                         ml_signal = strategy.generate_buy_signal(df_features_for_model)
@@ -1527,7 +1513,6 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة للفلتر النهائي.")
                         
-                        # --- Step 4: Final Checks and Trade Execution ---
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
@@ -1542,7 +1527,7 @@ def main_loop_enhanced():
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        strategy_name = "BB_Stoch_Reversal_V2_Opt"
+                        strategy_name = "BB_Stoch_Reversal_V3_Fixed"
                         signal_details = {
                             'ML_Confidence': f"{ml_signal['confidence']:.2%}",
                             'Pattern': pattern_name,
@@ -1621,13 +1606,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة محسنة وسريعة)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة مصححة)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Optimized BB Strategy) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Fixed BB Strategy) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
