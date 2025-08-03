@@ -795,8 +795,12 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
     
-    if not (last_candle['close'] > last_candle['ema_21'] and last_candle['ema_21'] > last_candle['ema_50']):
+    # --- START: MODIFICATION ---
+    # تم تخفيف الشرط للتركيز على هيكل الاتجاه العام (ema_21 > ema_50)
+    # والسماح للسعر بالانخفاض مؤقتًا تحت ema_21 كجزء من التصحيح.
+    if not (last_candle['ema_21'] > last_candle['ema_50']):
         return False, "Not an Uptrend", {}
+    # --- END: MODIFICATION ---
         
     pullback_occurred = (prev_candle['low'] <= prev_candle['ema_21']) or (last_candle['low'] <= last_candle['ema_21'])
     if not pullback_occurred:
