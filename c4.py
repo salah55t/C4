@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V3 مع تسجيل تفصيلي للأسباب
-# تم التحديث بواسطة Gemini لزيادة الشفافية وتسهيل تشخيص أداء الاستراتيجية
-# --- التغييرات الرئيسية (V3):
-# 1. (تحسين جذري) إعادة هيكلة دالة `check_dynamic_divergence_strategy` لتسجيل سبب الرفض المحدد عند كل خطوة فحص.
-# 2. (تحسين) تعديل الحلقة الرئيسية لالتقاط الرسالة المحددة من الدالة بدلاً من تسجيل رسالة عامة.
-# 3. (تحسين) إضافة قاموس أكثر تفصيلاً لأسباب الرفض لدعم الرسائل الجديدة.
+# ملف c4.py - نسخة V5 مع خط تجميع إشارة واضح
+# تم التحديث بواسطة Gemini لتوضيح تطبيق الفلاتر النهائية على جميع الاستراتيجيات
+# --- التغييرات الرئيسية (V5):
+# 1. (هيكلة جديدة) إعادة هيكلة الحلقة الرئيسية لتتبع "خط تجميع إشارة" (Signal Pipeline) واضح ومكون من 4 مراحل.
+# 2. (تأكيد منطقي) التأكيد على أن مخرجات كلتا الاستراتيجيتين (الانعكاس ومتابعة الاتجاه) تمر بنفس فلاتر الجودة (النموذج الآلي ودفتر الطلبات).
+# 3. (تحسين التسجيل) إضافة رسائل سجل أكثر تفصيلاً لتتبع تقدم الإشارة عبر كل مرحلة من مراحل التحقق.
 
 import time
 import os
@@ -122,12 +122,10 @@ last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
-# --- قاموس أسباب الرفض باللغة العربية (موسع) ---
+# --- قاموس أسباب الرفض باللغة العربية (موسع للاستراتيجيتين) ---
 REJECTION_REASONS_AR = {
-    "Strategy Signal Not Found": "لم تتحقق شروط الاستراتيجية",
-    "No Bullish Divergence": "لم يتم العثور على انفراج إيجابي",
-    "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
-    "Low Buy Pressure": "ضغط الشراء ضعيف",
+    # أسباب عامة
+    "Strategy Signal Not Found": "لم تتحقق شروط أي استراتيجية",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
     "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
@@ -137,10 +135,22 @@ REJECTION_REASONS_AR = {
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
-    "Invalid Market Regime": "حالة السوق غير مناسبة للإشارة",
+    "Invalid Market Regime for Any Strategy": "حالة السوق غير مناسبة لأي استراتيجية متاحة",
+
+    # أسباب استراتيجية الانعكاس (Divergence)
+    "No Bullish Divergence": "لم يتم العثور على انفراج إيجابي",
     "Divergence not from Oversold": "الانفراج لم يبدأ من منطقة ذروة بيع",
     "No Stochastic Crossover": "لم يحدث تقاطع إيجابي لمؤشر ستوكاستيك",
+    
+    # أسباب استراتيجية متابعة الاتجاه (Pullback)
+    "Not an Uptrend": "السوق ليس في اتجاه صاعد",
+    "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
+    "RSI below threshold": "مؤشر القوة النسبية ضعيف",
+
+    # أسباب مشتركة
     "No Confirmation Candle": "لم تظهر شمعة تأكيد صاعدة قوية",
+    "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
+    "Low Buy Pressure": "ضغط الشراء ضعيف",
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -618,7 +628,6 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         bid_ask_ratio = relevant_bids_vol / relevant_asks_vol
         
         if bid_ask_ratio >= ORDER_BOOK_MIN_BID_ASK_RATIO:
-            logger.info(f"  -> [{symbol}] ✅ فلتر دفتر الطلبات ناجح (Ratio: {bid_ask_ratio:.2f})")
             return True
         else:
             log_rejection(symbol, "Order Book Filter Failed", {"ratio": f"{bid_ask_ratio:.2f}", "required": f"{ORDER_BOOK_MIN_BID_ASK_RATIO}"})
@@ -707,52 +716,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: NEW DYNAMIC STRATEGY FUNCTIONS (V3 with Detailed Logging) ---
-
-def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
-    """
-    البحث عن انفراج إيجابي كلاسيكي على مؤشر RSI.
-    إذا تم العثور عليه، يُرجع الطوابع الزمنية للقاعين.
-    """
-    if len(df) < lookback:
-        return None
-
-    data = df.iloc[-lookback:].copy()
-    
-    data['price_pivot'] = data['low'].rolling(window=pivot_window*2+1, center=True).min()
-    data['rsi_pivot'] = data['rsi'].rolling(window=pivot_window*2+1, center=True).min()
-
-    price_lows = data[data['low'] == data['price_pivot']].dropna()
-    
-    if len(price_lows) < 2:
-        return None
-
-    last_price_low = price_lows.iloc[-1]
-    prev_price_low = price_lows.iloc[-2]
-
-    if last_price_low['low'] >= prev_price_low['low']:
-        return None
-
-    rsi_low_at_last_price_low = data['rsi'].loc[last_price_low.name]
-    rsi_low_at_prev_price_low = data['rsi'].loc[prev_price_low.name]
-
-    if rsi_low_at_last_price_low > rsi_low_at_prev_price_low:
-        logger.info(f"  -> [{df.name}] ✅ تم العثور على انفراج إيجابي بين {prev_price_low.name} و {last_price_low.name}")
-        return prev_price_low.name, last_price_low.name
-
-    return None
-
-def calculate_dynamic_rsi_level(rsi_series: pd.Series, period: int = 20, std_dev: float = 2.0) -> float:
-    """
-    حساب مستوى ذروة البيع الديناميكي لمؤشر RSI باستخدام بولينجر باند.
-    """
-    if len(rsi_series) < period:
-        return 30.0 # قيمة افتراضية
-    
-    rsi_ma = rsi_series.rolling(window=period).mean()
-    rsi_std = rsi_series.rolling(window=period).std()
-    rsi_bb_lower = rsi_ma - (rsi_std * std_dev)
-    return rsi_bb_lower.iloc[-1]
+# --- START: STRATEGY FUNCTIONS (V5 - Multi-Strategy) ---
 
 def is_strong_bullish_candle(candle: pd.Series, prev_candle: pd.Series) -> bool:
     """
@@ -768,72 +732,88 @@ def is_strong_bullish_candle(candle: pd.Series, prev_candle: pd.Series) -> bool:
     
     return is_bullish and close_position_in_range > 0.7 and body_size > prev_body_size
 
-def check_dynamic_divergence_strategy(df: pd.DataFrame, market_regime: str) -> Tuple[bool, str, Optional[Dict]]:
-    """
-    التحقق من استراتيجية الانعكاس الديناميكية والمحسنة (V3).
-    تُرجع الآن (is_signal, rejection_key, details)
-    """
-    required_cols = ['low', 'close', 'open', 'high', 'rsi', 'volume', 'stoch_k', 'stoch_d', 'buy_pressure']
+# --- استراتيجية 1: الانعكاس (Divergence Reversal) ---
+def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+    if len(df) < lookback: return None
+    data = df.iloc[-lookback:].copy()
+    data['price_pivot'] = data['low'].rolling(window=pivot_window*2+1, center=True).min()
+    price_lows = data[data['low'] == data['price_pivot']].dropna()
+    if len(price_lows) < 2: return None
+    last_price_low = price_lows.iloc[-1]
+    prev_price_low = price_lows.iloc[-2]
+    if last_price_low['low'] >= prev_price_low['low']: return None
+    rsi_low_at_last_price_low = data['rsi'].loc[last_price_low.name]
+    rsi_low_at_prev_price_low = data['rsi'].loc[prev_price_low.name]
+    if rsi_low_at_last_price_low > rsi_low_at_prev_price_low:
+        logger.info(f"  -> [{df.name}] ✅ تم العثور على انفراج إيجابي بين {prev_price_low.name} و {last_price_low.name}")
+        return prev_price_low.name, last_price_low.name
+    return None
+
+def calculate_dynamic_rsi_level(rsi_series: pd.Series, period: int = 20, std_dev: float = 2.0) -> float:
+    if len(rsi_series) < period: return 30.0
+    rsi_ma = rsi_series.rolling(window=period).mean()
+    rsi_std = rsi_series.rolling(window=period).std()
+    rsi_bb_lower = rsi_ma - (rsi_std * std_dev)
+    return rsi_bb_lower.iloc[-1]
+
+def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    if not all(col in df.columns for col in required_cols) or len(df) < 50:
-        return False, "Insufficient Data", {"len": len(df)}
-
-    # --- الشرط 1: فلتر حالة السوق ---
-    if market_regime in ["STRONG_UPTREND", "UPTREND"]:
-        return False, "Invalid Market Regime", {"regime": market_regime}
-
-    # --- الشرط 2: البحث عن الانفراج الإيجابي ---
     divergence_points = find_bullish_divergence(df)
     if not divergence_points:
         return False, "No Bullish Divergence", {}
     
     first_low_ts, _ = divergence_points
-
-    try:
-        last_candle = df.iloc[-1]
-        prev_candle = df.iloc[-2]
-
-        # --- الشرط 3: التحقق من أن الانفراج بدأ من منطقة ذروة بيع (ديناميكية) ---
-        dynamic_oversold_level = calculate_dynamic_rsi_level(df['rsi'])
-        rsi_at_first_low = df.loc[first_low_ts]['rsi']
-        if rsi_at_first_low > dynamic_oversold_level:
-            details = {
-                "rsi_at_low": f"{rsi_at_first_low:.2f}",
-                "dynamic_level": f"{dynamic_oversold_level:.2f}"
-            }
-            return False, "Divergence not from Oversold", details
+    dynamic_oversold_level = calculate_dynamic_rsi_level(df['rsi'])
+    rsi_at_first_low = df.loc[first_low_ts]['rsi']
+    if rsi_at_first_low > dynamic_oversold_level:
+        details = {"rsi_at_low": f"{rsi_at_first_low:.2f}", "dynamic_level": f"{dynamic_oversold_level:.2f}"}
+        return False, "Divergence not from Oversold", details
         
-        # --- الشرط 4: تقاطع ستوكاستيك إيجابي ---
-        stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
-        if not stoch_k_cross_above_d:
-            return False, "No Stochastic Crossover", {}
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
+    if not stoch_k_cross_above_d:
+        return False, "No Stochastic Crossover", {}
 
-        # --- الشرط 5: شمعة تأكيد صاعدة قوية ---
-        if not is_strong_bullish_candle(last_candle, prev_candle):
-            return False, "No Confirmation Candle", {}
+    if not is_strong_bullish_candle(last_candle, prev_candle):
+        return False, "No Confirmation Candle", {}
             
-        # --- الشرط 6: تأكيد حجم التداول ---
-        avg_volume = df['volume'].iloc[-11:-1].mean()
-        if last_candle['volume'] < avg_volume:
-            details = {
-                "signal_volume": f"{last_candle['volume']:.2f}",
-                "avg_volume": f"{avg_volume:.2f}"
-            }
-            return False, "Low Volume on Signal Candle", details
+    avg_volume = df['volume'].iloc[-11:-1].mean()
+    if last_candle['volume'] < avg_volume:
+        details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
+        return False, "Low Volume on Signal Candle", details
+    
+    if last_candle['buy_pressure'] < 0.55:
+        return False, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"}
+
+    return True, "Divergence_Reversal", {}
+
+# --- استراتيجية 2: متابعة الاتجاه (Trend Continuation) ---
+def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
+    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
+    
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    
+    if not (last_candle['close'] > last_candle['ema_21'] and last_candle['ema_21'] > last_candle['ema_50']):
+        return False, "Not an Uptrend", {}
         
-        # --- الشرط 7: تأكيد ضغط الشراء ---
-        if last_candle['buy_pressure'] < 0.55:
-            return False, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"}
+    pullback_occurred = (prev_candle['low'] <= prev_candle['ema_21']) or (last_candle['low'] <= last_candle['ema_21'])
+    if not pullback_occurred:
+        return False, "No Pullback to EMA", {}
+        
+    if last_candle['rsi'] < 45:
+        return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
+        
+    if not is_strong_bullish_candle(last_candle, prev_candle):
+        return False, "No Confirmation Candle", {}
+        
+    avg_volume = df['volume'].iloc[-11:-1].mean()
+    if last_candle['volume'] < avg_volume * 1.1:
+        details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
+        return False, "Low Volume on Signal Candle", details
 
-        # --- النجاح! تحققت كل الشروط ---
-        return True, "Dynamic Divergence", {}
-
-    except Exception as e:
-        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من الاستراتيجية الديناميكية: {e}")
-        return False, "Strategy Function Error", {"error": str(e)}
-# --- END: NEW DYNAMIC STRATEGY FUNCTIONS ---
-
+    return True, "Uptrend_Pullback", {}
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -1063,8 +1043,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
                 f"*العملة:* `{signal_data['symbol']}`\n"
-                f"*الاستراتيجية:* `{signal_data['strategy_name']}`\n"
-                f"*النمط:* `{signal_data['signal_details'].get('Pattern', 'N/A')}`\n"
+                f"*الاستراتيجية:* `{signal_data['strategy_name'].replace('_', ' ')}`\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
                 f"*الهدف (TP):* `{target_price:.4f}`\n"
                 f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
@@ -1116,7 +1095,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V10 - استراتيجية الانفراج الديناميكية</title>
+    <title>لوحة تحكم التداول V10 - نظام متعدد الاستراتيجيات</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1146,7 +1125,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V10 (Dynamic)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V5 (Multi-Strategy)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1157,7 +1136,7 @@ def get_dashboard_html():
         </section>
         <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button><button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button></nav></div>
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الحالة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[25%]">التقدم</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الاستراتيجية</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[25%]">التقدم</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
@@ -1226,7 +1205,14 @@ function updateSignals() {
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
             const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss), tp = parseFloat(s.target_price), current = parseFloat(s.current_price || entry);
             const progress = (tp - sl > 0) ? Math.max(0, Math.min(100, (current - sl) / (tp - sl) * 100)) : 0;
-            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${s.is_real_trade ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'}">${s.is_real_trade ? 'حقيقي' : 'تجريبي'}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
+            const strategyName = s.strategy_name || 'N/A';
+            let strategyClass = 'bg-gray-700 text-gray-200';
+            if (strategyName.includes('Pullback')) {
+                strategyClass = 'bg-green-500/20 text-green-400';
+            } else if (strategyName.includes('Reversal')) {
+                strategyClass = 'bg-yellow-500/20 text-yellow-400';
+            }
+            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${strategyClass}">${strategyName.replace(/_/g, ' ')}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
         });
     });
 }
@@ -1482,7 +1468,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية المحدثة مع استراتيجية الانفراج الديناميكية (V3).
+    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V5).
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1511,7 +1497,7 @@ def main_loop_enhanced():
 
                 for symbol in batch:
                     try:
-                        logger.info(f"---===[ 🔍 تحليل {symbol} ]===---")
+                        logger.info(f"---===[ 🔍 تحليل {symbol} | حالة السوق: {market_regime} ]===---")
 
                         with signal_cache_lock:
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
@@ -1524,18 +1510,36 @@ def main_loop_enhanced():
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
                         if df_with_indicators is None or df_with_indicators.empty:
                             continue
-                        df_with_indicators.name = symbol
-
-                        # *** استدعاء الاستراتيجية مع التقاط سبب الرفض المحدد ***
-                        strategy_signal_found, rejection_key, details = check_dynamic_divergence_strategy(df_with_indicators, market_regime)
                         
+                        # =================================================================
+                        # ============== خط تجميع الإشارة (Signal Pipeline) ==============
+                        # =================================================================
+
+                        # --- المرحلة 1: الاكتشاف الفني (Technical Discovery) ---
+                        strategy_signal_found = False
+                        strategy_name = ""
+                        rejection_key = "Strategy Signal Not Found"
+                        details = {}
+
+                        if market_regime in ["UPTREND", "STRONG_UPTREND"]:
+                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
+                            strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
+                        elif market_regime in ["DOWNTREND", "RANGING"]:
+                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية الانعكاس (Reversal)...")
+                            strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
+                        else:
+                            rejection_key = "Invalid Market Regime for Any Strategy"
+                            details = {"regime": market_regime}
+
                         if not strategy_signal_found:
-                            # تسجيل سبب الرفض المحدد الذي تم إرجاعه من الدالة
                             log_rejection(symbol, rejection_key, details)
                             continue
                         
-                        logger.info(f"  -> [{symbol}] 🔥 إشارة فنية مكتشفة (نمط: {rejection_key}). تحميل النموذج للتحقق...")
+                        strategy_name = rejection_key # اسم الاستراتيجية الناجحة
+                        logger.info(f"  -> [مرحلة 1] ✅ نجاح! إشارة فنية مكتشفة (استراتيجية: {strategy_name}).")
                         
+                        # --- المرحلة 2: التحقق من النموذج الآلي (ML Validation) ---
+                        logger.info(f"  -> [مرحلة 2] الانتقال إلى التحقق من النموذج الآلي...")
                         strategy = EnhancedTradingStrategy(symbol)
                         if not strategy.load_model():
                             log_rejection(symbol, "ML Model Load Failed")
@@ -1553,9 +1557,11 @@ def main_loop_enhanced():
                         if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
                             log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence'] if ml_signal else 'N/A'})
                             continue
-
-                        logger.info(f"  -> [{symbol}] ✅ النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}). المتابعة للفلتر النهائي.")
                         
+                        logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}).")
+
+                        # --- المرحلة 3: التحقق من دفتر الطلبات (Order Book Validation) ---
+                        logger.info(f"  -> [مرحلة 3] الانتقال إلى التحقق من دفتر الطلبات...")
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
@@ -1563,18 +1569,20 @@ def main_loop_enhanced():
                             continue
 
                         if not passes_final_order_book_check(symbol, entry_price):
+                            # سيتم تسجيل الرفض داخل الدالة نفسها
                             continue
                         
-                        logger.info(f"  -> [{symbol}] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
+                        logger.info(f"  -> [مرحلة 3] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
 
+                        # --- المرحلة 4: التنفيذ (Execution) ---
+                        logger.info(f"  -> [مرحلة 4] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        strategy_name = "Dynamic_Divergence_V3"
                         signal_details = {
                             'ML_Confidence': f"{ml_signal['confidence']:.2%}",
-                            'Pattern': rejection_key, # Using the success key as the pattern name
-                            'Signal_Type': 'Dynamic Divergence + Buy Pressure',
+                            'Pattern': strategy_name,
+                            'Signal_Type': 'Multi-Strategy System',
                             **tp_sl_data
                         }
 
@@ -1650,13 +1658,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10 - تسجيل تفصيلي)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V5 - متعدد الاستراتيجيات)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V10 - Dynamic Strategy with Detailed Logging) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V5 - Multi-Strategy System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
