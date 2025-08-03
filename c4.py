@@ -718,23 +718,6 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
 # --- START: STRATEGY FUNCTIONS (V5 - Multi-Strategy) ---
 
-# --- START: MODIFICATION ---
-# تم تعطيل هذه الدالة لأن شرط شمعة التأكيد تمت إزالته من الاستراتيجيات
-# def is_strong_bullish_candle(candle: pd.Series, prev_candle: pd.Series) -> bool:
-#     """
-#     التحقق من وجود شمعة صاعدة قوية وأكثر مرونة.
-#     """
-#     is_bullish = candle['close'] > candle['open']
-#     range_val = candle['high'] - candle['low']
-#     if range_val == 0: return False
-#     
-#     close_position_in_range = (candle['close'] - candle['low']) / range_val
-#     body_size = abs(candle['close'] - candle['open'])
-#     prev_body_size = abs(prev_candle['close'] - prev_candle['open'])
-#     
-#     return is_bullish and close_position_in_range > 0.7 and body_size > prev_body_size
-# --- END: MODIFICATION ---
-
 # --- استراتيجية 1: الانعكاس (Divergence Reversal) ---
 def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     if len(df) < lookback: return None
@@ -777,17 +760,14 @@ def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]
     stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
     if not stoch_k_cross_above_d:
         return False, "No Stochastic Crossover", {}
-
-    # --- START: MODIFICATION ---
-    # تم تعطيل شرط شمعة التأكيد
-    # if not is_strong_bullish_candle(last_candle, prev_candle):
-    #     return False, "No Confirmation Candle", {}
-    # --- END: MODIFICATION ---
             
+    # --- START: MODIFICATION ---
+    # تم تخفيف شرط حجم التداول. الآن يتطلب فقط أن يكون حجم التداول أعلى من 50% من المتوسط.
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume:
+    if last_candle['volume'] < avg_volume * 0.5:
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
+    # --- END: MODIFICATION ---
     
     if last_candle['buy_pressure'] < 0.55:
         return False, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"}
@@ -812,15 +792,12 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
         return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
         
     # --- START: MODIFICATION ---
-    # تم تعطيل شرط شمعة التأكيد
-    # if not is_strong_bullish_candle(last_candle, prev_candle):
-    #     return False, "No Confirmation Candle", {}
-    # --- END: MODIFICATION ---
-        
+    # تم تخفيف شرط حجم التداول. الآن يتطلب فقط أن يكون حجم التداول أعلى من 70% من المتوسط.
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 1.1:
+    if last_candle['volume'] < avg_volume * 0.7:
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
+    # --- END: MODIFICATION ---
 
     return True, "Uptrend_Pullback", {}
 
