@@ -341,6 +341,13 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
     df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
+    # --- START: FIX ---
+    # Add Keltner Channels (KC) calculation to match training script
+    df['kc_middle'] = df['close'].ewm(span=20, adjust=False).mean()
+    if 'atr' in df.columns:
+        df['kc_upper'] = df['kc_middle'] + (df['atr'] * 1.5)
+        df['kc_lower'] = df['kc_middle'] - (df['atr'] * 1.5)
+    # --- END: FIX ---
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
     positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
@@ -435,6 +442,8 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
 
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
+    # This function in the bot must now mirror the logic from the training script
+    # It was missing some indicators and MTF logic which are now added in get_features_for_model
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
@@ -471,6 +480,9 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=200, adjust=False).mean()) - 1
     if btc_df is not None and not btc_df.empty:
         asset_returns = df_calc['close'].pct_change()
+        # Ensure btc_df has 'btc_returns' column
+        if 'btc_returns' not in btc_df.columns:
+            btc_df['btc_returns'] = btc_df['close'].pct_change()
         merged_df = pd.merge(df_calc, btc_df[['btc_returns']], left_index=True, right_index=True, how='left').fillna(0)
         df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     else:
@@ -485,6 +497,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
     df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
     return df_calc.astype('float32', errors='ignore')
+
 
 def get_session_state() -> Tuple[List[str], str, str]:
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
@@ -567,45 +580,72 @@ class EnhancedTradingStrategy:
             logger.error(f"  -> [{self.symbol}] 🛑 ملف النموذج غير مكتمل.")
             return False
 
+    # --- START: MAJOR FIX ---
+    # This function is completely overhauled to perfectly match the feature engineering
+    # pipeline from the ml.py training script.
     def get_features_for_model(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         if self.feature_names is None:
             logger.error(f"  -> [{self.symbol}] 🛑 لا يمكن إعداد الميزات لأن أسماء الميزات غير محملة.")
             return None
         try:
+            # 1. Calculate all base features for the 15m timeframe
             df_featured = calculate_all_features(df_15m, btc_df)
-            df_4h_features = calculate_all_features(df_4h, None)
-            df_4h_features = df_4h_features.rename(columns=lambda c: f"{c}_4h")
-            
-            required_4h_cols = [f for f in self.feature_names if f.endswith('_4h')]
-            
-            df_featured = df_featured.join(df_4h_features[required_4h_cols], how='left')
-            df_featured[required_4h_cols] = df_featured[required_4h_cols].fillna(method='ffill')
 
+            # 2. Calculate the specific required features for the 4h timeframe
+            delta_4h = df_4h['close'].diff()
+            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+            df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
+            
+            ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+            df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+            
+            # 3. Join the 4h features onto the 15m dataframe
+            mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
+            df_featured = df_featured.join(mtf_features)
+            
+            # 4. Forward-fill the 4h features to align with the 15m candles
+            df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+
+            # 5. Ensure all required columns exist, filling with 0 if necessary
             for col in self.feature_names:
                 if col not in df_featured.columns:
                     df_featured[col] = 0.0
             
+            # 6. Clean up any potential inf/-inf values and drop rows with NaNs in feature columns
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات للنموذج: {e}", exc_info=True)
             return None
+    # --- END: MAJOR FIX ---
 
     def generate_buy_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty:
             return None
         try:
+            # Ensure the columns are in the exact same order as during training
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
+            
             features_scaled = self.scaler.transform(last_row_ordered_df)
+            
             prediction = self.ml_model.predict(features_scaled)[0]
+            
+            # We only care about buy signals (class 1)
             if prediction != 1:
+                # Log the prediction if it's not a buy, for debugging
+                logger.info(f"  -> [{self.symbol}] النموذج تنبأ بـ {prediction} (ليس شراء).")
                 return None
+                
             prediction_proba = self.ml_model.predict_proba(features_scaled)
+            # The confidence is the probability of the predicted class
             confidence = float(np.max(prediction_proba[0]))
+            
             return {'prediction': int(prediction), 'confidence': confidence}
         except Exception as e:
-            logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}")
+            logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}", exc_info=True)
             return None
+
 
 def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
     if not client:
@@ -761,13 +801,10 @@ def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]
     if not stoch_k_cross_above_d:
         return False, "No Stochastic Crossover", {}
             
-    # --- START: MODIFICATION ---
-    # تم تخفيف شرط حجم التداول. الآن يتطلب فقط أن يكون حجم التداول أعلى من 50% من المتوسط.
     avg_volume = df['volume'].iloc[-11:-1].mean()
     if last_candle['volume'] < avg_volume * 0.5:
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
-    # --- END: MODIFICATION ---
     
     if last_candle['buy_pressure'] < 0.55:
         return False, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"}
@@ -791,13 +828,10 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
     if last_candle['rsi'] < 45:
         return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
         
-    # --- START: MODIFICATION ---
-    # تم تخفيف شرط حجم التداول. الآن يتطلب فقط أن يكون حجم التداول أعلى من 70% من المتوسط.
     avg_volume = df['volume'].iloc[-11:-1].mean()
     if last_candle['volume'] < avg_volume * 0.7:
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
-    # --- END: MODIFICATION ---
 
     return True, "Uptrend_Pullback", {}
 
@@ -1493,6 +1527,7 @@ def main_loop_enhanced():
                         if df_15m is None or df_15m.empty:
                             continue
                         
+                        # We calculate base indicators here for the strategy check
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
                         if df_with_indicators is None or df_with_indicators.empty:
                             continue
@@ -1535,8 +1570,10 @@ def main_loop_enhanced():
                         if df_4h is None or df_4h.empty:
                             continue
 
+                        # This now returns a fully prepared dataframe
                         df_features_for_model = strategy.get_features_for_model(df_15m, df_4h, btc_data)
                         if df_features_for_model is None or df_features_for_model.empty:
+                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
                             continue
                         
                         ml_signal = strategy.generate_buy_signal(df_features_for_model)
