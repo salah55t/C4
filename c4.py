@@ -1,9 +1,11 @@
-# ملف c4.py - نسخة مصححة مع استراتيجية معدلة ولوحة تحكم شفافة
-# تم التحديث بواسطة Gemini بناءً على طلب المستخدم
-# --- التغييرات الرئيسية:
-# 1. (إصلاح خطأ) تم تعديل شرط الاستوكاستك ليصبح أكثر واقعية (التحقق من أن التقاطع بدأ من منطقة ذروة البيع).
-# 2. (تحسين) تم تفعيل عرض الصفقات المرفوضة في لوحة التحكم لإعطاء رؤية واضحة لعمل البوت.
-# 3. (تحسين) يتم الآن تسجيل جميع حالات الرفض، بما في ذلك عندما لا يتم العثور على إشارة فنية.
+# ملف c4.py - نسخة مطورة بآليات تداول متكيفة
+# تم التحديث بواسطة Gemini لتعزيز اكتشاف الفرص في مختلف ظروف السوق
+# --- التغييرات الرئيسية (V2):
+# 1. (استراتيجية جديدة) إضافة دالة لحساب مستويات RSI الديناميكية (Dynamic Oversold/Overbought) باستخدام Bollinger Bands.
+# 2. (استراتيجية جديدة) تعزيز فلتر حجم التداول ليشمل تحليل "ضغط الشراء" (Buy Pressure) كبديل لتحليل Volume Profile.
+# 3. (تحسين منطقي) دمج "فلتر حالة السوق" (Market Regime Filter) في منطق الاستراتيجية.
+# 4. (تحسين منطقي) زيادة مرونة التعرف على الشموع الانعكاسية بدلاً من الاعتماد على أنماط صارمة.
+# 5. (تحسين) تم تغيير اسم الاستراتيجية إلى "Dynamic_Divergence_V2" لتعكس المنطق الجديد.
 
 import time
 import os
@@ -42,11 +44,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v9_telegram_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10_dynamic_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9_Telegram')
+logger = logging.getLogger('CryptoBotV10_Dynamic')
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -73,7 +75,7 @@ SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
-REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v9"
+REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
@@ -125,6 +127,9 @@ TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Strategy Signal Not Found": "لم تتحقق شروط الاستراتيجية",
+    "No Bullish Divergence": "لم يتم العثور على انفراج إيجابي",
+    "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
+    "Low Buy Pressure": "ضغط الشراء ضعيف",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
     "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
@@ -134,6 +139,8 @@ REJECTION_REASONS_AR = {
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
+    "Invalid Market Regime": "حالة السوق غير مناسبة للإشارة",
+    "Divergence not from Oversold": "الانفراج لم يبدأ من منطقة ذروة بيع",
 }
 
 # --- دالة إرسال رسائل تليجرام ---
@@ -286,7 +293,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V9) ---
+# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V10) ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -514,7 +521,7 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V9) ----------------------
+# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V10) ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -590,7 +597,6 @@ class EnhancedTradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}")
             return None
 
-# --- NEW: Final Order Book Check as per user request ---
 def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
     if not client:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": "Client not initialized"})
@@ -621,7 +627,6 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
     except Exception as e:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)})
         return False
-
 
 # --- START: S/R BASED TP/SL FUNCTIONS ---
 SR_LOOKBACK_CANDLES = 50
@@ -702,98 +707,137 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: NEW STRATEGY FUNCTIONS (BB + STOCH + CANDLES) ---
-# دوال مساعدة للتعرف على أنماط الشموع
-def is_hammer(candle: pd.Series) -> bool:
-    body = abs(candle['close'] - candle['open'])
-    if body == 0: return False
-    lower_wick = candle['open'] - candle['low'] if candle['close'] > candle['open'] else candle['close'] - candle['low']
-    upper_wick = candle['high'] - candle['close'] if candle['close'] > candle['open'] else candle['high'] - candle['open']
-    return lower_wick > 2 * body and upper_wick < body
+# --- START: NEW DYNAMIC STRATEGY FUNCTIONS (V2) ---
 
-def is_bullish_engulfing(current: pd.Series, previous: pd.Series) -> bool:
-    return (current['close'] > current['open'] and
-            previous['open'] > previous['close'] and
-            current['close'] > previous['open'] and
-            current['open'] < previous['close'])
-
-def is_piercing_line(current: pd.Series, previous: pd.Series) -> bool:
-    if not (previous['open'] > previous['close'] and current['close'] > current['open']):
-        return False
-    if not (current['open'] < previous['low']):
-        return False
-    midpoint = (previous['open'] + previous['close']) / 2
-    return current['close'] > midpoint and current['close'] < previous['open']
-
-def is_morning_star(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool: # c3 is the latest
-    c1_is_bearish = c1['open'] > c1['close']
-    c1_body = c1['open'] - c1['close']
-    if (c1['high'] - c1['low']) == 0: return False # Avoid division by zero
-    c1_is_long = c1_body / (c1['high'] - c1['low']) > 0.5
-    c2_body = abs(c2['open'] - c2['close'])
-    if (c2['high'] - c2['low']) == 0: return False
-    c2_is_small = c2_body / (c2['high'] - c2['low']) < 0.3
-    gapped_down = c2['high'] < c1['close']
-    c3_is_bullish = c3['close'] > c3['open']
-    midpoint_c1 = (c1['open'] + c1['close']) / 2
-    closes_above_mid = c3['close'] > midpoint_c1
-    return c1_is_bearish and c1_is_long and c2_is_small and gapped_down and c3_is_bullish and closes_above_mid
-
-def is_tweezer_bottom(current: pd.Series, previous: pd.Series) -> bool:
-    if not (previous['open'] > previous['close'] and current['close'] > current['open']):
-        return False
-    return np.isclose(previous['low'], current['low'], rtol=0.002) # 0.2% tolerance
-
-def check_new_bb_strategy(df: pd.DataFrame) -> tuple[bool, str]:
+def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
-    التحقق من استراتيجية الانعكاس المصححة.
-    - الشرط 1: السعر يلامس أو يكسر الحد السفلي للبولينجر باند.
-    - الشرط 2: تقاطع إيجابي لـ K و D لمؤشر ستوكاستيك.
-    - الشرط 3: التقاطع بدأ من منطقة ذروة البيع (K كان تحت 20 في الشمعة السابقة).
-    - الشرط 4: ظهور نمط شموع انعكاسي صاعد.
+    البحث عن انفراج إيجابي كلاسيكي على مؤشر RSI.
+    إذا تم العثور عليه، يُرجع الطوابع الزمنية للقاعين.
     """
-    required_cols = ['low', 'close', 'open', 'high', 'bb_lower', 'stoch_k', 'stoch_d']
-    symbol_name = df.name if hasattr(df, 'name') else 'DataFrame'
+    if len(df) < lookback:
+        return None
+
+    data = df.iloc[-lookback:].copy()
     
-    if not all(col in df.columns for col in required_cols):
+    data['price_pivot'] = data['low'].rolling(window=pivot_window*2+1, center=True).min()
+    data['rsi_pivot'] = data['rsi'].rolling(window=pivot_window*2+1, center=True).min()
+
+    price_lows = data[data['low'] == data['price_pivot']].dropna()
+    
+    if len(price_lows) < 2:
+        return None
+
+    last_price_low = price_lows.iloc[-1]
+    prev_price_low = price_lows.iloc[-2]
+
+    if last_price_low['low'] >= prev_price_low['low']:
+        return None
+
+    rsi_low_at_last_price_low = data['rsi'].loc[last_price_low.name]
+    rsi_low_at_prev_price_low = data['rsi'].loc[prev_price_low.name]
+
+    if rsi_low_at_last_price_low > rsi_low_at_prev_price_low:
+        logger.info(f"  -> [{df.name}] ✅ تم العثور على انفراج إيجابي بين {prev_price_low.name} و {last_price_low.name}")
+        return prev_price_low.name, last_price_low.name
+
+    return None
+
+def calculate_dynamic_rsi_level(rsi_series: pd.Series, period: int = 20, std_dev: float = 2.0) -> float:
+    """
+    حساب مستوى ذروة البيع الديناميكي لمؤشر RSI باستخدام بولينجر باند.
+    """
+    if len(rsi_series) < period:
+        return 30.0 # قيمة افتراضية
+    
+    rsi_ma = rsi_series.rolling(window=period).mean()
+    rsi_std = rsi_series.rolling(window=period).std()
+    rsi_bb_lower = rsi_ma - (rsi_std * std_dev)
+    return rsi_bb_lower.iloc[-1]
+
+def is_strong_bullish_candle(candle: pd.Series, prev_candle: pd.Series) -> bool:
+    """
+    التحقق من وجود شمعة صاعدة قوية وأكثر مرونة.
+    """
+    is_bullish = candle['close'] > candle['open']
+    range_val = candle['high'] - candle['low']
+    if range_val == 0: return False
+    
+    # يجب أن تغلق الشمعة في الربع العلوي من نطاقها
+    close_position_in_range = (candle['close'] - candle['low']) / range_val
+    
+    # يجب أن يكون جسم الشمعة أكبر من جسم الشمعة السابقة
+    body_size = abs(candle['close'] - candle['open'])
+    prev_body_size = abs(prev_candle['close'] - prev_candle['open'])
+    
+    return is_bullish and close_position_in_range > 0.7 and body_size > prev_body_size
+
+def check_dynamic_divergence_strategy(df: pd.DataFrame, market_regime: str) -> tuple[bool, str]:
+    """
+    التحقق من استراتيجية الانعكاس الديناميكية والمحسنة (V2).
+    """
+    required_cols = ['low', 'close', 'open', 'high', 'rsi', 'volume', 'stoch_k', 'stoch_d', 'buy_pressure']
+    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
+    
+    if not all(col in df.columns for col in required_cols) or len(df) < 50:
         return False, ""
 
-    if len(df) < 3:
+    # --- الشرط 1: فلتر حالة السوق ---
+    # إشارات الانعكاس الصاعدة تكون أفضل في الأسواق الهابطة أو المتذبذبة
+    if market_regime not in ["STRONG_DOWNTREND", "DOWNTREND", "RANGING"]:
+        log_rejection(df.name, "Invalid Market Regime", {"regime": market_regime})
         return False, ""
+
+    # --- الشرط 2: البحث عن الانفراج الإيجابي ---
+    divergence_points = find_bullish_divergence(df)
+    if not divergence_points:
+        return False, ""
+    
+    first_low_ts, _ = divergence_points
 
     try:
         last_candle = df.iloc[-1]
         prev_candle = df.iloc[-2]
-        third_last_candle = df.iloc[-3]
 
-        # الشرط 1: السعر عند الحد السفلي للبولينجر
-        price_at_lower_band = last_candle['low'] <= last_candle['bb_lower']
+        # --- الشرط 3: التحقق من أن الانفراج بدأ من منطقة ذروة بيع (ديناميكية) ---
+        dynamic_oversold_level = calculate_dynamic_rsi_level(df['rsi'])
+        rsi_at_first_low = df.loc[first_low_ts]['rsi']
+        if rsi_at_first_low > dynamic_oversold_level:
+            log_rejection(df.name, "Divergence not from Oversold", {
+                "rsi_at_low": f"{rsi_at_first_low:.2f}",
+                "dynamic_level": f"{dynamic_oversold_level:.2f}"
+            })
+            return False, ""
         
-        # الشرط 2: تقاطع ستوكاستيك إيجابي
+        # --- الشرط 4: تقاطع ستوكاستيك إيجابي ---
         stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
-        
-        # الشرط 3 (المصحح): التقاطع بدأ من منطقة ذروة البيع
-        crossover_started_oversold = prev_candle['stoch_k'] < 20
+        if not stoch_k_cross_above_d:
+            return False, ""
 
-        if price_at_lower_band and stoch_k_cross_above_d and crossover_started_oversold:
-            # الشرط 4: البحث عن شمعة تأكيد إيجابية
-            patterns = {
-                "Hammer": is_hammer(last_candle),
-                "Bullish Engulfing": is_bullish_engulfing(last_candle, prev_candle),
-                "Piercing Line": is_piercing_line(last_candle, prev_candle),
-                "Tweezer Bottom": is_tweezer_bottom(last_candle, prev_candle),
-                "Morning Star": is_morning_star(third_last_candle, prev_candle, last_candle)
-            }
+        # --- الشرط 5: شمعة تأكيد صاعدة قوية ---
+        if not is_strong_bullish_candle(last_candle, prev_candle):
+            return False, ""
             
-            for pattern_name, is_found in patterns.items():
-                if is_found:
-                    return True, pattern_name
+        # --- الشرط 6: تأكيد حجم التداول وضغط الشراء ---
+        avg_volume = df['volume'].iloc[-11:-1].mean()
+        if last_candle['volume'] < avg_volume:
+            log_rejection(df.name, "Low Volume on Signal Candle", {
+                "signal_volume": f"{last_candle['volume']:.2f}",
+                "avg_volume": f"{avg_volume:.2f}"
+            })
+            return False, ""
+        
+        # هذا هو الفلتر الجديد والمهم: ضغط الشراء
+        if last_candle['buy_pressure'] < 0.55:
+            log_rejection(df.name, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"})
+            return False, ""
 
-        return False, ""
+        # إذا تحققت كل الشروط
+        return True, "Dynamic Divergence"
+
     except Exception as e:
-        logger.error(f"  -> [{symbol_name}] ❌ خطأ أثناء التحقق من الاستراتيجية المصححة: {e}")
+        logger.error(f"  -> [{df.name}] ❌ خطأ أثناء التحقق من الاستراتيجية الديناميكية: {e}")
         return False, ""
-# --- END: NEW STRATEGY FUNCTIONS ---
+# --- END: NEW DYNAMIC STRATEGY FUNCTIONS ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1077,7 +1121,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9 - نسخة مصححة</title>
+    <title>لوحة تحكم التداول V10 - استراتيجية الانفراج الديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1107,7 +1151,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9 (FIXED)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V10 (Dynamic)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1443,7 +1487,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية المصححة مع تسجيل جميع حالات الرفض.
+    الحلقة الرئيسية المحدثة مع استراتيجية الانفراج الديناميكية (V2).
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1459,6 +1503,8 @@ def main_loop_enhanced():
         try:
             logger.info("🔄 [Main Loop] بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
+            with market_state_lock:
+                market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
 
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
@@ -1485,9 +1531,11 @@ def main_loop_enhanced():
                             continue
                         df_with_indicators.name = symbol
 
-                        strategy_signal_found, pattern_name = check_new_bb_strategy(df_with_indicators)
+                        # *** استدعاء الاستراتيجية الديناميكية والمحسنة (V2) ***
+                        strategy_signal_found, pattern_name = check_dynamic_divergence_strategy(df_with_indicators, market_regime)
                         
                         if not strategy_signal_found:
+                            # لا داعي لتسجيل الرفض هنا، فقد تم تسجيله داخل الدالة
                             log_rejection(symbol, "Strategy Signal Not Found")
                             continue
                         
@@ -1527,10 +1575,11 @@ def main_loop_enhanced():
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
 
-                        strategy_name = "BB_Stoch_Reversal_V3_Fixed"
+                        strategy_name = "Dynamic_Divergence_V2"
                         signal_details = {
                             'ML_Confidence': f"{ml_signal['confidence']:.2%}",
                             'Pattern': pattern_name,
+                            'Signal_Type': 'Dynamic Divergence + Buy Pressure',
                             **tp_sl_data
                         }
 
@@ -1606,13 +1655,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة مصححة)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10 الديناميكية)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9 - Fixed BB Strategy) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V10 - Dynamic Divergence Strategy) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
@@ -1623,3 +1672,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
+
