@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V6 مع استراتيجية تقاطع المتوسطات المتحركة
-# تم التحديث بواسطة Gemini لتضمين استراتيجية ثالثة لزيادة وتيرة التداول.
-# --- التغييرات الرئيسية (V6):
-# 1. (استراتيجية جديدة) إضافة دالة `check_momentum_crossover_strategy` التي تبحث عن تقاطع EMA 9 فوق EMA 21.
-# 2. (تحديث المنطق) تعديل الحلقة الرئيسية `main_loop_enhanced` لتفحص استراتيجية التقاطع أولاً قبل العودة للاستراتيجيات الأساسية.
-# 3. (تحسين التسجيل) إضافة أسباب الرفض الجديدة إلى القاموس `REJECTION_REASONS_AR`.
+# ملف c4.py - نسخة V5 مع خط تجميع إشارة واضح
+# تم التحديث بواسطة Gemini لتوضيح تطبيق الفلاتر النهائية على جميع الاستراتيجيات
+# --- التغييرات الرئيسية (V5):
+# 1. (هيكلة جديدة) إعادة هيكلة الحلقة الرئيسية لتتبع "خط تجميع إشارة" (Signal Pipeline) واضح ومكون من 4 مراحل.
+# 2. (تأكيد منطقي) التأكيد على أن مخرجات كلتا الاستراتيجيتين (الانعكاس ومتابعة الاتجاه) تمر بنفس فلاتر الجودة (النموذج الآلي ودفتر الطلبات).
+# 3. (تحسين التسجيل) إضافة رسائل سجل أكثر تفصيلاً لتتبع تقدم الإشارة عبر كل مرحلة من مراحل التحقق.
 
 import time
 import os
@@ -146,11 +146,6 @@ REJECTION_REASONS_AR = {
     "Not an Uptrend": "السوق ليس في اتجاه صاعد",
     "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
     "RSI below threshold": "مؤشر القوة النسبية ضعيف",
-
-    # أسباب استراتيجية تقاطع المتوسطات (Crossover)
-    "No EMA Crossover": "لم يحدث تقاطع للمتوسطات المتحركة",
-    "Price Below Slow EMA": "السعر تحت المتوسط المتحرك البطيء",
-    "Low Volume on Crossover": "حجم تداول ضعيف عند التقاطع",
 
     # أسباب مشتركة
     "No Confirmation Candle": "لم تظهر شمعة تأكيد صاعدة قوية",
@@ -721,7 +716,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: STRATEGY FUNCTIONS (V6 - Multi-Strategy) ---
+# --- START: STRATEGY FUNCTIONS (V5 - Multi-Strategy) ---
 
 def is_strong_bullish_candle(candle: pd.Series, prev_candle: pd.Series) -> bool:
     """
@@ -819,48 +814,6 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
         return False, "Low Volume on Signal Candle", details
 
     return True, "Uptrend_Pullback", {}
-
-# --- استراتيجية 3: تقاطع المتوسطات المتحركة (Momentum Crossover) ---
-def check_momentum_crossover_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    """
-    تتحقق من وجود إشارة شراء بناءً على تقاطع المتوسطات المتحركة الأسية.
-    تعتبر أكثر نشاطًا ومناسبة لاقتناص بدايات الاتجاهات.
-    """
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    # التأكد من وجود البيانات اللازمة
-    required_cols = ['ema_9', 'ema_21', 'close', 'volume', 'volume_sma_20']
-    if not all(col in df.columns for col in required_cols) or len(df) < 2:
-        return False, "Insufficient Data for Crossover", {}
-
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    # --- الشرط 1: حدوث التقاطع الإيجابي ---
-    # هل كان المتوسط السريع (9) تحت أو يساوي البطيء (21) في الشمعة السابقة؟
-    # وهل أصبح المتوسط السريع فوق البطيء في الشمعة الحالية؟
-    ema_crossed_up = (prev_candle['ema_9'] <= prev_candle['ema_21']) and \
-                     (last_candle['ema_9'] > last_candle['ema_21'])
-
-    if not ema_crossed_up:
-        return False, "No EMA Crossover", {}
-
-    # --- الشرط 2: فلتر تأكيد الاتجاه ---
-    # هل سعر الإغلاق الحالي فوق المتوسط البطيء؟ هذا يقلل من الدخول في تقاطعات كاذبة ضمن اتجاه هابط.
-    price_above_slow_ema = last_candle['close'] > last_candle['ema_21']
-    if not price_above_slow_ema:
-        return False, "Price Below Slow EMA", {"price": f"{last_candle['close']:.4f}", "ema_21": f"{last_candle['ema_21']:.4f}"}
-
-    # --- الشرط 3: فلتر تأكيد الحجم ---
-    # هل حجم التداول الحالي أعلى من متوسطه؟ هذا يؤكد اهتمام السوق بالحركة.
-    volume_is_strong = last_candle['volume'] > last_candle['volume_sma_20']
-    if not volume_is_strong:
-        details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{last_candle['volume_sma_20']:.2f}"}
-        return False, "Low Volume on Crossover", details
-
-    # إذا تحققت كل الشروط، نعتبرها إشارة صالحة
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة تقاطع متوسطات متحركة إيجابية.")
-    return True, "Momentum_Crossover", {}
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -1172,7 +1125,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6 (Crossover)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V5 (Multi-Strategy)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1258,8 +1211,6 @@ function updateSignals() {
                 strategyClass = 'bg-green-500/20 text-green-400';
             } else if (strategyName.includes('Reversal')) {
                 strategyClass = 'bg-yellow-500/20 text-yellow-400';
-            } else if (strategyName.includes('Crossover')) {
-                strategyClass = 'bg-blue-500/20 text-blue-400';
             }
             tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${strategyClass}">${strategyName.replace(/_/g, ' ')}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
         });
@@ -1517,7 +1468,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V6).
+    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V5).
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1560,8 +1511,6 @@ def main_loop_enhanced():
                         if df_with_indicators is None or df_with_indicators.empty:
                             continue
                         
-                        df_with_indicators.name = symbol
-                        
                         # =================================================================
                         # ============== خط تجميع الإشارة (Signal Pipeline) ==============
                         # =================================================================
@@ -1572,24 +1521,15 @@ def main_loop_enhanced():
                         rejection_key = "Strategy Signal Not Found"
                         details = {}
 
-                        # --- [تعديل مقترح] ---
-                        # أولاً، نبحث عن الإشارة الأكثر نشاطًا (التقاطع)
-                        logger.info(f"  -> [مرحلة 1أ] البحث عن إشارة تقاطع (Momentum Crossover)...")
-                        strategy_signal_found, rejection_key, details = check_momentum_crossover_strategy(df_with_indicators)
-
-                        # إذا لم نجد إشارة تقاطع، نعود للاستراتيجيات الأصلية حسب حالة السوق
-                        if not strategy_signal_found:
-                            logger.info(f"  -> [مرحلة 1ب] لم يتم العثور على تقاطع. العودة للاستراتيجيات الأساسية...")
-                            if market_regime in ["UPTREND", "STRONG_UPTREND"]:
-                                logger.info(f"  -> تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
-                                strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
-                            elif market_regime in ["DOWNTREND", "RANGING"]:
-                                logger.info(f"  -> تفعيل استراتيجية الانعكاس (Reversal)...")
-                                strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
-                            else:
-                                rejection_key = "Invalid Market Regime for Any Strategy"
-                                details = {"regime": market_regime}
-                        # --- [نهاية التعديل] ---
+                        if market_regime in ["UPTREND", "STRONG_UPTREND"]:
+                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
+                            strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
+                        elif market_regime in ["DOWNTREND", "RANGING"]:
+                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية الانعكاس (Reversal)...")
+                            strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
+                        else:
+                            rejection_key = "Invalid Market Regime for Any Strategy"
+                            details = {"regime": market_regime}
 
                         if not strategy_signal_found:
                             log_rejection(symbol, rejection_key, details)
@@ -1718,13 +1658,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6 - استراتيجية التقاطع)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V5 - متعدد الاستراتيجيات)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6 - Crossover Strategy) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V5 - Multi-Strategy System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
@@ -1735,4 +1675,3 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
-
