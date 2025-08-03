@@ -603,22 +603,25 @@ class EnhancedTradingStrategy:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات للنموذج: {e}", exc_info=True)
             return None
 
-    def generate_buy_signal(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    # --- START: LOGIC IMPROVEMENT ---
+    # The function now returns the full prediction result, not just for buy signals.
+    # This allows the main loop to log more detailed rejection reasons.
+    def generate_prediction_result(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty:
             return None
         try:
             last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
             features_scaled = self.scaler.transform(last_row_ordered_df)
+            
             prediction = self.ml_model.predict(features_scaled)[0]
-            if prediction != 1:
-                logger.info(f"  -> [{self.symbol}] النموذج تنبأ بـ {prediction} (ليس شراء).")
-                return None
             prediction_proba = self.ml_model.predict_proba(features_scaled)
             confidence = float(np.max(prediction_proba[0]))
+            
             return {'prediction': int(prediction), 'confidence': confidence}
         except Exception as e:
-            logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد إشارة النموذج: {e}", exc_info=True)
+            logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد تنبؤ النموذج: {e}", exc_info=True)
             return None
+    # --- END: LOGIC IMPROVEMENT ---
 
 
 def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
@@ -732,27 +735,21 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
 # --- START: STRATEGY FUNCTIONS (V5 - Multi-Strategy) ---
 
-# --- START: NEW HELPER FUNCTION ---
 def is_bullish_reversal_pattern(candle: pd.Series, prev_candle: pd.Series) -> bool:
     """
     Checks for simple bullish reversal candlestick patterns.
     """
-    # Hammer: Small body, long lower wick
     body_size = abs(candle['close'] - candle['open'])
     if body_size > 0:
         lower_wick = candle['open'] - candle['low'] if candle['open'] < candle['close'] else candle['close'] - candle['low']
         if lower_wick > body_size * 2:
             return True
-
-    # Bullish Engulfing: Bullish candle engulfs previous bearish candle's body
     if (prev_candle['close'] < prev_candle['open'] and 
         candle['close'] > candle['open'] and
         candle['close'] > prev_candle['open'] and 
         candle['open'] < prev_candle['close']):
         return True
-        
     return False
-# --- END: NEW HELPER FUNCTION ---
 
 # --- استراتيجية 1: الانعكاس (Divergence Reversal) ---
 def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -831,18 +828,16 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
 
     return True, "Uptrend_Pullback", {}
 
-# --- START: NEW STRATEGY FUNCTION ---
+# --- استراتيجية 3: BB + Stoch Reversal ---
 def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
 
-    # Condition 1: Price touches or goes below the lower Bollinger Band
     if not (last_candle['low'] <= last_candle['bb_lower'] or prev_candle['low'] <= prev_candle['bb_lower']):
         return False, "Price did not touch Lower BB", {}
 
-    # Condition 2: Stochastic bullish crossover below 15
     stoch_oversold_crossover = (
         prev_candle['stoch_k'] < 15 and 
         prev_candle['stoch_d'] < 15 and 
@@ -856,13 +851,10 @@ def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optio
         }
         return False, "No Stoch Crossover below 15", details
 
-    # Condition 3: A bullish reversal candle pattern appears
     if not is_bullish_reversal_pattern(last_candle, prev_candle):
         return False, "No Bullish Reversal Candle Pattern", {}
 
-    # If all conditions are met, it's a valid signal
     return True, "BB_Stoch_Reversal", {}
-# --- END: NEW STRATEGY FUNCTION ---
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1577,9 +1569,7 @@ def main_loop_enhanced():
                         
                         elif market_regime in ["DOWNTREND", "RANGING"]:
                             logger.info(f"  -> [مرحلة 1] تفعيل استراتيجيات الانعكاس...")
-                            # Try first reversal strategy
                             strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
-                            # If it fails, try the new BB + Stoch strategy
                             if not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+Stoch...")
                                 strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
@@ -1591,7 +1581,7 @@ def main_loop_enhanced():
                             log_rejection(symbol, rejection_key, details)
                             continue
                         
-                        strategy_name = rejection_key # اسم الاستراتيجية الناجحة
+                        strategy_name = rejection_key
                         logger.info(f"  -> [مرحلة 1] ✅ نجاح! إشارة فنية مكتشفة (استراتيجية: {strategy_name}).")
                         
                         # --- المرحلة 2: التحقق من النموذج الآلي (ML Validation) ---
@@ -1610,12 +1600,26 @@ def main_loop_enhanced():
                             log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
                             continue
                         
-                        ml_signal = strategy.generate_buy_signal(df_features_for_model)
-                        if not ml_signal or ml_signal['confidence'] < BUY_CONFIDENCE_THRESHOLD:
-                            log_rejection(symbol, "ML Model Rejected Signal", {"confidence": ml_signal['confidence'] if ml_signal else 'N/A'})
+                        # --- START: LOGIC IMPROVEMENT ---
+                        ml_result = strategy.generate_prediction_result(df_features_for_model)
+
+                        if not ml_result:
+                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Prediction generation failed"})
                             continue
+
+                        is_buy_signal = ml_result['prediction'] == 1
+                        is_confident = ml_result['confidence'] >= BUY_CONFIDENCE_THRESHOLD
+
+                        if not is_buy_signal or not is_confident:
+                            log_rejection(symbol, "ML Model Rejected Signal", {
+                                "prediction": ml_result['prediction'],
+                                "confidence": f"{ml_result['confidence']:.2%}",
+                                "reason": "Not a buy signal" if not is_buy_signal else "Confidence too low"
+                            })
+                            continue
+                        # --- END: LOGIC IMPROVEMENT ---
                         
-                        logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_signal['confidence']:.2%}).")
+                        logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
 
                         # --- المرحلة 3: التحقق من دفتر الطلبات (Order Book Validation) ---
                         logger.info(f"  -> [مرحلة 3] الانتقال إلى التحقق من دفتر الطلبات...")
@@ -1626,7 +1630,6 @@ def main_loop_enhanced():
                             continue
 
                         if not passes_final_order_book_check(symbol, entry_price):
-                            # سيتم تسجيل الرفض داخل الدالة نفسها
                             continue
                         
                         logger.info(f"  -> [مرحلة 3] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
@@ -1637,7 +1640,7 @@ def main_loop_enhanced():
                         if not tp_sl_data: continue
 
                         signal_details = {
-                            'ML_Confidence': f"{ml_signal['confidence']:.2%}",
+                            'ML_Confidence': f"{ml_result['confidence']:.2%}",
                             'Pattern': strategy_name,
                             'Signal_Type': 'Multi-Strategy System',
                             **tp_sl_data
