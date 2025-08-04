@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V6.4 مع إضافة استراتيجية الارتداد من البولينجر
-# تم التحديث بواسطة Gemini لإضافة استراتيجية جديدة للاتجاه الصاعد/العرضي
-# --- التغييرات الرئيسية (V6.4):
-# 1. إضافة استراتيجية جديدة (check_bb_reversion_strategy) تعتمد على ADX والارتداد من البولينجر والماكد.
-# 2. دمج الاستراتيجية الجديدة في حلقة الفحص الرئيسية ضمن شرط ADX خاص بها.
-# 3. تحديث قاموس أسباب الرفض وعنوان لوحة التحكم.
+# ملف c4.py - نسخة V6.5 مع جعل استراتيجية BB+Stoch تعمل دائماً
+# تم التحديث بواسطة Gemini لتعديل منطق اختيار الاستراتيجية
+# --- التغييرات الرئيسية (V6.5):
+# 1. تم تعديل الحلقة الرئيسية لجعل استراتيجية `check_bb_stoch_reversal_strategy` تعمل أولاً في جميع حالات السوق.
+# 2. تعمل الاستراتيجيات الأخرى كبدائل إذا لم يتم العثور على إشارة من الاستراتيجية الأساسية.
+# 3. تحديث عنوان لوحة التحكم.
 
 import time
 import os
@@ -129,7 +129,7 @@ TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
-    # أسباب عامة
+    # General reasons
     "Strategy Signal Not Found": "لم تتحقق شروط أي استراتيجية",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
@@ -142,32 +142,32 @@ REJECTION_REASONS_AR = {
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
     "Invalid Market Regime for Any Strategy": "حالة السوق غير مناسبة لأي استراتيجية متاحة",
 
-    # أسباب استراتيجية الانعكاس (Divergence)
+    # Divergence Reversal strategy reasons
     "No Bullish Divergence": "لم يتم العثور على انفراج إيجابي",
     "Divergence not from Oversold": "الانفراج لم يبدأ من منطقة ذروة بيع",
     "No Stochastic Crossover": "لم يحدث تقاطع إيجابي لمؤشر ستوكاستيك",
     
-    # أسباب استراتيجية متابعة الاتجاه (Pullback)
+    # Trend Continuation (Pullback) strategy reasons
     "Not an Uptrend": "السوق ليس في اتجاه صاعد",
     "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
     "RSI below threshold": "مؤشر القوة النسبية ضعيف",
 
-    # أسباب استراتيجية الانعكاس (BB + Stoch)
+    # BB + Stoch Reversal strategy reasons
     "Price did not touch Lower BB": "السعر لم يلامس الحد السفلي للبولينجر باند",
     "No Stoch Crossover below 15": "لم يحدث تقاطع ستوكاستيك تحت مستوى 15",
     "No Bullish Reversal Candle Pattern": "لم يظهر نمط شمعة انعكاسية صاعدة",
 
-    # أسباب استراتيجية الانعكاس (BB + MACD)
+    # BB + MACD Reversal strategy reasons
     "No Bullish MACD Crossover": "لم يحدث تقاطع إيجابي للماكد",
 
-    # --- NEW ---: أسباب استراتيجية الارتداد الجديدة (BB Reversion)
+    # BB Reversion strategy reasons
     "ADX not in range (15-25)": "مؤشر ADX خارج النطاق المطلوب (15-25)",
     "No recent BB breakout": "لم يحدث اختراق حديث للحد العلوي للبولينجر",
     "Price did not return to BB": "السعر لم يرتد لملامسة حد البولينجر",
     "MACD not above zero": "خط الماكد ليس فوق مستوى الصفر",
     "Volume not above average": "حجم التداول ليس أعلى من المتوسط",
 
-    # أسباب مشتركة
+    # Common reasons
     "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
     "Low Buy Pressure": "ضغط الشراء ضعيف",
 }
@@ -334,7 +334,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات ---
+# --- Data Fetching and Feature Calculation Functions ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -569,7 +569,7 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- استراتيجية التداول والفلاتر ----------------------
+# ---------------------- Trading Strategy & Filters ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -676,7 +676,7 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)})
         return False
 
-# --- دوال حساب TP/SL ---
+# --- TP/SL Calculation Functions ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
@@ -770,7 +770,7 @@ def is_bullish_reversal_pattern(candle: pd.Series, prev_candle: pd.Series) -> bo
         return True
     return False
 
-# --- استراتيجية 1: الانعكاس (Divergence Reversal) ---
+# --- Strategy 1: Divergence Reversal ---
 def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
     if len(df) < lookback: return None
     data = df.iloc[-lookback:].copy()
@@ -823,7 +823,7 @@ def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]
 
     return True, "Divergence_Reversal", {}
 
-# --- استراتيجية 2: متابعة الاتجاه (Trend Continuation) ---
+# --- Strategy 2: Trend Continuation ---
 def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
@@ -847,7 +847,7 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
 
     return True, "Uptrend_Pullback", {}
 
-# --- استراتيجية 3: BB + Stoch Reversal ---
+# --- Strategy 3: BB + Stoch Reversal (Always-On) ---
 def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
@@ -873,9 +873,10 @@ def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optio
     if not is_bullish_reversal_pattern(last_candle, prev_candle):
         return False, "No Bullish Reversal Candle Pattern", {}
 
+    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + Stoch).")
     return True, "BB_Stoch_Reversal", {}
 
-# --- استراتيجية 4: BB + MACD Reversal ---
+# --- Strategy 4: BB + MACD Reversal ---
 def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
@@ -897,31 +898,27 @@ def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Option
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + MACD).")
     return True, "BB_MACD_Reversal", {}
 
-# --- NEW: استراتيجية 5: الارتداد من البولينجر (BB Reversion) ---
+# --- Strategy 5: BB Reversion ---
 def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
 
-    # الشرط 1: ADX في نطاق (15-25) - تم التحقق منه في الحلقة الرئيسية، ولكن يمكن إضافته هنا كحماية
     adx_val = last_candle.get('adx', 0)
     if not (15 <= adx_val <= 25):
         return False, "ADX not in range (15-25)", {"adx": f"{adx_val:.2f}"}
 
-    # الشرط 2: السعر يخترق الحد العلوي ثم يعود
     lookback_period = 5
     prev_candles = df.iloc[-lookback_period-1:-1] 
     breakout_occurred = (prev_candles['high'] > prev_candles['bb_upper']).any()
     if not breakout_occurred:
         return False, "No recent BB breakout", {}
     
-    # عاد ليلامس الحد العلوي أو المتوسط
     returned_to_band = (last_candle['low'] <= last_candle['bb_upper']) and (last_candle['high'] >= last_candle['bb_middle'])
     if not returned_to_band:
         return False, "Price did not return to BB", {}
 
-    # الشرط 3: الماكد إيجابي ويتقاطع للأعلى
     if not (last_candle['macd'] > 0 and last_candle['macd_signal'] > 0):
         return False, "MACD not above zero", {"macd": f"{last_candle['macd']:.4f}"}
     
@@ -929,16 +926,15 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
     if not macd_crossover:
         return False, "No Bullish MACD Crossover", {}
 
-    # الشرط 4: حجم تداول أعلى من المتوسط
     avg_volume = df['volume'].iloc[-21:-1].mean()
-    if not (last_candle['volume'] > avg_volume * 1.1): # استخدام مضاعف 1.1
+    if not (last_candle['volume'] > avg_volume * 1.1):
         return False, "Volume not above average", {"volume": f"{last_candle['volume']}", "avg_volume": f"{avg_volume:.2f}"}
 
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
     return True, "BB_Reversion", {}
 
 
-# ---------------------- دوال إدارة الصفقات ----------------------
+# ---------------------- Trade Management Functions ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -1157,7 +1153,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
-# ---------------------- دوال النظام الرئيسية ----------------------
+# ---------------------- System Core Functions ----------------------
 def determine_market_state_enhanced():
     global current_market_state, last_market_state_check
     if time.time() - last_market_state_check < 180: return
@@ -1187,12 +1183,12 @@ def determine_market_state_enhanced():
     except Exception as e:
         logger.error(f"❌ [Market State] خطأ: {e}", exc_info=True)
 
-# ---------------------- واجهة Flask ----------------------
+# ---------------------- Flask Web Interface ----------------------
 app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
-    # --- NEW: Updated title to V6.4 ---
+    # --- NEW: Updated title to V6.5 ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1234,7 +1230,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.4 (BB Reversion)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.5 (Always-On BB+Stoch)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1519,7 +1515,7 @@ def manual_close_trade_endpoint(signal_id):
     else:
         return jsonify({"success": False, "message": "Failed to close signal. Check logs."}), 500
 
-# ---------------------- حلقات النظام ----------------------
+# ---------------------- System Loops ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
     if df is None or len(df) < 20:
         return False
@@ -1716,31 +1712,34 @@ def main_loop_enhanced():
                         rejection_key = "Strategy Signal Not Found"
                         details = {}
                         
-                        last_adx = df_with_indicators.iloc[-1].get('adx', 0)
-
                         # --- NEW: منطق اختيار الاستراتيجية المحدث ---
-                        if market_regime in ["UPTREND", "STRONG_UPTREND"] and last_adx > 25:
-                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
-                            strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
-                        
-                        elif 15 <= last_adx <= 25:
-                            logger.info(f"  -> [مرحلة 1] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
-                            strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
+                        # الخطوة 1: فحص الاستراتيجية الأساسية (BB+Stoch) دائماً وأولاً
+                        logger.info(f"  -> [مرحلة 1أ] فحص الاستراتيجية الأساسية (BB+Stoch)...")
+                        strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
 
-                        elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15:
-                            logger.info(f"  -> [مرحلة 1] تفعيل استراتيجيات الانعكاس...")
-                            strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
+                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الأخرى بناءً على حالة السوق
+                        if not strategy_signal_found:
+                            logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية...")
+                            last_adx = df_with_indicators.iloc[-1].get('adx', 0)
+
+                            if market_regime in ["UPTREND", "STRONG_UPTREND"] and last_adx > 25:
+                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
+                                strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
                             
-                            if not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+Stoch...")
-                                strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
-                            
-                            if not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1] استراتيجية BB+Stoch فشلت، تجربة استراتيجية BB+MACD...")
-                                strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
-                        else:
-                            rejection_key = "Invalid Market Regime for Any Strategy"
-                            details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
+                            elif 15 <= last_adx <= 25:
+                                logger.info(f"  -> [مرحلة 1ب] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
+                                strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
+
+                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15:
+                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الأخرى...")
+                                strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
+                                
+                                if not strategy_signal_found:
+                                    logger.info(f"  -> [مرحلة 1ب] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+MACD...")
+                                    strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
+                            else:
+                                rejection_key = "Invalid Market Regime for Any Strategy"
+                                details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
 
                         if not strategy_signal_found:
                             log_rejection(symbol, rejection_key, details)
@@ -1878,13 +1877,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.4 - BB Reversion)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.5 - Always-On BB+Stoch)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
-# ---------------------- نقطة الانطلاق ----------------------
+# ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.4 - BB Reversion System) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.5 - Always-On BB+Stoch System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
