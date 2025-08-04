@@ -75,7 +75,7 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 5.0
+STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.55
@@ -2011,3 +2011,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [Shutdown] تم إيقاف تشغيل التطبيق.")
+
