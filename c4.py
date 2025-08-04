@@ -1,10 +1,7 @@
-# ملف c4.py - نسخة V6 مع رحلة التداول الديناميكية
+# ملف c4.py - نسخة V6.1 مع رحلة التداول الديناميكية وإصلاح API
 # تم التحديث بواسطة Gemini لدمج نظام الأهداف المتعددة والخروج الجزئي
-# --- التغييرات الرئيسية (V6):
-# 1. (إدارة الصفقات) دمج "رحلة التداول الديناميكية" في حلقة إدارة الصفقات الرئيسية.
-# 2. (قاعدة البيانات) تعديل هيكل تخزين الإشارات ليشمل حالة الرحلة (الأهداف، نسب الخروج).
-# 3. (منطق التحليل) تحسين دالة تحليل المسار لتكون أكثر شمولاً وتعتمد على مؤشرات إضافية.
-# 4. (واجهة المستخدم) إضافة عرض مرئي لتقدم رحلة كل صفقة في لوحة التحكم.
+# --- التغييرات الرئيسية (V6.1):
+# 1. (إصلاح خطأ) تعديل نقطة نهاية /api/signals لتجنب خطأ TypeError وجعل التحقق من الاتصال أكثر وضوحًا.
 
 import time
 import os
@@ -1395,7 +1392,14 @@ def get_stats():
 
 @app.route('/api/signals')
 def get_signals():
-    if not all([check_db_connection(), redis_client]): return jsonify({"error": "Service connection failed"}), 500
+    # --- FIX START ---
+    # Refactored the connection check to be more explicit and robust, avoiding the strange TypeError.
+    db_ok = check_db_connection()
+    redis_ok = redis_client is not None
+    if not (db_ok and redis_ok):
+        logger.warning(f"[API Signals] Service connection check failed. DB OK: {db_ok}, Redis OK: {redis_ok}")
+        return jsonify({"error": "Service connection failed"}), 500
+    # --- FIX END ---
     try:
         current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
         with signal_cache_lock: signals_copy = list(open_signals_cache.values())
