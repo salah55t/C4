@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V7.0 مع إضافة استراتيجية الاختراق الجديدة
-# تم التحديث بواسطة Gemini لإضافة استراتيجية EMA Breakout وتكاملها
-# --- التغييرات الرئيسية (V7.0):
-# 1. إضافة دالة استراتيجية جديدة: check_ema_breakout_strategy بناءً على طلب المستخدم.
-# 2. إضافة دالة مخصصة لحساب TP/SL لهذه الاستراتيجية: calculate_ema_breakout_tp_sl.
-# 3. دمج الاستراتيجية الجديدة في الحلقة الرئيسية لتخضع لتأكيد نموذج التعلم الآلي.
-# 4. تحديث قاموس أسباب الرفض ليشمل الحالات الجديدة.
+# ملف c4.py - نسخة V7.1 مع العودة إلى قائمة العملات من الملف
+# تم التحديث بواسطة Gemini لإلغاء فلتر حجم التداول والاعتماد على ملف crypto_list.txt فقط.
+# --- التغييرات الرئيسية (V7.1):
+# 1. تم تعديل دالة `get_validated_symbols` لإزالة فلتر حجم التداول (> 100 مليون دولار).
+# 2. البوت الآن يحلل فقط الرموز المدرجة في ملف `crypto_list.txt` طالما أنها متاحة للتداول.
+# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
 
 import time
 import os
@@ -168,7 +167,7 @@ REJECTION_REASONS_AR = {
     "MACD not above zero": "خط الماكد ليس فوق مستوى الصفر",
     "Volume not above average": "حجم التداول ليس أعلى من المتوسط",
 
-    # NEW: EMA Breakout Strategy reasons
+    # EMA Breakout Strategy reasons
     "No Bullish EMA Cross": "لم يحدث تقاطع صاعد للمتوسطات المتحركة (EMA 21/50)",
     "MACD not bullish above zero": "الماكد ليس إيجابياً فوق خط الصفر",
     "RSI did not bounce from 40": "مؤشر القوة النسبية لم يرتد من مستوى 40",
@@ -329,21 +328,14 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         if not exchange_info_map: get_exchange_info_map()
         
-        # فلتر إضافي بناءً على حجم التداول اليومي (أكثر من 100 مليون دولار)
-        all_tickers = client.get_ticker()
-        high_volume_symbols = {
-            t['symbol'] for t in all_tickers 
-            if t['symbol'].endswith('USDT') and float(t.get('quoteVolume', 0)) > 100_000_000
-        }
-        
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         
-        # تقاطع القوائم الثلاث: من الملف، نشطة على المنصة، وذات حجم تداول عالٍ
-        validated = sorted(list(formatted.intersection(active).intersection(high_volume_symbols)))
+        # تقاطع القائمة من الملف مع العملات النشطة على المنصة فقط
+        validated = sorted(list(formatted.intersection(active)))
         
-        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول (حجم تداول > 100م دولار).")
+        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من ملفك.")
         if not validated:
-             logger.warning(f"⚠️ [Validation] لم تتطابق أي من العملات في ملفك مع الشروط المطلوبة (نشطة وذات سيولة عالية).")
+             logger.warning(f"⚠️ [Validation] لم تتطابق أي من العملات في ملفك مع العملات المتاحة للتداول على Binance.")
         else:
             logger.info(f"🔍 [Validation] عينة من العملات التي ستتم مراقبتها: {validated[:5]}")
 
@@ -351,6 +343,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except Exception as e:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
+
 
 # --- Data Fetching and Feature Calculation Functions ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
@@ -951,7 +944,7 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
     return True, "BB_Reversion", {}
 
-# --- NEW: Strategy 6: EMA Breakout Strategy ---
+# --- Strategy 6: EMA Breakout Strategy ---
 def check_ema_breakout_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
     """
     يفحص شروط استراتيجية الاختراق الجديدة بناءً على تقاطع المتوسطات المتحركة وتأكيدات الزخم.
@@ -1335,7 +1328,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.0 (مع استراتيجية الاختراق)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.1 (قائمة من ملف)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1823,7 +1816,7 @@ def main_loop_enhanced():
                         strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
                         if strategy_signal_found: strategy_name = rejection_key
 
-                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الأخرى
+                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الثانوية
                         if not strategy_signal_found:
                             logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية...")
                             last_adx = df_with_indicators.iloc[-1].get('adx', 0)
@@ -2001,13 +1994,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.0 - مع استراتيجية الاختراق)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.1 - قائمة من ملف)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.0 - مع استراتيجية الاختراق) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.1 - قائمة من ملف) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
