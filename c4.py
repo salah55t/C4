@@ -1,7 +1,9 @@
-# ملف c4.py - نسخة V6.2 مع رحلة التداول الديناميكية وإصلاح مخطط قاعدة البيانات
-# تم التحديث بواسطة Gemini لدمج نظام الأهداف المتعددة والخروج الجزئي
-# --- التغييرات الرئيسية (V6.2):
-# 1. (إصلاح خطأ حرج) إضافة ALTER TABLE لعمود original_quantity لضمان تحديث مخطط قاعدة البيانات الموجودة.
+# ملف c4.py - نسخة V6.3 مع إضافة استراتيجية BB + MACD
+# تم التحديث بواسطة Gemini لإضافة استراتيجية انعكاس جديدة
+# --- التغييرات الرئيسية (V6.3):
+# 1. إضافة استراتيجية جديدة (check_bb_macd_reversal_strategy) تعتمد على ملامسة الحد السفلي للبولينجر وتقاطع الماكد.
+# 2. دمج الاستراتيجية الجديدة في حلقة الفحص الرئيسية.
+# 3. تحديث قاموس أسباب الرفض.
 
 import time
 import os
@@ -150,10 +152,14 @@ REJECTION_REASONS_AR = {
     "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
     "RSI below threshold": "مؤشر القوة النسبية ضعيف",
 
-    # أسباب استراتيجية الانعكاس الجديدة (BB + Stoch)
+    # أسباب استراتيجية الانعكاس (BB + Stoch)
     "Price did not touch Lower BB": "السعر لم يلامس الحد السفلي للبولينجر باند",
     "No Stoch Crossover below 15": "لم يحدث تقاطع ستوكاستيك تحت مستوى 15",
     "No Bullish Reversal Candle Pattern": "لم يظهر نمط شمعة انعكاسية صاعدة",
+
+    # --- NEW ---: أسباب استراتيجية الانعكاس الجديدة (BB + MACD)
+    "No Bullish MACD Crossover": "لم يحدث تقاطع إيجابي للماكد",
+    # (ملاحظة: سبب "Price did not touch Lower BB" مشترك مع استراتيجية BB+Stoch)
 
     # أسباب مشتركة
     "No Confirmation Candle": "لم تظهر شمعة تأكيد صاعدة قوية",
@@ -207,10 +213,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         closing_reason TEXT
                     );
                 """)
-                # --- FIX START: Ensure all new columns are added to existing tables ---
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS journey_state JSONB;")
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS original_quantity DOUBLE PRECISION;")
-                # --- FIX END ---
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -676,21 +680,17 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
 
     df_slice = df.iloc[-lookback:]
     
-    # Using a simpler method to find significant highs and lows
     resistance_candidates = df_slice[df_slice['high'] == df_slice['high'].rolling(5, center=True).max()]['high']
     support_candidates = df_slice[df_slice['low'] == df_slice['low'].rolling(5, center=True).min()]['low']
 
     if resistance_candidates.empty or support_candidates.empty:
         return {'support': None, 'resistance': None}
 
-    # Find the most relevant levels relative to the current price
     current_price = df_slice['close'].iloc[-1]
     
-    # Find the closest resistance above the current price
     next_resistance = resistance_candidates[resistance_candidates > current_price]
     closest_resistance = next_resistance.min() if not next_resistance.empty else None
 
-    # Find the closest support below the current price
     next_support = support_candidates[support_candidates < current_price]
     closest_support = next_support.max() if not next_support.empty else None
 
@@ -749,12 +749,9 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: STRATEGY FUNCTIONS (V5 - Multi-Strategy) ---
+# --- START: STRATEGY FUNCTIONS ---
 
 def is_bullish_reversal_pattern(candle: pd.Series, prev_candle: pd.Series) -> bool:
-    """
-    Checks for simple bullish reversal candlestick patterns.
-    """
     body_size = abs(candle['close'] - candle['open'])
     if body_size > 0:
         lower_wick = candle['open'] - candle['low'] if candle['open'] < candle['close'] else candle['close'] - candle['low']
@@ -872,6 +869,34 @@ def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optio
 
     return True, "BB_Stoch_Reversal", {}
 
+# --- NEW: استراتيجية 4: BB + MACD Reversal ---
+def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
+    """
+    Checks for a buy signal based on touching the lower Bollinger Band and a bullish MACD crossover.
+    """
+    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
+    
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+
+    # الشرط الأول: ملامسة الحد السفلي لمؤشر البولينجر باند
+    touched_lower_bb = (last_candle['low'] <= last_candle['bb_lower']) or (prev_candle['low'] <= prev_candle['bb_lower'])
+    if not touched_lower_bb:
+        return False, "Price did not touch Lower BB", {}
+
+    # الشرط الثاني: تقاطع إيجابي للماكد
+    macd_crossover = (prev_candle['macd'] < prev_candle['macd_signal']) and (last_candle['macd'] > last_candle['macd_signal'])
+    if not macd_crossover:
+        details = {
+            "prev_macd": f"{prev_candle['macd']:.4f}", "prev_signal": f"{prev_candle['macd_signal']:.4f}",
+            "last_macd": f"{last_candle['macd']:.4f}", "last_signal": f"{last_candle['macd_signal']:.4f}"
+        }
+        return False, "No Bullish MACD Crossover", details
+
+    # إذا تحققت كل الشروط
+    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + MACD).")
+    return True, "BB_MACD_Reversal", {}
+
 
 # ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -969,13 +994,11 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             return False
 
         entry_price = float(signal_to_close['entry_price'])
-        # Use original quantity for final P/L calculation for consistency
         original_quantity = float(signal_to_close.get('original_quantity', signal_to_close.get('quantity', 1)))
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
             try:
-                # Close the remaining position
                 remaining_quantity_str = signal_to_close.get('quantity')
                 if remaining_quantity_str and float(remaining_quantity_str) > 0:
                     quantity_to_sell = Decimal(str(remaining_quantity_str))
@@ -983,7 +1006,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     if not sell_order:
                         log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                         return False
-                    # Verification is important but omitted here for brevity
                 else:
                     logger.info(f"ℹ️ [{symbol_to_close}] No remaining quantity to sell for real trade. Closing in DB only.")
 
@@ -1042,7 +1064,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             stop_loss = float(signal_data['stop_loss'])
             quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
 
-            # --- NEW: Initialize Journey State ---
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
                 initial_targets = []
@@ -1057,7 +1078,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                     "exited_quantities": [],
                     "is_complete": False
                 }
-                # The primary `target_price` is now the first journey target
                 signal_data['target_price'] = journey_state['targets'][0]['price']
 
             cur.execute("""
@@ -1072,7 +1092,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 json.dumps(signal_data['signal_details']),
                 signal_data.get('is_real_trade', False),
                 quantity,
-                quantity, # Original quantity is same as initial quantity
+                quantity, 
                 signal_data.get('order_id'),
                 entry_price,
                 json.dumps(journey_state) if journey_state else None
@@ -1132,7 +1152,6 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
-    # NEW: Added displayTradeJourney function and updated table headers
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1174,7 +1193,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6 (Dynamic Journey)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.3 (BB+MACD)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1279,7 +1298,7 @@ function updateSignals() {
             const currentTarget = s.journey_state ? s.journey_state.targets[s.journey_state.current_target_index].price : s.target_price;
 
             tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5">
-                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace('_', ' ')}</span></td>
+                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace(/_/g, ' ')}</span></td>
                 <td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td>
                 <td class="p-4">${journeyHTML}</td>
                 <td class="p-4 font-mono text-xs">
@@ -1394,14 +1413,11 @@ def get_stats():
 
 @app.route('/api/signals')
 def get_signals():
-    # --- FIX START ---
-    # Refactored the connection check to be more explicit and robust, avoiding the strange TypeError.
     db_ok = check_db_connection()
     redis_ok = redis_client is not None
     if not (db_ok and redis_ok):
         logger.warning(f"[API Signals] Service connection check failed. DB OK: {db_ok}, Redis OK: {redis_ok}")
         return jsonify({"error": "Service connection failed"}), 500
-    # --- FIX END ---
     try:
         current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
         with signal_cache_lock: signals_copy = list(open_signals_cache.values())
@@ -1464,27 +1480,14 @@ def manual_close_trade_endpoint(signal_id):
 
 # ---------------------- حلقات النظام ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
-    """
-    تحليل حركة السعر لتحديد ما إذا كان يجب تمديد الهدف.
-    أكثر قوة من مجرد الزخم، حيث يدمج قوة الاتجاه وحجم التداول.
-    """
     if df is None or len(df) < 20:
         return False
-
     last = df.iloc[-1]
-    
-    # 1. قوة الاتجاه (ADX > 25 يدل على اتجاه قوي)
     trend_strong = last.get('adx', 0) > 25
-    
-    # 2. تأكيد حجم التداول (أعلى من المتوسط)
     volume_confirmed = last.get('volume_ratio', 0) > 1.2
-    
-    # 3. الزخم إيجابي (السعر لا يزال فوق متوسط متحرك سريع)
     momentum_positive = last.get('close', 0) > last.get('ema_21', 0)
-
     should_extend = trend_strong and volume_confirmed and momentum_positive
     logger.info(f"  -> [Path Analysis] Extend? {should_extend} (Trend: {trend_strong}, Volume: {volume_confirmed}, Momentum: {momentum_positive})")
-    
     return should_extend
 
 
@@ -1515,7 +1518,6 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                # --- 1. منطق رحلة التداول الديناميكية ---
                 if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
                     journey_state = signal['journey_state']
                     if not journey_state.get('is_complete', False) and current_price >= tp:
@@ -1523,16 +1525,13 @@ def trade_management_loop():
                         current_target_index = journey_state['current_target_index']
                         logger.info(f"🎉 [{symbol}] الهدف رقم {current_target_index + 1} تحقق عند سعر {current_price:.4f}")
 
-                        # تحديث حالة الهدف الحالي
                         journey_state['targets'][current_target_index]['achieved'] = True
                         
-                        # تنفيذ خروج جزئي إذا كانت الصفقة حقيقية
                         if signal.get('is_real_trade'):
                             original_quantity = Decimal(str(signal.get('original_quantity', '0')))
                             exit_percentage = Decimal(str(journey_state['partial_exit_percentages'][current_target_index]))
                             exit_quantity = original_quantity * exit_percentage
                             
-                            # تعديل الكمية لتكون صالحة للبيع
                             adjusted_exit_quantity = adjust_quantity_to_lot_size(symbol, float(exit_quantity))
 
                             if adjusted_exit_quantity and adjusted_exit_quantity > 0:
@@ -1545,39 +1544,32 @@ def trade_management_loop():
                                 else:
                                     log_and_notify('error', f"❌ [{symbol}] فشل تنفيذ أمر الخروج الجزئي.", "TRADE_ERROR")
                         
-                        # التحقق إذا كانت هناك أهداف متبقية
                         if current_target_index < len(journey_state['targets']) - 1:
-                            # تحليل المسار لاتخاذ قرار التمديد
                             df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
                             df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
                             
                             if analyze_path_for_extension(df_with_features):
-                                # الانتقال للهدف التالي
                                 journey_state['current_target_index'] += 1
                                 next_target_index = journey_state['current_target_index']
                                 next_target_price = journey_state['targets'][next_target_index]['price']
                                 
-                                # رفع وقف الخسارة إلى الهدف السابق لضمان عدم الخسارة
-                                new_sl = signal['target_price'] # Move SL to the just-achieved target
+                                new_sl = signal['target_price']
                                 signal['stop_loss'] = new_sl
                                 signal['target_price'] = next_target_price
                                 
                                 logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {next_target_price:.4f}, وقف الخسارة الجديد: {new_sl:.4f}")
                                 log_and_notify('info', f"🎯 [{symbol}] تمديد الهدف إلى {next_target_price:.4f}", "TARGET_EXTEND")
                             else:
-                                # عدم التمديد، إنهاء الرحلة
                                 logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد. إغلاق الصفقة بالكامل.")
                                 journey_state['is_complete'] = True
                                 close_signal(signal_id, current_price, 'journey_completed')
-                                continue # الانتقال للصفقة التالية
+                                continue
                         else:
-                            # تم تحقيق كل الأهداف
                             logger.info(f"🏁 [{symbol}] تم تحقيق جميع الأهداف. اكتملت الرحلة بنجاح!")
                             journey_state['is_complete'] = True
                             close_signal(signal_id, current_price, 'journey_completed')
                             continue
 
-                        # تحديث حالة الرحلة في الكاش وقاعدة البيانات
                         with signal_cache_lock:
                             open_signals_cache[symbol] = signal
                         try:
@@ -1589,18 +1581,15 @@ def trade_management_loop():
                         except Exception as e:
                             logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
                         
-                        # إعادة تعيين tp و sl للمتابعة في الحلقة
                         tp = float(signal['target_price'])
                         sl = float(signal['stop_loss'])
 
-                # --- 2. منطق وقف الخسارة العادي و المتحرك (يستمر بالعمل) ---
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, reason)
                     continue
 
-                # --- 3. تحديث السعر الأقصى ووقف الخسارة المتحرك ---
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1623,7 +1612,6 @@ def trade_management_loop():
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
 
-                    # تحديث الكاش وقاعدة البيانات
                     with signal_cache_lock:
                         open_signals_cache[symbol] = signal
                     try:
@@ -1640,9 +1628,6 @@ def trade_management_loop():
             time.sleep(10)
 
 def main_loop_enhanced():
-    """
-    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V6).
-    """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
     time.sleep(15)
@@ -1681,14 +1666,10 @@ def main_loop_enhanced():
                             continue
                         
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
+                        df_with_indicators.name = symbol # Add name for logging
                         if df_with_indicators is None or df_with_indicators.empty:
                             continue
                         
-                        # =================================================================
-                        # ============== خط تجميع الإشارة (Signal Pipeline) ==============
-                        # =================================================================
-
-                        # --- المرحلة 1: الاكتشاف الفني (Technical Discovery) ---
                         strategy_signal_found = False
                         strategy_name = ""
                         rejection_key = "Strategy Signal Not Found"
@@ -1698,12 +1679,18 @@ def main_loop_enhanced():
                             logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
                             strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
                         
-                        elif market_regime in ["DOWNTREND", "RANGING"]:
+                        elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"]:
                             logger.info(f"  -> [مرحلة 1] تفعيل استراتيجيات الانعكاس...")
                             strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
+                            
                             if not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+Stoch...")
                                 strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
+                            
+                            # --- NEW: Check the new BB+MACD strategy ---
+                            if not strategy_signal_found:
+                                logger.info(f"  -> [مرحلة 1] استراتيجية BB+Stoch فشلت، تجربة استراتيجية BB+MACD...")
+                                strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
                         else:
                             rejection_key = "Invalid Market Regime for Any Strategy"
                             details = {"regime": market_regime}
@@ -1715,7 +1702,6 @@ def main_loop_enhanced():
                         strategy_name = rejection_key
                         logger.info(f"  -> [مرحلة 1] ✅ نجاح! إشارة فنية مكتشفة (استراتيجية: {strategy_name}).")
                         
-                        # --- المرحلة 2: التحقق من النموذج الآلي (ML Validation) ---
                         logger.info(f"  -> [مرحلة 2] الانتقال إلى التحقق من النموذج الآلي...")
                         strategy = EnhancedTradingStrategy(symbol)
                         if not strategy.load_model():
@@ -1750,7 +1736,6 @@ def main_loop_enhanced():
                         
                         logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
 
-                        # --- المرحلة 3: التحقق من دفتر الطلبات (Order Book Validation) ---
                         logger.info(f"  -> [مرحلة 3] الانتقال إلى التحقق من دفتر الطلبات...")
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
@@ -1763,7 +1748,6 @@ def main_loop_enhanced():
                         
                         logger.info(f"  -> [مرحلة 3] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
 
-                        # --- المرحلة 4: التنفيذ (Execution) ---
                         logger.info(f"  -> [مرحلة 4] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
                         if not tp_sl_data: continue
@@ -1847,13 +1831,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6 - رحلة التداول الديناميكية)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.3 - BB+MACD)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6 - Dynamic Journey System) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.3 - BB+MACD System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
