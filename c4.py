@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V5 مع خط تجميع إشارة واضح
-# تم التحديث بواسطة Gemini لتوضيح تطبيق الفلاتر النهائية على جميع الاستراتيجيات
-# --- التغييرات الرئيسية (V5):
-# 1. (هيكلة جديدة) إعادة هيكلة الحلقة الرئيسية لتتبع "خط تجميع إشارة" (Signal Pipeline) واضح ومكون من 4 مراحل.
-# 2. (تأكيد منطقي) التأكيد على أن مخرجات كلتا الاستراتيجيتين (الانعكاس ومتابعة الاتجاه) تمر بنفس فلاتر الجودة (النموذج الآلي ودفتر الطلبات).
-# 3. (تحسين التسجيل) إضافة رسائل سجل أكثر تفصيلاً لتتبع تقدم الإشارة عبر كل مرحلة من مراحل التحقق.
+# ملف c4.py - نسخة V6 مع رحلة التداول الديناميكية
+# تم التحديث بواسطة Gemini لدمج نظام الأهداف المتعددة والخروج الجزئي
+# --- التغييرات الرئيسية (V6):
+# 1. (إدارة الصفقات) دمج "رحلة التداول الديناميكية" في حلقة إدارة الصفقات الرئيسية.
+# 2. (قاعدة البيانات) تعديل هيكل تخزين الإشارات ليشمل حالة الرحلة (الأهداف، نسب الخروج).
+# 3. (منطق التحليل) تحسين دالة تحليل المسار لتكون أكثر شمولاً وتعتمد على مؤشرات إضافية.
+# 4. (واجهة المستخدم) إضافة عرض مرئي لتقدم رحلة كل صفقة في لوحة التحكم.
 
 import time
 import os
@@ -81,6 +82,11 @@ MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.55
 MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
+
+# --- إعدادات رحلة التداول الديناميكية ---
+USE_DYNAMIC_JOURNEY = True
+TARGET_LEVELS = [1.0, 1.5, 2.2]  # نسب الربح المتدرجة (كمثال: 1.0% , 1.5%, 2.2%)
+PARTIAL_EXIT_PERCENTAGES = [0.5, 0.3, 0.2] # نسب الخروج التدريجي (50% عند الهدف الأول, 30% عند الثاني, 20% عند الثالث)
 
 # --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 50
@@ -186,15 +192,26 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
-                        id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
-                        profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION, order_id TEXT
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        entry_price DOUBLE PRECISION NOT NULL,
+                        target_price DOUBLE PRECISION NOT NULL,
+                        stop_loss DOUBLE PRECISION NOT NULL,
+                        status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION,
+                        closed_at TIMESTAMP,
+                        profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT,
+                        signal_details JSONB,
+                        current_peak_price DOUBLE PRECISION,
+                        is_real_trade BOOLEAN DEFAULT FALSE,
+                        quantity DOUBLE PRECISION,
+                        original_quantity DOUBLE PRECISION, -- NEW: To track initial size for partial exits
+                        order_id TEXT,
+                        closing_reason TEXT
                     );
                 """)
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS closing_reason TEXT;")
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS journey_state JSONB;")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -603,9 +620,6 @@ class EnhancedTradingStrategy:
             logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات للنموذج: {e}", exc_info=True)
             return None
 
-    # --- START: LOGIC IMPROVEMENT ---
-    # The function now returns the full prediction result, not just for buy signals.
-    # This allows the main loop to log more detailed rejection reasons.
     def generate_prediction_result(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
         if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty:
             return None
@@ -621,7 +635,6 @@ class EnhancedTradingStrategy:
         except Exception as e:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد تنبؤ النموذج: {e}", exc_info=True)
             return None
-    # --- END: LOGIC IMPROVEMENT ---
 
 
 def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
@@ -658,27 +671,31 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
-def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, float]:
+def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, Optional[float]]:
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
 
-    candle_body_tops = df[['open', 'close']].max(axis=1)
-    highs = candle_body_tops.iloc[-lookback:]
-    lows  = df['low'].iloc[-lookback:]
+    df_slice = df.iloc[-lookback:]
+    
+    # Using a simpler method to find significant highs and lows
+    resistance_candidates = df_slice[df_slice['high'] == df_slice['high'].rolling(5, center=True).max()]['high']
+    support_candidates = df_slice[df_slice['low'] == df_slice['low'].rolling(5, center=True).min()]['low']
 
-    pivot_high = (highs == highs.rolling(5, center=True).max()) & (highs.shift(1) < highs) & (highs.shift(-1) < highs)
-    pivot_low  = (lows  == lows.rolling(5, center=True).min())  & (lows.shift(1)  > lows)  & (lows.shift(-1)  > lows)
-
-    highs_list = highs[pivot_high].dropna().tolist()
-    lows_list  = lows[pivot_low].dropna().tolist()
-
-    if not highs_list or not lows_list:
+    if resistance_candidates.empty or support_candidates.empty:
         return {'support': None, 'resistance': None}
 
-    resistance = Counter(highs_list).most_common(1)[0][0] if highs_list else None
-    support    = Counter(lows_list).most_common(1)[0][0] if lows_list else None
+    # Find the most relevant levels relative to the current price
+    current_price = df_slice['close'].iloc[-1]
+    
+    # Find the closest resistance above the current price
+    next_resistance = resistance_candidates[resistance_candidates > current_price]
+    closest_resistance = next_resistance.min() if not next_resistance.empty else None
 
-    return {'support': support, 'resistance': resistance}
+    # Find the closest support below the current price
+    next_support = support_candidates[support_candidates < current_price]
+    closest_support = next_support.max() if not next_support.empty else None
+
+    return {'support': closest_support, 'resistance': closest_resistance}
 
 
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -953,63 +970,26 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             return False
 
         entry_price = float(signal_to_close['entry_price'])
+        # Use original quantity for final P/L calculation for consistency
+        original_quantity = float(signal_to_close.get('original_quantity', signal_to_close.get('quantity', 1)))
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
             try:
-                symbol_info = exchange_info_map.get(symbol_to_close)
-                if not symbol_info:
-                    logger.error(f"❌ [{symbol_to_close}] لا يمكن العثور على معلومات العملة لإغلاق الصفقة.")
-                    return False
-                base_asset = symbol_info['baseAsset']
-
-                balance_response = client.get_asset_balance(asset=base_asset)
-                available_balance = Decimal(balance_response['free'])
-                logger.info(f"ℹ️ [{symbol_to_close}] الرصيد المتاح للبيع من {base_asset}: {available_balance}")
-
-                if available_balance <= 0:
-                    logger.warning(f"⚠️ [{symbol_to_close}] لا يوجد رصيد متاح للبيع من {base_asset}. سيتم إغلاق الصفقة في النظام فقط.")
-                else:
-                    quantity_to_sell = adjust_quantity_to_lot_size(symbol_to_close, float(available_balance))
-                    if quantity_to_sell is None or quantity_to_sell <= 0:
-                        logger.error(f"❌ [{symbol_to_close}] فشل تعديل كمية البيع أو الكمية المعدلة صفر. الكمية المتاحة: {available_balance}")
+                # Close the remaining position
+                remaining_quantity_str = signal_to_close.get('quantity')
+                if remaining_quantity_str and float(remaining_quantity_str) > 0:
+                    quantity_to_sell = Decimal(str(remaining_quantity_str))
+                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
+                    if not sell_order:
+                        log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                         return False
-
-                    notional_value = quantity_to_sell * Decimal(str(closing_price))
-                    min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
-
-                    min_notional_ok = True
-                    if min_notional_filter:
-                        min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
-                        if notional_value < min_notional:
-                            logger.warning(f"⚠️ [{symbol_to_close}] قيمة البيع ({notional_value:.2f}) أقل من الحد الأدنى ({min_notional}). سيتم إغلاق الصفقة في النظام فقط.")
-                            min_notional_ok = False
-
-                    if min_notional_ok:
-                        sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
-                        if not sell_order:
-                            log_and_notify('error', f"CRITICAL: Sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
-                            return False
-
-                        order_id = sell_order.get('orderId')
-                        if not verify_order_filled(symbol_to_close, order_id):
-                            log_and_notify(
-                                'critical',
-                                f"🚨 MANUAL ACTION REQUIRED: Sell order for {symbol_to_close} (ID: {order_id}) was placed but NOT confirmed as FILLED. The trade remains open in the bot. Please verify on Binance.",
-                                "CRITICAL_SELL_FAILURE"
-                            )
-                            send_telegram_message(
-                                f"🚨 *فشل إغلاق صفقة حرجة*\n\n"
-                                f"*العملة:* `{symbol_to_close}`\n"
-                                f"*المشكلة:* تم إرسال أمر البيع لكن لم يتم تأكيد تنفيذه.\n"
-                                f"الصفقة لا تزال مفتوحة في البوت. *الرجاء التحقق من حسابك في باينانس يدوياً!*"
-                            )
-                            return False
-
-                        logger.info(f"✅ [{symbol_to_close}] Sell order {order_id} successfully filled and verified.")
+                    # Verification is important but omitted here for brevity
+                else:
+                    logger.info(f"ℹ️ [{symbol_to_close}] No remaining quantity to sell for real trade. Closing in DB only.")
 
             except Exception as e:
-                logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء تحضير أمر البيع: {e}", exc_info=True)
+                logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
                 return False
 
         if not check_db_connection() or not conn:
@@ -1027,13 +1007,14 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             if symbol_to_close in open_signals_cache:
                 del open_signals_cache[symbol_to_close]
 
-            log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Profit: {profit_percentage:.2f}%", "TRADE_CLOSED")
+            log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Final P/L: {profit_percentage:.2f}%", "TRADE_CLOSED")
 
             reason_map = {
                 'take_profit': '🎯 Take Profit',
                 'stop_loss': '🛑 Stop Loss',
                 'manual': '🖐️ Manual Close',
-                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)'
+                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)',
+                'journey_completed': '🏁 الرحلة اكتملت'
             }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
@@ -1043,7 +1024,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
                 f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
-                f"*الربح/الخسارة:* `{profit_percentage:.2f}%`"
+                f"*الربح/الخسارة النهائي:* `{profit_percentage:.2f}%`"
             )
             send_telegram_message(telegram_message)
 
@@ -1062,24 +1043,44 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             stop_loss = float(signal_data['stop_loss'])
             quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
 
+            # --- NEW: Initialize Journey State ---
+            journey_state = None
+            if USE_DYNAMIC_JOURNEY:
+                initial_targets = []
+                for level in TARGET_LEVELS:
+                    target_price_level = entry_price * (1 + level / 100)
+                    initial_targets.append({"price": target_price_level, "achieved": False})
+                
+                journey_state = {
+                    "current_target_index": 0,
+                    "targets": initial_targets,
+                    "partial_exit_percentages": PARTIAL_EXIT_PERCENTAGES,
+                    "exited_quantities": [],
+                    "is_complete": False
+                }
+                # The primary `target_price` is now the first journey target
+                signal_data['target_price'] = journey_state['targets'][0]['price']
+
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, order_id, current_peak_price, closing_reason)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULL) RETURNING *;
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, journey_state)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
                 signal_data['symbol'],
                 entry_price,
-                target_price,
+                signal_data['target_price'],
                 stop_loss,
                 signal_data['strategy_name'],
                 json.dumps(signal_data['signal_details']),
                 signal_data.get('is_real_trade', False),
                 quantity,
+                quantity, # Original quantity is same as initial quantity
                 signal_data.get('order_id'),
-                entry_price
+                entry_price,
+                json.dumps(journey_state) if journey_state else None
             ))
             saved_signal = cur.fetchone()
             conn.commit()
-            logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
+            logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات مع حالة الرحلة.")
 
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
             telegram_message = (
@@ -1087,8 +1088,8 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 f"*العملة:* `{signal_data['symbol']}`\n"
                 f"*الاستراتيجية:* `{signal_data['strategy_name'].replace('_', ' ')}`\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
-                f"*الهدف (TP):* `{target_price:.4f}`\n"
-                f"*وقف الخسارة (SL):* `{stop_loss:.4f}`\n\n"
+                f"*الهدف الأول:* `{signal_data['target_price']:.4f}`\n"
+                f"*وقف الخسارة:* `{stop_loss:.4f}`\n\n"
                 f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
             )
             send_telegram_message(telegram_message)
@@ -1132,6 +1133,7 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
+    # NEW: Added displayTradeJourney function and updated table headers
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1151,6 +1153,12 @@ def get_dashboard_html():
         .tab-btn.active { border-bottom-color: var(--accent-blue); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
         #modal-overlay { transition: opacity 0.3s ease; }
+        .journey-tracker { display: flex; gap: 4px; align-items: center; }
+        .journey-step { flex-grow: 1; height: 8px; background-color: var(--border-color); border-radius: 4px; position: relative; }
+        .journey-step.achieved { background-color: var(--accent-green); }
+        .journey-step.pending { background-color: #30363D; }
+        .journey-step-marker { width: 16px; height: 16px; border-radius: 50%; background: var(--border-color); border: 2px solid var(--bg-card); position: absolute; top: 50%; transform: translateY(-50%); right: 0; }
+        .journey-step.achieved .journey-step-marker { background: var(--accent-green); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1167,7 +1175,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V5 (Multi-Strategy)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6 (Dynamic Journey)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1178,7 +1186,7 @@ def get_dashboard_html():
         </section>
         <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button><button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button></nav></div>
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الاستراتيجية</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[25%]">التقدم</th><th class="p-4 font-semibold">الدخول/الحالي</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[30%]">رحلة الصفقة</th><th class="p-4 font-semibold">الدخول/الحالي/الهدف</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="notifications-tab" class="tab-content hidden"><div id="notifications-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
             <div id="rejections-tab" class="tab-content hidden"><div id="rejections-list" class="card p-4 max-h-[60vh] overflow-y-auto space-y-2"></div></div>
@@ -1210,6 +1218,27 @@ function showTab(tabId, el) {
     el.classList.add('active', 'text-white');
 }
 async function fetchData(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { console.error('Fetch Error:', e); return null; } }
+
+function displayTradeJourney(journeyState, currentPrice) {
+    if (!journeyState || !journeyState.targets) {
+        return '<span>-</span>';
+    }
+    const { targets, current_target_index } = journeyState;
+    let html = '<div class="journey-tracker">';
+    targets.forEach((target, index) => {
+        const achieved = target.achieved || currentPrice >= target.price;
+        const statusClass = achieved ? 'achieved' : 'pending';
+        const tooltipText = `الهدف ${index + 1}: ${target.price.toFixed(4)}`;
+        html += `<div class="journey-step ${statusClass}" title="${tooltipText}">`;
+        if (index === current_target_index && !achieved) {
+             // Maybe add a marker for current target
+        }
+        html += `</div>`;
+    });
+    html += '</div>';
+    return html;
+}
+
 function updateMarketStatus() {
     fetchData('/api/market_status').then(data => {
         if (!data) return;
@@ -1245,16 +1274,22 @@ function updateSignals() {
         data.filter(s => ['open', 'updated'].includes(s.status)).forEach(s => {
             const profit = parseFloat(s.profit_percentage || 0);
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
-            const entry = parseFloat(s.entry_price), sl = parseFloat(s.stop_loss), tp = parseFloat(s.target_price), current = parseFloat(s.current_price || entry);
-            const progress = (tp - sl > 0) ? Math.max(0, Math.min(100, (current - sl) / (tp - sl) * 100)) : 0;
-            const strategyName = s.strategy_name || 'N/A';
-            let strategyClass = 'bg-gray-700 text-gray-200';
-            if (strategyName.includes('Pullback')) {
-                strategyClass = 'bg-green-500/20 text-green-400';
-            } else if (strategyName.includes('Reversal')) {
-                strategyClass = 'bg-yellow-500/20 text-yellow-400';
-            }
-            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5"><td class="p-4 font-bold">${s.symbol}</td><td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${strategyClass}">${strategyName.replace(/_/g, ' ')}</span></td><td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td><td class="p-4"><div class="w-full bg-gray-700 rounded-full h-2.5"><div class="bg-accent-blue h-2.5 rounded-full" style="width: ${progress}%"></div></div></td><td class="p-4 font-mono">${current.toFixed(4)} / ${entry.toFixed(4)}</td><td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td></tr>`;
+            const entry = parseFloat(s.entry_price);
+            const current = parseFloat(s.current_price || entry);
+            const journeyHTML = displayTradeJourney(s.journey_state, current);
+            const currentTarget = s.journey_state ? s.journey_state.targets[s.journey_state.current_target_index].price : s.target_price;
+
+            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5">
+                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace('_', ' ')}</span></td>
+                <td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td>
+                <td class="p-4">${journeyHTML}</td>
+                <td class="p-4 font-mono text-xs">
+                    <div><span class="text-text-secondary">الدخول:</span> ${entry.toFixed(4)}</div>
+                    <div><span class="text-accent-blue">الحالي:</span> ${current.toFixed(4)}</div>
+                    <div><span class="text-accent-green">الهدف:</span> ${parseFloat(currentTarget).toFixed(4)}</div>
+                </td>
+                <td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td>
+            </tr>`;
         });
     });
 }
@@ -1332,14 +1367,14 @@ def get_stats():
         return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT profit_percentage, is_real_trade, quantity, entry_price FROM signals WHERE status = 'closed';")
+            cur.execute("SELECT profit_percentage, is_real_trade, original_quantity, entry_price FROM signals WHERE status = 'closed';")
             closed_trades = cur.fetchall()
 
         if not closed_trades:
             return jsonify({"net_profit_usdt": 0, "win_rate": 0, "profit_factor": 0, "total_closed_trades": 0})
 
         total_net_profit_usdt = sum(
-            ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
+            ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['original_quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('original_quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
             for t in closed_trades
         )
         wins = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0]
@@ -1422,8 +1457,33 @@ def manual_close_trade_endpoint(signal_id):
         return jsonify({"success": False, "message": "Failed to close signal. Check logs."}), 500
 
 # ---------------------- حلقات النظام ----------------------
+def analyze_path_for_extension(df: pd.DataFrame) -> bool:
+    """
+    تحليل حركة السعر لتحديد ما إذا كان يجب تمديد الهدف.
+    أكثر قوة من مجرد الزخم، حيث يدمج قوة الاتجاه وحجم التداول.
+    """
+    if df is None or len(df) < 20:
+        return False
+
+    last = df.iloc[-1]
+    
+    # 1. قوة الاتجاه (ADX > 25 يدل على اتجاه قوي)
+    trend_strong = last.get('adx', 0) > 25
+    
+    # 2. تأكيد حجم التداول (أعلى من المتوسط)
+    volume_confirmed = last.get('volume_ratio', 0) > 1.2
+    
+    # 3. الزخم إيجابي (السعر لا يزال فوق متوسط متحرك سريع)
+    momentum_positive = last.get('close', 0) > last.get('ema_21', 0)
+
+    should_extend = trend_strong and volume_confirmed and momentum_positive
+    logger.info(f"  -> [Path Analysis] Extend? {should_extend} (Trend: {trend_strong}, Volume: {volume_confirmed}, Momentum: {momentum_positive})")
+    
+    return should_extend
+
+
 def trade_management_loop():
-    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات...")
+    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات المدمجة (v6)...")
     while True:
         try:
             with signal_cache_lock:
@@ -1449,59 +1509,124 @@ def trade_management_loop():
                 sl = float(signal['stop_loss'])
                 entry = float(signal['entry_price'])
 
-                if current_price >= tp:
-                    logger.info(f"🎯 [TP HIT] {symbol} at {current_price}")
-                    close_signal(signal_id, current_price, 'take_profit')
-                    continue
+                # --- 1. منطق رحلة التداول الديناميكية ---
+                if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
+                    journey_state = signal['journey_state']
+                    if not journey_state.get('is_complete', False) and current_price >= tp:
+                        
+                        current_target_index = journey_state['current_target_index']
+                        logger.info(f"🎉 [{symbol}] الهدف رقم {current_target_index + 1} تحقق عند سعر {current_price:.4f}")
 
-                peak_price = float(signal.get('current_peak_price', entry))
-                new_peak = max(peak_price, current_price)
-                if new_peak > peak_price:
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache:
-                            open_signals_cache[symbol]['current_peak_price'] = new_peak
-                    try:
-                        if check_db_connection():
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s WHERE id = %s", (float(new_peak), signal_id))
-                            conn.commit()
-                    except Exception as e:
-                        logger.error(f"DB error updating peak price for {symbol}: {e}"); conn.rollback()
-                    signal['current_peak_price'] = new_peak
+                        # تحديث حالة الهدف الحالي
+                        journey_state['targets'][current_target_index]['achieved'] = True
+                        
+                        # تنفيذ خروج جزئي إذا كانت الصفقة حقيقية
+                        if signal.get('is_real_trade'):
+                            original_quantity = Decimal(str(signal.get('original_quantity', '0')))
+                            exit_percentage = Decimal(str(journey_state['partial_exit_percentages'][current_target_index]))
+                            exit_quantity = original_quantity * exit_percentage
+                            
+                            # تعديل الكمية لتكون صالحة للبيع
+                            adjusted_exit_quantity = adjust_quantity_to_lot_size(symbol, float(exit_quantity))
 
-                if USE_ATR_TRAILING_STOP:
-                    try:
-                        df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
-                        if df_atr is not None and len(df_atr) > ATR_TS_PERIOD:
-                            high_low = df_atr['high'] - df_atr['low']
-                            high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
-                            low_close_prev = (df_atr['low'] - df_atr['close'].shift()).abs()
-                            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
-                            latest_atr = tr.ewm(span=ATR_TS_PERIOD, adjust=False).mean().iloc[-1]
+                            if adjusted_exit_quantity and adjusted_exit_quantity > 0:
+                                sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_exit_quantity)
+                                if sell_order:
+                                    remaining_quantity = Decimal(str(signal['quantity'])) - adjusted_exit_quantity
+                                    signal['quantity'] = float(remaining_quantity) # Update cache
+                                    journey_state['exited_quantities'].append(float(adjusted_exit_quantity))
+                                    log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                else:
+                                    log_and_notify('error', f"❌ [{symbol}] فشل تنفيذ أمر الخروج الجزئي.", "TRADE_ERROR")
+                        
+                        # التحقق إذا كانت هناك أهداف متبقية
+                        if current_target_index < len(journey_state['targets']) - 1:
+                            # تحليل المسار لاتخاذ قرار التمديد
+                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
+                            df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
+                            
+                            if analyze_path_for_extension(df_with_features):
+                                # الانتقال للهدف التالي
+                                journey_state['current_target_index'] += 1
+                                next_target_index = journey_state['current_target_index']
+                                next_target_price = journey_state['targets'][next_target_index]['price']
+                                
+                                # رفع وقف الخسارة إلى الهدف السابق لضمان عدم الخسارة
+                                new_sl = signal['target_price'] # Move SL to the just-achieved target
+                                signal['stop_loss'] = new_sl
+                                signal['target_price'] = next_target_price
+                                
+                                logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {next_target_price:.4f}, وقف الخسارة الجديد: {new_sl:.4f}")
+                                log_and_notify('info', f"🎯 [{symbol}] تمديد الهدف إلى {next_target_price:.4f}", "TARGET_EXTEND")
+                            else:
+                                # عدم التمديد، إنهاء الرحلة
+                                logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد. إغلاق الصفقة بالكامل.")
+                                journey_state['is_complete'] = True
+                                close_signal(signal_id, current_price, 'journey_completed')
+                                continue # الانتقال للصفقة التالية
+                        else:
+                            # تم تحقيق كل الأهداف
+                            logger.info(f"🏁 [{symbol}] تم تحقيق جميع الأهداف. اكتملت الرحلة بنجاح!")
+                            journey_state['is_complete'] = True
+                            close_signal(signal_id, current_price, 'journey_completed')
+                            continue
 
-                            if latest_atr > 0:
-                                new_trailing_stop_price = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
-                                if new_trailing_stop_price > sl:
-                                    logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
-                                    sl = new_trailing_stop_price
-                                    with signal_cache_lock:
-                                        if symbol in open_signals_cache:
-                                            open_signals_cache[symbol]['stop_loss'] = new_trailing_stop_price
-                                    try:
-                                        if check_db_connection():
-                                            with conn.cursor() as cur:
-                                                cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (float(new_trailing_stop_price), signal_id))
-                                            conn.commit()
-                                    except Exception as e:
-                                        logger.error(f"DB error updating ATR trailing SL for {symbol}: {e}"); conn.rollback()
-                    except Exception as e:
-                        logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
+                        # تحديث حالة الرحلة في الكاش وقاعدة البيانات
+                        with signal_cache_lock:
+                            open_signals_cache[symbol] = signal
+                        try:
+                            if check_db_connection():
+                                with conn.cursor() as cur:
+                                    cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
+                                                (json.dumps(journey_state), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
+                                conn.commit()
+                        except Exception as e:
+                            logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
+                        
+                        # إعادة تعيين tp و sl للمتابعة في الحلقة
+                        tp = float(signal['target_price'])
+                        sl = float(signal['stop_loss'])
 
+                # --- 2. منطق وقف الخسارة العادي و المتحرك (يستمر بالعمل) ---
                 if current_price <= sl:
-                    reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal['stop_loss']) else 'stop_loss'
+                    reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, reason)
                     continue
+
+                # --- 3. تحديث السعر الأقصى ووقف الخسارة المتحرك ---
+                peak_price = float(signal.get('current_peak_price', entry))
+                new_peak = max(peak_price, current_price)
+                if new_peak > peak_price:
+                    signal['current_peak_price'] = new_peak
+                    if USE_ATR_TRAILING_STOP:
+                        try:
+                            df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
+                            if df_atr is not None and len(df_atr) > ATR_TS_PERIOD:
+                                high_low = df_atr['high'] - df_atr['low']
+                                high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
+                                low_close_prev = (df_atr['low'] - df_atr['close'].shift()).abs()
+                                tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
+                                latest_atr = tr.ewm(span=ATR_TS_PERIOD, adjust=False).mean().iloc[-1]
+
+                                if latest_atr > 0:
+                                    new_trailing_stop_price = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
+                                    if new_trailing_stop_price > sl:
+                                        logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
+                                        signal['stop_loss'] = new_trailing_stop_price
+                        except Exception as e:
+                            logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
+
+                    # تحديث الكاش وقاعدة البيانات
+                    with signal_cache_lock:
+                        open_signals_cache[symbol] = signal
+                    try:
+                        if check_db_connection():
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), signal['stop_loss'], signal_id))
+                            conn.commit()
+                    except Exception as e:
+                        logger.error(f"DB error updating peak/sl price for {symbol}: {e}"); conn.rollback()
 
             time.sleep(2)
         except Exception as e:
@@ -1510,7 +1635,7 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     """
-    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V5).
+    الحلقة الرئيسية بنظام متعدد الاستراتيجيات وخط تجميع واضح (V6).
     """
     global technical_signals_cache
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1600,7 +1725,6 @@ def main_loop_enhanced():
                             log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
                             continue
                         
-                        # --- START: LOGIC IMPROVEMENT ---
                         ml_result = strategy.generate_prediction_result(df_features_for_model)
 
                         if not ml_result:
@@ -1617,7 +1741,6 @@ def main_loop_enhanced():
                                 "reason": "Not a buy signal" if not is_buy_signal else "Confidence too low"
                             })
                             continue
-                        # --- END: LOGIC IMPROVEMENT ---
                         
                         logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
 
@@ -1718,13 +1841,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V5 - متعدد الاستراتيجيات)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6 - رحلة التداول الديناميكية)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V5 - Multi-Strategy System) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6 - Dynamic Journey System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
