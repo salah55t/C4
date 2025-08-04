@@ -1,7 +1,7 @@
-# ملف c4.py - نسخة V6.1 مع رحلة التداول الديناميكية وإصلاح API
+# ملف c4.py - نسخة V6.2 مع رحلة التداول الديناميكية وإصلاح مخطط قاعدة البيانات
 # تم التحديث بواسطة Gemini لدمج نظام الأهداف المتعددة والخروج الجزئي
-# --- التغييرات الرئيسية (V6.1):
-# 1. (إصلاح خطأ) تعديل نقطة نهاية /api/signals لتجنب خطأ TypeError وجعل التحقق من الاتصال أكثر وضوحًا.
+# --- التغييرات الرئيسية (V6.2):
+# 1. (إصلاح خطأ حرج) إضافة ALTER TABLE لعمود original_quantity لضمان تحديث مخطط قاعدة البيانات الموجودة.
 
 import time
 import os
@@ -203,12 +203,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         current_peak_price DOUBLE PRECISION,
                         is_real_trade BOOLEAN DEFAULT FALSE,
                         quantity DOUBLE PRECISION,
-                        original_quantity DOUBLE PRECISION, -- NEW: To track initial size for partial exits
                         order_id TEXT,
                         closing_reason TEXT
                     );
                 """)
+                # --- FIX START: Ensure all new columns are added to existing tables ---
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS journey_state JSONB;")
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS original_quantity DOUBLE PRECISION;")
+                # --- FIX END ---
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
