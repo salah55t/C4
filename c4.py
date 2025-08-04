@@ -1,11 +1,12 @@
-# ملف c4.py - نسخة V7.4 (إضافة استراتيجية للسوق الهابط)
-# تم التحديث بواسطة Gemini لإضافة استراتيجية جديدة للتعامل مع الاتجاه الهابط القوي.
-# --- التغييرات الرئيسية (V7.4):
-# 1. تمت إضافة استراتيجية جديدة: "Oversold Bounce Scalp" (ارتداد ذروة البيع).
-# 2. هذه الاستراتيجية تعمل خصيصًا عندما يكتشف البوت حالة "STRONG_DOWNTREND".
-# 3. هدفها هو اقتناص ارتدادات سريعة من مستويات البيع المفرط.
-# 4. تم تحديث منطق الحلقة الرئيسية لتفعيل هذه الاستراتيجية في الظروف المناسبة.
-# 5. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل إلى V7.4.
+# ملف c4.py - نسخة V8.0 (تحديث حالة السوق)
+# تم التحديث بواسطة Gemini لتحسين آلية تحديد حالة السوق لتكون أكثر دقة واستجابة.
+# --- التغييرات الرئيسية (V8.0):
+# 1. آلية جديدة لتحديد حالة السوق (determine_market_state_v2) بنظام تسجيل مرجح.
+# 2. تحليل مؤشرات متعددة (EMA, ADX, RSI) مع إعطاء وزن أكبر للأطر الزمنية الأعلى.
+# 3. تقليل الفاصل الزمني لتحديث حالة السوق إلى 60 ثانية لزيادة الاستجابة.
+# 4. تقديم حالات سوق أكثر تفصيلاً (مثل STRONG_BULLISH_TREND, CONSOLIDATION_RANGE).
+# 5. تحديث منطق اختيار الاستراتيجيات ليتوافق مع حالات السوق الجديدة.
+# 6. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل إلى V8.0.
 
 import time
 import os
@@ -77,7 +78,7 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 BUY_CONFIDENCE_THRESHOLD = 0.55
@@ -175,12 +176,6 @@ REJECTION_REASONS_AR = {
     "RSI did not bounce from 40": "مؤشر القوة النسبية لم يرتد من مستوى 40",
     "No price breakout of recent high": "السعر لم يخترق قمة حديثة خلال آخر 12 ساعة",
     "Invalid TP/SL for EMA Breakout": "فشل حساب الهدف/الوقف لاستراتيجية الاختراق",
-
-    # Oversold Bounce Scalp Strategy reasons
-    "Not in Strong Downtrend": "السوق ليس في اتجاه هابط قوي",
-    "RSI not in extreme oversold": "مؤشر القوة النسبية ليس في منطقة بيع مفرط",
-    "No capitulation volume": "لم يظهر حجم تداول استسلامي",
-    "No bullish confirmation candle": "لم تظهر شمعة تأكيد صاعدة",
 
     # Common reasons
     "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
@@ -833,7 +828,8 @@ def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]
         return False, "No Stochastic Crossover", {}
             
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.3:
+    # تخفيف شرط حجم التداول
+    if last_candle['volume'] < avg_volume * 0.3: # تم التخفيض من 0.5
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
     
@@ -848,9 +844,11 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
     
     last_candle = df.iloc[-1]
     
+    # تخفيف شرط الاتجاه: يكفي أن يكون السعر فوق EMA50
     if not (last_candle['close'] > last_candle['ema_50']):
         return False, "Not in Uptrend Context", {}
         
+    # توسيع منطقة التصحيح لتكون بين EMA21 و EMA50
     pullback_occurred_in_zone = (last_candle['low'] <= last_candle['ema_21']) and (last_candle['low'] >= last_candle['ema_50'])
     if not pullback_occurred_in_zone:
         return False, "No Pullback to EMA Zone", {}
@@ -859,7 +857,8 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
         return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
         
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.4:
+    # تخفيف شرط حجم التداول
+    if last_candle['volume'] < avg_volume * 0.4: # تم التخفيض من 0.7
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
 
@@ -945,7 +944,8 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
         return False, "No Bullish MACD Crossover", {}
 
     avg_volume = df['volume'].iloc[-21:-1].mean()
-    if not (last_candle['volume'] > avg_volume * 0.9):
+    # تخفيف شرط حجم التداول
+    if not (last_candle['volume'] > avg_volume * 0.9): # تم التخفيض من 1.1
         return False, "Volume not above average", {"volume": f"{last_candle['volume']}", "avg_volume": f"{avg_volume:.2f}"}
 
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
@@ -953,25 +953,34 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
 
 # --- Strategy 6: EMA Breakout Strategy ---
 def check_ema_breakout_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
+    """
+    يفحص شروط استراتيجية الاختراق الجديدة بناءً على تقاطع المتوسطات المتحركة وتأكيدات الزخم.
+    """
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    if len(df) < 50:
+    if len(df) < 50: # تحتاج إلى بيانات كافية لحساب المتوسطات والقنوات
         return False, "Insufficient data for EMA Breakout", {}
 
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
 
+    # الشرط أ: تقاطع EMA21 فوق EMA50
     ema_crossed_up = last_candle['ema_21'] > last_candle['ema_50'] and prev_candle['ema_21'] <= prev_candle['ema_50']
     if not ema_crossed_up:
         return False, "No Bullish EMA Cross", {}
 
+    # الشرط ب: تقاطع صعودي للماكد فوق خط الصفر
     macd_bullish = last_candle['macd'] > last_candle['macd_signal'] and last_candle['macd'] > 0
     if not macd_bullish:
         return False, "MACD not bullish above zero", {"macd": f"{last_candle['macd']:.4f}"}
 
+    # الشرط ج: ارتداد RSI من مستوى 40 لأعلى
+    # نبحث عن ارتداد حديث من منطقة قريبة من 40
     rsi_bounced = (df['rsi'].iloc[-5:-1] < 45).any() and last_candle['rsi'] > 40
     if not rsi_bounced:
         return False, "RSI did not bounce from 40", {"rsi": f"{last_candle['rsi']:.2f}"}
 
+    # الشرط د: السعر يكسر قمة المستطيل (آخر 10-12 ساعة)
+    # 12 ساعة * 4 شمعات/ساعة = 48 شمعة
     lookback_period = 48
     recent_high = df['high'].iloc[-lookback_period:-1].max()
     breakout_confirmed = last_candle['close'] > recent_high
@@ -981,35 +990,12 @@ def check_ema_breakout_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (EMA Breakout Strategy).")
     return True, "EMA_Breakout_Strategy", {}
 
-# --- NEW Strategy 7: Oversold Bounce Scalp ---
-def check_oversold_scalp_strategy(df: pd.DataFrame, market_regime: str) -> Tuple[bool, str, Optional[Dict]]:
-    """
-    استراتيجية جديدة للبحث عن ارتداد سريع في سوق هابط بقوة.
-    """
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    if market_regime != "STRONG_DOWNTREND":
-        return False, "Not in Strong Downtrend", {"regime": market_regime}
-
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    # الشرط 1: RSI في منطقة بيع مفرط جداً
-    if last_candle['rsi'] >= 25:
-        return False, "RSI not in extreme oversold", {"rsi": f"{last_candle['rsi']:.2f}"}
-
-    # الشرط 2: حجم تداول استسلامي (أعلى بكثير من المتوسط)
-    avg_volume = df['volume'].iloc[-21:-1].mean()
-    if last_candle['volume'] < avg_volume * 2.0:
-        return False, "No capitulation volume", {"volume": f"{last_candle['volume']:.0f}", "avg_volume": f"{avg_volume:.0f}"}
-
-    # الشرط 3: شمعة تأكيد صاعدة (شمعة خضراء صغيرة بعد الهبوط)
-    if not (last_candle['close'] > last_candle['open'] and last_candle['open'] > prev_candle['low']):
-        return False, "No bullish confirmation candle", {}
-    
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (Oversold Bounce Scalp).")
-    return True, "Oversold_Bounce_Scalp", {}
-
 def calculate_ema_breakout_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    يحسب الهدف ووقف الخسارة خصيصًا لاستراتيجية الاختراق الجديدة.
+    SL: 1.2 * ATR تحت قاع شمعة الإشارة.
+    TP: نسبة 1.5 R:R.
+    """
     try:
         if df.empty or 'atr' not in df.columns or 'low' not in df.columns:
             log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Missing ATR/low data"})
@@ -1018,12 +1004,14 @@ def calculate_ema_breakout_tp_sl(symbol: str, entry_price: float, df: pd.DataFra
         last_candle = df.iloc[-1]
         atr_value = last_candle['atr']
         
+        # وقف الخسارة: 1.2 * ATR تحت قاع شمعة الاختراق
         stop_loss_price = last_candle['low'] - (atr_value * 1.2)
         
         if stop_loss_price >= entry_price:
             log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Stop loss is above entry price"})
             return None
 
+        # الهدف: نسبة 1.5 بناءً على المخاطرة
         risk_per_share = entry_price - stop_loss_price
         target_price = entry_price + (risk_per_share * 1.5)
 
@@ -1087,6 +1075,9 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
+        # ملاحظة: لم يتم تطبيق خاصية OCO هنا مباشرة.
+        # يتم إدارة الهدف ووقف الخسارة عبر trade_management_loop.
+        # هذا يوفر مرونة أكبر مثل الوقف المتحرك.
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
@@ -1134,6 +1125,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             return False
 
         entry_price = float(signal_to_close['entry_price'])
+        # تحويل القيم إلى float قبل الحساب والتخزين
         closing_price_float = float(closing_price)
         profit_percentage = ((closing_price_float - entry_price) / entry_price) * 100
 
@@ -1159,6 +1151,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
 
         try:
             with conn.cursor() as cur:
+                # التأكد من أن جميع القيم الرقمية هي float
                 cur.execute("""
                     UPDATE signals SET status = 'closed', closing_price = %s, closed_at = NOW(),
                     profit_percentage = %s, closing_reason = %s WHERE id = %s;
@@ -1206,15 +1199,20 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
 
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
+                # بالنسبة لاستراتيجية الاختراق، الهدف الأول هو 1.5R. الأهداف التالية هي من الإعدادات العامة
                 first_target_price = target_price
                 
+                # بناء أهداف الرحلة
                 initial_targets = [{"price": first_target_price, "achieved": False}]
+                # إضافة أهداف إضافية من الإعدادات العامة إذا كانت أعلى من الهدف الأول
                 for level in TARGET_LEVELS:
                     next_target_price = entry_price * (1 + level / 100)
                     if next_target_price > first_target_price:
+                        # التأكد من عدم إضافة أهداف مكررة
                         if not any(abs(t['price'] - next_target_price) < 1e-6 for t in initial_targets):
                             initial_targets.append({"price": next_target_price, "achieved": False})
                 
+                # فرز الأهداف للتأكد من ترتيبها
                 initial_targets.sort(key=lambda x: x['price'])
 
                 journey_state = {
@@ -1264,34 +1262,109 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
 # ---------------------- System Core Functions ----------------------
-def determine_market_state_enhanced():
+def determine_market_state_v2():
+    """
+    يحدد حالة السوق بشكل أكثر دقة وفي الوقت الفعلي باستخدام نظام تسجيل مرجح عبر أطر زمنية متعددة.
+    - يستخدم مؤشرات متعددة (EMA, ADX, RSI).
+    - يعطي وزناً أكبر للأطر الزمنية الأعلى.
+    - يوفر حالات سوق أكثر تفصيلاً.
+    - يزيد من تكرار التحديث.
+    """
     global current_market_state, last_market_state_check
-    if time.time() - last_market_state_check < 180: return
-    logger.info("🧠 [Market State] تحديث حالة السوق...")
+    
+    # تحديث كل 60 ثانية ليكون أقرب للوقت الفعلي
+    if time.time() - last_market_state_check < 60:
+        return
+
+    logger.info("🧠 [Market State V2] تحديث حالة السوق بنظام التسجيل المرجح...")
+    
     try:
+        total_score = 0
         trend_details = {}
-        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            df = fetch_historical_data(BTC_SYMBOL, tf, 20)
-            if df is not None and not df.empty:
-                ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
-                ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
-                adx_features = calculate_all_features(df, None)
-                adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
-                if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
-                elif ema_fast > ema_slow: trend = "Uptrend"
-                elif ema_fast < ema_slow and adx > 25: trend = "Strong Downtrend"
-                elif ema_fast < ema_slow: trend = "Downtrend"
-                else: trend = "Ranging"
-                trend_details[tf] = {"trend": trend, "adx": float(adx)}
-            else: trend_details[tf] = {"trend": "Uncertain", "adx": 0}
-        trends = [d['trend'] for d in trend_details.values()]
-        overall_regime = max(set(trends), key=trends.count) if trends else "Uncertain"
+        
+        # أوزان للأطر الزمنية المختلفة (الأعلى له وزن أكبر)
+        timeframe_weights = {'15m': 1, '1h': 2, '4h': 4}
+        
+        for tf, weight in timeframe_weights.items():
+            # جلب بيانات أكثر دقة (50 يومًا للحصول على شموع كافية)
+            df = fetch_historical_data(BTC_SYMBOL, tf, 50)
+            
+            if df is None or len(df) < 50:
+                trend_details[tf] = {"trend": "Uncertain", "score": 0, "details": "No data"}
+                continue
+
+            # حساب المؤشرات
+            df_featured = calculate_all_features(df, None)
+            last_candle = df_featured.iloc[-1]
+            
+            tf_score = 0
+            
+            # 1. تحليل اتجاه EMA
+            if last_candle['ema_50'] > last_candle['ema_120']:
+                tf_score += 2
+                trend_desc = "Uptrend"
+            elif last_candle['ema_50'] < last_candle['ema_120']:
+                tf_score -= 2
+                trend_desc = "Downtrend"
+            else:
+                trend_desc = "Sideways"
+
+            # 2. تحليل قوة الاتجاه (ADX)
+            if last_candle['adx'] > 25:
+                tf_score += 1
+                trend_strength = "Trending"
+            else:
+                trend_strength = "Ranging"
+
+            # 3. تحليل الزخم (RSI)
+            if last_candle['rsi'] > 55:
+                tf_score += 1
+                momentum = "Bullish"
+            elif last_candle['rsi'] < 45:
+                tf_score -= 1
+                momentum = "Bearish"
+            else:
+                momentum = "Neutral"
+
+            # تجميع النتائج للإطار الزمني الحالي
+            trend_details[tf] = {
+                "trend": f"{trend_desc} ({trend_strength})",
+                "score": tf_score,
+                "details": f"ADX: {last_candle['adx']:.1f}, RSI: {last_candle['rsi']:.1f}, Momentum: {momentum}"
+            }
+            
+            # إضافة النتيجة المرجحة إلى المجموع الكلي
+            total_score += tf_score * weight
+
+        # تحديد حالة السوق العامة بناءً على النتيجة الإجمالية
+        max_possible_score = sum(4 * w for w in timeframe_weights.values()) # (2+1+1) * weight
+        normalized_score = (total_score / max_possible_score) * 100 if max_possible_score > 0 else 0
+
+        if normalized_score > 50:
+            overall_regime = "STRONG_BULLISH_TREND"
+        elif normalized_score > 20:
+            overall_regime = "BULLISH_TREND"
+        elif normalized_score > -20:
+            overall_regime = "CONSOLIDATION_RANGE"
+        elif normalized_score > -50:
+            overall_regime = "BEARISH_TREND"
+        else:
+            overall_regime = "STRONG_BEARISH_TREND"
+
         with market_state_lock:
-            current_market_state = {"overall_regime": overall_regime.upper().replace(" ", "_"), "trend_details_by_tf": trend_details, "last_updated": datetime.now(timezone.utc).isoformat()}
+            current_market_state = {
+                "overall_regime": overall_regime,
+                "trend_details_by_tf": trend_details,
+                "total_score": total_score,
+                "normalized_score": f"{normalized_score:.1f}%",
+                "last_updated": datetime.now(timezone.utc).isoformat()
+            }
             last_market_state_check = time.time()
-        logger.info(f"✅ [Market State] الحالة العامة: {overall_regime}")
+            
+        logger.info(f"✅ [Market State V2] الحالة العامة: {overall_regime} (Score: {total_score}, Normalized: {normalized_score:.1f}%)")
+
     except Exception as e:
-        logger.error(f"❌ [Market State] خطأ: {e}", exc_info=True)
+        logger.error(f"❌ [Market State V2] خطأ: {e}", exc_info=True)
 
 # ---------------------- Flask Web Interface ----------------------
 app = Flask(__name__)
@@ -1339,11 +1412,11 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.4 (استراتيجية السوق الهابط)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.0 (حالة السوق V2)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
+            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div><div id="market-score" class="text-center text-xs text-text-secondary mt-1"></div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">التداول الحقيقي</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="trading-status-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div></div>
             <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">حالة الفلاتر</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="disable-filters-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="disable-filters-toggle" class="sr-only" onchange="toggleFilters()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">فلتر دفتر الطلبات نشط دائمًا</div></div>
@@ -1407,14 +1480,18 @@ function updateMarketStatus() {
     fetchData('/api/market_status').then(data => {
         if (!data) return;
         document.getElementById('overall-regime').textContent = (data.market_state?.overall_regime || 'UNCERTAIN').replace(/_/g, ' ');
+        document.getElementById('market-score').textContent = `Score: ${data.market_state?.total_score || 'N/A'} (${data.market_state?.normalized_score || 'N/A'})`;
+
         const lights = document.getElementById('trend-lights-container');
         lights.innerHTML = '';
-        ['15m', '1h', '4h'].forEach(tf => {
-            const trendInfo = data.market_state?.trend_details_by_tf[tf];
-            const trend = trendInfo?.trend || 'Uncertain';
-            let c = trend.includes('Uptrend') ? 'light-on-green' : trend.includes('Downtrend') ? 'light-on-red' : 'light-on-yellow';
-            lights.innerHTML += `<div class="flex items-center gap-2"><div class="trend-light ${c}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
-        });
+        if (data.market_state?.trend_details_by_tf) {
+            Object.entries(data.market_state.trend_details_by_tf).forEach(([tf, trendInfo]) => {
+                const score = trendInfo.score || 0;
+                let c = score > 1 ? 'light-on-green' : score < -1 ? 'light-on-red' : 'light-on-yellow';
+                lights.innerHTML += `<div class="flex items-center gap-2" title="${trendInfo.details}"><div class="trend-light ${c}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
+            });
+        }
+        
         const sessions = document.getElementById('active-sessions-list');
         sessions.innerHTML = data.active_sessions.length > 0 ? data.active_sessions.map(s => `<span class="bg-accent-blue/20 text-accent-blue text-xs font-bold px-2 py-1 rounded">${s}</span>`).join('') : `<span class="bg-gray-700 text-text-secondary text-xs font-bold px-2 py-1 rounded">لا توجد</span>`;
 
@@ -1763,6 +1840,7 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
+                                # التأكد من أن جميع القيم هي float قبل الحفظ
                                 cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(signal['current_peak_price']), float(signal['stop_loss']), signal_id))
                             conn.commit()
                     except Exception as e:
@@ -1788,7 +1866,7 @@ def main_loop_enhanced():
     while True:
         try:
             logger.info("🔄 [Main Loop] بدء دورة مسح جديدة...")
-            determine_market_state_enhanced()
+            determine_market_state_v2()  # <-- استدعاء الدالة الجديدة
             with market_state_lock:
                 market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
 
@@ -1822,26 +1900,18 @@ def main_loop_enhanced():
                         rejection_key = "Strategy Signal Not Found"
                         details = {}
                         
-                        # --- NEW STRATEGY SELECTION LOGIC ---
-                        last_adx = df_with_indicators.iloc[-1].get('adx', 0)
+                        # --- منطق اختيار الاستراتيجية المحدث ---
+                        # الخطوة 1: فحص الاستراتيجية الأساسية (BB+Stoch) دائماً وأولاً
+                        logger.info(f"  -> [مرحلة 1أ] فحص الاستراتيجية الأساسية (BB+Stoch)...")
+                        strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
+                        if strategy_signal_found: strategy_name = rejection_key
 
-                        # Priority 1: Check for strong downtrend scalp opportunity
-                        if market_regime == "STRONG_DOWNTREND":
-                            logger.info(f"  -> [مرحلة 1] السوق هابط بقوة. فحص استراتيجية ارتداد ذروة البيع...")
-                            strategy_signal_found, rejection_key, details = check_oversold_scalp_strategy(df_with_indicators, market_regime)
-                            if strategy_signal_found:
-                                strategy_name = rejection_key
-                        
-                        # Priority 2: If not strong downtrend, check other strategies
+                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الثانوية بناءً على حالة السوق
                         if not strategy_signal_found:
-                            logger.info(f"  -> [مرحلة 1أ] فحص الاستراتيجية الأساسية (BB+Stoch)...")
-                            strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
-                            if strategy_signal_found:
-                                strategy_name = rejection_key
-
-                        if not strategy_signal_found:
-                            logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية...")
-                            if market_regime in ["UPTREND", "STRONG_UPTREND"]:
+                            logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية بناءً على حالة السوق ({market_regime})...")
+                            
+                            # فحص استراتيجيات الاتجاه الصاعد
+                            if market_regime in ["BULLISH_TREND", "STRONG_BULLISH_TREND"]:
                                 logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الاتجاه الصاعد...")
                                 strategy_signal_found, rejection_key, details = check_ema_breakout_strategy(df_with_indicators)
                                 if strategy_signal_found:
@@ -1849,25 +1919,30 @@ def main_loop_enhanced():
                                 else:
                                     strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
                                     if strategy_signal_found: strategy_name = rejection_key
-                            
-                            elif 15 <= last_adx <= 25 and not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1ب] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
-                                strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
-                                if strategy_signal_found: strategy_name = rejection_key
 
-                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15 and not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الأخرى...")
+                            # فحص استراتيجيات السوق العرضي
+                            elif market_regime == "CONSOLIDATION_RANGE":
+                                logger.info(f"  -> [مرحلة 1ب] السوق في نطاق. تفعيل استراتيجيات الارتداد والانعكاس...")
+                                strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
+                                if strategy_signal_found:
+                                    strategy_name = rejection_key
+                                else:
+                                    strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
+                                    if strategy_signal_found: strategy_name = rejection_key
+
+                            # فحص استراتيجيات الانعكاس في الاتجاه الهابط
+                            elif market_regime in ["BEARISH_TREND", "STRONG_BEARISH_TREND"]:
+                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الصاعد...")
                                 strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
                                 if strategy_signal_found:
                                     strategy_name = rejection_key
                                 else:
-                                    logger.info(f"  -> [مرحلة 1ب] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+MACD...")
                                     strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
                                     if strategy_signal_found: strategy_name = rejection_key
                             else:
                                 if not strategy_signal_found:
                                     rejection_key = "Invalid Market Regime for Any Strategy"
-                                    details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
+                                    details = {"regime": market_regime}
 
                         if not strategy_signal_found:
                             log_rejection(symbol, rejection_key, details)
@@ -1923,6 +1998,7 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [مرحلة 4] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
                         
+                        # تحديد أي دالة TP/SL سيتم استخدامها بناءً على الاستراتيجية
                         if strategy_name == "EMA_Breakout_Strategy":
                             tp_sl_data = calculate_ema_breakout_tp_sl(symbol, entry_price, df_with_indicators)
                         else:
@@ -2009,13 +2085,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.4 - استراتيجية السوق الهابط)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.0 - حالة السوق V2)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.4 - استراتيجية السوق الهابط) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.0 - حالة السوق V2) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
