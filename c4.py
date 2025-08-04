@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V6.3 مع إضافة استراتيجية BB + MACD
-# تم التحديث بواسطة Gemini لإضافة استراتيجية انعكاس جديدة
-# --- التغييرات الرئيسية (V6.3):
-# 1. إضافة استراتيجية جديدة (check_bb_macd_reversal_strategy) تعتمد على ملامسة الحد السفلي للبولينجر وتقاطع الماكد.
-# 2. دمج الاستراتيجية الجديدة في حلقة الفحص الرئيسية.
-# 3. تحديث قاموس أسباب الرفض.
+# ملف c4.py - نسخة V6.4 مع إضافة استراتيجية الارتداد من البولينجر
+# تم التحديث بواسطة Gemini لإضافة استراتيجية جديدة للاتجاه الصاعد/العرضي
+# --- التغييرات الرئيسية (V6.4):
+# 1. إضافة استراتيجية جديدة (check_bb_reversion_strategy) تعتمد على ADX والارتداد من البولينجر والماكد.
+# 2. دمج الاستراتيجية الجديدة في حلقة الفحص الرئيسية ضمن شرط ADX خاص بها.
+# 3. تحديث قاموس أسباب الرفض وعنوان لوحة التحكم.
 
 import time
 import os
@@ -84,8 +84,8 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات رحلة التداول الديناميكية ---
 USE_DYNAMIC_JOURNEY = True
-TARGET_LEVELS = [1.0, 1.5, 2.2]  # نسب الربح المتدرجة (كمثال: 1.0% , 1.5%, 2.2%)
-PARTIAL_EXIT_PERCENTAGES = [0.5, 0.3, 0.2] # نسب الخروج التدريجي (50% عند الهدف الأول, 30% عند الثاني, 20% عند الثالث)
+TARGET_LEVELS = [1.0, 1.5, 2.2]
+PARTIAL_EXIT_PERCENTAGES = [0.5, 0.3, 0.2]
 
 # --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 50
@@ -102,8 +102,8 @@ SUPERTREND_MULTIPLIER: float = 3.0
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
-ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005 # ±0.5%
-ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.3 # Bids must be > 30% of Asks
+ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005
+ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.3
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.5
@@ -127,7 +127,7 @@ last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
-# --- قاموس أسباب الرفض باللغة العربية (موسع للاستراتيجيتين) ---
+# --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     # أسباب عامة
     "Strategy Signal Not Found": "لم تتحقق شروط أي استراتيجية",
@@ -157,15 +157,21 @@ REJECTION_REASONS_AR = {
     "No Stoch Crossover below 15": "لم يحدث تقاطع ستوكاستيك تحت مستوى 15",
     "No Bullish Reversal Candle Pattern": "لم يظهر نمط شمعة انعكاسية صاعدة",
 
-    # --- NEW ---: أسباب استراتيجية الانعكاس الجديدة (BB + MACD)
+    # أسباب استراتيجية الانعكاس (BB + MACD)
     "No Bullish MACD Crossover": "لم يحدث تقاطع إيجابي للماكد",
-    # (ملاحظة: سبب "Price did not touch Lower BB" مشترك مع استراتيجية BB+Stoch)
+
+    # --- NEW ---: أسباب استراتيجية الارتداد الجديدة (BB Reversion)
+    "ADX not in range (15-25)": "مؤشر ADX خارج النطاق المطلوب (15-25)",
+    "No recent BB breakout": "لم يحدث اختراق حديث للحد العلوي للبولينجر",
+    "Price did not return to BB": "السعر لم يرتد لملامسة حد البولينجر",
+    "MACD not above zero": "خط الماكد ليس فوق مستوى الصفر",
+    "Volume not above average": "حجم التداول ليس أعلى من المتوسط",
 
     # أسباب مشتركة
-    "No Confirmation Candle": "لم تظهر شمعة تأكيد صاعدة قوية",
     "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
     "Low Buy Pressure": "ضغط الشراء ضعيف",
 }
+
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
@@ -328,7 +334,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-# --- دوال جلب البيانات وحساب الميزات (محدثة لـ V10) ---
+# --- دوال جلب البيانات وحساب الميزات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -563,7 +569,7 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- استراتيجية التداول والفلاتر (محدثة لـ V10) ----------------------
+# ---------------------- استراتيجية التداول والفلاتر ----------------------
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -670,7 +676,7 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)})
         return False
 
-# --- START: S/R BASED TP/SL FUNCTIONS ---
+# --- دوال حساب TP/SL ---
 SR_LOOKBACK_CANDLES = 50
 SR_MIN_BOUNCES      = 2
 
@@ -869,22 +875,17 @@ def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optio
 
     return True, "BB_Stoch_Reversal", {}
 
-# --- NEW: استراتيجية 4: BB + MACD Reversal ---
+# --- استراتيجية 4: BB + MACD Reversal ---
 def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    """
-    Checks for a buy signal based on touching the lower Bollinger Band and a bullish MACD crossover.
-    """
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
     last_candle = df.iloc[-1]
     prev_candle = df.iloc[-2]
 
-    # الشرط الأول: ملامسة الحد السفلي لمؤشر البولينجر باند
     touched_lower_bb = (last_candle['low'] <= last_candle['bb_lower']) or (prev_candle['low'] <= prev_candle['bb_lower'])
     if not touched_lower_bb:
         return False, "Price did not touch Lower BB", {}
 
-    # الشرط الثاني: تقاطع إيجابي للماكد
     macd_crossover = (prev_candle['macd'] < prev_candle['macd_signal']) and (last_candle['macd'] > last_candle['macd_signal'])
     if not macd_crossover:
         details = {
@@ -893,9 +894,48 @@ def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Option
         }
         return False, "No Bullish MACD Crossover", details
 
-    # إذا تحققت كل الشروط
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + MACD).")
     return True, "BB_MACD_Reversal", {}
+
+# --- NEW: استراتيجية 5: الارتداد من البولينجر (BB Reversion) ---
+def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
+    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
+    
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+
+    # الشرط 1: ADX في نطاق (15-25) - تم التحقق منه في الحلقة الرئيسية، ولكن يمكن إضافته هنا كحماية
+    adx_val = last_candle.get('adx', 0)
+    if not (15 <= adx_val <= 25):
+        return False, "ADX not in range (15-25)", {"adx": f"{adx_val:.2f}"}
+
+    # الشرط 2: السعر يخترق الحد العلوي ثم يعود
+    lookback_period = 5
+    prev_candles = df.iloc[-lookback_period-1:-1] 
+    breakout_occurred = (prev_candles['high'] > prev_candles['bb_upper']).any()
+    if not breakout_occurred:
+        return False, "No recent BB breakout", {}
+    
+    # عاد ليلامس الحد العلوي أو المتوسط
+    returned_to_band = (last_candle['low'] <= last_candle['bb_upper']) and (last_candle['high'] >= last_candle['bb_middle'])
+    if not returned_to_band:
+        return False, "Price did not return to BB", {}
+
+    # الشرط 3: الماكد إيجابي ويتقاطع للأعلى
+    if not (last_candle['macd'] > 0 and last_candle['macd_signal'] > 0):
+        return False, "MACD not above zero", {"macd": f"{last_candle['macd']:.4f}"}
+    
+    macd_crossover = (prev_candle['macd'] < prev_candle['macd_signal']) and (last_candle['macd'] > last_candle['macd_signal'])
+    if not macd_crossover:
+        return False, "No Bullish MACD Crossover", {}
+
+    # الشرط 4: حجم تداول أعلى من المتوسط
+    avg_volume = df['volume'].iloc[-21:-1].mean()
+    if not (last_candle['volume'] > avg_volume * 1.1): # استخدام مضاعف 1.1
+        return False, "Volume not above average", {"volume": f"{last_candle['volume']}", "avg_volume": f"{avg_volume:.2f}"}
+
+    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
+    return True, "BB_Reversion", {}
 
 
 # ---------------------- دوال إدارة الصفقات ----------------------
@@ -1152,6 +1192,7 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
+    # --- NEW: Updated title to V6.4 ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1193,7 +1234,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.3 (BB+MACD)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.4 (BB Reversion)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1492,7 +1533,7 @@ def analyze_path_for_extension(df: pd.DataFrame) -> bool:
 
 
 def trade_management_loop():
-    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات المدمجة (v6)...")
+    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات المدمجة...")
     while True:
         try:
             with signal_cache_lock:
@@ -1538,7 +1579,7 @@ def trade_management_loop():
                                 sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_exit_quantity)
                                 if sell_order:
                                     remaining_quantity = Decimal(str(signal['quantity'])) - adjusted_exit_quantity
-                                    signal['quantity'] = float(remaining_quantity) # Update cache
+                                    signal['quantity'] = float(remaining_quantity)
                                     journey_state['exited_quantities'].append(float(adjusted_exit_quantity))
                                     log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
                                 else:
@@ -1666,20 +1707,27 @@ def main_loop_enhanced():
                             continue
                         
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
-                        df_with_indicators.name = symbol # Add name for logging
-                        if df_with_indicators is None or df_with_indicators.empty:
+                        df_with_indicators.name = symbol
+                        if df_with_indicators is None or df_with_indicators.empty or len(df_with_indicators) < 50:
                             continue
                         
                         strategy_signal_found = False
                         strategy_name = ""
                         rejection_key = "Strategy Signal Not Found"
                         details = {}
+                        
+                        last_adx = df_with_indicators.iloc[-1].get('adx', 0)
 
-                        if market_regime in ["UPTREND", "STRONG_UPTREND"]:
+                        # --- NEW: منطق اختيار الاستراتيجية المحدث ---
+                        if market_regime in ["UPTREND", "STRONG_UPTREND"] and last_adx > 25:
                             logger.info(f"  -> [مرحلة 1] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
                             strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
                         
-                        elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"]:
+                        elif 15 <= last_adx <= 25:
+                            logger.info(f"  -> [مرحلة 1] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
+                            strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
+
+                        elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15:
                             logger.info(f"  -> [مرحلة 1] تفعيل استراتيجيات الانعكاس...")
                             strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
                             
@@ -1687,13 +1735,12 @@ def main_loop_enhanced():
                                 logger.info(f"  -> [مرحلة 1] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+Stoch...")
                                 strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
                             
-                            # --- NEW: Check the new BB+MACD strategy ---
                             if not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1] استراتيجية BB+Stoch فشلت، تجربة استراتيجية BB+MACD...")
                                 strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
                         else:
                             rejection_key = "Invalid Market Regime for Any Strategy"
-                            details = {"regime": market_regime}
+                            details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
 
                         if not strategy_signal_found:
                             log_rejection(symbol, rejection_key, details)
@@ -1831,13 +1878,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.3 - BB+MACD)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.4 - BB Reversion)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.3 - BB+MACD System) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.4 - BB Reversion System) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
