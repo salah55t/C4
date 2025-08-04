@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V7.1 مع العودة إلى قائمة العملات من الملف
-# تم التحديث بواسطة Gemini لإلغاء فلتر حجم التداول والاعتماد على ملف crypto_list.txt فقط.
-# --- التغييرات الرئيسية (V7.1):
-# 1. تم تعديل دالة `get_validated_symbols` لإزالة فلتر حجم التداول (> 100 مليون دولار).
-# 2. البوت الآن يحلل فقط الرموز المدرجة في ملف `crypto_list.txt` طالما أنها متاحة للتداول.
-# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
+# ملف c4.py - نسخة V7.3 (إصلاح الأخطاء)
+# تم التحديث بواسطة Gemini لإصلاح خطأ قاعدة البيانات "schema np does not exist"
+# --- التغييرات الرئيسية (V7.3):
+# 1. تم إصلاح خطأ "schema "np" does not exist" عن طريق تحويل أنواع بيانات numpy إلى float قبل حفظها في قاعدة البيانات.
+# 2. هذا الإصلاح يحل أيضًا مشكلة عدم إغلاق الصفقات من لوحة التحكم.
+# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل إلى V7.3.
 
 import time
 import os
@@ -148,8 +148,8 @@ REJECTION_REASONS_AR = {
     "No Stochastic Crossover": "لم يحدث تقاطع إيجابي لمؤشر ستوكاستيك",
     
     # Trend Continuation (Pullback) strategy reasons
-    "Not an Uptrend": "السوق ليس في اتجاه صاعد",
-    "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
+    "Not in Uptrend Context": "السوق ليس في سياق صاعد (السعر تحت EMA50)",
+    "No Pullback to EMA Zone": "لم يحدث تصحيح لمنطقة الدعم (بين EMA21 و EMA50)",
     "RSI below threshold": "مؤشر القوة النسبية ضعيف",
 
     # BB + Stoch Reversal strategy reasons
@@ -825,7 +825,8 @@ def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]
         return False, "No Stochastic Crossover", {}
             
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.5:
+    # تخفيف شرط حجم التداول
+    if last_candle['volume'] < avg_volume * 0.3: # تم التخفيض من 0.5
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
     
@@ -839,20 +840,22 @@ def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Opti
     df.name = df.name if hasattr(df, 'name') else 'DataFrame'
     
     last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
     
-    if not (last_candle['ema_21'] > last_candle['ema_50']):
-        return False, "Not an Uptrend", {}
+    # تخفيف شرط الاتجاه: يكفي أن يكون السعر فوق EMA50
+    if not (last_candle['close'] > last_candle['ema_50']):
+        return False, "Not in Uptrend Context", {}
         
-    pullback_occurred = (prev_candle['low'] <= prev_candle['ema_21']) or (last_candle['low'] <= last_candle['ema_21'])
-    if not pullback_occurred:
-        return False, "No Pullback to EMA", {}
+    # توسيع منطقة التصحيح لتكون بين EMA21 و EMA50
+    pullback_occurred_in_zone = (last_candle['low'] <= last_candle['ema_21']) and (last_candle['low'] >= last_candle['ema_50'])
+    if not pullback_occurred_in_zone:
+        return False, "No Pullback to EMA Zone", {}
         
     if last_candle['rsi'] < 45:
         return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
         
     avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.7:
+    # تخفيف شرط حجم التداول
+    if last_candle['volume'] < avg_volume * 0.4: # تم التخفيض من 0.7
         details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
         return False, "Low Volume on Signal Candle", details
 
@@ -938,7 +941,8 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
         return False, "No Bullish MACD Crossover", {}
 
     avg_volume = df['volume'].iloc[-21:-1].mean()
-    if not (last_candle['volume'] > avg_volume * 1.1):
+    # تخفيف شرط حجم التداول
+    if not (last_candle['volume'] > avg_volume * 0.9): # تم التخفيض من 1.1
         return False, "Volume not above average", {"volume": f"{last_candle['volume']}", "avg_volume": f"{avg_volume:.2f}"}
 
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
@@ -1118,8 +1122,9 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             return False
 
         entry_price = float(signal_to_close['entry_price'])
-        original_quantity = float(signal_to_close.get('original_quantity', signal_to_close.get('quantity', 1)))
-        profit_percentage = ((closing_price - entry_price) / entry_price) * 100
+        # تحويل القيم إلى float قبل الحساب والتخزين
+        closing_price_float = float(closing_price)
+        profit_percentage = ((closing_price_float - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
             try:
@@ -1143,16 +1148,17 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
 
         try:
             with conn.cursor() as cur:
+                # التأكد من أن جميع القيم الرقمية هي float
                 cur.execute("""
                     UPDATE signals SET status = 'closed', closing_price = %s, closed_at = NOW(),
                     profit_percentage = %s, closing_reason = %s WHERE id = %s;
-                """, (closing_price, profit_percentage, reason, signal_id))
+                """, (closing_price_float, float(profit_percentage), reason, signal_id))
             conn.commit()
 
             if symbol_to_close in open_signals_cache:
                 del open_signals_cache[symbol_to_close]
 
-            log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Final P/L: {profit_percentage:.2f}%", "TRADE_CLOSED")
+            log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price_float:.4f}. Reason: {reason}. Final P/L: {profit_percentage:.2f}%", "TRADE_CLOSED")
 
             reason_map = {
                 'take_profit': '🎯 Take Profit',
@@ -1168,14 +1174,14 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 f"*العملة:* `{symbol_to_close}`\n"
                 f"*سبب الإغلاق:* {reason_map.get(reason, reason)}\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
-                f"*سعر الإغلاق:* `{closing_price:.4f}`\n"
+                f"*سعر الإغلاق:* `{closing_price_float:.4f}`\n"
                 f"*الربح/الخسارة النهائي:* `{profit_percentage:.2f}%`"
             )
             send_telegram_message(telegram_message)
 
             return True
         except Exception as e:
-            logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}")
+            logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}", exc_info=True)
             if conn: conn.rollback()
             return False
 
@@ -1328,7 +1334,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.1 (قائمة من ملف)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.3 (إصلاح الأخطاء)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1477,7 +1483,7 @@ function manualClose(signalId, symbol) {
                 if(data.success) {
                     updateSignals();
                 } else {
-                    alert(data.message);
+                    alert('فشل إغلاق الصفقة: ' + data.message);
                 }
             });
     });
@@ -1689,8 +1695,8 @@ def trade_management_loop():
                                 next_target_price = journey_state['targets'][next_target_index]['price']
                                 
                                 new_sl = signal['target_price']
-                                signal['stop_loss'] = new_sl
-                                signal['target_price'] = next_target_price
+                                signal['stop_loss'] = float(new_sl)
+                                signal['target_price'] = float(next_target_price)
                                 
                                 logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {next_target_price:.4f}, وقف الخسارة الجديد: {new_sl:.4f}")
                                 log_and_notify('info', f"🎯 [{symbol}] تمديد الهدف إلى {next_target_price:.4f}", "TARGET_EXTEND")
@@ -1711,7 +1717,7 @@ def trade_management_loop():
                             if check_db_connection():
                                 with conn.cursor() as cur:
                                     cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
-                                                (json.dumps(journey_state), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
+                                                (json.dumps(journey_state), float(signal['target_price']), float(signal['stop_loss']), signal.get('quantity'), signal_id))
                                 conn.commit()
                         except Exception as e:
                             logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
@@ -1728,7 +1734,7 @@ def trade_management_loop():
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
-                    signal['current_peak_price'] = new_peak
+                    signal['current_peak_price'] = float(new_peak)
                     if USE_ATR_TRAILING_STOP:
                         try:
                             df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
@@ -1743,7 +1749,7 @@ def trade_management_loop():
                                     new_trailing_stop_price = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
                                     if new_trailing_stop_price > sl:
                                         logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
-                                        signal['stop_loss'] = new_trailing_stop_price
+                                        signal['stop_loss'] = float(new_trailing_stop_price)
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
 
@@ -1752,10 +1758,12 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), signal['stop_loss'], signal_id))
+                                # التأكد من أن جميع القيم هي float قبل الحفظ
+                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(signal['current_peak_price']), float(signal['stop_loss']), signal_id))
                             conn.commit()
                     except Exception as e:
-                        logger.error(f"DB error updating peak/sl price for {symbol}: {e}"); conn.rollback()
+                        logger.error(f"DB error updating peak/sl price for {symbol}: {e}", exc_info=True)
+                        if conn: conn.rollback()
 
             time.sleep(2)
         except Exception as e:
@@ -1994,13 +2002,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.1 - قائمة من ملف)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.3 - إصلاح الأخطاء)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.1 - قائمة من ملف) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.3 - إصلاح الأخطاء) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
