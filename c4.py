@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V6.5 مع جعل استراتيجية BB+Stoch تعمل دائماً
-# تم التحديث بواسطة Gemini لتعديل منطق اختيار الاستراتيجية
-# --- التغييرات الرئيسية (V6.5):
-# 1. تم تعديل الحلقة الرئيسية لجعل استراتيجية `check_bb_stoch_reversal_strategy` تعمل أولاً في جميع حالات السوق.
-# 2. تعمل الاستراتيجيات الأخرى كبدائل إذا لم يتم العثور على إشارة من الاستراتيجية الأساسية.
-# 3. تحديث عنوان لوحة التحكم.
+# ملف c4.py - نسخة V7.0 مع إضافة استراتيجية الاختراق الجديدة
+# تم التحديث بواسطة Gemini لإضافة استراتيجية EMA Breakout وتكاملها
+# --- التغييرات الرئيسية (V7.0):
+# 1. إضافة دالة استراتيجية جديدة: check_ema_breakout_strategy بناءً على طلب المستخدم.
+# 2. إضافة دالة مخصصة لحساب TP/SL لهذه الاستراتيجية: calculate_ema_breakout_tp_sl.
+# 3. دمج الاستراتيجية الجديدة في الحلقة الرئيسية لتخضع لتأكيد نموذج التعلم الآلي.
+# 4. تحديث قاموس أسباب الرفض ليشمل الحالات الجديدة.
 
 import time
 import os
@@ -167,6 +168,13 @@ REJECTION_REASONS_AR = {
     "MACD not above zero": "خط الماكد ليس فوق مستوى الصفر",
     "Volume not above average": "حجم التداول ليس أعلى من المتوسط",
 
+    # NEW: EMA Breakout Strategy reasons
+    "No Bullish EMA Cross": "لم يحدث تقاطع صاعد للمتوسطات المتحركة (EMA 21/50)",
+    "MACD not bullish above zero": "الماكد ليس إيجابياً فوق خط الصفر",
+    "RSI did not bounce from 40": "مؤشر القوة النسبية لم يرتد من مستوى 40",
+    "No price breakout of recent high": "السعر لم يخترق قمة حديثة خلال آخر 12 ساعة",
+    "Invalid TP/SL for EMA Breakout": "فشل حساب الهدف/الوقف لاستراتيجية الاختراق",
+
     # Common reasons
     "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
     "Low Buy Pressure": "ضغط الشراء ضعيف",
@@ -320,12 +328,22 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         if not exchange_info_map: get_exchange_info_map()
-        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
-        validated = sorted(list(formatted.intersection(active)))
         
-        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من ملفك.")
+        # فلتر إضافي بناءً على حجم التداول اليومي (أكثر من 100 مليون دولار)
+        all_tickers = client.get_ticker()
+        high_volume_symbols = {
+            t['symbol'] for t in all_tickers 
+            if t['symbol'].endswith('USDT') and float(t.get('quoteVolume', 0)) > 100_000_000
+        }
+        
+        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
+        
+        # تقاطع القوائم الثلاث: من الملف، نشطة على المنصة، وذات حجم تداول عالٍ
+        validated = sorted(list(formatted.intersection(active).intersection(high_volume_symbols)))
+        
+        logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول (حجم تداول > 100م دولار).")
         if not validated:
-             logger.warning(f"⚠️ [Validation] لم تتطابق أي من العملات في ملفك مع العملات المتاحة للتداول على Binance.")
+             logger.warning(f"⚠️ [Validation] لم تتطابق أي من العملات في ملفك مع الشروط المطلوبة (نشطة وذات سيولة عالية).")
         else:
             logger.info(f"🔍 [Validation] عينة من العملات التي ستتم مراقبتها: {validated[:5]}")
 
@@ -933,6 +951,80 @@ def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[D
     logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
     return True, "BB_Reversion", {}
 
+# --- NEW: Strategy 6: EMA Breakout Strategy ---
+def check_ema_breakout_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
+    """
+    يفحص شروط استراتيجية الاختراق الجديدة بناءً على تقاطع المتوسطات المتحركة وتأكيدات الزخم.
+    """
+    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
+    if len(df) < 50: # تحتاج إلى بيانات كافية لحساب المتوسطات والقنوات
+        return False, "Insufficient data for EMA Breakout", {}
+
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+
+    # الشرط أ: تقاطع EMA21 فوق EMA50
+    ema_crossed_up = last_candle['ema_21'] > last_candle['ema_50'] and prev_candle['ema_21'] <= prev_candle['ema_50']
+    if not ema_crossed_up:
+        return False, "No Bullish EMA Cross", {}
+
+    # الشرط ب: تقاطع صعودي للماكد فوق خط الصفر
+    macd_bullish = last_candle['macd'] > last_candle['macd_signal'] and last_candle['macd'] > 0
+    if not macd_bullish:
+        return False, "MACD not bullish above zero", {"macd": f"{last_candle['macd']:.4f}"}
+
+    # الشرط ج: ارتداد RSI من مستوى 40 لأعلى
+    # نبحث عن ارتداد حديث من منطقة قريبة من 40
+    rsi_bounced = (df['rsi'].iloc[-5:-1] < 45).any() and last_candle['rsi'] > 40
+    if not rsi_bounced:
+        return False, "RSI did not bounce from 40", {"rsi": f"{last_candle['rsi']:.2f}"}
+
+    # الشرط د: السعر يكسر قمة المستطيل (آخر 10-12 ساعة)
+    # 12 ساعة * 4 شمعات/ساعة = 48 شمعة
+    lookback_period = 48
+    recent_high = df['high'].iloc[-lookback_period:-1].max()
+    breakout_confirmed = last_candle['close'] > recent_high
+    if not breakout_confirmed:
+        return False, "No price breakout of recent high", {"recent_high": f"{recent_high:.4f}"}
+
+    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (EMA Breakout Strategy).")
+    return True, "EMA_Breakout_Strategy", {}
+
+def calculate_ema_breakout_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    """
+    يحسب الهدف ووقف الخسارة خصيصًا لاستراتيجية الاختراق الجديدة.
+    SL: 1.2 * ATR تحت قاع شمعة الإشارة.
+    TP: نسبة 1.5 R:R.
+    """
+    try:
+        if df.empty or 'atr' not in df.columns or 'low' not in df.columns:
+            log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Missing ATR/low data"})
+            return None
+
+        last_candle = df.iloc[-1]
+        atr_value = last_candle['atr']
+        
+        # وقف الخسارة: 1.2 * ATR تحت قاع شمعة الاختراق
+        stop_loss_price = last_candle['low'] - (atr_value * 1.2)
+        
+        if stop_loss_price >= entry_price:
+            log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Stop loss is above entry price"})
+            return None
+
+        # الهدف: نسبة 1.5 بناءً على المخاطرة
+        risk_per_share = entry_price - stop_loss_price
+        target_price = entry_price + (risk_per_share * 1.5)
+
+        return {
+            'target_price': round(target_price, 6),
+            'stop_loss': round(stop_loss_price, 6),
+            'source': 'EMA_Breakout_Rule',
+            'rr_ratio': 1.5
+        }
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] Error in EMA Breakout TP/SL calculation: {e}", exc_info=True)
+        log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"error": str(e)})
+        return None
 
 # ---------------------- Trade Management Functions ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
@@ -983,6 +1075,9 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
+        # ملاحظة: لم يتم تطبيق خاصية OCO هنا مباشرة.
+        # يتم إدارة الهدف ووقف الخسارة عبر trade_management_loop.
+        # هذا يوفر مرونة أكبر مثل الوقف المتحرك.
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
@@ -1102,11 +1197,22 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
 
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
-                initial_targets = []
-                for level in TARGET_LEVELS:
-                    target_price_level = entry_price * (1 + level / 100)
-                    initial_targets.append({"price": target_price_level, "achieved": False})
+                # بالنسبة لاستراتيجية الاختراق، الهدف الأول هو 1.5R. الأهداف التالية هي من الإعدادات العامة
+                first_target_price = target_price
                 
+                # بناء أهداف الرحلة
+                initial_targets = [{"price": first_target_price, "achieved": False}]
+                # إضافة أهداف إضافية من الإعدادات العامة إذا كانت أعلى من الهدف الأول
+                for level in TARGET_LEVELS:
+                    next_target_price = entry_price * (1 + level / 100)
+                    if next_target_price > first_target_price:
+                        # التأكد من عدم إضافة أهداف مكررة
+                        if not any(abs(t['price'] - next_target_price) < 1e-6 for t in initial_targets):
+                            initial_targets.append({"price": next_target_price, "achieved": False})
+                
+                # فرز الأهداف للتأكد من ترتيبها
+                initial_targets.sort(key=lambda x: x['price'])
+
                 journey_state = {
                     "current_target_index": 0,
                     "targets": initial_targets,
@@ -1188,7 +1294,6 @@ app = Flask(__name__)
 CORS(app)
 
 def get_dashboard_html():
-    # --- NEW: Updated title to V6.5 ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -1230,7 +1335,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V6.5 (Always-On BB+Stoch)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.0 (مع استراتيجية الاختراق)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1712,45 +1817,58 @@ def main_loop_enhanced():
                         rejection_key = "Strategy Signal Not Found"
                         details = {}
                         
-                        # --- NEW: منطق اختيار الاستراتيجية المحدث ---
+                        # --- منطق اختيار الاستراتيجية المحدث ---
                         # الخطوة 1: فحص الاستراتيجية الأساسية (BB+Stoch) دائماً وأولاً
                         logger.info(f"  -> [مرحلة 1أ] فحص الاستراتيجية الأساسية (BB+Stoch)...")
                         strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
+                        if strategy_signal_found: strategy_name = rejection_key
 
-                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الأخرى بناءً على حالة السوق
+                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الأخرى
                         if not strategy_signal_found:
                             logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية...")
                             last_adx = df_with_indicators.iloc[-1].get('adx', 0)
 
-                            if market_regime in ["UPTREND", "STRONG_UPTREND"] and last_adx > 25:
-                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجية متابعة الاتجاه (Pullback)...")
-                                strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
+                            # فحص استراتيجيات الاتجاه الصاعد
+                            if market_regime in ["UPTREND", "STRONG_UPTREND"]:
+                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الاتجاه الصاعد...")
+                                # الاستراتيجية الجديدة: الاختراق
+                                strategy_signal_found, rejection_key, details = check_ema_breakout_strategy(df_with_indicators)
+                                if strategy_signal_found:
+                                    strategy_name = rejection_key
+                                else: # إذا فشلت، جرب استراتيجية التصحيح
+                                    strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
+                                    if strategy_signal_found: strategy_name = rejection_key
                             
-                            elif 15 <= last_adx <= 25:
+                            # فحص استراتيجيات السوق العرضي
+                            elif 15 <= last_adx <= 25 and not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1ب] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
                                 strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
+                                if strategy_signal_found: strategy_name = rejection_key
 
-                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15:
+                            # فحص استراتيجيات الانعكاس الأخرى
+                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15 and not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الأخرى...")
                                 strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
-                                
-                                if not strategy_signal_found:
+                                if strategy_signal_found:
+                                    strategy_name = rejection_key
+                                else:
                                     logger.info(f"  -> [مرحلة 1ب] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+MACD...")
                                     strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
+                                    if strategy_signal_found: strategy_name = rejection_key
                             else:
-                                rejection_key = "Invalid Market Regime for Any Strategy"
-                                details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
+                                if not strategy_signal_found:
+                                    rejection_key = "Invalid Market Regime for Any Strategy"
+                                    details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
 
                         if not strategy_signal_found:
                             log_rejection(symbol, rejection_key, details)
                             continue
                         
-                        strategy_name = rejection_key
                         logger.info(f"  -> [مرحلة 1] ✅ نجاح! إشارة فنية مكتشفة (استراتيجية: {strategy_name}).")
                         
                         logger.info(f"  -> [مرحلة 2] الانتقال إلى التحقق من النموذج الآلي...")
-                        strategy = EnhancedTradingStrategy(symbol)
-                        if not strategy.load_model():
+                        strategy_instance = EnhancedTradingStrategy(symbol)
+                        if not strategy_instance.load_model():
                             log_rejection(symbol, "ML Model Load Failed")
                             continue
 
@@ -1758,12 +1876,12 @@ def main_loop_enhanced():
                         if df_4h is None or df_4h.empty:
                             continue
 
-                        df_features_for_model = strategy.get_features_for_model(df_15m, df_4h, btc_data)
+                        df_features_for_model = strategy_instance.get_features_for_model(df_15m, df_4h, btc_data)
                         if df_features_for_model is None or df_features_for_model.empty:
                             log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
                             continue
                         
-                        ml_result = strategy.generate_prediction_result(df_features_for_model)
+                        ml_result = strategy_instance.generate_prediction_result(df_features_for_model)
 
                         if not ml_result:
                             log_rejection(symbol, "ML Model Rejected Signal", {"details": "Prediction generation failed"})
@@ -1795,7 +1913,13 @@ def main_loop_enhanced():
                         logger.info(f"  -> [مرحلة 3] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
 
                         logger.info(f"  -> [مرحلة 4] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
-                        tp_sl_data = calculate_tp_sl(symbol, entry_price, df_15m)
+                        
+                        # تحديد أي دالة TP/SL سيتم استخدامها بناءً على الاستراتيجية
+                        if strategy_name == "EMA_Breakout_Strategy":
+                            tp_sl_data = calculate_ema_breakout_tp_sl(symbol, entry_price, df_with_indicators)
+                        else:
+                            tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
+                        
                         if not tp_sl_data: continue
 
                         signal_details = {
@@ -1877,13 +2001,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V6.5 - Always-On BB+Stoch)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.0 - مع استراتيجية الاختراق)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V6.5 - Always-On BB+Stoch System) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.0 - مع استراتيجية الاختراق) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
