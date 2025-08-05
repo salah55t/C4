@@ -1,11 +1,9 @@
-# ملف c4.py - نسخة V8.0 مع آلية حالة سوق آنية عبر WebSockets
-# تم التحديث بواسطة Gemini لتحسين آلية تحديد حالة السوق وجعلها آنية.
-# --- التغييرات الرئيسية (V8.0):
-# 1. إضافة فئة `MarketStateStreamer` جديدة تستخدم WebSockets لمراقبة BTC بشكل آني.
-# 2. إزالة الدالة القديمة `determine_market_state_enhanced` التي كانت تعمل بشكل دوري.
-# 3. استخدام نظام نقاط متقدم لتقييم حالة السوق بناءً على أوزان الأطر الزمنية وقوة الاتجاه (ADX).
-# 4. تقليل الاعتماد على طلبات API المتكررة، مما يزيد من كفاءة البوت وسرعته.
-# 5. تحديث رسائل بدء التشغيل لتعكس الآلية الجديدة.
+# ملف c4.py - نسخة V7.1 مع العودة إلى قائمة العملات من الملف
+# تم التحديث بواسطة Gemini لإلغاء فلتر حجم التداول والاعتماد على ملف crypto_list.txt فقط.
+# --- التغييرات الرئيسية (V7.1):
+# 1. تم تعديل دالة `get_validated_symbols` لإزالة فلتر حجم التداول (> 100 مليون دولار).
+# 2. البوت الآن يحلل فقط الرموز المدرجة في ملف `crypto_list.txt` طالما أنها متاحة للتداول.
+# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
 
 import time
 import os
@@ -26,7 +24,6 @@ from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
-from binance import BinanceSocketManager # <-- تم التحديث
 from flask import Flask, jsonify, render_template_string
 from flask_cors import CORS
 from threading import Thread, Lock
@@ -126,6 +123,7 @@ rejection_logs_cache = deque(maxlen=100)
 rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
 market_state_lock = Lock()
+last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
@@ -1255,161 +1253,34 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
 # ---------------------- System Core Functions ----------------------
-
-# --- START: NEW Real-time Market State Streamer ---
-class MarketStateStreamer:
-    """
-    هذه الفئة تدير حالة السوق بشكل آني باستخدام WebSockets.
-    - تتصل بـ Binance للحصول على تحديثات الشموع فور حدوثها.
-    - تحسب حالة السوق (Trend, Regime) بناءً على بيانات آنية.
-    - تحدث متغير الحالة العام `current_market_state`.
-    """
-    def __init__(self, symbol: str, timeframes: List[str]):
-        self.symbol = symbol
-        self.timeframes = timeframes
-        self.data_frames: Dict[str, pd.DataFrame] = {tf: pd.DataFrame() for tf in timeframes}
-        self.lock = Lock()
-        self.bsm = BinanceSocketManager(client)
-        self.conn_key = None
-        self.tf_weights = {'15m': 1, '1h': 2, '4h': 3}
-
-    def _seed_initial_data(self):
-        """تحميل البيانات التاريخية الأولية لبدء حساب المؤشرات."""
-        logger.info(f"🧠 [Market Streamer] تحميل البيانات الأولية لـ {self.symbol}...")
-        for tf in self.timeframes:
-            df = fetch_historical_data(self.symbol, tf, 90) # 90 days for indicator stability
-            if df is not None and not df.empty:
-                self.data_frames[tf] = calculate_all_features(df, None)
-                logger.info(f"  -> ✅ تم تحميل وحساب مؤشرات {len(df)} شمعة لـ {tf}.")
-            else:
-                logger.error(f"  -> ❌ فشل تحميل البيانات الأولية لـ {tf}. لا يمكن بدء مراقبة هذا الإطار الزمني.")
-                # Exit if essential data is missing
-                if tf in ['1h', '4h']: 
-                    log_and_notify('critical', f"Market Streamer cannot start without initial data for {tf}", "SYSTEM_ERROR")
-                    exit(1)
-        self._update_market_regime()
-
-    async def _handle_socket_message(self, msg: Dict):
-        """معالجة الرسائل الواردة من WebSocket."""
-        try:
-            if msg.get('e') == 'error':
-                logger.error(f"❌ [Market Streamer] خطأ في WebSocket: {msg['m']}")
-                return
-
-            kline = msg.get('k', {})
-            tf = kline.get('i')
-            is_closed = kline.get('x', False)
-
-            if not tf or not is_closed:
-                return # We only care about closed candles
-
-            with self.lock:
-                df = self.data_frames.get(tf)
-                if df is None: return
-
-                new_candle_data = {
-                    'timestamp': pd.to_datetime(kline['t'], unit='ms', utc=True),
-                    'open': float(kline['o']),
-                    'high': float(kline['h']),
-                    'low': float(kline['l']),
-                    'close': float(kline['c']),
-                    'volume': float(kline['v']),
-                    'quote_volume': float(kline['q']),
-                    'trades': int(kline['n']),
-                    'taker_buy_base': float(kline['V']),
-                    'taker_buy_quote': float(kline['Q']),
-                }
-                
-                # Append new candle and remove the oldest one to keep the DataFrame size constant
-                new_candle_df = pd.DataFrame([new_candle_data]).set_index('timestamp')
-                
-                # Check if the new candle is a duplicate of the last one
-                if not df.empty and new_candle_df.index[0] == df.index[-1]:
-                    df.iloc[-1] = new_candle_df.iloc[0] # Update last candle
-                else:
-                    df = pd.concat([df, new_candle_df])
-                    df = df.iloc[1:] # Remove the oldest row
-
-                # Recalculate all features for the updated dataframe
-                self.data_frames[tf] = calculate_all_features(df, None)
-                
-                # Update the overall market state
-                self._update_market_regime()
-
-        except Exception as e:
-            logger.error(f"❌ [Market Streamer] خطأ في معالجة رسالة WebSocket: {e}", exc_info=True)
-
-    def _update_market_regime(self):
-        """حساب وتحديث حالة السوق العامة بناءً على أحدث البيانات."""
-        global current_market_state
-        
+def determine_market_state_enhanced():
+    global current_market_state, last_market_state_check
+    if time.time() - last_market_state_check < 180: return
+    logger.info("🧠 [Market State] تحديث حالة السوق...")
+    try:
         trend_details = {}
-        total_score = 0
-        total_weight = 0
-
-        for tf in self.timeframes:
-            df = self.data_frames.get(tf)
-            if df is None or df.empty:
-                trend_details[tf] = {"trend": "Uncertain", "adx": 0, "score": 0}
-                continue
-
-            last_candle = df.iloc[-1]
-            ema_fast = last_candle.get('ema_21', 0)
-            ema_slow = last_candle.get('ema_50', 0)
-            adx = last_candle.get('adx', 0)
-            
-            trend = "Ranging"
-            trend_score = 0
-            if ema_fast > ema_slow:
-                trend = "Uptrend"
-                trend_score = 1
-                if adx > 25:
-                    trend = "Strong Uptrend"
-                    trend_score = 2
-            elif ema_fast < ema_slow:
-                trend = "Downtrend"
-                trend_score = -1
-                if adx > 25:
-                    trend = "Strong Downtrend"
-                    trend_score = -2
-            
-            weight = self.tf_weights.get(tf, 1)
-            total_score += trend_score * weight
-            total_weight += weight
-            trend_details[tf] = {"trend": trend, "adx": float(adx), "score": trend_score * weight}
-
-        # Normalize score and determine regime
-        final_score = total_score / total_weight if total_weight > 0 else 0
-        
-        if final_score >= 1.5: overall_regime = "STRONG_BULLISH"
-        elif final_score >= 0.5: overall_regime = "BULLISH"
-        elif final_score > -0.5: overall_regime = "RANGING_NEUTRAL"
-        elif final_score > -1.5: overall_regime = "BEARISH"
-        else: overall_regime = "STRONG_BEARISH"
-        
+        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
+            df = fetch_historical_data(BTC_SYMBOL, tf, 20)
+            if df is not None and not df.empty:
+                ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
+                ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
+                adx_features = calculate_all_features(df, None)
+                adx = adx_features['adx'].iloc[-1] if not adx_features.empty else 0
+                if ema_fast > ema_slow and adx > 25: trend = "Strong Uptrend"
+                elif ema_fast > ema_slow: trend = "Uptrend"
+                elif ema_fast < ema_slow and adx > 25: trend = "Strong Downtrend"
+                elif ema_fast < ema_slow: trend = "Downtrend"
+                else: trend = "Ranging"
+                trend_details[tf] = {"trend": trend, "adx": float(adx)}
+            else: trend_details[tf] = {"trend": "Uncertain", "adx": 0}
+        trends = [d['trend'] for d in trend_details.values()]
+        overall_regime = max(set(trends), key=trends.count) if trends else "Uncertain"
         with market_state_lock:
-            current_market_state = {
-                "overall_regime": overall_regime,
-                "trend_details_by_tf": trend_details,
-                "last_updated": datetime.now(timezone.utc).isoformat()
-            }
-        
-        logger.info(f"🧠 [Market State Updated] New Regime: {overall_regime} (Score: {final_score:.2f})")
-
-    async def start(self):
-        """بدء مراقبة السوق."""
-        self._seed_initial_data()
-        
-        streams = [f"{self.symbol.lower()}@kline_{tf}" for tf in self.timeframes]
-        logger.info(f"⚡️ [Market Streamer] بدء الاتصال بـ WebSocket لـ: {streams}")
-        
-        self.conn_key = self.bsm.multiplex_socket(streams)
-        async with self.bsm as socket_manager:
-            while True:
-                msg = await socket_manager.get()
-                await self._handle_socket_message(msg)
-
-# --- END: NEW Real-time Market State Streamer ---
+            current_market_state = {"overall_regime": overall_regime.upper().replace(" ", "_"), "trend_details_by_tf": trend_details, "last_updated": datetime.now(timezone.utc).isoformat()}
+            last_market_state_check = time.time()
+        logger.info(f"✅ [Market State] الحالة العامة: {overall_regime}")
+    except Exception as e:
+        logger.error(f"❌ [Market State] خطأ: {e}", exc_info=True)
 
 # ---------------------- Flask Web Interface ----------------------
 app = Flask(__name__)
@@ -1457,7 +1328,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.0 (مراقبة آنية)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.1 (قائمة من ملف)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1893,8 +1764,8 @@ def trade_management_loop():
 
 def main_loop_enhanced():
     global technical_signals_cache
-    logger.info("[Main Loop] انتظار استقرار مراقب السوق...")
-    time.sleep(15) # Give market streamer time to get first state
+    logger.info("[Main Loop] انتظار اكتمال التهيئة...")
+    time.sleep(15)
     
     if not validated_symbols_to_scan:
         log_and_notify("critical", "قائمة العملات للمسح فارغة. يرجى التحقق من ملف 'crypto_list.txt'.", "SYSTEM_ERROR")
@@ -1905,6 +1776,7 @@ def main_loop_enhanced():
     while True:
         try:
             logger.info("🔄 [Main Loop] بدء دورة مسح جديدة...")
+            determine_market_state_enhanced()
             with market_state_lock:
                 market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
 
@@ -1950,7 +1822,7 @@ def main_loop_enhanced():
                             last_adx = df_with_indicators.iloc[-1].get('adx', 0)
 
                             # فحص استراتيجيات الاتجاه الصاعد
-                            if market_regime in ["BULLISH", "STRONG_BULLISH"]:
+                            if market_regime in ["UPTREND", "STRONG_UPTREND"]:
                                 logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الاتجاه الصاعد...")
                                 # الاستراتيجية الجديدة: الاختراق
                                 strategy_signal_found, rejection_key, details = check_ema_breakout_strategy(df_with_indicators)
@@ -1967,7 +1839,7 @@ def main_loop_enhanced():
                                 if strategy_signal_found: strategy_name = rejection_key
 
                             # فحص استراتيجيات الانعكاس الأخرى
-                            elif market_regime in ["BEARISH", "RANGING_NEUTRAL", "UNCERTAIN"] or last_adx < 15 and not strategy_signal_found:
+                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15 and not strategy_signal_found:
                                 logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الأخرى...")
                                 strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
                                 if strategy_signal_found:
@@ -2109,8 +1981,6 @@ def price_update_loop():
 
 def initialize_bot_services():
     global client, validated_symbols_to_scan
-    import asyncio
-
     logger.info("🤖 [Bot Services] بدء التهيئة...")
     try:
         client = Client(API_KEY, API_SECRET)
@@ -2120,28 +1990,17 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
-
-        # Start the new real-time market streamer
-        market_streamer = MarketStateStreamer(symbol=BTC_SYMBOL, timeframes=TIMEFRAMES_FOR_TREND_LIGHTS)
-        
-        def run_market_streamer():
-            asyncio.run(market_streamer.start())
-
-        Thread(target=run_market_streamer, daemon=True).start()
-        
-        # Start other background threads
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
-        
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.0 - مراقبة آنية)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.1 - قائمة من ملف)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.0 - مراقبة آنية) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.1 - قائمة من ملف) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
