@@ -1118,7 +1118,10 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             return False
 
         entry_price = float(signal_to_close['entry_price'])
-        original_quantity = float(signal_to_close.get('original_quantity', signal_to_close.get('quantity', 1)))
+        # --- START: FIX ---
+        # This line was changed to prevent a TypeError with demo trades where quantity is None.
+        original_quantity = float(signal_to_close.get('original_quantity') or signal_to_close.get('quantity') or 1.0)
+        # --- END: FIX ---
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
