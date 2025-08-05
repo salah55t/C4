@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v9.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v10_strategies.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V9_Microstructure')
+logger = logging.getLogger('MLTrainer_V10_Strategies')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,10 +51,10 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V10_With_Strategies'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 90
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 HYPERPARAM_TUNING_TRIALS: int = 5
 BTC_SYMBOL = 'BTCUSDT'
 
@@ -66,8 +66,9 @@ EMA_SLOW_PERIOD: int = 200
 EMA_FAST_PERIOD: int = 50
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
-MOMENTUM_PERIOD: int = 12
-EMA_SLOPE_PERIOD: int = 5
+EMA_SHORT_PERIOD: int = 9
+EMA_LONG_PERIOD: int = 21
+
 
 # Triple-Barrier Method Parameters
 TP_ATR_MULTIPLIER: float = 2.0
@@ -208,7 +209,6 @@ def fetch_and_cache_btc_data():
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
-    df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
     df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
     df['stoch_d'] = df['stoch_k'].rolling(3).mean()
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
@@ -222,10 +222,6 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
     df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
-    df['kc_middle'] = df['close'].ewm(span=20, adjust=False).mean()
-    if 'atr' in df.columns:
-        df['kc_upper'] = df['kc_middle'] + (df['atr'] * 1.5)
-        df['kc_lower'] = df['kc_middle'] - (df['atr'] * 1.5)
     typical_price = (df['high'] + df['low'] + df['close']) / 3
     money_flow = typical_price * df['volume']
     positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
@@ -247,12 +243,6 @@ def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
     log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
     gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
     df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
-    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
-    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
-    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
-    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
-    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
-    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
     return df
 
 def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,6 +276,31 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     return df
 
+# NEW: Function to calculate strategy-based features
+def calculate_strategy_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates composite features based on specific trading strategies.
+    These are binary features (1 for true, 0 for false).
+    """
+    logger.info("ℹ️ [Features] Calculating strategy-based composite features...")
+    
+    # Strategy 1: Price touches lower Bollinger Band + Positive MACD Crossover
+    macd_crossed_up = (df['macd'] > df['macd_signal']) & (df['macd'].shift(1) <= df['macd_signal'].shift(1))
+    price_touched_lower_bb = df['low'] <= df['bb_lower']
+    df['buy_signal_bb_macd'] = (price_touched_lower_bb & macd_crossed_up).astype(int)
+
+    # Strategy 2: Price touches lower Bollinger Band + Positive Stochastic Crossover below 20
+    stoch_crossed_up = (df['stoch_k'] > df['stoch_d']) & (df['stoch_k'].shift(1) <= df['stoch_d'].shift(1))
+    stoch_is_oversold = (df['stoch_k'] < 20) & (df['stoch_d'] < 20)
+    df['buy_signal_bb_stoch'] = (price_touched_lower_bb & stoch_crossed_up & stoch_is_oversold).astype(int)
+
+    # Strategy 3: Positive EMA Crossover (9 over 21)
+    ema_short = df['close'].ewm(span=EMA_SHORT_PERIOD, adjust=False).mean()
+    ema_long = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
+    df['buy_signal_ema_cross'] = ((ema_short > ema_long) & (ema_short.shift(1) <= ema_long.shift(1))).astype(int)
+    
+    return df
+
 def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
     """
     دالة محسنة وشاملة لحساب جميع الميزات مع التقليل من استهلاك الذاكرة.
@@ -311,7 +326,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()) - 1
     asset_returns = df_calc['close'].pct_change()
@@ -324,14 +338,11 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
 
-    # --- 3. Basic Momentum ---
-    df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
-    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
+    # --- 3. NEW: Strategy-based Features ---
+    df_calc = calculate_strategy_features(df_calc)
 
     # --- 4. Cleanup and Finalization ---
-    del high_low, high_close, low_close, tr, up_move, down_move, plus_dm, minus_dm, plus_di, minus_di, dx, delta, gain, loss, asset_returns, merged_df, ema_slope
+    del high_low, high_close, low_close, tr, up_move, down_move, plus_dm, minus_dm, plus_di, minus_di, dx, delta, gain, loss, asset_returns, merged_df
     gc.collect()
     
     logger.info("✅ [Features] All features calculated successfully.")
@@ -378,14 +389,15 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
     # --- 4. Feature List and Cleaning ---
+    # CHANGE: Added new strategy features to the list
     feature_columns = [
-        'rsi', 'adx', 'atr', 'relative_volume', 'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
+        'rsi', 'adx', 'atr', 'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'rsi_4h', 'price_vs_ema50_4h',
-        f'roc_{MOMENTUM_PERIOD}', 'roc_acceleration', f'ema_slope_{EMA_SLOPE_PERIOD}',
-        'williams_r', 'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'mfi',
-        'buy_pressure', 'volume_ratio', 'price_impact', 'garman_klass_vol', 'rogers_satchell_vol',
+        'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'mfi',
+        'buy_pressure', 'volume_ratio', 'price_impact', 'garman_klass_vol',
         'chaikin_volatility', 'ulcer_index', 'atr_ratio_5', 'atr_ratio_10', 'atr_ratio_20',
-        'hour_sin', 'hour_cos', 'day_of_week', 'is_weekend', 'asia_session', 'london_session', 'ny_session', 'month_sin', 'month_cos'
+        'hour_sin', 'hour_cos', 'day_of_week', 'is_weekend', 'asia_session', 'london_session', 'ny_session', 'month_sin', 'month_cos',
+        'buy_signal_bb_macd', 'buy_signal_bb_stoch', 'buy_signal_ema_cross' # NEW FEATURES
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -427,10 +439,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
             y_train, y_test = y.iloc[train_index], y.iloc[test_index]
             scaler = StandardScaler()
 
-            # --- FIX START: Recreate DataFrame after scaling to preserve feature names ---
             X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
             X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
-            # --- FIX END ---
 
             model = lgb.LGBMClassifier(**params)
             model.fit(X_train_scaled, y_train, eval_set=[(X_test_scaled, y_test)], callbacks=[lgb.early_stopping(20, verbose=False)])
@@ -450,9 +460,7 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
     final_model_params = {'objective': 'multiclass', 'num_class': 3, 'class_weight': 'balanced', 'random_state': 42, 'verbosity': -1, **best_params}
     
     final_scaler = StandardScaler()
-    # --- FIX START: Recreate DataFrame after scaling for final model ---
     X_scaled_full = pd.DataFrame(final_scaler.fit_transform(X), index=X.index, columns=X.columns)
-    # --- FIX END ---
     final_model = lgb.LGBMClassifier(**final_model_params)
     final_model.fit(X_scaled_full, y)
     
@@ -464,10 +472,8 @@ def tune_and_train_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Any], 
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         scaler = StandardScaler()
         
-        # --- FIX START: Recreate DataFrame in final validation loop ---
         X_train_scaled = pd.DataFrame(scaler.fit_transform(X_train), index=X_train.index, columns=X_train.columns)
         X_test_scaled = pd.DataFrame(scaler.transform(X_test), index=X_test.index, columns=X_test.columns)
-        # --- FIX END ---
 
         model = lgb.LGBMClassifier(**final_model_params)
         model.fit(X_train_scaled, y_train)
@@ -589,7 +595,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Microstructure features) service is running and healthy.", 200
+    return "ML Trainer (with Strategy features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
