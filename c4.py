@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V8.2 (ML-Only with DB Type Fix)
-# تم التحديث بواسطة Gemini لإصلاح خطأ توافق أنواع البيانات مع قاعدة البيانات.
-# --- التغييرات الرئيسية (V8.2):
-# 1. إصلاح خطأ "can't adapt type 'numpy.float32'" عن طريق تحويل جميع القيم الرقمية إلى `float` قبل تحديث قاعدة البيانات.
-# 2. هذا الإصلاح يحل مشكلة توقف تحديث الصفقات في لوحة التحكم.
-# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
+# ملف c4.py - نسخة V8.3 (Dashboard Fix)
+# تم التحديث بواسطة Gemini لإصلاح مشكلة عدم ظهور الصفقات في لوحة التحكم.
+# --- التغييرات الرئيسية (V8.3):
+# 1. إصلاح خطأ "Object of type Decimal is not JSON serializable".
+# 2. تم إضافة دالة لتحويل أنواع بيانات 'Decimal' القادمة من قاعدة البيانات إلى 'float' قبل إرسالها لواجهة المستخدم.
+# 3. هذا الإصلاح يحل مشكلة ظهور جدول الصفقات فارغًا في لوحة التحكم.
+# 4. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل إلى V8.3.
 
 import time
 import os
@@ -792,6 +793,19 @@ def determine_market_state():
 app = Flask(__name__)
 CORS(app)
 
+# --- FIX: Helper function to convert Decimal types for JSON serialization ---
+def convert_decimals_to_float(obj: Any) -> Any:
+    """
+    Recursively traverses a data structure and converts all Decimal objects to floats.
+    """
+    if isinstance(obj, list):
+        return [convert_decimals_to_float(i) for i in obj]
+    if isinstance(obj, dict):
+        return {k: convert_decimals_to_float(v) for k, v in obj.items()}
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return obj
+
 def get_dashboard_html():
     return """
 <!DOCTYPE html>
@@ -799,7 +813,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.2 - نظام تعلم الآلة</title>
+    <title>لوحة تحكم التداول V8.3 - نظام تعلم الآلة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -832,7 +846,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold text-center sm:text-right"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.2 (DB Fix)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold text-center sm:text-right"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.3 (Dashboard Fix)</span></h1>
             <div id="trend-lights-container" class="flex items-center justify-center flex-wrap gap-x-4 sm:gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         
@@ -909,14 +923,18 @@ function updateMarketStatus() {
 }
 function updateSignals() {
     fetchData('/api/signals').then(data => {
-        if (!data) return;
+        if (!data) {
+            console.error("Failed to fetch signals or received null data.");
+            return;
+        }
         const tableBody = document.getElementById('signals-table');
         tableBody.innerHTML = '';
-        if (data.length === 0) {
+        const openTrades = data.filter(s => ['open', 'updated'].includes(s.status));
+        if (openTrades.length === 0) {
             tableBody.innerHTML = '<tr><td colspan="5" class="p-8 text-center text-text-secondary">لا توجد صفقات مفتوحة حاليًا.</td></tr>';
             return;
         }
-        data.filter(s => ['open', 'updated'].includes(s.status)).forEach(s => {
+        openTrades.forEach(s => {
             const profit = parseFloat(s.profit_percentage || 0);
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
             const entry = parseFloat(s.entry_price);
@@ -1002,34 +1020,57 @@ def get_stats():
             cur.execute("SELECT profit_percentage, is_real_trade, original_quantity, entry_price FROM signals WHERE status = 'closed';")
             closed_trades = cur.fetchall()
         if not closed_trades: return jsonify({"net_profit_usdt": 0, "win_rate": 0, "profit_factor": 0, "total_closed_trades": 0})
+        
+        # Convert Decimals to floats for calculation
+        processed_trades = convert_decimals_to_float(closed_trades)
+
         total_net_profit_usdt = sum(
-            ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['original_quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('original_quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
-            for t in closed_trades
+            (((t['profit_percentage'] or 0) - (2 * TRADING_FEE_PERCENT)) / 100) * (t['original_quantity'] * t['entry_price'] if t.get('is_real_trade') and t.get('original_quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
+            for t in processed_trades
         )
-        wins = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) > 0]
-        losses = [float(s['profit_percentage']) for s in closed_trades if float(s['profit_percentage']) < 0]
-        win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
+        wins = [s['profit_percentage'] for s in processed_trades if s['profit_percentage'] and s['profit_percentage'] > 0]
+        losses = [s['profit_percentage'] for s in processed_trades if s['profit_percentage'] and s['profit_percentage'] < 0]
+        win_rate = (len(wins) / len(processed_trades) * 100) if processed_trades else 0.0
         total_loss = abs(sum(losses))
         profit_factor = sum(wins) / total_loss if total_loss > 0 else "Infinity"
-        return jsonify({"net_profit_usdt": total_net_profit_usdt, "win_rate": win_rate, "profit_factor": profit_factor, "total_closed_trades": len(closed_trades)})
+        return jsonify({"net_profit_usdt": total_net_profit_usdt, "win_rate": win_rate, "profit_factor": profit_factor, "total_closed_trades": len(processed_trades)})
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/signals')
 def get_signals():
-    if not (check_db_connection() and redis_client): return jsonify({"error": "Service connection failed"}), 500
+    if not (check_db_connection() and redis_client):
+        return jsonify({"error": "Service connection failed"}), 500
     try:
         current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
-        with signal_cache_lock: signals_copy = list(open_signals_cache.values())
+        with signal_cache_lock:
+            # The cache contains dicts with Decimal objects from the DB
+            signals_from_cache = list(open_signals_cache.values())
+
+        # Create a new list for processing to avoid modifying the cache directly
+        signals_copy = [dict(s) for s in signals_from_cache]
+
         for signal in signals_copy:
-            current_price = current_prices.get(signal['symbol'])
-            if current_price:
-                signal['current_price'] = current_price
-                signal['profit_percentage'] = ((float(current_price) - float(signal['entry_price'])) / float(signal['entry_price'])) * 100
-        return jsonify(signals_copy)
+            current_price_str = current_prices.get(signal['symbol'])
+            if current_price_str:
+                signal['current_price'] = current_price_str
+                try:
+                    # Ensure all calculations use standard Python floats
+                    current_price_float = float(current_price_str)
+                    entry_price_float = float(signal['entry_price'])
+                    signal['profit_percentage'] = ((current_price_float - entry_price_float) / entry_price_float) * 100
+                except (ValueError, TypeError):
+                    signal['profit_percentage'] = 0
+
+        # --- FIX: Convert all Decimal objects to float before sending to frontend ---
+        signals_ready_for_json = convert_decimals_to_float(signals_copy)
+
+        return jsonify(signals_ready_for_json)
     except Exception as e:
-        logger.error(f"❌ [API Signals] Error: {e}"); return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ [API Signals] Error: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1134,7 +1175,7 @@ def trade_management_loop():
                         if check_db_connection() and conn:
                             try:
                                 with conn.cursor() as cur:
-                                    # FIX: Cast all numeric values to float for DB compatibility
+                                    # Cast all numeric values to float for DB compatibility
                                     cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
                                                 (json.dumps(journey_state), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity')), signal_id))
                                 conn.commit()
@@ -1167,7 +1208,7 @@ def trade_management_loop():
                     if check_db_connection() and conn:
                         try:
                             with conn.cursor() as cur:
-                                # FIX: Cast numpy.float32 to standard Python float
+                                # Cast numpy.float32 to standard Python float
                                 cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", 
                                             (float(new_peak), float(signal['stop_loss']), signal_id))
                             conn.commit()
@@ -1327,13 +1368,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.2 - DB Fix)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.3 - Dashboard Fix)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.2 - DB Fix) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.3 - Dashboard Fix) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
