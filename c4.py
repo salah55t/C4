@@ -1,9 +1,11 @@
-# ملف c4.py - نسخة V7.1 مع العودة إلى قائمة العملات من الملف
-# تم التحديث بواسطة Gemini لإلغاء فلتر حجم التداول والاعتماد على ملف crypto_list.txt فقط.
-# --- التغييرات الرئيسية (V7.1):
-# 1. تم تعديل دالة `get_validated_symbols` لإزالة فلتر حجم التداول (> 100 مليون دولار).
-# 2. البوت الآن يحلل فقط الرموز المدرجة في ملف `crypto_list.txt` طالما أنها متاحة للتداول.
-# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
+# ملف c4.py - نسخة V8.0 (ML-Only)
+# تم التحديث بواسطة Gemini للتركيز حصريًا على نموذج تعلم الآلة لتوليد الإشارات.
+# --- التغييرات الرئيسية (V8.0):
+# 1. إزالة جميع دوال استراتيجيات التحليل الفني (مثل Divergence, Pullback, BB Reversal).
+# 2. إزالة جميع الفلاتر الإضافية (مثل فلتر دفتر الطلبات).
+# 3. تبسيط الحلقة الرئيسية `main_loop` لتعتمد فقط على تنبؤ النموذج ومستوى الثقة.
+# 4. تنظيف الكود من المتغيرات والدوال غير المستخدمة.
+# 5. تحديث لوحة التحكم لتعكس الهيكلية الجديدة المبسطة.
 
 import time
 import os
@@ -15,12 +17,10 @@ import pandas as pd
 import psycopg2
 import pickle
 import redis
-import re
 import gc
 import random
-from decimal import Decimal, ROUND_DOWN
-from urllib.parse import urlparse
-from psycopg2 import sql, OperationalError, InterfaceError
+from decimal import Decimal
+from psycopg2 import sql, OperationalError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
@@ -29,9 +29,9 @@ from flask_cors import CORS
 from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
-from typing import List, Dict, Optional, Any, Set, Tuple
+from typing import List, Dict, Optional, Any
 from sklearn.preprocessing import StandardScaler
-from collections import deque, Counter
+from collections import deque
 import warnings
 
 # --- إعدادات التجاهل واللوجر ---
@@ -42,11 +42,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10_dynamic_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10_ml_only_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10_Dynamic')
+logger = logging.getLogger('CryptoBotV10_ML_Only')
 
 # --- تحميل متغيرات البيئة ---
 try:
@@ -56,7 +56,6 @@ try:
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
-
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
@@ -64,8 +63,6 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-are_filters_disabled: bool = True
-filters_disabled_lock = Lock()
 RISK_PER_TRADE_PERCENT: float = 1.0
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 MODEL_FOLDER: str = 'V9'
@@ -87,7 +84,7 @@ USE_DYNAMIC_JOURNEY = True
 TARGET_LEVELS = [1.0, 1.5, 2.2]
 PARTIAL_EXIT_PERCENTAGES = [0.5, 0.3, 0.2]
 
-# --- إعدادات المؤشرات الفنية ---
+# --- إعدادات المؤشرات الفنية (لإنشاء الميزات للنموذج) ---
 EMA_FAST_PERIOD: int = 50
 EMA_SLOW_PERIOD: int = 120
 ADX_PERIOD: int = 14
@@ -99,11 +96,6 @@ MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
-
-# --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
-ORDER_BOOK_DEPTH_LIMIT: int = 100
-ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005
-ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.3
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.5
@@ -124,61 +116,21 @@ rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
 market_state_lock = Lock()
 last_market_state_check = 0
-technical_signals_cache: Dict[str, Dict] = {}
-TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
-# --- قاموس أسباب الرفض باللغة العربية ---
+# --- قاموس أسباب الرفض المبسط ---
 REJECTION_REASONS_AR = {
-    # General reasons
-    "Strategy Signal Not Found": "لم تتحقق شروط أي استراتيجية",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
-    "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
+    "Feature Preparation Failed": "فشل إعداد البيانات للنموذج",
+    "Prediction Generation Failed": "فشل توليد التنبؤ من النموذج",
+    "Not a Buy Signal": "النموذج لم يصدر إشارة شراء",
+    "Confidence Too Low": "مستوى ثقة النموذج منخفض",
     "Invalid Position Size": "حجم الصفقة غير صالح",
     "Lot Size Adjustment Failed": "فشل ضبط حجم العقد",
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ",
-    "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
-    "Invalid Market Regime for Any Strategy": "حالة السوق غير مناسبة لأي استراتيجية متاحة",
-
-    # Divergence Reversal strategy reasons
-    "No Bullish Divergence": "لم يتم العثور على انفراج إيجابي",
-    "Divergence not from Oversold": "الانفراج لم يبدأ من منطقة ذروة بيع",
-    "No Stochastic Crossover": "لم يحدث تقاطع إيجابي لمؤشر ستوكاستيك",
-    
-    # Trend Continuation (Pullback) strategy reasons
-    "Not an Uptrend": "السوق ليس في اتجاه صاعد",
-    "No Pullback to EMA": "لم يحدث تصحيح لمنطقة الدعم (EMA)",
-    "RSI below threshold": "مؤشر القوة النسبية ضعيف",
-
-    # BB + Stoch Reversal strategy reasons
-    "Price did not touch Lower BB": "السعر لم يلامس الحد السفلي للبولينجر باند",
-    "No Stoch Crossover below 15": "لم يحدث تقاطع ستوكاستيك تحت مستوى 15",
-    "No Bullish Reversal Candle Pattern": "لم يظهر نمط شمعة انعكاسية صاعدة",
-
-    # BB + MACD Reversal strategy reasons
-    "No Bullish MACD Crossover": "لم يحدث تقاطع إيجابي للماكد",
-
-    # BB Reversion strategy reasons
-    "ADX not in range (15-25)": "مؤشر ADX خارج النطاق المطلوب (15-25)",
-    "No recent BB breakout": "لم يحدث اختراق حديث للحد العلوي للبولينجر",
-    "Price did not return to BB": "السعر لم يرتد لملامسة حد البولينجر",
-    "MACD not above zero": "خط الماكد ليس فوق مستوى الصفر",
-    "Volume not above average": "حجم التداول ليس أعلى من المتوسط",
-
-    # EMA Breakout Strategy reasons
-    "No Bullish EMA Cross": "لم يحدث تقاطع صاعد للمتوسطات المتحركة (EMA 21/50)",
-    "MACD not bullish above zero": "الماكد ليس إيجابياً فوق خط الصفر",
-    "RSI did not bounce from 40": "مؤشر القوة النسبية لم يرتد من مستوى 40",
-    "No price breakout of recent high": "السعر لم يخترق قمة حديثة خلال آخر 12 ساعة",
-    "Invalid TP/SL for EMA Breakout": "فشل حساب الهدف/الوقف لاستراتيجية الاختراق",
-
-    # Common reasons
-    "Low Volume on Signal Candle": "حجم تداول ضعيف على شمعة الإشارة",
-    "Low Buy Pressure": "ضغط الشراء ضعيف",
 }
-
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
@@ -223,11 +175,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         is_real_trade BOOLEAN DEFAULT FALSE,
                         quantity DOUBLE PRECISION,
                         order_id TEXT,
-                        closing_reason TEXT
+                        closing_reason TEXT,
+                        journey_state JSONB,
+                        original_quantity DOUBLE PRECISION
                     );
                 """)
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS journey_state JSONB;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS original_quantity DOUBLE PRECISION;")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -254,7 +206,7 @@ def check_db_connection() -> bool:
             with conn.cursor() as cur: cur.execute("SELECT 1;")
             return True
         return False
-    except (OperationalError, InterfaceError) as e:
+    except (OperationalError, psycopg2.InterfaceError) as e:
         logger.error(f"❌ [DB] فقدان الاتصال: {e}. إعادة الاتصال...")
         try:
             init_db()
@@ -330,7 +282,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         
-        # تقاطع القائمة من الملف مع العملات النشطة على المنصة فقط
         validated = sorted(list(formatted.intersection(active)))
         
         logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من ملفك.")
@@ -344,8 +295,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         logger.error(f"❌ [Validation] خطأ أثناء التحقق من العملات: {e}", exc_info=True)
         return []
 
-
-# --- Data Fetching and Feature Calculation Functions ---
+# --- دوال جلب البيانات وحساب الميزات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
@@ -366,121 +316,9 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] خطأ في جلب البيانات التاريخية لـ {symbol}: {e}")
         return None
 
-def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
-    highest_high = df['high'].rolling(window=14).max()
-    lowest_low = df['low'].rolling(window=14).min()
-    df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
-    df['stoch_k'] = 100 * (df['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
-    df['stoch_d'] = df['stoch_k'].rolling(3).mean()
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_histogram'] = df['macd'] - df['macd_signal']
-    bb_period = 20
-    df['bb_middle'] = df['close'].rolling(window=bb_period).mean()
-    bb_std = df['close'].rolling(window=bb_period).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
-    df['kc_middle'] = df['close'].ewm(span=20, adjust=False).mean()
-    if 'atr' in df.columns:
-        df['kc_upper'] = df['kc_middle'] + (df['atr'] * 1.5)
-        df['kc_lower'] = df['kc_middle'] - (df['atr'] * 1.5)
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
-    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
-    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
-    money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
-    df['mfi'] = 100 - (100 / (1 + money_ratio))
-    return df
-
-def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
-    if not all(col in df.columns for col in required_cols): return df
-    df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
-    volume_ma = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / volume_ma.replace(0, 1e-9)
-    df['price_impact'] = df['quote_volume'] / df['volume'].replace(0, 1e-9)
-    log_hl = np.log(df['high'] / df['low'].replace(0, 1e-9))
-    log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
-    gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
-    df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
-    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
-    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
-    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
-    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
-    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
-    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
-    return df
-
-def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-    high_low = df['high'] - df['low']
-    ema_high_low = high_low.ewm(span=10, adjust=False).mean()
-    ema_high_low_shifted = ema_high_low.shift(10)
-    df['chaikin_volatility'] = (ema_high_low - ema_high_low_shifted) / ema_high_low_shifted.replace(0, 1e-9) * 100
-    period = 14
-    max_close = df['close'].rolling(window=period).max()
-    percentage_drawdown = 100 * (df['close'] - max_close) / max_close.replace(0, 1e-9)
-    df['ulcer_index'] = np.sqrt((percentage_drawdown ** 2).rolling(window=period).mean())
-    if 'atr' not in df.columns: return df
-    high_low_tr = df['high'] - df['low']
-    high_close_prev = (df['high'] - df['close'].shift()).abs()
-    low_close_prev = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low_tr, high_close_prev, low_close_prev], axis=1).max(axis=1)
-    for p in [5, 10, 20]:
-        atr_p = tr.ewm(span=p, adjust=False).mean()
-        df[f'atr_ratio_{p}'] = df['atr'] / atr_p.replace(0, 1e-9)
-    return df
-
-def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
-    df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
-    df['day_of_week'] = df.index.dayofweek
-    df['is_weekend'] = (df.index.dayofweek >= 5).astype(int)
-    df['asia_session'] = ((df.index.hour >= 0) & (df.index.hour < 8)).astype(int)
-    df['london_session'] = ((df.index.hour >= 8) & (df.index.hour < 16)).astype(int)
-    df['ny_session'] = ((df.index.hour >= 13) & (df.index.hour < 21)).astype(int)
-    df['month_sin'] = np.sin(2 * np.pi * df.index.month / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
-    return df
-
-def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -> pd.DataFrame:
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    high_low = high - low
-    high_close_prev = np.abs(high - close.shift(1))
-    low_close_prev = np.abs(low - close.shift(1))
-    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-    atr = tr.ewm(com=atr_period - 1, min_periods=atr_period, adjust=False).mean()
-    hl2 = (high + low) / 2
-    final_upper_band = upper_band = hl2 + (multiplier * atr)
-    final_lower_band = lower_band = hl2 - (multiplier * atr)
-    supertrend = pd.Series(np.nan, index=df.index)
-    supertrend_direction = pd.Series(np.nan, index=df.index)
-    for i in range(1, len(df)):
-        curr, prev = i, i - 1
-        if close[curr] > final_upper_band[prev]:
-            supertrend_direction[curr] = 1
-        elif close[curr] < final_lower_band[prev]:
-            supertrend_direction[curr] = -1
-        else:
-            supertrend_direction[curr] = supertrend_direction[prev]
-            if supertrend_direction[curr] == -1 and final_upper_band[curr] < final_upper_band[prev]:
-                final_upper_band[curr] = final_upper_band[curr]
-            if supertrend_direction[curr] == 1 and final_lower_band[curr] > final_lower_band[prev]:
-                final_lower_band[curr] = final_lower_band[curr]
-        if supertrend_direction[curr] == 1:
-            supertrend[curr] = final_lower_band[curr]
-        else:
-            supertrend[curr] = final_upper_band[curr]
-    df['supertrend'] = supertrend
-    df['supertrend_direction'] = supertrend_direction
-    return df
-
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
+    # Basic MAs and Volume
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
@@ -488,6 +326,8 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
     df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+    
+    # ATR and ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -501,20 +341,23 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    
+    # RSI and StochRSI
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    STOCH_RSI_PERIOD = 14
-    STOCH_RSI_K_PERIOD = 3
-    STOCH_RSI_D_PERIOD = 3
     rsi = df_calc['rsi']
-    stoch_rsi_val = (rsi - rsi.rolling(STOCH_RSI_PERIOD).min()) / (rsi.rolling(STOCH_RSI_PERIOD).max() - rsi.rolling(STOCH_RSI_PERIOD).min()).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(STOCH_RSI_K_PERIOD).mean() * 100
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(STOCH_RSI_D_PERIOD).mean()
+    stoch_rsi_val = (rsi - rsi.rolling(14).min()) / (rsi.rolling(14).max() - rsi.rolling(14).min()).replace(0, 1e-9)
+    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(3).mean() * 100
+    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(3).mean()
+
+    # Other Indicators
     df_calc['relative_volume'] = df_calc['volume'] / (df_calc['volume'].rolling(window=REL_VOL_PERIOD, min_periods=1).mean() + 1e-9)
     df_calc['price_vs_ema50'] = (df_calc['close'] / df_calc['ema_50']) - 1
     df_calc['price_vs_ema200'] = (df_calc['close'] / df_calc['close'].ewm(span=200, adjust=False).mean()) - 1
+    
+    # BTC Correlation
     if btc_df is not None and not btc_df.empty:
         asset_returns = df_calc['close'].pct_change()
         if 'btc_returns' not in btc_df.columns:
@@ -523,29 +366,45 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
         df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
-    df_calc = calculate_advanced_momentum_features(df_calc)
-    df_calc = calculate_market_microstructure_features(df_calc)
-    df_calc = calculate_advanced_volatility_features(df_calc)
-    df_calc = calculate_temporal_features(df_calc)
-    df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
+    
+    # Advanced Momentum
+    highest_high = df_calc['high'].rolling(window=14).max()
+    lowest_low = df_calc['low'].rolling(window=14).min()
+    df_calc['stoch_k'] = 100 * (df_calc['close'] - lowest_low) / (highest_high - lowest_low).replace(0, 1e-9)
+    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
+    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    df_calc['macd'] = exp1 - exp2
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+    
+    # Supertrend
+    hl2 = (df_calc['high'] + df_calc['low']) / 2
+    upper_band = hl2 + (SUPERTREND_MULTIPLIER * df_calc['atr'])
+    lower_band = hl2 - (SUPERTREND_MULTIPLIER * df_calc['atr'])
+    supertrend = pd.Series(np.nan, index=df_calc.index)
+    direction = pd.Series(1, index=df_calc.index)
+    for i in range(1, len(df_calc)):
+        if df_calc['close'][i-1] <= upper_band[i-1]:
+            upper_band[i] = min(upper_band[i], upper_band[i-1])
+        if df_calc['close'][i-1] >= lower_band[i-1]:
+            lower_band[i] = max(lower_band[i], lower_band[i-1])
+        if df_calc['close'][i] > upper_band[i-1]:
+            direction[i] = 1
+        elif df_calc['close'][i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+    supertrend = np.where(direction == 1, lower_band, upper_band)
+    df_calc['supertrend'] = supertrend
+    df_calc['supertrend_direction'] = direction
+
+    # Final Features
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
-    df_calc['roc_acceleration'] = df_calc[f'roc_{MOMENTUM_PERIOD}'].diff()
-    ema_slope = df_calc['close'].ewm(span=EMA_SLOPE_PERIOD, adjust=False).mean()
-    df_calc[f'ema_slope_{EMA_SLOPE_PERIOD}'] = (ema_slope - ema_slope.shift(1)) / ema_slope.shift(1).replace(0, 1e-9) * 100
     return df_calc.astype('float32', errors='ignore')
-
-
-def get_session_state() -> Tuple[List[str], str, str]:
-    sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
-    active_sessions = []
-    now_utc = datetime.now(timezone.utc)
-    current_hour = now_utc.hour
-    if now_utc.weekday() >= 5: return [], "WEEKEND", "عطلة نهاية الأسبوع"
-    for session, (start, end) in sessions.items():
-        if start <= current_hour < end: active_sessions.append(session)
-    if "London" in active_sessions and "New York" in active_sessions: return active_sessions, "HIGH_LIQUIDITY", "تداخل لندن/نيويورك"
-    elif len(active_sessions) >= 1: return active_sessions, "NORMAL_LIQUIDITY", f"{', '.join(active_sessions)}"
-    else: return [], "LOW_LIQUIDITY", "خارج أوقات الذروة"
 
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
     btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
@@ -580,8 +439,8 @@ def load_notifications_to_cache():
     except Exception as e:
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
-# ---------------------- Trading Strategy & Filters ----------------------
-class EnhancedTradingStrategy:
+# ---------------------- ML Model Handling ----------------------
+class MachineLearningModelHandler:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model, self.scaler, self.feature_names = None, None, None
@@ -622,18 +481,24 @@ class EnhancedTradingStrategy:
             return None
         try:
             df_featured = calculate_all_features(df_15m, btc_df)
+            
+            # Add 4h features
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
             ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
             df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
+            
             mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
             df_featured = df_featured.join(mtf_features)
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
+            
+            # Ensure all required columns exist
             for col in self.feature_names:
                 if col not in df_featured.columns:
                     df_featured[col] = 0.0
+            
             df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
             return df_featured.dropna(subset=self.feature_names)
         except Exception as e:
@@ -656,42 +521,8 @@ class EnhancedTradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد تنبؤ النموذج: {e}", exc_info=True)
             return None
 
-
-def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
-    if not client:
-        log_rejection(symbol, "Order Book Fetch Failed", {"error": "Client not initialized"})
-        return False
-    try:
-        order_book = client.get_order_book(symbol=symbol, limit=ORDER_BOOK_DEPTH_LIMIT)
-        bids = pd.DataFrame(order_book['bids'], columns=['price', 'qty'], dtype=float)
-        asks = pd.DataFrame(order_book['asks'], columns=['price', 'qty'], dtype=float)
-
-        price_range_upper = entry_price * (1 + ORDER_BOOK_ANALYSIS_RANGE_PCT)
-        price_range_lower = entry_price * (1 - ORDER_BOOK_ANALYSIS_RANGE_PCT)
-
-        relevant_bids_vol = bids[bids['price'].between(price_range_lower, entry_price)]['qty'].sum()
-        relevant_asks_vol = asks[asks['price'].between(entry_price, price_range_upper)]['qty'].sum()
-
-        if relevant_asks_vol == 0:
-            return True
-
-        bid_ask_ratio = relevant_bids_vol / relevant_asks_vol
-        
-        if bid_ask_ratio >= ORDER_BOOK_MIN_BID_ASK_RATIO:
-            return True
-        else:
-            log_rejection(symbol, "Order Book Filter Failed", {"ratio": f"{bid_ask_ratio:.2f}", "required": f"{ORDER_BOOK_MIN_BID_ASK_RATIO}"})
-            return False
-
-    except Exception as e:
-        log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)})
-        return False
-
-# --- TP/SL Calculation Functions ---
-SR_LOOKBACK_CANDLES = 50
-SR_MIN_BOUNCES      = 2
-
-def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, Optional[float]]:
+# --- دوال حساب الهدف ووقف الخسارة ---
+def find_sr_levels(df: pd.DataFrame, lookback: int = 50) -> Dict[str, Optional[float]]:
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
 
@@ -713,36 +544,30 @@ def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -
 
     return {'support': closest_support, 'resistance': closest_resistance}
 
-
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     try:
         if df.empty or len(df) < 50:
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
 
-        sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
+        sr = find_sr_levels(df, lookback=50)
         resistance = sr['resistance']
-        support    = sr['support']
+        support = sr['support']
 
         potential_profit_pct = 0
         if resistance is not None and resistance > entry_price:
             potential_profit_pct = ((resistance - entry_price) / entry_price) * 100
 
         if resistance is None or support is None or potential_profit_pct < MIN_PROFIT_PERCENT:
-            if resistance is None or support is None:
-                log_message = f"[{symbol}] لم يتم العثور على دعم/مقاومة. سيتم استخدام TP/SL بنسبة ثابتة."
-            else:
-                log_message = f"[{symbol}] الربح من المقاومة ({potential_profit_pct:.2f}%) أقل من الحد الأدنى. سيتم استخدام TP/SL بنسبة ثابتة."
-
-            logger.info(log_message)
+            logger.info(f"[{symbol}] لم يتم العثور على دعم/مقاومة مناسبة. سيتم استخدام TP/SL بنسبة ثابتة.")
             new_target_price = entry_price * (1 + 1.2 / 100)
             new_stop_loss = entry_price * (1 - 1.5 / 100)
 
             return {
                 'target_price': round(new_target_price, 6),
-                'stop_loss':    round(new_stop_loss, 6),
-                'source':       'FIXED_PERCENTAGE',
-                'rr_ratio':     round(1.2 / 1.5, 2)
+                'stop_loss': round(new_stop_loss, 6),
+                'source': 'FIXED_PERCENTAGE',
+                'rr_ratio': round(1.2 / 1.5, 2)
             }
 
         if support >= entry_price:
@@ -754,289 +579,25 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
 
         return {
             'target_price': round(resistance, 6),
-            'stop_loss':    round(support, 6),
-            'source':       'SR_LEVELS',
-            'rr_ratio':     round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
+            'stop_loss': round(support, 6),
+            'source': 'SR_LEVELS',
+            'rr_ratio': round((resistance - entry_price) / (entry_price - support), 2) if (entry_price - support) > 0 else 0
         }
-
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error in S/R TP/SL: {e}", exc_info=True)
-        last_atr = df['atr'].iloc[-1] if 'atr' in df.columns and not df['atr'].empty else 0
-        if last_atr > 0:
-            return {'target_price': entry_price + last_atr * 2.2, 'stop_loss': entry_price - last_atr * 1.5, 'source': 'ATR_Fallback'}
         return None
 
-# --- START: STRATEGY FUNCTIONS ---
-
-def is_bullish_reversal_pattern(candle: pd.Series, prev_candle: pd.Series) -> bool:
-    body_size = abs(candle['close'] - candle['open'])
-    if body_size > 0:
-        lower_wick = candle['open'] - candle['low'] if candle['open'] < candle['close'] else candle['close'] - candle['low']
-        if lower_wick > body_size * 2:
-            return True
-    if (prev_candle['close'] < prev_candle['open'] and 
-        candle['close'] > candle['open'] and
-        candle['close'] > prev_candle['open'] and 
-        candle['open'] < prev_candle['close']):
-        return True
-    return False
-
-# --- Strategy 1: Divergence Reversal ---
-def find_bullish_divergence(df: pd.DataFrame, lookback: int = 40, pivot_window: int = 5) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
-    if len(df) < lookback: return None
-    data = df.iloc[-lookback:].copy()
-    data['price_pivot'] = data['low'].rolling(window=pivot_window*2+1, center=True).min()
-    price_lows = data[data['low'] == data['price_pivot']].dropna()
-    if len(price_lows) < 2: return None
-    last_price_low = price_lows.iloc[-1]
-    prev_price_low = price_lows.iloc[-2]
-    if last_price_low['low'] >= prev_price_low['low']: return None
-    rsi_low_at_last_price_low = data['rsi'].loc[last_price_low.name]
-    rsi_low_at_prev_price_low = data['rsi'].loc[prev_price_low.name]
-    if rsi_low_at_last_price_low > rsi_low_at_prev_price_low:
-        logger.info(f"  -> [{df.name}] ✅ تم العثور على انفراج إيجابي بين {prev_price_low.name} و {last_price_low.name}")
-        return prev_price_low.name, last_price_low.name
-    return None
-
-def calculate_dynamic_rsi_level(rsi_series: pd.Series, period: int = 20, std_dev: float = 2.0) -> float:
-    if len(rsi_series) < period: return 30.0
-    rsi_ma = rsi_series.rolling(window=period).mean()
-    rsi_std = rsi_series.rolling(window=period).std()
-    rsi_bb_lower = rsi_ma - (rsi_std * std_dev)
-    return rsi_bb_lower.iloc[-1]
-
-def check_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    divergence_points = find_bullish_divergence(df)
-    if not divergence_points:
-        return False, "No Bullish Divergence", {}
-    
-    first_low_ts, _ = divergence_points
-    dynamic_oversold_level = calculate_dynamic_rsi_level(df['rsi'])
-    rsi_at_first_low = df.loc[first_low_ts]['rsi']
-    if rsi_at_first_low > dynamic_oversold_level:
-        details = {"rsi_at_low": f"{rsi_at_first_low:.2f}", "dynamic_level": f"{dynamic_oversold_level:.2f}"}
-        return False, "Divergence not from Oversold", details
-        
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-    stoch_k_cross_above_d = prev_candle['stoch_k'] <= prev_candle['stoch_d'] and last_candle['stoch_k'] > last_candle['stoch_d']
-    if not stoch_k_cross_above_d:
-        return False, "No Stochastic Crossover", {}
-            
-    avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.5:
-        details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
-        return False, "Low Volume on Signal Candle", details
-    
-    if last_candle['buy_pressure'] < 0.55:
-        return False, "Low Buy Pressure", {"buy_pressure": f"{last_candle['buy_pressure']:.2f}"}
-
-    return True, "Divergence_Reversal", {}
-
-# --- Strategy 2: Trend Continuation ---
-def check_trend_continuation_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-    
-    if not (last_candle['ema_21'] > last_candle['ema_50']):
-        return False, "Not an Uptrend", {}
-        
-    pullback_occurred = (prev_candle['low'] <= prev_candle['ema_21']) or (last_candle['low'] <= last_candle['ema_21'])
-    if not pullback_occurred:
-        return False, "No Pullback to EMA", {}
-        
-    if last_candle['rsi'] < 45:
-        return False, "RSI below threshold", {"rsi": f"{last_candle['rsi']:.2f}"}
-        
-    avg_volume = df['volume'].iloc[-11:-1].mean()
-    if last_candle['volume'] < avg_volume * 0.7:
-        details = {"signal_volume": f"{last_candle['volume']:.2f}", "avg_volume": f"{avg_volume:.2f}"}
-        return False, "Low Volume on Signal Candle", details
-
-    return True, "Uptrend_Pullback", {}
-
-# --- Strategy 3: BB + Stoch Reversal (Always-On) ---
-def check_bb_stoch_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    if not (last_candle['low'] <= last_candle['bb_lower'] or prev_candle['low'] <= prev_candle['bb_lower']):
-        return False, "Price did not touch Lower BB", {}
-
-    stoch_oversold_crossover = (
-        prev_candle['stoch_k'] < 15 and 
-        prev_candle['stoch_d'] < 15 and 
-        prev_candle['stoch_k'] <= prev_candle['stoch_d'] and 
-        last_candle['stoch_k'] > last_candle['stoch_d']
-    )
-    if not stoch_oversold_crossover:
-        details = {
-            "prev_k": f"{prev_candle['stoch_k']:.2f}", "prev_d": f"{prev_candle['stoch_d']:.2f}",
-            "last_k": f"{last_candle['stoch_k']:.2f}", "last_d": f"{last_candle['stoch_d']:.2f}"
-        }
-        return False, "No Stoch Crossover below 15", details
-
-    if not is_bullish_reversal_pattern(last_candle, prev_candle):
-        return False, "No Bullish Reversal Candle Pattern", {}
-
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + Stoch).")
-    return True, "BB_Stoch_Reversal", {}
-
-# --- Strategy 4: BB + MACD Reversal ---
-def check_bb_macd_reversal_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    touched_lower_bb = (last_candle['low'] <= last_candle['bb_lower']) or (prev_candle['low'] <= prev_candle['bb_lower'])
-    if not touched_lower_bb:
-        return False, "Price did not touch Lower BB", {}
-
-    macd_crossover = (prev_candle['macd'] < prev_candle['macd_signal']) and (last_candle['macd'] > last_candle['macd_signal'])
-    if not macd_crossover:
-        details = {
-            "prev_macd": f"{prev_candle['macd']:.4f}", "prev_signal": f"{prev_candle['macd_signal']:.4f}",
-            "last_macd": f"{last_candle['macd']:.4f}", "last_signal": f"{last_candle['macd_signal']:.4f}"
-        }
-        return False, "No Bullish MACD Crossover", details
-
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB + MACD).")
-    return True, "BB_MACD_Reversal", {}
-
-# --- Strategy 5: BB Reversion ---
-def check_bb_reversion_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    adx_val = last_candle.get('adx', 0)
-    if not (15 <= adx_val <= 25):
-        return False, "ADX not in range (15-25)", {"adx": f"{adx_val:.2f}"}
-
-    lookback_period = 5
-    prev_candles = df.iloc[-lookback_period-1:-1] 
-    breakout_occurred = (prev_candles['high'] > prev_candles['bb_upper']).any()
-    if not breakout_occurred:
-        return False, "No recent BB breakout", {}
-    
-    returned_to_band = (last_candle['low'] <= last_candle['bb_upper']) and (last_candle['high'] >= last_candle['bb_middle'])
-    if not returned_to_band:
-        return False, "Price did not return to BB", {}
-
-    if not (last_candle['macd'] > 0 and last_candle['macd_signal'] > 0):
-        return False, "MACD not above zero", {"macd": f"{last_candle['macd']:.4f}"}
-    
-    macd_crossover = (prev_candle['macd'] < prev_candle['macd_signal']) and (last_candle['macd'] > last_candle['macd_signal'])
-    if not macd_crossover:
-        return False, "No Bullish MACD Crossover", {}
-
-    avg_volume = df['volume'].iloc[-21:-1].mean()
-    if not (last_candle['volume'] > avg_volume * 1.1):
-        return False, "Volume not above average", {"volume": f"{last_candle['volume']}", "avg_volume": f"{avg_volume:.2f}"}
-
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (BB Reversion).")
-    return True, "BB_Reversion", {}
-
-# --- Strategy 6: EMA Breakout Strategy ---
-def check_ema_breakout_strategy(df: pd.DataFrame) -> Tuple[bool, str, Optional[Dict]]:
-    """
-    يفحص شروط استراتيجية الاختراق الجديدة بناءً على تقاطع المتوسطات المتحركة وتأكيدات الزخم.
-    """
-    df.name = df.name if hasattr(df, 'name') else 'DataFrame'
-    if len(df) < 50: # تحتاج إلى بيانات كافية لحساب المتوسطات والقنوات
-        return False, "Insufficient data for EMA Breakout", {}
-
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
-
-    # الشرط أ: تقاطع EMA21 فوق EMA50
-    ema_crossed_up = last_candle['ema_21'] > last_candle['ema_50'] and prev_candle['ema_21'] <= prev_candle['ema_50']
-    if not ema_crossed_up:
-        return False, "No Bullish EMA Cross", {}
-
-    # الشرط ب: تقاطع صعودي للماكد فوق خط الصفر
-    macd_bullish = last_candle['macd'] > last_candle['macd_signal'] and last_candle['macd'] > 0
-    if not macd_bullish:
-        return False, "MACD not bullish above zero", {"macd": f"{last_candle['macd']:.4f}"}
-
-    # الشرط ج: ارتداد RSI من مستوى 40 لأعلى
-    # نبحث عن ارتداد حديث من منطقة قريبة من 40
-    rsi_bounced = (df['rsi'].iloc[-5:-1] < 45).any() and last_candle['rsi'] > 40
-    if not rsi_bounced:
-        return False, "RSI did not bounce from 40", {"rsi": f"{last_candle['rsi']:.2f}"}
-
-    # الشرط د: السعر يكسر قمة المستطيل (آخر 10-12 ساعة)
-    # 12 ساعة * 4 شمعات/ساعة = 48 شمعة
-    lookback_period = 48
-    recent_high = df['high'].iloc[-lookback_period:-1].max()
-    breakout_confirmed = last_candle['close'] > recent_high
-    if not breakout_confirmed:
-        return False, "No price breakout of recent high", {"recent_high": f"{recent_high:.4f}"}
-
-    logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة شراء (EMA Breakout Strategy).")
-    return True, "EMA_Breakout_Strategy", {}
-
-def calculate_ema_breakout_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
-    """
-    يحسب الهدف ووقف الخسارة خصيصًا لاستراتيجية الاختراق الجديدة.
-    SL: 1.2 * ATR تحت قاع شمعة الإشارة.
-    TP: نسبة 1.5 R:R.
-    """
-    try:
-        if df.empty or 'atr' not in df.columns or 'low' not in df.columns:
-            log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Missing ATR/low data"})
-            return None
-
-        last_candle = df.iloc[-1]
-        atr_value = last_candle['atr']
-        
-        # وقف الخسارة: 1.2 * ATR تحت قاع شمعة الاختراق
-        stop_loss_price = last_candle['low'] - (atr_value * 1.2)
-        
-        if stop_loss_price >= entry_price:
-            log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"details": "Stop loss is above entry price"})
-            return None
-
-        # الهدف: نسبة 1.5 بناءً على المخاطرة
-        risk_per_share = entry_price - stop_loss_price
-        target_price = entry_price + (risk_per_share * 1.5)
-
-        return {
-            'target_price': round(target_price, 6),
-            'stop_loss': round(stop_loss_price, 6),
-            'source': 'EMA_Breakout_Rule',
-            'rr_ratio': 1.5
-        }
-    except Exception as e:
-        logger.error(f"❌ [{symbol}] Error in EMA Breakout TP/SL calculation: {e}", exc_info=True)
-        log_rejection(symbol, "Invalid TP/SL for EMA Breakout", {"error": str(e)})
-        return None
-
-# ---------------------- Trade Management Functions ----------------------
+# ---------------------- دوال إدارة الصفقات ----------------------
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.error(f"[{symbol}] لم يتم العثور على معلومات الرمز لضبط LOT_SIZE.")
-            return None
-
+        if not symbol_info: return None
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-
         if lot_size_filter:
             step_size = Decimal(lot_size_filter['stepSize'])
             quantity_decimal = Decimal(str(quantity))
-            adjusted_quantity = (quantity_decimal // step_size) * step_size
-            return adjusted_quantity
-
+            return (quantity_decimal // step_size) * step_size
         return Decimal(str(quantity))
-
     except Exception as e:
         logger.error(f"[{symbol}] خطأ في تعديل الكمية لـ LOT_SIZE: {e}", exc_info=True)
         return None
@@ -1049,9 +610,11 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         risk_amount_usdt = available_balance * (Decimal(str(RISK_PER_TRADE_PERCENT)) / Decimal('100'))
         risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
         if risk_per_coin <= 0: log_rejection(symbol, "Invalid Position Size"); return None
+        
         initial_quantity = risk_amount_usdt / risk_per_coin
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
         if adjusted_quantity is None or adjusted_quantity <= 0: log_rejection(symbol, "Lot Size Adjustment Failed"); return None
+        
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
@@ -1059,6 +622,7 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
                 if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
                     min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
                     if notional_value < min_notional: log_rejection(symbol, "Min Notional Filter", {"value": f"{notional_value:.2f}"}); return None
+        
         if notional_value > available_balance: log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}"}); return None
         return adjusted_quantity
     except Exception as e:
@@ -1068,9 +632,6 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
     if not client: return None
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
-        # ملاحظة: لم يتم تطبيق خاصية OCO هنا مباشرة.
-        # يتم إدارة الهدف ووقف الخسارة عبر trade_management_loop.
-        # هذا يوفر مرونة أكبر مثل الوقف المتحرك.
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
@@ -1079,49 +640,15 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         log_and_notify('error', f"REAL TRADE FAILED: {symbol} | {e}", "REAL_TRADE_ERROR")
         return None
 
-def verify_order_filled(symbol: str, order_id: str, timeout_seconds: int = 30) -> bool:
-    if not client:
-        return False
-    start_time = time.time()
-    while time.time() - start_time < timeout_seconds:
-        try:
-            order_status = client.get_order(symbol=symbol, orderId=order_id)
-            if order_status['status'] == 'FILLED':
-                logger.info(f"✅ [{symbol}] Order {order_id} confirmed as FILLED.")
-                return True
-            elif order_status['status'] in ['CANCELED', 'EXPIRED', 'REJECTED']:
-                logger.error(f"❌ [{symbol}] Order {order_id} has failed status: {order_status['status']}.")
-                return False
-            time.sleep(2)
-        except BinanceAPIException as e:
-            logger.error(f"❌ [{symbol}] API Error while verifying order {order_id}: {e}")
-            time.sleep(5)
-        except Exception as e:
-            logger.error(f"❌ [{symbol}] Unexpected error while verifying order {order_id}: {e}", exc_info=True)
-            return False
-
-    logger.error(f"⌛️ [{symbol}] Timeout reached while waiting for order {order_id} to be filled.")
-    return False
-
 def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
     with signal_cache_lock:
-        signal_to_close = None
-        symbol_to_close = None
-        for symbol, signal_data in open_signals_cache.items():
-            if signal_data['id'] == signal_id:
-                signal_to_close = signal_data
-                symbol_to_close = symbol
-                break
-
+        signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
         if not signal_to_close:
             logger.warning(f"⚠️ [Close] محاولة إغلاق صفقة غير موجودة في الكاش ID: {signal_id}")
             return False
-
+        
+        symbol_to_close = signal_to_close['symbol']
         entry_price = float(signal_to_close['entry_price'])
-        # --- START: FIX ---
-        # This line was changed to prevent a TypeError with demo trades where quantity is None.
-        original_quantity = float(signal_to_close.get('original_quantity') or signal_to_close.get('quantity') or 1.0)
-        # --- END: FIX ---
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
@@ -1133,9 +660,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                     if not sell_order:
                         log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol_to_close}. Trade remains open.", "TRADE_ERROR")
                         return False
-                else:
-                    logger.info(f"ℹ️ [{symbol_to_close}] No remaining quantity to sell for real trade. Closing in DB only.")
-
             except Exception as e:
                 logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
                 return False
@@ -1157,13 +681,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
 
             log_and_notify('info', f"CLOSED: {symbol_to_close} at {closing_price:.4f}. Reason: {reason}. Final P/L: {profit_percentage:.2f}%", "TRADE_CLOSED")
 
-            reason_map = {
-                'take_profit': '🎯 Take Profit',
-                'stop_loss': '🛑 Stop Loss',
-                'manual': '🖐️ Manual Close',
-                'atr_trailing_stop': '🛡️ وقف خسارة متحرك (ATR)',
-                'journey_completed': '🏁 الرحلة اكتملت'
-            }
+            reason_map = {'take_profit': '🎯 Take Profit', 'stop_loss': '🛑 Stop Loss', 'manual': '🖐️ Manual Close', 'atr_trailing_stop': '🛡️ Trailing Stop', 'journey_completed': '🏁 Journey Completed'}
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
             telegram_message = (
@@ -1175,7 +693,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 f"*الربح/الخسارة النهائي:* `{profit_percentage:.2f}%`"
             )
             send_telegram_message(telegram_message)
-
             return True
         except Exception as e:
             logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}")
@@ -1193,28 +710,16 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
 
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
-                # بالنسبة لاستراتيجية الاختراق، الهدف الأول هو 1.5R. الأهداف التالية هي من الإعدادات العامة
-                first_target_price = target_price
-                
-                # بناء أهداف الرحلة
-                initial_targets = [{"price": first_target_price, "achieved": False}]
-                # إضافة أهداف إضافية من الإعدادات العامة إذا كانت أعلى من الهدف الأول
+                initial_targets = [{"price": target_price, "achieved": False}]
                 for level in TARGET_LEVELS:
                     next_target_price = entry_price * (1 + level / 100)
-                    if next_target_price > first_target_price:
-                        # التأكد من عدم إضافة أهداف مكررة
-                        if not any(abs(t['price'] - next_target_price) < 1e-6 for t in initial_targets):
-                            initial_targets.append({"price": next_target_price, "achieved": False})
-                
-                # فرز الأهداف للتأكد من ترتيبها
+                    if next_target_price > target_price and not any(abs(t['price'] - next_target_price) < 1e-6 for t in initial_targets):
+                        initial_targets.append({"price": next_target_price, "achieved": False})
                 initial_targets.sort(key=lambda x: x['price'])
-
                 journey_state = {
-                    "current_target_index": 0,
-                    "targets": initial_targets,
+                    "current_target_index": 0, "targets": initial_targets,
                     "partial_exit_percentages": PARTIAL_EXIT_PERCENTAGES,
-                    "exited_quantities": [],
-                    "is_complete": False
+                    "exited_quantities": [], "is_complete": False
                 }
                 signal_data['target_price'] = journey_state['targets'][0]['price']
 
@@ -1222,41 +727,31 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, journey_state)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
-                signal_data['symbol'],
-                entry_price,
-                signal_data['target_price'],
-                stop_loss,
-                signal_data['strategy_name'],
-                json.dumps(signal_data['signal_details']),
-                signal_data.get('is_real_trade', False),
-                quantity,
-                quantity, 
-                signal_data.get('order_id'),
-                entry_price,
-                json.dumps(journey_state) if journey_state else None
+                signal_data['symbol'], entry_price, signal_data['target_price'], stop_loss,
+                signal_data['strategy_name'], json.dumps(signal_data['signal_details']),
+                signal_data.get('is_real_trade', False), quantity, quantity, 
+                signal_data.get('order_id'), entry_price, json.dumps(journey_state) if journey_state else None
             ))
             saved_signal = cur.fetchone()
             conn.commit()
-            logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات مع حالة الرحلة.")
+            logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
 
             trade_type = "حقيقية" if signal_data.get('is_real_trade') else "تجريبية"
             telegram_message = (
-                f"💡 *توصية شراء {trade_type} جديدة*\n\n"
+                f"💡 *توصية شراء {trade_type} جديدة (ML-Only)*\n\n"
                 f"*العملة:* `{signal_data['symbol']}`\n"
-                f"*الاستراتيجية:* `{signal_data['strategy_name'].replace('_', ' ')}`\n"
                 f"*سعر الدخول:* `{entry_price:.4f}`\n"
                 f"*الهدف الأول:* `{signal_data['target_price']:.4f}`\n"
                 f"*وقف الخسارة:* `{stop_loss:.4f}`\n\n"
                 f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
             )
             send_telegram_message(telegram_message)
-
             return dict(saved_signal)
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}"); conn.rollback(); return None
 
-# ---------------------- System Core Functions ----------------------
-def determine_market_state_enhanced():
+# ---------------------- دوال النظام الأساسية ----------------------
+def determine_market_state():
     global current_market_state, last_market_state_check
     if time.time() - last_market_state_check < 180: return
     logger.info("🧠 [Market State] تحديث حالة السوق...")
@@ -1285,7 +780,7 @@ def determine_market_state_enhanced():
     except Exception as e:
         logger.error(f"❌ [Market State] خطأ: {e}", exc_info=True)
 
-# ---------------------- Flask Web Interface ----------------------
+# ---------------------- واجهة الويب (Flask) ----------------------
 app = Flask(__name__)
 CORS(app)
 
@@ -1295,7 +790,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V10 - نظام متعدد الاستراتيجيات</title>
+    <title>لوحة تحكم التداول V8.0 - نظام تعلم الآلة فقط</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1309,12 +804,8 @@ def get_dashboard_html():
         .tab-btn.active { border-bottom-color: var(--accent-blue); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
         #modal-overlay { transition: opacity 0.3s ease; }
-        .journey-tracker { display: flex; gap: 4px; align-items: center; }
-        .journey-step { flex-grow: 1; height: 8px; background-color: var(--border-color); border-radius: 4px; position: relative; }
+        .journey-step { flex-grow: 1; height: 8px; background-color: var(--border-color); border-radius: 4px; }
         .journey-step.achieved { background-color: var(--accent-green); }
-        .journey-step.pending { background-color: #30363D; }
-        .journey-step-marker { width: 16px; height: 16px; border-radius: 50%; background: var(--border-color); border: 2px solid var(--bg-card); position: absolute; top: 50%; transform: translateY(-50%); right: 0; }
-        .journey-step.achieved .journey-step-marker { background: var(--accent-green); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1331,14 +822,13 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V7.1 (قائمة من ملف)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.0 (ML-Only)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
-        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">التداول الحقيقي</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="trading-status-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div></div>
-            <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">حالة الفلاتر</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="disable-filters-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="disable-filters-toggle" class="sr-only" onchange="toggleFilters()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">فلتر دفتر الطلبات نشط دائمًا</div></div>
         </section>
         <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px"><button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button><button onclick="showTab('stats', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإحصائيات</button><button onclick="showTab('notifications', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الإشعارات</button><button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button></nav></div>
         <main>
@@ -1350,13 +840,7 @@ def get_dashboard_html():
     </div>
 <script>
 let confirmCallback = null;
-const modal = {
-    overlay: document.getElementById('modal-overlay'),
-    title: document.getElementById('modal-title'),
-    body: document.getElementById('modal-body'),
-    confirmBtn: document.getElementById('modal-confirm'),
-    cancelBtn: document.getElementById('modal-cancel'),
-};
+const modal = { overlay: document.getElementById('modal-overlay'), title: document.getElementById('modal-title'), body: document.getElementById('modal-body'), confirmBtn: document.getElementById('modal-confirm'), cancelBtn: document.getElementById('modal-cancel') };
 modal.cancelBtn.onclick = () => { modal.overlay.classList.add('hidden'); };
 modal.confirmBtn.onclick = () => { if(confirmCallback) confirmCallback(); modal.overlay.classList.add('hidden'); };
 
@@ -1376,20 +860,12 @@ function showTab(tabId, el) {
 async function fetchData(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { console.error('Fetch Error:', e); return null; } }
 
 function displayTradeJourney(journeyState, currentPrice) {
-    if (!journeyState || !journeyState.targets) {
-        return '<span>-</span>';
-    }
-    const { targets, current_target_index } = journeyState;
-    let html = '<div class="journey-tracker">';
-    targets.forEach((target, index) => {
+    if (!journeyState || !journeyState.targets) return '<span>-</span>';
+    const { targets } = journeyState;
+    let html = '<div class="flex gap-1 items-center">';
+    targets.forEach(target => {
         const achieved = target.achieved || currentPrice >= target.price;
-        const statusClass = achieved ? 'achieved' : 'pending';
-        const tooltipText = `الهدف ${index + 1}: ${target.price.toFixed(4)}`;
-        html += `<div class="journey-step ${statusClass}" title="${tooltipText}">`;
-        if (index === current_target_index && !achieved) {
-             // Maybe add a marker for current target
-        }
-        html += `</div>`;
+        html += `<div class="journey-step ${achieved ? 'achieved' : ''}" title="الهدف: ${target.price.toFixed(4)}"></div>`;
     });
     html += '</div>';
     return html;
@@ -1415,11 +891,6 @@ function updateMarketStatus() {
         tradeText.textContent = data.is_trading_enabled ? 'مُفعَّل' : 'غير مُفعَّل';
         tradeText.className = `font-bold text-lg ${data.is_trading_enabled ? 'text-accent-green' : 'text-accent-red'}`;
         document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
-
-        const filtersToggle = document.getElementById('disable-filters-toggle'), filtersText = document.getElementById('disable-filters-text');
-        filtersToggle.checked = data.are_filters_disabled;
-        filtersText.textContent = data.are_filters_disabled ? 'معطلة' : 'مفعلة';
-        filtersText.className = `font-bold text-lg ${data.are_filters_disabled ? 'text-accent-red' : 'text-accent-green'}`;
     });
 }
 function updateSignals() {
@@ -1436,7 +907,7 @@ function updateSignals() {
             const currentTarget = s.journey_state ? s.journey_state.targets[s.journey_state.current_target_index].price : s.target_price;
 
             tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5">
-                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace(/_/g, ' ')}</span></td>
+                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary font-mono">${s.signal_details.ML_Confidence}</span></td>
                 <td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td>
                 <td class="p-4">${journeyHTML}</td>
                 <td class="p-4 font-mono text-xs">
@@ -1451,12 +922,8 @@ function updateSignals() {
 }
 function updateStats() {
     fetchData('/api/stats').then(data => {
-        if (!data) return;
+        if (!data || data.error) return;
         const container = document.getElementById('stats-container');
-        if (data.error) {
-            container.innerHTML = `<div class="card p-4 text-center col-span-full text-accent-red">${data.error}</div>`;
-            return;
-        }
         container.innerHTML = `<div class="card p-4 text-center"><h4 class="text-text-secondary">صافي الربح</h4><div class="text-2xl font-bold ${data.net_profit_usdt >= 0 ? 'text-accent-green' : 'text-accent-red'}">${parseFloat(data.net_profit_usdt).toFixed(2)}</div></div><div class="card p-4 text-center"><h4 class="text-text-secondary">معدل الربح</h4><div class="text-2xl font-bold">${parseFloat(data.win_rate).toFixed(2)}%</div></div><div class="card p-4 text-center"><h4 class="text-text-secondary">عامل الربح</h4><div class="text-2xl font-bold">${data.profit_factor === 'Infinity' ? '∞' : parseFloat(data.profit_factor).toFixed(2)}</div></div><div class="card p-4 text-center"><h4 class="text-text-secondary">الصفقات المغلقة</h4><div class="text-2xl font-bold">${data.total_closed_trades}</div></div>`;
     });
 }
@@ -1474,19 +941,10 @@ function updateRejections() {
 }
 function manualClose(signalId, symbol) {
     showConfirmation('تأكيد الإغلاق', `هل أنت متأكد من رغبتك في إغلاق الصفقة لـ ${symbol} يدوياً؟`, () => {
-        fetch(`/api/signals/close/${signalId}`, { method: 'POST' })
-            .then(res => res.json())
-            .then(data => {
-                if(data.success) {
-                    updateSignals();
-                } else {
-                    alert(data.message);
-                }
-            });
+        fetch(`/api/signals/close/${signalId}`, { method: 'POST' }).then(res => res.json()).then(data => { if(data.success) updateSignals(); else alert(data.message); });
     });
 }
 function toggleTrading() { fetch('/api/trading/toggle', { method: 'POST' }).then(() => updateMarketStatus()); }
-function toggleFilters() { fetch('/api/filters/disable/toggle', { method: 'POST' }).then(() => updateMarketStatus()); }
 document.addEventListener('DOMContentLoaded', () => {
     ['MarketStatus', 'Signals', 'Stats', 'Notifications', 'Rejections'].forEach(f => window[`update${f}`]());
     setInterval(updateMarketStatus, 5000); setInterval(updateSignals, 7000); setInterval(updateStats, 60000);
@@ -1502,7 +960,6 @@ def home(): return render_template_string(get_dashboard_html())
 @app.route('/api/market_status')
 def get_market_status():
     with market_state_lock: state_copy = dict(current_market_state)
-    with filters_disabled_lock: is_disabled = are_filters_disabled
     with trading_status_lock: is_enabled = is_trading_enabled
     active_sessions, _, _ = get_session_state()
     usdt_balance = None
@@ -1511,24 +968,19 @@ def get_market_status():
         except: usdt_balance = 'N/A'
     return jsonify({
         "market_state": state_copy,
-        "active_sessions": active_sessions,
+        "active_sessions": [s for s, _, _ in [get_session_state()] if s],
         "usdt_balance": usdt_balance,
-        "is_trading_enabled": is_enabled,
-        "are_filters_disabled": is_disabled
+        "is_trading_enabled": is_enabled
     })
 
 @app.route('/api/stats')
 def get_stats():
-    if not check_db_connection() or not conn:
-        return jsonify({"error": "DB connection failed"}), 500
+    if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT profit_percentage, is_real_trade, original_quantity, entry_price FROM signals WHERE status = 'closed';")
             closed_trades = cur.fetchall()
-
-        if not closed_trades:
-            return jsonify({"net_profit_usdt": 0, "win_rate": 0, "profit_factor": 0, "total_closed_trades": 0})
-
+        if not closed_trades: return jsonify({"net_profit_usdt": 0, "win_rate": 0, "profit_factor": 0, "total_closed_trades": 0})
         total_net_profit_usdt = sum(
             ((float(t['profit_percentage']) - (2 * TRADING_FEE_PERCENT)) / 100) * (float(t['original_quantity']) * float(t['entry_price']) if t.get('is_real_trade') and t.get('original_quantity') and t.get('entry_price') else STATS_TRADE_SIZE_USDT)
             for t in closed_trades
@@ -1538,24 +990,14 @@ def get_stats():
         win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
         total_loss = abs(sum(losses))
         profit_factor = sum(wins) / total_loss if total_loss > 0 else "Infinity"
-
-        return jsonify({
-            "net_profit_usdt": total_net_profit_usdt,
-            "win_rate": win_rate,
-            "profit_factor": profit_factor,
-            "total_closed_trades": len(closed_trades)
-        })
+        return jsonify({"net_profit_usdt": total_net_profit_usdt, "win_rate": win_rate, "profit_factor": profit_factor, "total_closed_trades": len(closed_trades)})
     except Exception as e:
         logger.error(f"❌ [API Stats] Error: {e}", exc_info=True)
-        return jsonify({"error": "Internal server error fetching stats"}), 500
+        return jsonify({"error": "Internal server error"}), 500
 
 @app.route('/api/signals')
 def get_signals():
-    db_ok = check_db_connection()
-    redis_ok = redis_client is not None
-    if not (db_ok and redis_ok):
-        logger.warning(f"[API Signals] Service connection check failed. DB OK: {db_ok}, Redis OK: {redis_ok}")
-        return jsonify({"error": "Service connection failed"}), 500
+    if not (check_db_connection() and redis_client): return jsonify({"error": "Service connection failed"}), 500
     try:
         current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
         with signal_cache_lock: signals_copy = list(open_signals_cache.values())
@@ -1570,13 +1012,11 @@ def get_signals():
 
 @app.route('/api/notifications')
 def get_notifications():
-    with notifications_lock:
-        return jsonify(list(notifications_cache))
+    with notifications_lock: return jsonify(list(notifications_cache))
 
 @app.route('/api/rejection_logs')
 def get_rejection_logs():
-    with rejection_logs_lock:
-        return jsonify(list(rejection_logs_cache))
+    with rejection_logs_lock: return jsonify(list(rejection_logs_cache))
 
 @app.route('/api/trading/toggle', methods=['POST'])
 def toggle_trading_status():
@@ -1587,50 +1027,33 @@ def toggle_trading_status():
         log_and_notify('warning', f"🚨 Real trading status changed to: {status_msg}", "TRADING_STATUS_CHANGE")
         return jsonify({"message": f"Trading status set to {status_msg}"})
 
-@app.route('/api/filters/disable/toggle', methods=['POST'])
-def toggle_disable_filters():
-    global are_filters_disabled
-    with filters_disabled_lock:
-        are_filters_disabled = not are_filters_disabled
-        status_msg = "DISABLED" if are_filters_disabled else "ENABLED"
-        log_and_notify('warning', f"⚙️ Filters status changed to: {status_msg}", "FILTER_STATUS_CHANGE")
-        return jsonify({"message": f"Filters status set to {status_msg}"})
-
 @app.route('/api/signals/close/<int:signal_id>', methods=['POST'])
 def manual_close_trade_endpoint(signal_id):
     if not redis_client or not client: return jsonify({"success": False, "message": "Services not ready"}), 503
-
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
-
-    if not signal_to_close: return jsonify({"success": False, "message": "Signal not found or already closed"}), 404
-
+    if not signal_to_close: return jsonify({"success": False, "message": "Signal not found"}), 404
     try:
         current_price = float(redis_client.hget(REDIS_PRICES_HASH_NAME, signal_to_close['symbol']))
     except (TypeError, ValueError):
         try: current_price = float(client.get_symbol_ticker(symbol=signal_to_close['symbol'])['price'])
-        except Exception as e: return jsonify({"success": False, "message": f"Could not fetch current price: {e}"}), 500
-
+        except Exception as e: return jsonify({"success": False, "message": f"Could not fetch price: {e}"}), 500
     if close_signal(signal_id, current_price, 'manual'):
-        return jsonify({"success": True, "message": f"Signal for {signal_to_close['symbol']} closed successfully."})
+        return jsonify({"success": True, "message": "Signal closed."})
     else:
-        return jsonify({"success": False, "message": "Failed to close signal. Check logs."}), 500
+        return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
-# ---------------------- System Loops ----------------------
+# ---------------------- حلقات النظام ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
-    if df is None or len(df) < 20:
-        return False
+    if df is None or len(df) < 20: return False
     last = df.iloc[-1]
     trend_strong = last.get('adx', 0) > 25
     volume_confirmed = last.get('volume_ratio', 0) > 1.2
     momentum_positive = last.get('close', 0) > last.get('ema_21', 0)
-    should_extend = trend_strong and volume_confirmed and momentum_positive
-    logger.info(f"  -> [Path Analysis] Extend? {should_extend} (Trend: {trend_strong}, Volume: {volume_confirmed}, Momentum: {momentum_positive})")
-    return should_extend
-
+    return trend_strong and volume_confirmed and momentum_positive
 
 def trade_management_loop():
-    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات المدمجة...")
+    logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات...")
     while True:
         try:
             with signal_cache_lock:
@@ -1639,10 +1062,7 @@ def trade_management_loop():
                     continue
                 signals_to_check = list(open_signals_cache.values())
 
-            if not redis_client:
-                time.sleep(5)
-                continue
-
+            if not redis_client: time.sleep(5); continue
             current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
 
             for signal in signals_to_check:
@@ -1650,123 +1070,89 @@ def trade_management_loop():
                 if not current_price_str: continue
 
                 current_price = float(current_price_str)
-                signal_id = signal['id']
-                symbol = signal['symbol']
-                tp = float(signal['target_price'])
-                sl = float(signal['stop_loss'])
-                entry = float(signal['entry_price'])
+                signal_id, symbol, tp, sl, entry = signal['id'], signal['symbol'], float(signal['target_price']), float(signal['stop_loss']), float(signal['entry_price'])
 
+                # Dynamic Journey Management
                 if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
                     journey_state = signal['journey_state']
                     if not journey_state.get('is_complete', False) and current_price >= tp:
-                        
                         current_target_index = journey_state['current_target_index']
-                        logger.info(f"🎉 [{symbol}] الهدف رقم {current_target_index + 1} تحقق عند سعر {current_price:.4f}")
-
+                        logger.info(f"🎉 [{symbol}] الهدف رقم {current_target_index + 1} تحقق عند {current_price:.4f}")
                         journey_state['targets'][current_target_index]['achieved'] = True
                         
                         if signal.get('is_real_trade'):
                             original_quantity = Decimal(str(signal.get('original_quantity', '0')))
                             exit_percentage = Decimal(str(journey_state['partial_exit_percentages'][current_target_index]))
                             exit_quantity = original_quantity * exit_percentage
-                            
                             adjusted_exit_quantity = adjust_quantity_to_lot_size(symbol, float(exit_quantity))
-
                             if adjusted_exit_quantity and adjusted_exit_quantity > 0:
-                                sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_exit_quantity)
-                                if sell_order:
-                                    remaining_quantity = Decimal(str(signal['quantity'])) - adjusted_exit_quantity
-                                    signal['quantity'] = float(remaining_quantity)
-                                    journey_state['exited_quantities'].append(float(adjusted_exit_quantity))
-                                    log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
-                                else:
-                                    log_and_notify('error', f"❌ [{symbol}] فشل تنفيذ أمر الخروج الجزئي.", "TRADE_ERROR")
-                        
+                                if place_order(symbol, Client.SIDE_SELL, adjusted_exit_quantity):
+                                    signal['quantity'] = float(Decimal(str(signal['quantity'])) - adjusted_exit_quantity)
+                                    log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} at {current_price:.4f}", "PARTIAL_EXIT")
+
                         if current_target_index < len(journey_state['targets']) - 1:
-                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
+                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 25)
                             df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
-                            
                             if analyze_path_for_extension(df_with_features):
                                 journey_state['current_target_index'] += 1
-                                next_target_index = journey_state['current_target_index']
-                                next_target_price = journey_state['targets'][next_target_index]['price']
-                                
-                                new_sl = signal['target_price']
-                                signal['stop_loss'] = new_sl
-                                signal['target_price'] = next_target_price
-                                
-                                logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {next_target_price:.4f}, وقف الخسارة الجديد: {new_sl:.4f}")
-                                log_and_notify('info', f"🎯 [{symbol}] تمديد الهدف إلى {next_target_price:.4f}", "TARGET_EXTEND")
+                                signal['stop_loss'] = signal['target_price'] # Move SL to previous TP
+                                signal['target_price'] = journey_state['targets'][journey_state['current_target_index']]['price']
+                                logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {signal['target_price']:.4f}, وقف الخسارة الجديد: {signal['stop_loss']:.4f}")
                             else:
-                                logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد. إغلاق الصفقة بالكامل.")
+                                logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد. إغلاق الصفقة.")
                                 journey_state['is_complete'] = True
                                 close_signal(signal_id, current_price, 'journey_completed')
                                 continue
                         else:
-                            logger.info(f"🏁 [{symbol}] تم تحقيق جميع الأهداف. اكتملت الرحلة بنجاح!")
+                            logger.info(f"🏁 [{symbol}] تم تحقيق جميع الأهداف. اكتملت الرحلة!")
                             journey_state['is_complete'] = True
                             close_signal(signal_id, current_price, 'journey_completed')
                             continue
-
-                        with signal_cache_lock:
-                            open_signals_cache[symbol] = signal
-                        try:
-                            if check_db_connection():
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
-                                                (json.dumps(journey_state), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
-                                conn.commit()
-                        except Exception as e:
-                            logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
                         
-                        tp = float(signal['target_price'])
-                        sl = float(signal['stop_loss'])
-
+                        # Update DB and cache
+                        with signal_cache_lock: open_signals_cache[symbol] = signal
+                        if check_db_connection():
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
+                                            (json.dumps(journey_state), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
+                            conn.commit()
+                
+                # Stop Loss Check
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, reason)
                     continue
 
+                # Trailing Stop Update
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
                     signal['current_peak_price'] = new_peak
                     if USE_ATR_TRAILING_STOP:
                         try:
-                            df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 3)
+                            df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 20)
                             if df_atr is not None and len(df_atr) > ATR_TS_PERIOD:
-                                high_low = df_atr['high'] - df_atr['low']
-                                high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
-                                low_close_prev = (df_atr['low'] - df_atr['close'].shift()).abs()
-                                tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)
-                                latest_atr = tr.ewm(span=ATR_TS_PERIOD, adjust=False).mean().iloc[-1]
-
+                                df_atr_featured = calculate_all_features(df_atr, None)
+                                latest_atr = df_atr_featured['atr'].iloc[-1]
                                 if latest_atr > 0:
-                                    new_trailing_stop_price = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
-                                    if new_trailing_stop_price > sl:
-                                        logger.info(f"📈 [ATR TRAILING SL] {symbol} SL moved up to {new_trailing_stop_price:.4f}")
-                                        signal['stop_loss'] = new_trailing_stop_price
-                        except Exception as e:
-                            logger.error(f"❌ [{symbol}] Error during ATR Trailing Stop calculation: {e}")
-
-                    with signal_cache_lock:
-                        open_signals_cache[symbol] = signal
-                    try:
-                        if check_db_connection():
-                            with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), signal['stop_loss'], signal_id))
-                            conn.commit()
-                    except Exception as e:
-                        logger.error(f"DB error updating peak/sl price for {symbol}: {e}"); conn.rollback()
+                                    new_trailing_stop = new_peak - (latest_atr * ATR_TS_MULTIPLIER)
+                                    if new_trailing_stop > sl:
+                                        signal['stop_loss'] = new_trailing_stop
+                        except Exception: pass # Ignore errors in TS calculation
+                    
+                    with signal_cache_lock: open_signals_cache[symbol] = signal
+                    if check_db_connection():
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (new_peak, signal['stop_loss'], signal_id))
+                        conn.commit()
 
             time.sleep(2)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
             time.sleep(10)
 
-def main_loop_enhanced():
-    global technical_signals_cache
+def main_loop():
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
     time.sleep(15)
     
@@ -1779,92 +1165,31 @@ def main_loop_enhanced():
     while True:
         try:
             logger.info("🔄 [Main Loop] بدء دورة مسح جديدة...")
-            determine_market_state_enhanced()
-            with market_state_lock:
-                market_regime = current_market_state.get("overall_regime", "UNCERTAIN")
-
+            determine_market_state()
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
 
             for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
-                logger.info(f"🔄 Processing batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}/{total_batches} ({len(batch)} symbols)...")
+                logger.info(f"🔄 Processing batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}/{total_batches}...")
 
                 for symbol in batch:
                     try:
-                        logger.info(f"---===[ 🔍 تحليل {symbol} | حالة السوق: {market_regime} ]===---")
+                        logger.info(f"---===[ 🔍 تحليل {symbol} ]===---")
 
                         with signal_cache_lock:
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or df_15m.empty:
+                        if df_15m is None or df_15m.empty or len(df_15m) < 50:
                             continue
                         
-                        df_with_indicators = calculate_all_features(df_15m, btc_data)
-                        df_with_indicators.name = symbol
-                        if df_with_indicators is None or df_with_indicators.empty or len(df_with_indicators) < 50:
-                            continue
-                        
-                        strategy_signal_found = False
-                        strategy_name = ""
-                        rejection_key = "Strategy Signal Not Found"
-                        details = {}
-                        
-                        # --- منطق اختيار الاستراتيجية المحدث ---
-                        # الخطوة 1: فحص الاستراتيجية الأساسية (BB+Stoch) دائماً وأولاً
-                        logger.info(f"  -> [مرحلة 1أ] فحص الاستراتيجية الأساسية (BB+Stoch)...")
-                        strategy_signal_found, rejection_key, details = check_bb_stoch_reversal_strategy(df_with_indicators)
-                        if strategy_signal_found: strategy_name = rejection_key
-
-                        # الخطوة 2: إذا لم تنجح الاستراتيجية الأساسية، يتم فحص الاستراتيجيات الثانوية
-                        if not strategy_signal_found:
-                            logger.info(f"  -> [مرحلة 1ب] الاستراتيجية الأساسية فشلت. فحص الاستراتيجيات الثانوية...")
-                            last_adx = df_with_indicators.iloc[-1].get('adx', 0)
-
-                            # فحص استراتيجيات الاتجاه الصاعد
-                            if market_regime in ["UPTREND", "STRONG_UPTREND"]:
-                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الاتجاه الصاعد...")
-                                # الاستراتيجية الجديدة: الاختراق
-                                strategy_signal_found, rejection_key, details = check_ema_breakout_strategy(df_with_indicators)
-                                if strategy_signal_found:
-                                    strategy_name = rejection_key
-                                else: # إذا فشلت، جرب استراتيجية التصحيح
-                                    strategy_signal_found, rejection_key, details = check_trend_continuation_strategy(df_with_indicators)
-                                    if strategy_signal_found: strategy_name = rejection_key
-                            
-                            # فحص استراتيجيات السوق العرضي
-                            elif 15 <= last_adx <= 25 and not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1ب] ADX في نطاق (15-25). تفعيل استراتيجية الارتداد من البولينجر...")
-                                strategy_signal_found, rejection_key, details = check_bb_reversion_strategy(df_with_indicators)
-                                if strategy_signal_found: strategy_name = rejection_key
-
-                            # فحص استراتيجيات الانعكاس الأخرى
-                            elif market_regime in ["DOWNTREND", "RANGING", "UNCERTAIN"] or last_adx < 15 and not strategy_signal_found:
-                                logger.info(f"  -> [مرحلة 1ب] تفعيل استراتيجيات الانعكاس الأخرى...")
-                                strategy_signal_found, rejection_key, details = check_reversal_strategy(df_with_indicators)
-                                if strategy_signal_found:
-                                    strategy_name = rejection_key
-                                else:
-                                    logger.info(f"  -> [مرحلة 1ب] استراتيجية الانفراج فشلت، تجربة استراتيجية BB+MACD...")
-                                    strategy_signal_found, rejection_key, details = check_bb_macd_reversal_strategy(df_with_indicators)
-                                    if strategy_signal_found: strategy_name = rejection_key
-                            else:
-                                if not strategy_signal_found:
-                                    rejection_key = "Invalid Market Regime for Any Strategy"
-                                    details = {"regime": market_regime, "adx": f"{last_adx:.2f}"}
-
-                        if not strategy_signal_found:
-                            log_rejection(symbol, rejection_key, details)
-                            continue
-                        
-                        logger.info(f"  -> [مرحلة 1] ✅ نجاح! إشارة فنية مكتشفة (استراتيجية: {strategy_name}).")
-                        
-                        logger.info(f"  -> [مرحلة 2] الانتقال إلى التحقق من النموذج الآلي...")
-                        strategy_instance = EnhancedTradingStrategy(symbol)
-                        if not strategy_instance.load_model():
+                        # --- المنطق المبسط: الاعتماد على النموذج فقط ---
+                        logger.info(f"  -> [مرحلة 1] الانتقال إلى التحقق من النموذج الآلي...")
+                        model_handler = MachineLearningModelHandler(symbol)
+                        if not model_handler.load_model():
                             log_rejection(symbol, "ML Model Load Failed")
                             continue
 
@@ -1872,64 +1197,48 @@ def main_loop_enhanced():
                         if df_4h is None or df_4h.empty:
                             continue
 
-                        df_features_for_model = strategy_instance.get_features_for_model(df_15m, df_4h, btc_data)
-                        if df_features_for_model is None or df_features_for_model.empty:
-                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
+                        df_features = model_handler.get_features_for_model(df_15m, df_4h, btc_data)
+                        if df_features is None or df_features.empty:
+                            log_rejection(symbol, "Feature Preparation Failed")
                             continue
                         
-                        ml_result = strategy_instance.generate_prediction_result(df_features_for_model)
-
+                        ml_result = model_handler.generate_prediction_result(df_features)
                         if not ml_result:
-                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Prediction generation failed"})
+                            log_rejection(symbol, "Prediction Generation Failed")
                             continue
 
                         is_buy_signal = ml_result['prediction'] == 1
                         is_confident = ml_result['confidence'] >= BUY_CONFIDENCE_THRESHOLD
 
                         if not is_buy_signal or not is_confident:
+                            reason = "Not a Buy Signal" if not is_buy_signal else "Confidence Too Low"
                             log_rejection(symbol, "ML Model Rejected Signal", {
                                 "prediction": ml_result['prediction'],
                                 "confidence": f"{ml_result['confidence']:.2%}",
-                                "reason": "Not a buy signal" if not is_buy_signal else "Confidence too low"
+                                "reason": reason
                             })
                             continue
                         
-                        logger.info(f"  -> [مرحلة 2] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
-
-                        logger.info(f"  -> [مرحلة 3] الانتقال إلى التحقق من دفتر الطلبات...")
+                        logger.info(f"  -> [مرحلة 1] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
+                        logger.info(f"  -> [مرحلة 2] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
+                        
                         try:
                             entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e:
                             logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
                             continue
 
-                        if not passes_final_order_book_check(symbol, entry_price):
-                            continue
-                        
-                        logger.info(f"  -> [مرحلة 3] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
-
-                        logger.info(f"  -> [مرحلة 4] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
-                        
-                        # تحديد أي دالة TP/SL سيتم استخدامها بناءً على الاستراتيجية
-                        if strategy_name == "EMA_Breakout_Strategy":
-                            tp_sl_data = calculate_ema_breakout_tp_sl(symbol, entry_price, df_with_indicators)
-                        else:
-                            tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
-                        
+                        tp_sl_data = calculate_tp_sl(symbol, entry_price, df_features)
                         if not tp_sl_data: continue
 
                         signal_details = {
                             'ML_Confidence': f"{ml_result['confidence']:.2%}",
-                            'Pattern': strategy_name,
-                            'Signal_Type': 'Multi-Strategy System',
                             **tp_sl_data
                         }
 
                         new_signal = {
-                            'symbol': symbol,
-                            'strategy_name': strategy_name,
-                            'signal_details': signal_details,
-                            'entry_price': entry_price,
+                            'symbol': symbol, 'strategy_name': 'ML_Signal',
+                            'signal_details': signal_details, 'entry_price': entry_price,
                             **tp_sl_data
                         }
 
@@ -1940,10 +1249,8 @@ def main_loop_enhanced():
                                 order_result = place_order(symbol, Client.SIDE_BUY, quantity)
                                 if order_result:
                                     new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
-                                else:
-                                    continue
-                            else:
-                                continue
+                                else: continue
+                            else: continue
                         
                         saved_signal = insert_signal_into_db(new_signal)
                         if saved_signal:
@@ -1956,20 +1263,17 @@ def main_loop_enhanced():
                     finally:
                         time.sleep(0.5)
 
-                logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches and collecting garbage.")
+                logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches...")
                 ml_models_cache.clear()
                 gc.collect()
-                logger.info("✅ Memory cleanup for batch complete.")
 
             logger.info("✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار 60 ثانية...")
             time.sleep(60)
 
         except (KeyboardInterrupt, SystemExit):
-            log_and_notify("info", "إيقاف البوت.", "SYSTEM")
-            break
+            log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
         except Exception as main_err:
-            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM")
-            time.sleep(120)
+            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
 
 def price_update_loop():
     if not redis_client: return
@@ -1993,17 +1297,17 @@ def initialize_bot_services():
         load_open_signals_to_cache()
         load_notifications_to_cache()
         validated_symbols_to_scan = get_validated_symbols()
-        Thread(target=main_loop_enhanced, daemon=True).start()
+        Thread(target=main_loop, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V7.1 - قائمة من ملف)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.0 - ML Only)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
-# ---------------------- Entry Point ----------------------
+# ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V7.1 - قائمة من ملف) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.0 - ML Only) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
