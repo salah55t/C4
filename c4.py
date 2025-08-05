@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V8.1 (ML-Only with UI Fix)
-# تم التحديث بواسطة Gemini لإصلاح واجهة المستخدم وجعلها متجاوبة بالكامل.
-# --- التغييرات الرئيسية (V8.1):
-# 1. إعادة كتابة HTML و CSS في `get_dashboard_html` ليكون متجاوبًا (Mobile-First).
-# 2. إصلاح تخطيط الشبكة للبطاقات العلوية وجعل جدول الصفقات قابل للتمرير الأفقي.
-# 3. إصلاح خطأ منطقي في دالة `get_market_status` لمنع عرض "..." في الجلسات النشطة.
-# 4. إعادة إضافة دالة `get_session_state` المفقودة.
+# ملف c4.py - نسخة V8.2 (ML-Only with DB Type Fix)
+# تم التحديث بواسطة Gemini لإصلاح خطأ توافق أنواع البيانات مع قاعدة البيانات.
+# --- التغييرات الرئيسية (V8.2):
+# 1. إصلاح خطأ "can't adapt type 'numpy.float32'" عن طريق تحويل جميع القيم الرقمية إلى `float` قبل تحديث قاعدة البيانات.
+# 2. هذا الإصلاح يحل مشكلة توقف تحديث الصفقات في لوحة التحكم.
+# 3. تحديث عنوان لوحة التحكم ورسالة بدء التشغيل.
 
 import time
 import os
@@ -481,7 +480,6 @@ class MachineLearningModelHandler:
         try:
             df_featured = calculate_all_features(df_15m, btc_df)
             
-            # Add 4h features
             delta_4h = df_4h['close'].diff()
             gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
             loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -493,7 +491,6 @@ class MachineLearningModelHandler:
             df_featured = df_featured.join(mtf_features)
             df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
             
-            # Ensure all required columns exist
             for col in self.feature_names:
                 if col not in df_featured.columns:
                     df_featured[col] = 0.0
@@ -802,7 +799,7 @@ def get_dashboard_html():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.1 - نظام تعلم الآلة</title>
+    <title>لوحة تحكم التداول V8.2 - نظام تعلم الآلة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -835,7 +832,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-col sm:flex-row justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold text-center sm:text-right"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.1 (ML-Only)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold text-center sm:text-right"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.2 (DB Fix)</span></h1>
             <div id="trend-lights-container" class="flex items-center justify-center flex-wrap gap-x-4 sm:gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         
@@ -1096,7 +1093,6 @@ def trade_management_loop():
                 current_price = float(current_price_str)
                 signal_id, symbol, tp, sl, entry = signal['id'], signal['symbol'], float(signal['target_price']), float(signal['stop_loss']), float(signal['entry_price'])
 
-                # Dynamic Journey Management
                 if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
                     journey_state = signal['journey_state']
                     if not journey_state.get('is_complete', False) and current_price >= tp:
@@ -1120,7 +1116,7 @@ def trade_management_loop():
                             df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
                             if analyze_path_for_extension(df_with_features):
                                 journey_state['current_target_index'] += 1
-                                signal['stop_loss'] = signal['target_price'] # Move SL to previous TP
+                                signal['stop_loss'] = signal['target_price']
                                 signal['target_price'] = journey_state['targets'][journey_state['current_target_index']]['price']
                                 logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {signal['target_price']:.4f}, وقف الخسارة الجديد: {signal['stop_loss']:.4f}")
                             else:
@@ -1138,20 +1134,19 @@ def trade_management_loop():
                         if check_db_connection() and conn:
                             try:
                                 with conn.cursor() as cur:
+                                    # FIX: Cast all numeric values to float for DB compatibility
                                     cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s", 
-                                                (json.dumps(journey_state), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
+                                                (json.dumps(journey_state), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity')), signal_id))
                                 conn.commit()
                             except Exception as db_err:
                                 logger.error(f"❌ [DB Update] فشل تحديث حالة الرحلة: {db_err}"); conn.rollback()
                 
-                # Stop Loss Check
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     logger.info(f"🛑 [{reason.upper()} HIT] {symbol} at {current_price}")
                     close_signal(signal_id, current_price, reason)
                     continue
 
-                # Trailing Stop Update
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1172,7 +1167,9 @@ def trade_management_loop():
                     if check_db_connection() and conn:
                         try:
                             with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (new_peak, signal['stop_loss'], signal_id))
+                                # FIX: Cast numpy.float32 to standard Python float
+                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", 
+                                            (float(new_peak), float(signal['stop_loss']), signal_id))
                             conn.commit()
                         except Exception as db_err:
                             logger.error(f"❌ [DB Update] فشل تحديث وقف الخسارة: {db_err}"); conn.rollback()
@@ -1330,13 +1327,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.1 - ML Only / UI Fix)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.2 - DB Fix)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الانطلاق ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.1 - ML Only / UI Fix) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.2 - DB Fix) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
