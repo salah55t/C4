@@ -63,7 +63,7 @@ BTC_SYMBOL = 'BTCUSDT'
 
 # --- TTM Model & Training Parameters (MEMORY FIXES APPLIED) ---
 SEQUENCE_LENGTH: int = 24 # MODIFIED: Reduced from 32 to 24
-N_FEATURES: int = 0 
+N_FEATURES: int = 0
 D_MODEL: int = 48 # MODIFIED: Reduced from 64 to 48
 N_BLOCKS: int = 3 # MODIFIED: Reduced from 4 to 3
 LEARNING_RATE: float = 0.001
@@ -237,7 +237,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         klines = client.get_historical_klines(symbol, interval, start_str)
         if not klines: return None
         
-        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 
+        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
                 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
         
@@ -245,7 +245,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df = df[required_cols]
         
         numeric_cols = {
-            'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 
+            'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float',
             'volume': 'float', 'quote_volume': 'float', 'taker_buy_base': 'float'
         }
         df = df.astype(numeric_cols)
@@ -357,25 +357,59 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
 
 # --- دوال إعداد البيانات والتدريب (Data Prep & Training Functions) ---
 
+# =========================================================================================
+# ==================== الدالة المُحسَّنة (Optimized Function) ==============================
+# =========================================================================================
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
-    labels = pd.Series(0, index=prices.index)
-    for i in tqdm(range(len(prices) - MAX_HOLD_PERIOD), desc="Labeling", leave=False):
-        entry_price = prices.iloc[i]
-        current_atr = atr.iloc[i]
-        if pd.isna(current_atr) or current_atr == 0: continue
-        upper_barrier = entry_price + (current_atr * TP_ATR_MULTIPLIER)
-        lower_barrier = entry_price - (current_atr * SL_ATR_MULTIPLIER)
-        for j in range(1, MAX_HOLD_PERIOD + 1):
-            if i + j >= len(prices): break
-            if prices.iloc[i + j] >= upper_barrier:
-                labels.iloc[i] = 1; break
-            if prices.iloc[i + j] <= lower_barrier:
-                labels.iloc[i] = -1; break
+    """
+    Generates labels using the triple-barrier method in a vectorized way.
+    This is significantly faster and more memory-efficient than the original loop-based approach.
+    
+    Returns:
+        pd.Series: Labels for each timestamp: 1 for TP, -1 for SL, 0 for timeout.
+    """
+    logger.info("ℹ️ [Labeling] Starting vectorized triple-barrier labeling...")
+    
+    # 1. Calculate barriers for all points at once
+    upper_barrier = prices + (atr * TP_ATR_MULTIPLIER)
+    lower_barrier = prices - (atr * SL_ATR_MULTIPLIER)
+    
+    # 2. Create rolling windows to look into the future
+    # We shift by -1 to start looking from the next candle.
+    # The window size is MAX_HOLD_PERIOD.
+    # We reverse the series to find the *first* time the price crosses a barrier in the future.
+    future_highs = prices[::-1].rolling(window=MAX_HOLD_PERIOD, min_periods=1).max()[::-1].shift(-1)
+    future_lows = prices[::-1].rolling(window=MAX_HOLD_PERIOD, min_periods=1).min()[::-1].shift(-1)
+
+    # 3. Determine if barriers are hit
+    # Check if the highest future price in the window crosses the upper barrier
+    tp_hit = future_highs >= upper_barrier
+    # Check if the lowest future price in the window crosses the lower barrier
+    sl_hit = future_lows <= lower_barrier
+
+    # 4. Create labels based on which barrier was hit
+    # We use np.select for conditional labeling. It's fast and readable.
+    conditions = [
+        tp_hit & ~sl_hit,  # Take profit hit, but stop loss was not
+        sl_hit & ~tp_hit,  # Stop loss hit, but take profit was not
+        tp_hit & sl_hit,   # Both were hit (this case needs a tie-breaker, but for now we prioritize SL)
+    ]
+    choices = [
+        1,  # Label for TP
+       -1,  # Label for SL
+       -1,  # Prioritize SL in case of a tie
+    ]
+    
+    # Default is 0 (timeout)
+    labels = pd.Series(np.select(conditions, choices, default=0), index=prices.index)
+    
+    logger.info("✅ [Labeling] Vectorized triple-barrier labeling completed.")
     return labels
 
 def create_sequences(X, y, sequence_length):
     xs, ys = [], []
-    for i in range(len(X) - sequence_length):
+    # Use tqdm for progress visualization, it's helpful
+    for i in tqdm(range(len(X) - sequence_length), desc="Creating Sequences", leave=False, ncols=80):
         xs.append(X[i:(i + sequence_length)])
         ys.append(y[i + sequence_length])
     return np.array(xs), np.array(ys)
@@ -508,8 +542,8 @@ def save_ml_model_to_db(model_bundle: Dict[str, Any], model_name: str, metrics: 
         metrics_json = json.dumps(metrics)
         with conn.cursor() as db_cur:
             db_cur.execute("""
-                INSERT INTO ml_models (model_name, model_data, trained_at, metrics) 
-                VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET 
+                INSERT INTO ml_models (model_name, model_data, trained_at, metrics)
+                VALUES (%s, %s, NOW(), %s) ON CONFLICT (model_name) DO UPDATE SET
                 model_data = EXCLUDED.model_data, trained_at = NOW(), metrics = EXCLUDED.metrics;
             """, (model_name, model_binary, metrics_json))
         conn.commit()
@@ -571,8 +605,8 @@ def run_training_job():
             
             if model_state_dict and final_scaler and model_metrics.get('precision_class_2', 0) > 0.35:
                 model_bundle = {
-                    'model_state_dict': model_state_dict, 
-                    'scaler': final_scaler, 
+                    'model_state_dict': model_state_dict,
+                    'scaler': final_scaler,
                     'feature_names': feature_names,
                     'sequence_length': SEQUENCE_LENGTH,
                     'n_features': N_FEATURES,
