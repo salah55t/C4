@@ -1,8 +1,7 @@
-# ملف c4.py - نسخة V8.5.1
-# تم التحديث لإصلاح خطأ في قاعدة البيانات عند تحديث وقف الخسارة المتحرك.
-# --- التغييرات الرئيسية (V8.5.1):
-# 1. إصلاح خطأ "schema 'np' does not exist" عن طريق تحويل قيم وقف الخسارة والهدف إلى float قبل إرسالها إلى قاعدة البيانات.
-# 2. تطبيق الإصلاح في دالة trade_management_loop عند تحديث حالة الرحلة وعند تحديث وقف الخسارة المتحرك.
+# ملف c4.py - نسخة V8.5.2
+# تم التحديث لإصلاح خطأ NameError المتعلق بالـ logger.
+# --- التغييرات الرئيسية (V8.5.2):
+# 1. تصحيح استدعاء getLogger ليصبح logging.getLogger.
 
 import time
 import os
@@ -45,7 +44,8 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = getLogger('CryptoBotV8_AdvCandles')
+# FIX: Corrected getLogger to logging.getLogger
+logger = logging.getLogger('CryptoBotV8_AdvCandles')
 
 # --- FIX: Custom JSON encoder for NumPy data types ---
 class NpEncoder(json.JSONEncoder):
@@ -1587,7 +1587,6 @@ def trade_management_loop():
                         try:
                             if check_db_connection():
                                 with conn.cursor() as cur:
-                                    # FIX: Cast values to float before DB update
                                     cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s",
                                                 (json.dumps(journey_state, cls=NpEncoder), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity', 0)), signal_id))
                                 conn.commit()
@@ -1624,7 +1623,6 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
-                                # FIX: Cast values to float before DB update
                                 cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), float(signal['stop_loss']), signal_id))
                             conn.commit()
                     except Exception as e:
