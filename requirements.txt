@@ -17,7 +17,6 @@ redis
 optuna
 tenacity
 scipy
-torch
 
 
 
