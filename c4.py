@@ -1,13 +1,11 @@
-# ملف c4.py - نسخة V8.3
-# تم التحديث لجعل الفلاتر الرئيسية قابلة للتفعيل/الإلغاء من لوحة التحكم.
-# --- التغييرات الرئيسية (V8.3):
-# 1. إضافة متغيرات عامة (USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER) مع أقفالها.
-# 2. تحديث لوحة التحكم (HTML/JS) لإضافة مفاتيح تحكم لهذه الفلاتر في قسم الإعدادات.
-# 3. تحديث واجهة API الخلفية (/api/market_status, /api/settings/update) لقراءة وحفظ حالة الفلاتر.
-# 4. جعل منطق الفلترة في الحلقة الرئيسية (main_loop_enhanced) شرطيًا بناءً على حالة هذه المتغيرات.
-# --- الإصلاح (V8.3.1):
-# 1. إضافة NpEncoder مخصص للتعامل مع أنواع بيانات NumPy (مثل float32) عند تحويلها إلى JSON.
-# 2. تحديث insert_signal_into_db و log_rejection لاستخدام NpEncoder، مما يحل خطأ "not JSON serializable".
+# ملف c4.py - نسخة V8.4
+# تم التحديث لإضافة استراتيجية Bollinger Band + Stochastic RSI قابلة للتفعيل.
+# --- التغييرات الرئيسية (V8.4):
+# 1. إضافة متغير عام جديد (USE_BB_STOCH_STRATEGY) مع قفل للتحكم في الاستراتيجية الجديدة.
+# 2. تحديث لوحة التحكم (HTML/JS) لإضافة مفتاح تحكم لهذه الاستراتيجية.
+# 3. تحديث واجهة API الخلفية (/api/market_status, /api/settings/update) لقراءة وحفظ حالة الاستراتيجية.
+# 4. إضافة دالة (check_bb_stoch_strategy) لتنفيذ منطق الاستراتيجية.
+# 5. دمج الاستراتيجية الجديدة في الحلقة الرئيسية (main_loop_enhanced) ليتم تشغيلها بشكل مستقل عن نموذج ML.
 
 import time
 import os
@@ -98,16 +96,19 @@ order_book_ratio_lock = Lock()
 VOLUME_FILTER_MULTIPLIER: float = 1.1
 volume_filter_lock = Lock()
 
-# --- إعدادات الفلاتر القابلة للتفعيل/الإلغاء ---
-USE_CANDLESTICK_FILTER: bool = True  # فلتر نمط الشموع الانعكاسية
+# --- إعدادات الفلاتر والاستراتيجيات القابلة للتفعيل/الإلغاء ---
+USE_CANDLESTICK_FILTER: bool = True
 candle_filter_lock = Lock()
 
-USE_VOLUME_FILTER: bool = True       # فلتر حجم التداول
+USE_VOLUME_FILTER: bool = True
 # (Note: volume_filter_lock is already defined above, so we reuse it)
 
-USE_ORDER_BOOK_FILTER: bool = True   # فلتر دفتر الطلبات
-# (Note: order_book_ratio_lock can be conceptually linked, but a new lock is cleaner)
+USE_ORDER_BOOK_FILTER: bool = True
 order_book_filter_enable_lock = Lock()
+
+# --- NEW: BB + Stochastic Strategy Toggle ---
+USE_BB_STOCH_STRATEGY: bool = True
+bb_stoch_strategy_lock = Lock()
 
 
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
@@ -181,6 +182,7 @@ REJECTION_REASONS_AR = {
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
+    "BB_Stoch Strategy Conditions Not Met": "شروط استراتيجية BB+Stoch لم تتحقق"
 }
 
 
@@ -586,6 +588,34 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Loading] فشل تحميل الإشعارات: {e}")
 
 # ---------------------- Trading Logic & Filters ----------------------
+
+# --- NEW: BB + Stochastic RSI Strategy Logic ---
+def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
+    """
+    Checks for a buy signal based on Bollinger Bands and Stochastic RSI.
+    Signal: Price touches lower BB + Stochastic K crosses above D below 30.
+    """
+    if len(df) < 2:
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # Condition 1: Price touches or goes below the lower Bollinger Band
+    price_touch_bb = last['low'] <= last['bb_lower']
+
+    # Condition 2: Stochastic K crosses above D
+    stoch_cross_up = prev['stoch_rsi_k'] < prev['stoch_rsi_d'] and last['stoch_rsi_k'] > last['stoch_rsi_d']
+
+    # Condition 3: Crossover happens in the oversold area (below 30)
+    oversold_area = last['stoch_rsi_k'] < 30 and last['stoch_rsi_d'] < 30
+
+    if price_touch_bb and stoch_cross_up and oversold_area:
+        logger.info(f"  -> [{df.name}] ✅ تم العثور على إشارة استراتيجية BB+Stoch.")
+        return True
+
+    return False
+
 class EnhancedTradingStrategy:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -1113,7 +1143,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.3 - فلاتر ديناميكية</title>
+    <title>لوحة تحكم التداول V8.4 - استراتيجيات متعددة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1152,7 +1182,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.3 (Dynamic Filters)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.4 (Multi-Strategy)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -1175,7 +1205,7 @@ def get_dashboard_html():
                     <h4 class="text-lg font-bold mb-4 text-text-secondary">الإعدادات الرقمية</h4>
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                         <div>
-                            <label for="ml-confidence" class="block text-sm font-medium text-text-secondary mb-1">نسبة ثقة النموذج</label>
+                            <label for="ml-confidence" class="block text-sm font-medium text-text-secondary mb-1">نسبة ثقة النموذج (ML)</label>
                             <input type="number" id="ml-confidence" name="ml_confidence" step="0.01" class="input-field w-full">
                         </div>
                         <div>
@@ -1194,8 +1224,8 @@ def get_dashboard_html():
 
                     <hr class="border-border-color my-6">
 
-                    <h4 class="text-lg font-bold mb-4 text-text-secondary">تفعيل/إلغاء الفلاتر</h4>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <h4 class="text-lg font-bold mb-4 text-text-secondary">تفعيل/إلغاء الفلاتر والاستراتيجيات</h4>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg">
                             <span class="font-semibold">فلتر نمط الشموع</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="candle-filter-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
@@ -1207,6 +1237,10 @@ def get_dashboard_html():
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg">
                             <span class="font-semibold">فلتر دفتر الطلبات</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="ob-filter-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg border-l-4 border-accent-blue">
+                            <span class="font-semibold">استراتيجية BB+Stoch</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="bb-stoch-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
                         </div>
                     </div>
 
@@ -1297,6 +1331,7 @@ function updateMarketStatus() {
             document.getElementById('candle-filter-toggle').checked = data.settings.use_candle_filter;
             document.getElementById('volume-filter-toggle').checked = data.settings.use_volume_filter;
             document.getElementById('ob-filter-toggle').checked = data.settings.use_order_book_filter;
+            document.getElementById('bb-stoch-strategy-toggle').checked = data.settings.use_bb_stoch_strategy;
         }
     });
 }
@@ -1373,7 +1408,8 @@ function saveSettings() {
         vol_multiplier: parseFloat(document.getElementById('vol-multiplier').value),
         use_candle_filter: document.getElementById('candle-filter-toggle').checked,
         use_volume_filter: document.getElementById('volume-filter-toggle').checked,
-        use_order_book_filter: document.getElementById('ob-filter-toggle').checked
+        use_order_book_filter: document.getElementById('ob-filter-toggle').checked,
+        use_bb_stoch_strategy: document.getElementById('bb-stoch-strategy-toggle').checked
     };
     const feedbackEl = document.getElementById('settings-feedback');
     feedbackEl.textContent = 'جاري الحفظ...';
@@ -1427,8 +1463,9 @@ def get_market_status():
     with order_book_ratio_lock: ob_ratio = ORDER_BOOK_MIN_BID_ASK_RATIO
     with volume_filter_lock: vol_mult = VOLUME_FILTER_MULTIPLIER
     with candle_filter_lock: use_candle = USE_CANDLESTICK_FILTER
-    with volume_filter_lock: use_volume = USE_VOLUME_FILTER # Re-using same lock for the toggle
+    with volume_filter_lock: use_volume = USE_VOLUME_FILTER
     with order_book_filter_enable_lock: use_ob = USE_ORDER_BOOK_FILTER
+    with bb_stoch_strategy_lock: use_bb_stoch = USE_BB_STOCH_STRATEGY
 
     return jsonify({
         "market_state": state_copy,
@@ -1442,7 +1479,8 @@ def get_market_status():
             "vol_multiplier": vol_mult,
             "use_candle_filter": use_candle,
             "use_volume_filter": use_volume,
-            "use_order_book_filter": use_ob
+            "use_order_book_filter": use_ob,
+            "use_bb_stoch_strategy": use_bb_stoch
         }
     })
 
@@ -1519,7 +1557,7 @@ def toggle_trading_status():
 @app.route('/api/settings/update', methods=['POST'])
 def update_settings():
     global BUY_CONFIDENCE_THRESHOLD, RISK_PER_TRADE_PERCENT, ORDER_BOOK_MIN_BID_ASK_RATIO, VOLUME_FILTER_MULTIPLIER, \
-           USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER
+           USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER, USE_BB_STOCH_STRATEGY
     try:
         data = request.get_json()
 
@@ -1531,13 +1569,14 @@ def update_settings():
             ORDER_BOOK_MIN_BID_ASK_RATIO = float(data['ob_ratio'])
         with volume_filter_lock:
             VOLUME_FILTER_MULTIPLIER = float(data['vol_multiplier'])
-            # Also update the toggle state
             USE_VOLUME_FILTER = bool(data['use_volume_filter'])
 
         with candle_filter_lock:
             USE_CANDLESTICK_FILTER = bool(data['use_candle_filter'])
         with order_book_filter_enable_lock:
             USE_ORDER_BOOK_FILTER = bool(data['use_order_book_filter'])
+        with bb_stoch_strategy_lock:
+            USE_BB_STOCH_STRATEGY = bool(data['use_bb_stoch_strategy'])
 
         log_and_notify('info', f"⚙️ Settings updated via dashboard: {data}", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "Settings updated successfully"})
@@ -1756,109 +1795,95 @@ def main_loop_enhanced():
                         if df_with_indicators is None or df_with_indicators.empty or len(df_with_indicators) < 50:
                             continue
 
-                        # --- الخطوة 1: التحقق من النموذج الآلي ---
-                        logger.info(f"  -> [مرحلة 1] فحص نموذج التعلم الآلي...")
+                        signal_found = False
+                        strategy_used = None
+                        ml_confidence_score = "N/A"
+
+                        # --- الاستراتيجية 1: نموذج التعلم الآلي ---
+                        logger.info(f"  -> [ML] فحص نموذج التعلم الآلي...")
                         strategy_instance = EnhancedTradingStrategy(symbol)
-                        if not strategy_instance.load_model():
-                            log_rejection(symbol, "ML Model Load Failed")
-                            continue
+                        if strategy_instance.load_model():
+                            df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                            if df_4h is not None and not df_4h.empty:
+                                df_features_for_model = strategy_instance.get_features_for_model(df_15m, df_4h, btc_data)
+                                if df_features_for_model is not None and not df_features_for_model.empty:
+                                    ml_result = strategy_instance.generate_prediction_result(df_features_for_model)
+                                    if ml_result:
+                                        with buy_confidence_lock: current_confidence_threshold = BUY_CONFIDENCE_THRESHOLD
+                                        is_buy_signal = ml_result['prediction'] == 1
+                                        is_confident = ml_result['confidence'] >= current_confidence_threshold
+                                        ml_confidence_score = f"{ml_result['confidence']:.2%}"
 
-                        df_4h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_4h is None or df_4h.empty:
-                            continue
-
-                        df_features_for_model = strategy_instance.get_features_for_model(df_15m, df_4h, btc_data)
-                        if df_features_for_model is None or df_features_for_model.empty:
-                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
-                            continue
-
-                        ml_result = strategy_instance.generate_prediction_result(df_features_for_model)
-
-                        if not ml_result:
-                            log_rejection(symbol, "ML Model Rejected Signal", {"details": "Prediction generation failed"})
-                            continue
-
-                        with buy_confidence_lock:
-                            current_confidence_threshold = BUY_CONFIDENCE_THRESHOLD
-
-                        is_buy_signal = ml_result['prediction'] == 1
-                        is_confident = ml_result['confidence'] >= current_confidence_threshold
-
-                        if not is_buy_signal or not is_confident:
-                            log_rejection(symbol, "ML Model Rejected Signal", {
-                                "prediction": ml_result['prediction'],
-                                "confidence": f"{ml_result['confidence']:.2%}",
-                                "required_confidence": f"{current_confidence_threshold:.2%}",
-                                "reason": "Not a buy signal" if not is_buy_signal else "Confidence too low"
-                            })
-                            continue
-
-                        logger.info(f"  -> [مرحلة 1] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_result['confidence']:.2%}).")
-
-                        # --- الخطوة 2: فلتر نمط الشمعة الصاعدة (شرطي) ---
-                        with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
-                        if use_filter:
-                            logger.info(f"  -> [مرحلة 2] فحص نمط الشمعة الصاعدة...")
-                            if not is_bullish_reversal_pattern(df_with_indicators):
-                                log_rejection(symbol, "Bullish Reversal Candle Pattern Failed")
-                                continue
-                            logger.info(f"  -> [مرحلة 2] ✅ نجاح! نمط الشمعة يؤكد الإشارة.")
+                                        if is_buy_signal and is_confident:
+                                            signal_found = True
+                                            strategy_used = "ML_Signal_V8.4"
+                                            logger.info(f"  -> [ML] ✅ نجاح! النموذج يؤكد الإشارة (Confidence: {ml_confidence_score}).")
+                                        else:
+                                            log_rejection(symbol, "ML Model Rejected Signal", {"prediction": ml_result['prediction'], "confidence": ml_confidence_score, "required": f"{current_confidence_threshold:.2%}"})
+                                    else:
+                                        log_rejection(symbol, "ML Model Rejected Signal", {"details": "Prediction generation failed"})
+                                else:
+                                    log_rejection(symbol, "ML Model Rejected Signal", {"details": "Feature preparation failed"})
                         else:
-                            logger.info(f"  -> [مرحلة 2] ⏭️ تم تخطي فلتر نمط الشمعة (غير مفعل).")
+                            log_rejection(symbol, "ML Model Load Failed")
 
-                        # --- الخطوة 3: فلتر حجم التداول (شرطي) ---
-                        with volume_filter_lock: use_filter = USE_VOLUME_FILTER
+                        # --- الاستراتيجية 2: BB + Stochastic (إذا لم يتم العثور على إشارة ML) ---
+                        if not signal_found:
+                            with bb_stoch_strategy_lock: use_strategy = USE_BB_STOCH_STRATEGY
+                            if use_strategy:
+                                logger.info(f"  -> [BB+Stoch] فحص استراتيجية BB+Stoch...")
+                                if check_bb_stoch_strategy(df_with_indicators):
+                                    signal_found = True
+                                    strategy_used = "BB_Stoch_Crossover_V8.4"
+                                else:
+                                    log_rejection(symbol, "BB_Stoch Strategy Conditions Not Met")
+
+                        if not signal_found:
+                            continue # الانتقال إلى العملة التالية إذا لم يتم العثور على إشارة
+
+                        # --- مرحلة الفلاتر (تطبق على أي إشارة ناجحة) ---
+                        logger.info(f"  -> [Filters] بدء مرحلة الفلاتر للإشارة من استراتيجية {strategy_used}...")
+
+                        # فلتر نمط الشمعة الصاعدة (شرطي)
+                        with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
+                        if use_filter and not is_bullish_reversal_pattern(df_with_indicators):
+                            log_rejection(symbol, "Bullish Reversal Candle Pattern Failed", {"strategy": strategy_used}); continue
+                        if use_filter: logger.info(f"  -> [Filters] ✅ نجاح! فلتر الشموع.")
+
+                        # فلتر حجم التداول (شرطي)
+                        with volume_filter_lock: use_filter, current_volume_multiplier = USE_VOLUME_FILTER, VOLUME_FILTER_MULTIPLIER
                         if use_filter:
-                            logger.info(f"  -> [مرحلة 3] فحص حجم التداول...")
-                            with volume_filter_lock:
-                                current_volume_multiplier = VOLUME_FILTER_MULTIPLIER
-
                             last_candle = df_with_indicators.iloc[-1]
                             avg_volume = df_with_indicators['volume'].iloc[-21:-1].mean()
                             if not (last_candle['volume'] > avg_volume * current_volume_multiplier):
-                                log_rejection(symbol, "Signal Candle Volume Too Low",
-                                              {"volume": f"{last_candle['volume']:.2f}",
-                                               "avg_volume": f"{avg_volume:.2f}",
-                                               "required_multiplier": current_volume_multiplier
-                                               })
-                                continue
-                            logger.info(f"  -> [مرحلة 3] ✅ نجاح! حجم التداول أعلى من المتوسط.")
-                        else:
-                            logger.info(f"  -> [مرحلة 3] ⏭️ تم تخطي فلتر حجم التداول (غير مفعل).")
+                                log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used}); continue
+                            logger.info(f"  -> [Filters] ✅ نجاح! فلتر حجم التداول.")
 
-                        # --- الخطوة 4: فلتر دفتر الطلبات (شرطي) ---
-                        try:
-                            entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                        except Exception as e:
-                            logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
-                            continue
+                        # فلتر دفتر الطلبات (شرطي)
+                        try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                        except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
 
                         with order_book_filter_enable_lock: use_filter = USE_ORDER_BOOK_FILTER
-                        if use_filter:
-                            logger.info(f"  -> [مرحلة 4] فحص دفتر الطلبات...")
-                            if not passes_final_order_book_check(symbol, entry_price):
-                                continue
-                            logger.info(f"  -> [مرحلة 4] ✅ نجاح! دفتر الطلبات يؤكد الإشارة.")
-                        else:
-                            logger.info(f"  -> [مرحلة 4] ⏭️ تم تخطي فلتر دفتر الطلبات (غير مفعل).")
+                        if use_filter and not passes_final_order_book_check(symbol, entry_price):
+                            log_rejection(symbol, "Order Book Filter Failed", {"strategy": strategy_used}); continue
+                        if use_filter: logger.info(f"  -> [Filters] ✅ نجاح! فلتر دفتر الطلبات.")
 
 
                         # --- جميع الشروط تحققت ---
-                        logger.info(f"  -> [مرحلة 5] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
+                        logger.info(f"  -> [EXECUTION] ✅ تم تجاوز جميع الشروط. تحضير الصفقة...")
 
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
                         if not tp_sl_data: continue
 
                         signal_details = {
-                            'ML_Confidence': f"{ml_result['confidence']:.2%}",
-                            'Pattern': "ML_Signal_V8.3",
-                            'Signal_Type': 'ML_With_Filters',
+                            'ML_Confidence': ml_confidence_score,
+                            'Pattern': strategy_used,
                             **tp_sl_data
                         }
 
                         new_signal = {
                             'symbol': symbol,
-                            'strategy_name': "ML_Signal_V8.3",
+                            'strategy_name': strategy_used,
                             'signal_details': signal_details,
                             'entry_price': entry_price,
                             **tp_sl_data
@@ -1880,7 +1905,7 @@ def main_loop_enhanced():
                         if saved_signal:
                             with signal_cache_lock:
                                 open_signals_cache[saved_signal['symbol']] = saved_signal
-                            log_and_notify('info', f"SIGNAL: New buy signal for {symbol} at {entry_price}", "NEW_SIGNAL")
+                            log_and_notify('info', f"SIGNAL: New buy signal for {symbol} at {entry_price} from {strategy_used}", "NEW_SIGNAL")
 
                     except Exception as e:
                         logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
@@ -1928,13 +1953,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.3 - Dynamic Filters)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.4 - Multi-Strategy)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.3 - Dynamic Filters) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.4 - Multi-Strategy) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
