@@ -33,11 +33,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('ml_model_trainer_v10_strategies.log', encoding='utf-8'),
+        logging.FileHandler('ml_model_trainer_v11_20_strategies.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_V10_Strategies')
+logger = logging.getLogger('MLTrainer_V11_20_Strategies')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -51,7 +51,7 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V10_With_Strategies'
+BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V11_With_20_Strategies'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
 DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
@@ -276,7 +276,6 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     df['month_cos'] = np.cos(2 * np.pi * df.index.month / 12)
     return df
 
-# NEW: Function to calculate strategy-based features
 def calculate_strategy_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculates composite features based on specific trading strategies.
@@ -299,6 +298,93 @@ def calculate_strategy_features(df: pd.DataFrame) -> pd.DataFrame:
     ema_long = df['close'].ewm(span=EMA_LONG_PERIOD, adjust=False).mean()
     df['buy_signal_ema_cross'] = ((ema_short > ema_long) & (ema_short.shift(1) <= ema_long.shift(1))).astype(int)
     
+    return df
+
+# NEW: Function for the 20 advanced strategies
+def add_all_strategy_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculates 20 advanced strategy features.
+    These are binary features (1 for signal, 0 for no signal).
+    """
+    logger.info("ℹ️ [Features] Calculating 20 advanced strategy features...")
+    # ---------- Bullish ----------
+    # 1 RSI Divergence
+    bullish_div = ((df['close'] < df['close'].shift(1)) & (df['close'].shift(1) < df['close'].shift(2)) &
+                   (df['rsi'] > df['rsi'].shift(1)) & (df['rsi'].shift(1) > df['rsi'].shift(2)))
+    df['rsi_divergence'] = bullish_div.astype(int)
+
+    # 2 EMA 3-8-21
+    ema3 = df['close'].ewm(span=3).mean()
+    ema8 = df['close'].ewm(span=8).mean()
+    ema21 = df['close'].ewm(span=21).mean()
+    df['ema_3_8_21_cross'] = ((ema3 > ema8) & (ema8 > ema21) & (ema3.shift(1) <= ema8.shift(1))).astype(int)
+
+    # 3 MACD Zero Break Up
+    df['macd_zero_break'] = ((df['macd'] > 0) & (df['macd'].shift(1) <= 0)).astype(int)
+
+    # 4 Stochastic Pop
+    stoch_pop = (df['stoch_k'] > df['stoch_d']) & (df['stoch_k'].shift(1) <= df['stoch_d'].shift(1)) & (df['stoch_k'] < 20)
+    df['stoch_oversold_pop'] = stoch_pop.astype(int)
+
+    # 5 Volume Breakout
+    bb_upper = df['bb_upper'] # Use existing bb_upper
+    vol_ma = df['volume'].rolling(20).mean()
+    df['vol_bb_break'] = ((df['close'] > bb_upper) & (df['volume'] > 2*vol_ma)).astype(int)
+
+    # 6 Golden Cross
+    ema50 = df['close'].ewm(span=50).mean()
+    ema200 = df['close'].ewm(span=200).mean()
+    df['golden_cross'] = ((ema50 > ema200) & (ema50.shift(50) <= ema200.shift(50))).astype(int)
+
+    # 7 Support Reclaim (مبسط: إغلاق>min 20)
+    support = df['low'].rolling(20).min()
+    df['support_reclaim'] = ((df['close'] > support) & (df['close'].shift(1) <= support.shift(1))).astype(int)
+
+    # 8 Morning Star placeholder (للتخصيص لاحقاً)
+    df['morning_star'] = 0
+
+    # 9 ATR Trailing Flip (مبسط)
+    atr_trail = df['close'] - 3*df['atr']
+    df['atr_trail_flip'] = ((df['close'] > atr_trail) & (df['close'].shift(1) <= atr_trail.shift(1))).astype(int)
+
+    # 10 Fib 61.8 bounce placeholder (للتخصيص لاحقاً)
+    df['fib_bounce'] = 0
+
+    # ---------- Bearish ----------
+    # 11 Bearish RSI Divergence
+    bear_div = ((df['close'] > df['close'].shift(1)) & (df['close'].shift(1) > df['close'].shift(2)) &
+                (df['rsi'] < df['rsi'].shift(1)) & (df['rsi'].shift(1) < df['rsi'].shift(2)))
+    df['bear_rsi_div'] = bear_div.astype(int)
+
+    # 12 Death Cross
+    df['death_cross'] = ((ema50 < ema200) & (ema50.shift(50) >= ema200.shift(50))).astype(int)
+
+    # 13 MACD Zero Down
+    df['macd_zero_down'] = ((df['macd'] < 0) & (df['macd'].shift(1) >= 0)).astype(int)
+
+    # 14 Bearish Engulfing placeholder
+    df['bear_engulf'] = 0
+
+    # 15 Break Support Volume
+    df['break_support_vol'] = ((df['close'] < support) & (df['volume'] > 1.5*vol_ma)).astype(int)
+
+    # 16 Keltner Lower Break
+    kelt_lower = ema21 - 1.5*df['atr'] # Using ema21 as a common base
+    df['keltner_lower_break'] = ((df['close'] < kelt_lower) & (df['close'].shift(1) >= kelt_lower.shift(1))).astype(int)
+
+    # 17 Evening Star placeholder
+    df['evening_star'] = 0
+
+    # ---------- Neutral / Range ----------
+    bb_lower = df['bb_lower'] # Use existing bb_lower
+    bb_width = bb_upper - bb_lower
+    df['bb_squeeze'] = (bb_width < 2*df['atr']).astype(int)
+
+    rsi_50_rej = ((df['rsi'] < 50) & (df['rsi'].shift(1) >= 50)) | ((df['rsi'] > 50) & (df['rsi'].shift(1) <= 50))
+    df['rsi_50_reject'] = rsi_50_rej.astype(int)
+
+    df['adx_no_trend'] = (df['adx'] < 20).astype(int)
+
     return df
 
 def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFrame:
@@ -338,10 +424,13 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
 
-    # --- 3. NEW: Strategy-based Features ---
+    # --- 3. Composite Strategy Features ---
     df_calc = calculate_strategy_features(df_calc)
+    
+    # --- 4. NEW: 20 Advanced Strategy Features ---
+    df_calc = add_all_strategy_features(df_calc)
 
-    # --- 4. Cleanup and Finalization ---
+    # --- 5. Cleanup and Finalization ---
     del high_low, high_close, low_close, tr, up_move, down_move, plus_dm, minus_dm, plus_di, minus_di, dx, delta, gain, loss, asset_returns, merged_df
     gc.collect()
     
@@ -389,15 +478,21 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     df_featured['target'] = get_triple_barrier_labels(df_featured['close'], df_featured['atr'])
     
     # --- 4. Feature List and Cleaning ---
-    # CHANGE: Added new strategy features to the list
     feature_columns = [
+        # Original Features
         'rsi', 'adx', 'atr', 'price_vs_ema50', 'price_vs_ema200', 'btc_correlation',
         'rsi_4h', 'price_vs_ema50_4h',
         'stoch_k', 'stoch_d', 'macd', 'macd_signal', 'macd_histogram', 'bb_position', 'mfi',
         'buy_pressure', 'volume_ratio', 'price_impact', 'garman_klass_vol',
         'chaikin_volatility', 'ulcer_index', 'atr_ratio_5', 'atr_ratio_10', 'atr_ratio_20',
         'hour_sin', 'hour_cos', 'day_of_week', 'is_weekend', 'asia_session', 'london_session', 'ny_session', 'month_sin', 'month_cos',
-        'buy_signal_bb_macd', 'buy_signal_bb_stoch', 'buy_signal_ema_cross' # NEW FEATURES
+        'buy_signal_bb_macd', 'buy_signal_bb_stoch', 'buy_signal_ema_cross',
+        # NEW 20 Advanced Strategy Features
+        'rsi_divergence', 'ema_3_8_21_cross', 'macd_zero_break', 'stoch_oversold_pop',
+        'vol_bb_break', 'golden_cross', 'support_reclaim', 'morning_star', 'atr_trail_flip',
+        'fib_bounce', 'bear_rsi_div', 'death_cross', 'macd_zero_down', 'bear_engulf',
+        'break_support_vol', 'keltner_lower_break', 'evening_star', 'bb_squeeze',
+        'rsi_50_reject', 'adx_no_trend'
     ]
     
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
@@ -595,7 +690,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "ML Trainer (with Strategy features) service is running and healthy.", 200
+    return "ML Trainer (with 20 new Strategy features) service is running and healthy.", 200
 
 if __name__ == "__main__":
     training_thread = Thread(target=run_training_job)
