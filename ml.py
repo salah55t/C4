@@ -41,7 +41,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('MLTrainer_TTM')
+logger = logging.getLogger('MLTrainer_TTM_MemFix')
 
 # ---------------------- تحميل متغيرات البيئة ----------------------
 try:
@@ -55,20 +55,20 @@ except Exception as e:
      exit(1)
 
 # ---------------------- إعداد الثوابت والمتغيرات العامة ----------------------
-BASE_ML_MODEL_NAME: str = 'TTM_Scalping_V1'
+BASE_ML_MODEL_NAME: str = 'TTM_Scalping_V2_MemFix'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 60
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
 BTC_SYMBOL = 'BTCUSDT'
 
-# --- TTM Model & Training Parameters ---
-SEQUENCE_LENGTH: int = 32 # How many past candles to look at
-N_FEATURES: int = 0 # Will be set dynamically
-D_MODEL: int = 64 # Dimension of the model
-N_BLOCKS: int = 4 # Number of TTM blocks
+# --- TTM Model & Training Parameters (MEMORY FIXES APPLIED) ---
+SEQUENCE_LENGTH: int = 24 # MODIFIED: Reduced from 32 to 24
+N_FEATURES: int = 0 
+D_MODEL: int = 48 # MODIFIED: Reduced from 64 to 48
+N_BLOCKS: int = 3 # MODIFIED: Reduced from 4 to 3
 LEARNING_RATE: float = 0.001
 N_EPOCHS: int = 20
-BATCH_SIZE: int = 64
+BATCH_SIZE: int = 32 # MODIFIED: Reduced from 64 to 32
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -267,7 +267,6 @@ def fetch_and_cache_btc_data():
     btc_data_cache['btc_returns'] = btc_data_cache['close'].pct_change()
 
 # --- دوال حساب الميزات (Feature Calculation Functions) ---
-# ... (All feature calculation functions from the previous version remain the same)
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
@@ -284,16 +283,9 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
     df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
     df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower']).replace(0, 1e-9)
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
-    positive_flow = money_flow.where(typical_price > typical_price.shift(1), 0).rolling(14).sum()
-    negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
-    money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
-    df['mfi'] = 100 - (100 / (1 + money_ratio))
     return df
 
 def add_all_strategy_features(df: pd.DataFrame) -> pd.DataFrame:
-    # This function remains the same as the one provided in the previous step
     # ---------- Bullish ----------
     bullish_div = ((df['close'] < df['close'].shift(1)) & (df['close'].shift(1) < df['close'].shift(2)) &
                    (df['rsi'] > df['rsi'].shift(1)) & (df['rsi'].shift(1) > df['rsi'].shift(2)))
@@ -339,7 +331,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
     logger.info("ℹ️ [Features] Calculating all features for TTM...")
     df_calc = df.copy()
     # --- Standard Features ---
-    df_calc['atr'] = (df_calc['high'] - df_calc['low']).rolling(window=ATR_PERIOD).mean() # Simplified ATR for now
+    df_calc['atr'] = (df_calc['high'] - df_calc['low']).rolling(window=ATR_PERIOD).mean()
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
@@ -417,7 +409,7 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
     df_featured['target'] = df_featured['target'].replace({-1: 0, 0: 1, 1: 2})
     
     feature_columns = [col for col in df_featured.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base', 'target']]
-    N_FEATURES = len(feature_columns) # Set global N_FEATURES
+    N_FEATURES = len(feature_columns)
 
     df_cleaned = df_featured.dropna(subset=feature_columns + ['target']).copy()
     df_cleaned.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -435,25 +427,24 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
 def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info(f"🧠 [TTM Train] Starting TTM model training...")
 
-    all_preds, all_true = [], []
+    # Use TimeSeriesSplit for a more robust train/test split
     tscv = TimeSeriesSplit(n_splits=5)
-    
-    # Using the last split for final training and previous for validation metrics
-    splits = list(tscv.split(X))
-    train_val_index, test_index = splits[-2]
-    final_train_index, _ = splits[-1]
+    train_index, test_index = list(tscv.split(X))[-1] # Use the last split for final train/test
 
-    # Prepare validation data
-    X_train_val, X_test = X.iloc[train_val_index], X.iloc[test_index]
-    y_train_val, y_test = y.iloc[train_val_index], y.iloc[test_index]
+    X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+    y_train, y_test = y.iloc[train_index], y.iloc[test_index]
     
     scaler = StandardScaler()
-    X_train_val_scaled = scaler.fit_transform(X_train_val)
+    X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    X_train_seq, y_train_seq = create_sequences(X_train_val_scaled, y_train_val.values, SEQUENCE_LENGTH)
+    X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train.values, SEQUENCE_LENGTH)
     X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test.values, SEQUENCE_LENGTH)
     
+    if len(X_train_seq) == 0 or len(X_test_seq) == 0:
+        logger.warning("⚠️ Not enough data to create sequences. Skipping training.")
+        return None, None, None
+
     train_dataset = TimeSeriesDataset(X_train_seq, y_train_seq)
     test_dataset = TimeSeriesDataset(X_test_seq, y_test_seq)
     
@@ -467,6 +458,7 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
     logger.info(f"🔥 Training on {DEVICE} for {N_EPOCHS} epochs...")
     for epoch in range(N_EPOCHS):
         model.train()
+        train_loss = 0
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
             optimizer.zero_grad()
@@ -474,18 +466,25 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
+            train_loss += loss.item()
         
-        # Validation loop
-        model.eval()
-        with torch.no_grad():
-            for X_batch, y_batch in test_loader:
-                X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
-                outputs = model(X_batch)
-                _, predicted = torch.max(outputs.data, 1)
-                all_preds.extend(predicted.cpu().numpy())
-                all_true.extend(y_batch.cpu().numpy())
-        
-        logger.info(f"Epoch {epoch+1}/{N_EPOCHS}, Loss: {loss.item():.4f}")
+        avg_train_loss = train_loss / len(train_loader)
+        logger.info(f"Epoch {epoch+1}/{N_EPOCHS}, Loss: {avg_train_loss:.4f}")
+
+    # Final evaluation on test set
+    model.eval()
+    all_preds, all_true = [], []
+    with torch.no_grad():
+        for X_batch, y_batch in test_loader:
+            X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+            outputs = model(X_batch)
+            _, predicted = torch.max(outputs.data, 1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_true.extend(y_batch.cpu().numpy())
+    
+    if not all_true:
+        logger.warning("⚠️ No predictions were made in the test set.")
+        return None, None, None
 
     final_report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
     final_metrics = {
@@ -494,11 +493,11 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
         'recall_class_2': final_report.get('2', {}).get('recall', 0),
         'f1_score_class_2': final_report.get('2', {}).get('f1-score', 0),
         'precision_class_0': final_report.get('0', {}).get('precision', 0), # Class 0 is SELL
-        'num_samples_trained': len(X),
+        'num_samples_trained': len(X_train_seq),
     }
     
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(BUY): {final_metrics['precision_class_2']:.4f}, R(BUY): {final_metrics['recall_class_2']:.4f}"
-    logger.info(f"📊 [TTM Train] Final Walk-Forward Performance: {metrics_log_str}")
+    logger.info(f"📊 [TTM Train] Final Performance: {metrics_log_str}")
 
     return model.state_dict(), scaler, final_metrics
 
@@ -563,14 +562,13 @@ def run_training_job():
             X, y, feature_names = prepared_data
             
             training_result = train_ttm_model(X, y)
-            if not all(training_result):
+            if not all(training_result) or training_result[0] is None:
                  logger.warning(f"⚠️ [Main] فشل تدريب النموذج لـ {symbol}."); failed_models += 1
                  del X, y, prepared_data; gc.collect()
                  continue
             
             model_state_dict, final_scaler, model_metrics = training_result
             
-            # Note: Precision for BUY is class '2' now
             if model_state_dict and final_scaler and model_metrics.get('precision_class_2', 0) > 0.35:
                 model_bundle = {
                     'model_state_dict': model_state_dict, 
@@ -610,7 +608,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "TTM ML Trainer service is running and healthy.", 200
+    return "TTM ML Trainer (MemFix) service is running and healthy.", 200
 
 if __name__ == "__main__":
     logger.info(f"PyTorch device set to: {DEVICE}")
@@ -621,4 +619,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
-
