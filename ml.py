@@ -58,7 +58,7 @@ except Exception as e:
 BASE_ML_MODEL_NAME: str = 'TTM_Scalping_V1'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 120
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 60
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- TTM Model & Training Parameters ---
@@ -621,3 +621,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
+
