@@ -1,11 +1,8 @@
-# ملف c4.py - نسخة V8.5
-# تم التحديث لجعل جميع الاستراتيجيات قابلة للتفعيل/الإلغاء وإضافة استراتيجيات جديدة.
-# --- التغييرات الرئيسية (V8.5):
-# 1. إضافة متغيرات عامة (USE_ML_STRATEGY, USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY) مع أقفال التحكم.
-# 2. تحديث لوحة التحكم (HTML/JS) لإضافة مفاتيح تحكم لجميع الاستراتيجيات.
-# 3. تحديث واجهة API الخلفية (/api/market_status, /api/settings/update) لدعم الإعدادات الجديدة.
-# 4. إضافة دوال منطقية للاستراتيجيات الجديدة: check_macd_ema_strategy و check_qqe_ssl_strategy_approx.
-# 5. إعادة هيكلة الحلقة الرئيسية (main_loop_enhanced) لفحص كل استراتيجية مفعلة بشكل تسلسلي.
+# ملف c4.py - نسخة V8.5.1
+# تم التحديث لإصلاح خطأ في قاعدة البيانات عند تحديث وقف الخسارة المتحرك.
+# --- التغييرات الرئيسية (V8.5.1):
+# 1. إصلاح خطأ "schema 'np' does not exist" عن طريق تحويل قيم وقف الخسارة والهدف إلى float قبل إرسالها إلى قاعدة البيانات.
+# 2. تطبيق الإصلاح في دالة trade_management_loop عند تحديث حالة الرحلة وعند تحديث وقف الخسارة المتحرك.
 
 import time
 import os
@@ -48,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV8_AdvCandles')
+logger = getLogger('CryptoBotV8_AdvCandles')
 
 # --- FIX: Custom JSON encoder for NumPy data types ---
 class NpEncoder(json.JSONEncoder):
@@ -298,7 +295,6 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
     log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason_ar} | Details: {details or {}}"
     logger.info(log_message)
     with rejection_logs_lock:
-        # FIX: Use NpEncoder to prevent JSON serialization errors
         rejection_logs_cache.appendleft({
             "timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
             "reason": reason_ar, "details": json.loads(json.dumps(details, cls=NpEncoder)) or {}
@@ -348,7 +344,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
 
-        # تقاطع القائمة من الملف مع العملات النشطة على المنصة فقط
         validated = sorted(list(formatted.intersection(active)))
 
         logger.info(f"✅ [Validation] تم العثور على {len(validated)} عملة صالحة للتداول من ملفك.")
@@ -648,7 +643,6 @@ class EnhancedTradingStrategy:
             model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
 
             if not os.path.exists(model_path):
-                # This is not an error, just means no specific model for this symbol
                 return False
             try:
                 with open(model_path, 'rb') as f:
@@ -1570,7 +1564,7 @@ def trade_management_loop():
                                     log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
 
                         if current_target_index < len(journey_state['targets']) - 1:
-                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
+                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 20)
                             df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
                             if analyze_path_for_extension(df_with_features):
                                 journey_state['current_target_index'] += 1
@@ -1593,8 +1587,9 @@ def trade_management_loop():
                         try:
                             if check_db_connection():
                                 with conn.cursor() as cur:
+                                    # FIX: Cast values to float before DB update
                                     cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s",
-                                                (json.dumps(journey_state, cls=NpEncoder), signal['target_price'], signal['stop_loss'], signal.get('quantity'), signal_id))
+                                                (json.dumps(journey_state, cls=NpEncoder), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity', 0)), signal_id))
                                 conn.commit()
                         except Exception as e:
                             logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
@@ -1629,7 +1624,8 @@ def trade_management_loop():
                     try:
                         if check_db_connection():
                             with conn.cursor() as cur:
-                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), signal['stop_loss'], signal_id))
+                                # FIX: Cast values to float before DB update
+                                cur.execute("UPDATE signals SET current_peak_price = %s, stop_loss = %s WHERE id = %s", (float(new_peak), float(signal['stop_loss']), signal_id))
                             conn.commit()
                     except Exception as e:
                         logger.error(f"DB error updating peak/sl price for {symbol}: {e}"); conn.rollback()
@@ -1673,7 +1669,6 @@ def main_loop_enhanced():
 
                         signal_found, strategy_used, ml_confidence_score = False, None, "N/A"
 
-                        # --- فحص الاستراتيجيات المفعلة بالتسلسل ---
                         strategies_to_check = []
                         with ml_strategy_lock:
                             if USE_ML_STRATEGY: strategies_to_check.append('ML')
@@ -1714,7 +1709,6 @@ def main_loop_enhanced():
                         
                         if not signal_found: continue
 
-                        # --- مرحلة الفلاتر النهائية ---
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
                         
                         with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
@@ -1735,7 +1729,6 @@ def main_loop_enhanced():
                         if use_filter and not passes_final_order_book_check(symbol, entry_price):
                             continue
 
-                        # --- تنفيذ الصفقة ---
                         logger.info(f"  -> [{symbol}] ✅ نجحت جميع الفلاتر. تحضير الصفقة...")
                         tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
                         if not tp_sl_data: continue
