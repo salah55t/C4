@@ -58,17 +58,17 @@ except Exception as e:
 BASE_ML_MODEL_NAME: str = 'TTM_Scalping_V2_MemFix'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '4h'
-DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 10
+DATA_LOOKBACK_DAYS_FOR_TRAINING: int = 20 # تم التخفيض بناءً على طلبك
 BTC_SYMBOL = 'BTCUSDT'
 
 # --- TTM Model & Training Parameters (MEMORY FIXES APPLIED) ---
-SEQUENCE_LENGTH: int = 24 # MODIFIED: Reduced from 32 to 24
+SEQUENCE_LENGTH: int = 24
 N_FEATURES: int = 0
-D_MODEL: int = 48 # MODIFIED: Reduced from 64 to 48
-N_BLOCKS: int = 3 # MODIFIED: Reduced from 4 to 3
+D_MODEL: int = 48
+N_BLOCKS: int = 3
 LEARNING_RATE: float = 0.001
 N_EPOCHS: int = 20
-BATCH_SIZE: int = 32 # MODIFIED: Reduced from 64 to 32
+BATCH_SIZE: int = 32
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -357,71 +357,44 @@ def calculate_all_features(df: pd.DataFrame, btc_df: pd.DataFrame) -> pd.DataFra
 
 # --- دوال إعداد البيانات والتدريب (Data Prep & Training Functions) ---
 
-# =========================================================================================
-# ==================== الدالة المُحسَّنة (Optimized Function) ==============================
-# =========================================================================================
 def get_triple_barrier_labels(prices: pd.Series, atr: pd.Series) -> pd.Series:
-    """
-    Generates labels using the triple-barrier method in a vectorized way.
-    This is significantly faster and more memory-efficient than the original loop-based approach.
-    
-    Returns:
-        pd.Series: Labels for each timestamp: 1 for TP, -1 for SL, 0 for timeout.
-    """
     logger.info("ℹ️ [Labeling] Starting vectorized triple-barrier labeling...")
-    
-    # 1. Calculate barriers for all points at once
     upper_barrier = prices + (atr * TP_ATR_MULTIPLIER)
     lower_barrier = prices - (atr * SL_ATR_MULTIPLIER)
-    
-    # 2. Create rolling windows to look into the future
-    # We shift by -1 to start looking from the next candle.
-    # The window size is MAX_HOLD_PERIOD.
-    # We reverse the series to find the *first* time the price crosses a barrier in the future.
     future_highs = prices[::-1].rolling(window=MAX_HOLD_PERIOD, min_periods=1).max()[::-1].shift(-1)
     future_lows = prices[::-1].rolling(window=MAX_HOLD_PERIOD, min_periods=1).min()[::-1].shift(-1)
-
-    # 3. Determine if barriers are hit
-    # Check if the highest future price in the window crosses the upper barrier
     tp_hit = future_highs >= upper_barrier
-    # Check if the lowest future price in the window crosses the lower barrier
     sl_hit = future_lows <= lower_barrier
-
-    # 4. Create labels based on which barrier was hit
-    # We use np.select for conditional labeling. It's fast and readable.
-    conditions = [
-        tp_hit & ~sl_hit,  # Take profit hit, but stop loss was not
-        sl_hit & ~tp_hit,  # Stop loss hit, but take profit was not
-        tp_hit & sl_hit,   # Both were hit (this case needs a tie-breaker, but for now we prioritize SL)
-    ]
-    choices = [
-        1,  # Label for TP
-       -1,  # Label for SL
-       -1,  # Prioritize SL in case of a tie
-    ]
-    
-    # Default is 0 (timeout)
+    conditions = [tp_hit & ~sl_hit, sl_hit & ~tp_hit, tp_hit & sl_hit]
+    choices = [1, -1, -1]
     labels = pd.Series(np.select(conditions, choices, default=0), index=prices.index)
-    
     logger.info("✅ [Labeling] Vectorized triple-barrier labeling completed.")
     return labels
 
-def create_sequences(X, y, sequence_length):
-    xs, ys = [], []
-    # Use tqdm for progress visualization, it's helpful
-    for i in tqdm(range(len(X) - sequence_length), desc="Creating Sequences", leave=False, ncols=80):
-        xs.append(X[i:(i + sequence_length)])
-        ys.append(y[i + sequence_length])
-    return np.array(xs), np.array(ys)
-
+# =========================================================================================
+# ==================== التغيير الجذري: Dataset ذكي وموفر للذاكرة ========================
+# =========================================================================================
 class TimeSeriesDataset(Dataset):
-    def __init__(self, X, y):
+    """
+    Dataset ذكي يقوم بتوليد السلاسل الزمنية عند الطلب بدلاً من تخزينها كلها.
+    This is extremely memory efficient.
+    """
+    def __init__(self, X, y, sequence_length):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = torch.tensor(y, dtype=torch.long)
+        self.sequence_length = sequence_length
+
     def __len__(self):
-        return len(self.X)
+        # The total number of sequences we can generate
+        return len(self.X) - self.sequence_length
+
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        # Get a single sequence and its corresponding label
+        # The sequence is from idx to idx + sequence_length
+        x_sequence = self.X[idx : idx + self.sequence_length]
+        # The label is for the candle immediately after the sequence ends
+        y_label = self.y[idx + self.sequence_length]
+        return x_sequence, y_label
 
 def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame, symbol: str) -> Optional[Tuple[pd.DataFrame, pd.Series, List[str]]]:
     global N_FEATURES
@@ -461,9 +434,8 @@ def prepare_data_for_ml(df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.Da
 def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Optional[Any], Optional[Dict[str, Any]]]:
     logger.info(f"🧠 [TTM Train] Starting TTM model training...")
 
-    # Use TimeSeriesSplit for a more robust train/test split
     tscv = TimeSeriesSplit(n_splits=5)
-    train_index, test_index = list(tscv.split(X))[-1] # Use the last split for final train/test
+    train_index, test_index = list(tscv.split(X))[-1]
 
     X_train, X_test = X.iloc[train_index], X.iloc[test_index]
     y_train, y_test = y.iloc[train_index], y.iloc[test_index]
@@ -472,16 +444,16 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    X_train_seq, y_train_seq = create_sequences(X_train_scaled, y_train.values, SEQUENCE_LENGTH)
-    X_test_seq, y_test_seq = create_sequences(X_test_scaled, y_test.values, SEQUENCE_LENGTH)
+    # --- NEW: Use the memory-efficient Dataset directly ---
+    # No more create_sequences() call!
+    train_dataset = TimeSeriesDataset(X_train_scaled, y_train.values, SEQUENCE_LENGTH)
+    test_dataset = TimeSeriesDataset(X_test_scaled, y_test.values, SEQUENCE_LENGTH)
     
-    if len(X_train_seq) == 0 or len(X_test_seq) == 0:
+    # Check if we have enough data to form at least one sequence
+    if len(train_dataset) == 0 or len(test_dataset) == 0:
         logger.warning("⚠️ Not enough data to create sequences. Skipping training.")
         return None, None, None
 
-    train_dataset = TimeSeriesDataset(X_train_seq, y_train_seq)
-    test_dataset = TimeSeriesDataset(X_test_seq, y_test_seq)
-    
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -493,7 +465,8 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
     for epoch in range(N_EPOCHS):
         model.train()
         train_loss = 0
-        for X_batch, y_batch in train_loader:
+        # Use tqdm for a nice progress bar
+        for X_batch, y_batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS}", leave=False, ncols=80):
             X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
             optimizer.zero_grad()
             outputs = model(X_batch)
@@ -505,7 +478,6 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
         avg_train_loss = train_loss / len(train_loader)
         logger.info(f"Epoch {epoch+1}/{N_EPOCHS}, Loss: {avg_train_loss:.4f}")
 
-    # Final evaluation on test set
     model.eval()
     all_preds, all_true = [], []
     with torch.no_grad():
@@ -523,11 +495,11 @@ def train_ttm_model(X: pd.DataFrame, y: pd.Series) -> Tuple[Optional[Dict], Opti
     final_report = classification_report(all_true, all_preds, output_dict=True, zero_division=0)
     final_metrics = {
         'accuracy': accuracy_score(all_true, all_preds),
-        'precision_class_2': final_report.get('2', {}).get('precision', 0), # Class 2 is BUY
+        'precision_class_2': final_report.get('2', {}).get('precision', 0),
         'recall_class_2': final_report.get('2', {}).get('recall', 0),
         'f1_score_class_2': final_report.get('2', {}).get('f1-score', 0),
-        'precision_class_0': final_report.get('0', {}).get('precision', 0), # Class 0 is SELL
-        'num_samples_trained': len(X_train_seq),
+        'precision_class_0': final_report.get('0', {}).get('precision', 0),
+        'num_samples_trained': len(train_dataset),
     }
     
     metrics_log_str = f"Accuracy: {final_metrics['accuracy']:.4f}, P(BUY): {final_metrics['precision_class_2']:.4f}, R(BUY): {final_metrics['recall_class_2']:.4f}"
@@ -653,4 +625,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10002))
     logger.info(f"🌍 Starting web server on port {port} to keep the service alive...")
     app.run(host='0.0.0.0', port=port)
-
