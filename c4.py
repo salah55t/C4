@@ -1,6 +1,8 @@
-# ملف c4.py - نسخة V9.0.1 (إصلاح خطأ حفظ الإعدادات)
-# --- التغييرات الرئيسية (V9.0.1):
-# 1. [إصلاح] تعديل دالة `update_settings` لاستخدام `.get()` عند الوصول للقيم، مما يمنع حدوث `KeyError` في حال عدم إرسال المتصفح لجميع الإعدادات (بسبب الكاش مثلاً). هذا يجعل الواجهة البرمجية أكثر قوة ومرونة.
+# ملف c4.py - نسخة V9.1.0 (معالجة بالدفعات وتسجيل مفصل)
+# --- التغييرات الرئيسية (V9.1.0):
+# 1. [معالجة بالدفعات] إعادة هيكلة الحلقة الرئيسية لتحليل الرموز على دفعات (Batches) ثم تحرير الذاكرة (gc.collect) بعد كل دفعة لتحسين الأداء.
+# 2. [تسجيل مفصل] زيادة تفاصيل السجلات (Logs) لتشمل كل مراحل فحص الرمز، مما يسهل تتبع عملية اتخاذ القرار.
+# 3. [شفافية الرفض] جميع أسباب الرفض أصبحت الآن تُسجل وتظهر في تبويب "الصفقات المرفوضة" في لوحة التحكم.
 
 import time
 import os
@@ -78,20 +80,20 @@ except Exception as e:
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
 
-# --- المتغيرات القابلة للتعديل مع أقفال خاصة بها (تم تحديث القيم حسب المقترح) ---
-RISK_PER_TRADE_PERCENT: float = 0.85 # V9.0: تم التعديل من 1.0%
+# --- المتغيرات القابلة للتعديل مع أقفال خاصة بها ---
+RISK_PER_TRADE_PERCENT: float = 0.85
 risk_per_trade_lock = Lock()
 
-BUY_CONFIDENCE_THRESHOLD = 0.53 # V9.0: تم التعديل من 0.55
+BUY_CONFIDENCE_THRESHOLD = 0.53
 buy_confidence_lock = Lock()
 
-ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.18 # V9.0: تم التعديل من 1.3
+ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.18
 order_book_ratio_lock = Lock()
 
-VOLUME_FILTER_MULTIPLIER: float = 1.07 # V9.0: تم التعديل من 1.1
+VOLUME_FILTER_MULTIPLIER: float = 1.07
 volume_filter_lock = Lock()
 
-MIN_PROFIT_PERCENT: float = 0.7 # V9.0: تم التعديل من 0.8%
+MIN_PROFIT_PERCENT: float = 0.7
 
 # --- إعدادات الفلاتر والاستراتيجيات القابلة للتفعيل/الإلغاء ---
 USE_CANDLESTICK_FILTER: bool = True
@@ -136,10 +138,10 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 4.0 # V9.0: تم التعديل من 5.0
+STATS_TRADE_SIZE_USDT: float = 4.0
 BTC_SYMBOL: str = 'BTCUSDT'
-MAX_OPEN_TRADES: int = 5 # V9.0: تم التعديل من 4
-SYMBOL_PROCESSING_BATCH_SIZE: int = 10
+MAX_OPEN_TRADES: int = 5
+SYMBOL_PROCESSING_BATCH_SIZE: int = 10 # V9.1: حجم الدفعة للمعالجة
 
 # --- إعدادات رحلة التداول الديناميكية (النسخة الجديدة) ---
 USE_DYNAMIC_JOURNEY = True
@@ -156,14 +158,14 @@ MOMENTUM_PERIOD: int = 12
 EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
-CANDLE_AVG_VOLUME_PERIOD: int = 15 # V9.0: تم التعديل من 20
+CANDLE_AVG_VOLUME_PERIOD: int = 15
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
-ATR_TS_MULTIPLIER: float = 2.2 # V9.0: تم التعديل من 2.5
+ATR_TS_MULTIPLIER: float = 2.2
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -197,6 +199,7 @@ REJECTION_REASONS_AR = {
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Insufficient data for TP/SL calculation": "بيانات غير كافية لحساب TP/SL",
+    "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص", # V9.1: New Reason
     "BB_Stoch Strategy Conditions Not Met": "شروط استراتيجية BB+Stoch لم تتحقق",
     "MACD_EMA Strategy Conditions Not Met": "شروط استراتيجية MACD+EMA لم تتحقق",
     "QQE_SSL Strategy Conditions Not Met": "شروط استراتيجية QQE+SSL لم تتحقق",
@@ -254,7 +257,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 """)
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS journey_state JSONB;")
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS original_quantity DOUBLE PRECISION;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS rr_ratio DOUBLE PRECISION;") # V9.0
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS rr_ratio DOUBLE PRECISION;")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
@@ -305,7 +308,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
 
 def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
     reason_ar = REJECTION_REASONS_AR.get(reason_key, reason_key)
-    log_message = f"🚫 [REJECTED] {symbol} | Reason: {reason_ar} | Details: {details or {}}"
+    log_message = f"🚫 [{symbol}] REJECTED | Reason: {reason_ar} | Details: {details or {}}"
     logger.info(log_message)
     with rejection_logs_lock:
         rejection_logs_cache.appendleft({
@@ -564,10 +567,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
 
 
 def get_session_state() -> Tuple[List[str], str, str]:
-    """
-    V9.0: Determines the active trading session(s) and liquidity level.
-    Returns a tuple: (active_session_names, liquidity_level, display_name)
-    """
     sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
     active_sessions = []
     now_utc = datetime.now(timezone.utc)
@@ -575,7 +574,6 @@ def get_session_state() -> Tuple[List[str], str, str]:
     if now_utc.weekday() >= 5: return [], "WEEKEND", "عطلة نهاية الأسبوع"
     
     for session, (start, end) in sessions.items():
-        # Handle overnight sessions like Tokyo
         if start > end:
             if current_hour >= start or current_hour < end:
                 active_sessions.append(session)
@@ -624,7 +622,7 @@ def load_notifications_to_cache():
 
 # ---------------------- Trading Logic & Filters ----------------------
 
-# --- Strategy Logic Functions (No changes from V8.9, confirmed to be balanced) ---
+# --- Strategy Logic Functions (V9.1: Changed to INFO logging) ---
 def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -632,7 +630,7 @@ def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
     stoch_cross_up = prev['stoch_rsi_k'] < prev['stoch_rsi_d'] and last['stoch_rsi_k'] > last['stoch_rsi_d']
     oversold_area = last['stoch_rsi_k'] < 30 and last['stoch_rsi_d'] < 30
     if price_touch_bb and stoch_cross_up and oversold_area:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية BB+Stoch.")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB+Stoch.")
         return True
     return False
 
@@ -642,7 +640,7 @@ def check_macd_ema_strategy(df: pd.DataFrame) -> bool:
     macd_cross_up = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
     price_above_ema = last['close'] > last['ema_50']
     if macd_cross_up and price_above_ema:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية MACD+EMA.")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية MACD+EMA.")
         return True
     return False
 
@@ -653,7 +651,7 @@ def check_qqe_ssl_strategy_approx(df: pd.DataFrame) -> bool:
     wae_explosion = last['relative_volume'] > 1.2
     qqe_bullish = last['rsi'] > 55
     if ssl_flipped_green and wae_explosion and qqe_bullish:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية QQE+SSL (تقريبية).")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية QQE+SSL (تقريبية).")
         return True
     return False
 
@@ -664,7 +662,7 @@ def check_ema_rsi_strategy(df: pd.DataFrame) -> bool:
     rsi_strong = last['rsi'] > 50
     trend_filter = last['close'] > last['ema_50']
     if ema_cross_up and rsi_strong and trend_filter:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية EMA+RSI Cross.")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية EMA+RSI Cross.")
         return True
     return False
 
@@ -674,7 +672,7 @@ def check_pullback_strategy(df: pd.DataFrame) -> bool:
     uptrend_confirmed = last['close'] > last['ema_50'] and last['ema_50'] > last['ema_100']
     macd_cross_up = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
     if uptrend_confirmed and macd_cross_up:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية Pullback MACD.")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية Pullback MACD.")
         return True
     return False
 
@@ -685,7 +683,7 @@ def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
     breakout = last['close'] > last['bb_upper']
     volume_confirmed = last['relative_volume'] > 1.2
     if is_squeeze and breakout and volume_confirmed:
-        logger.debug(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
         return True
     return False
 
@@ -1043,7 +1041,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             target_price = float(signal_data['target_price'])
             stop_loss = float(signal_data['stop_loss'])
             quantity = float(signal_data['quantity']) if signal_data.get('quantity') is not None else None
-            rr_ratio = float(signal_data.get('rr_ratio', 0.0)) # V9.0
+            rr_ratio = float(signal_data.get('rr_ratio', 0.0))
 
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
@@ -1122,7 +1120,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.0 - حلقة محسنة</title>
+    <title>لوحة تحكم التداول V9.1.0 - معالجة بالدفعات</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1157,7 +1155,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.0.1 (Patched)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.1.0 (Batch Processing)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1572,7 +1570,6 @@ def update_settings():
     try:
         data = request.get_json()
         
-        # V9.0.1: Use .get() for all keys to prevent KeyErrors if frontend is out of sync
         with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = float(data.get('ml_confidence', BUY_CONFIDENCE_THRESHOLD))
         with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
         with order_book_ratio_lock: ORDER_BOOK_MIN_BID_ASK_RATIO = float(data.get('ob_ratio', ORDER_BOOK_MIN_BID_ASK_RATIO))
@@ -1581,7 +1578,6 @@ def update_settings():
             VOLUME_FILTER_MULTIPLIER = float(data.get('vol_multiplier', VOLUME_FILTER_MULTIPLIER))
             USE_VOLUME_FILTER = bool(data.get('use_volume_filter', USE_VOLUME_FILTER))
         
-        # The specific fix for the reported error
         MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
 
         with candle_filter_lock: USE_CANDLESTICK_FILTER = bool(data.get('use_candle_filter', USE_CANDLESTICK_FILTER))
@@ -1664,20 +1660,17 @@ def trade_management_loop():
                 signal_id, symbol = signal['id'], signal['symbol']
                 tp, sl, entry = float(signal['target_price']), float(signal['stop_loss']), float(signal['entry_price'])
 
-                # 1. Check for Stop Loss
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     close_signal(signal_id, current_price, reason)
                     continue
 
-                # 2. Check for Take Profit & Dynamic Journey
                 if current_price >= tp:
                     if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
                         journey_state = signal['journey_state']
                         if journey_state.get('is_complete'): continue
                         logger.info(f"🎉 [{symbol}] الهدف عند {tp:.4f} تحقق بسعر {current_price:.4f}")
                         
-                        # V9.0: Dynamic Partial Exit Logic
                         if not journey_state.get('partial_exit_done'):
                             rr_ratio = float(signal.get('rr_ratio', 0.0))
                             partial_exit_percent = 0.6 if rr_ratio >= 2.0 else 0.4
@@ -1701,9 +1694,7 @@ def trade_management_loop():
                             df_with_features = calculate_all_features(df_analysis, None)
                             
                             if analyze_path_for_extension(df_with_features):
-                                new_sl = tp # Move SL to previous TP
-                                
-                                # V9.0: Dynamic Next Target ATR Multiplier
+                                new_sl = tp
                                 next_target_atr_multiplier = 1.45 if session_liquidity == 'HIGH_LIQUIDITY' else 1.25
                                 
                                 next_tp = find_next_resistance(df_with_features, current_price)
@@ -1738,7 +1729,6 @@ def trade_management_loop():
                     else:
                         close_signal(signal_id, current_price, 'take_profit')
                 
-                # 3. ATR Trailing Stop Update
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1787,142 +1777,144 @@ def main_loop_enhanced():
             determine_market_state_enhanced()
             btc_data = get_btc_data_for_bot()
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
+            total_batches = (len(symbols_to_process) + SYMBOL_PROCESSING_BATCH_SIZE - 1) // SYMBOL_PROCESSING_BATCH_SIZE
 
-            # V9.0: New Loop Structure to prevent strategy overlap
-            for symbol in symbols_to_process:
-                try:
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
+            # V9.1: Loop over batches
+            for i in range(0, len(symbols_to_process), SYMBOL_PROCESSING_BATCH_SIZE):
+                batch = symbols_to_process[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
+                logger.info(f"🔄 Processing batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}/{total_batches}...")
+
+                for symbol in batch:
+                    try:
+                        with signal_cache_lock:
+                            if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
+                                continue
+                        
+                        logger.info(f"--- [{symbol}] Starting analysis ---")
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        
+                        if df_15m is None or len(df_15m) < 100:
+                            log_rejection(symbol, "Insufficient Historical Data", {"days": SIGNAL_GENERATION_LOOKBACK_DAYS})
+                            continue
+                        logger.info(f"  -> [{symbol}] Fetched {len(df_15m)} candles. Calculating indicators...")
+
+                        df_with_indicators = calculate_all_features(df_15m, btc_data)
+                        df_with_indicators.name = symbol
+                        if df_with_indicators.empty:
+                            continue
+                        logger.info(f"  -> [{symbol}] Indicators calculated. Checking strategies...")
+
+                        signal_found, strategy_used, ml_confidence_score = False, None, "N/A"
+
+                        strategies_to_check = []
+                        with ml_strategy_lock:
+                            if USE_ML_STRATEGY: strategies_to_check.append('ML')
+                        with macd_ema_strategy_lock:
+                            if USE_MACD_EMA_STRATEGY: strategies_to_check.append('MACD_EMA')
+                        with bb_stoch_strategy_lock:
+                            if USE_BB_STOCH_STRATEGY: strategies_to_check.append('BB_STOCH')
+                        with qqe_ssl_strategy_lock:
+                            if USE_QQE_SSL_STRATEGY: strategies_to_check.append('QQE_SSL')
+                        with ema_rsi_strategy_lock:
+                            if USE_EMA_RSI_STRATEGY: strategies_to_check.append('EMA_RSI')
+                        with pullback_strategy_lock:
+                            if USE_PULLBACK_STRATEGY: strategies_to_check.append('PULLBACK')
+                        with bb_squeeze_strategy_lock:
+                            if USE_BB_SQUEEZE_STRATEGY: strategies_to_check.append('BB_SQUEEZE')
+
+                        for strategy_key in strategies_to_check:
+                            if strategy_key == 'ML':
+                                pass # ML logic
+                            elif strategy_key == 'MACD_EMA' and check_macd_ema_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.9"
+                            elif strategy_key == 'BB_STOCH' and check_bb_stoch_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.9"
+                            elif strategy_key == 'QQE_SSL' and check_qqe_ssl_strategy_approx(df_with_indicators):
+                                signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.9"
+                            elif strategy_key == 'EMA_RSI' and check_ema_rsi_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "EMA_RSI_Cross_V8.9"
+                            elif strategy_key == 'PULLBACK' and check_pullback_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "Pullback_MACD_V8.9"
+                            elif strategy_key == 'BB_SQUEEZE' and check_bb_squeeze_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "BB_Squeeze_Breakout_V8.9"
+                            
+                            if signal_found:
+                                break
+                        
+                        if not signal_found:
+                            logger.info(f"  -> [{symbol}] No strategy triggered. Moving to next symbol.")
                             continue
 
-                    df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                    if df_15m is None or len(df_15m) < 100:
-                        continue
+                        logger.info(f"  -> [{symbol}] Initial signal from {strategy_used}. Starting final filters...")
+                        df_for_filtering = df_with_indicators.iloc[:-1]
+                        df_for_filtering.name = symbol
 
-                    df_with_indicators = calculate_all_features(df_15m, btc_data)
-                    df_with_indicators.name = symbol
-                    if df_with_indicators.empty:
-                        continue
-
-                    signal_found, strategy_used, ml_confidence_score = False, None, "N/A"
-
-                    strategies_to_check = []
-                    with ml_strategy_lock:
-                        if USE_ML_STRATEGY: strategies_to_check.append('ML')
-                    with macd_ema_strategy_lock:
-                        if USE_MACD_EMA_STRATEGY: strategies_to_check.append('MACD_EMA')
-                    with bb_stoch_strategy_lock:
-                        if USE_BB_STOCH_STRATEGY: strategies_to_check.append('BB_STOCH')
-                    with qqe_ssl_strategy_lock:
-                        if USE_QQE_SSL_STRATEGY: strategies_to_check.append('QQE_SSL')
-                    with ema_rsi_strategy_lock:
-                        if USE_EMA_RSI_STRATEGY: strategies_to_check.append('EMA_RSI')
-                    with pullback_strategy_lock:
-                        if USE_PULLBACK_STRATEGY: strategies_to_check.append('PULLBACK')
-                    with bb_squeeze_strategy_lock:
-                        if USE_BB_SQUEEZE_STRATEGY: strategies_to_check.append('BB_SQUEEZE')
-
-                    # This inner loop checks all active strategies for the current symbol
-                    for strategy_key in strategies_to_check:
-                        logger.debug(f"  -> [{symbol}] فحص استراتيجية: {strategy_key}...")
-
-                        if strategy_key == 'ML':
-                            # ML logic remains the same
-                            pass # Placeholder for ML logic
+                        with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
+                        if use_filter and (strategy_used not in SCALPING_STRATEGIES):
+                            logger.info(f"  -> [{symbol}] Applying candlestick filter...")
+                            if not is_bullish_reversal_pattern(df_for_filtering):
+                                log_rejection(symbol, "Bullish Reversal Candle Pattern Failed", {"strategy": strategy_used}); continue
                         
-                        elif strategy_key == 'MACD_EMA' and check_macd_ema_strategy(df_with_indicators):
-                            signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.9"
-                        
-                        elif strategy_key == 'BB_STOCH' and check_bb_stoch_strategy(df_with_indicators):
-                            signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.9"
+                        with volume_filter_lock: use_filter, vol_mult = USE_VOLUME_FILTER, VOLUME_FILTER_MULTIPLIER
+                        if use_filter:
+                            logger.info(f"  -> [{symbol}] Applying volume filter...")
+                            completed_candle = df_with_indicators.iloc[-2]
+                            avg_volume = df_with_indicators['volume'].iloc[-(CANDLE_AVG_VOLUME_PERIOD + 2):-2].mean() 
+                            if not (completed_candle['volume'] > avg_volume * vol_mult):
+                                log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used, "vol": f"{completed_candle['volume']:.2f}", "avg_vol": f"{avg_volume:.2f}"}); continue
 
-                        elif strategy_key == 'QQE_SSL' and check_qqe_ssl_strategy_approx(df_with_indicators):
-                            signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.9"
-                        
-                        elif strategy_key == 'EMA_RSI' and check_ema_rsi_strategy(df_with_indicators):
-                            signal_found, strategy_used = True, "EMA_RSI_Cross_V8.9"
+                        try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                        except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
 
-                        elif strategy_key == 'PULLBACK' and check_pullback_strategy(df_with_indicators):
-                            signal_found, strategy_used = True, "Pullback_MACD_V8.9"
+                        with order_book_filter_enable_lock: use_filter = USE_ORDER_BOOK_FILTER
+                        if use_filter:
+                            logger.info(f"  -> [{symbol}] Applying order book filter...")
+                            if not passes_final_order_book_check(symbol, entry_price):
+                                continue
 
-                        elif strategy_key == 'BB_SQUEEZE' and check_bb_squeeze_strategy(df_with_indicators):
-                            signal_found, strategy_used = True, "BB_Squeeze_Breakout_V8.9"
+                        logger.info(f"  -> [{symbol}] ✅ All filters passed. Preparing trade...")
+                        tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
+                        if not tp_sl_data: continue
 
-                        # If a signal is found, break the inner loop and proceed to filters
-                        if signal_found:
-                            logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
-                            break
-                    
-                    if not signal_found:
-                        continue # Move to the next symbol if no strategy triggered
+                        new_signal = {
+                            'symbol': symbol, 'strategy_name': strategy_used,
+                            'signal_details': {'ML_Confidence': ml_confidence_score, **tp_sl_data},
+                            'entry_price': entry_price, **tp_sl_data
+                        }
 
-                    # --- Final Filters ---
-                    df_for_filtering = df_with_indicators.iloc[:-1]
-                    df_for_filtering.name = symbol
-
-                    # V9.0: Optional candle filter for scalping strategies
-                    with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
-                    if use_filter and (strategy_used not in SCALPING_STRATEGIES):
-                        if not is_bullish_reversal_pattern(df_for_filtering):
-                            log_rejection(symbol, "Bullish Reversal Candle Pattern Failed", {"strategy": strategy_used}); continue
-                    
-                    # V9.0: Updated volume filter period
-                    with volume_filter_lock: use_filter, vol_mult = USE_VOLUME_FILTER, VOLUME_FILTER_MULTIPLIER
-                    if use_filter:
-                        completed_candle = df_with_indicators.iloc[-2]
-                        avg_volume = df_with_indicators['volume'].iloc[-(CANDLE_AVG_VOLUME_PERIOD + 2):-2].mean() 
-                        if not (completed_candle['volume'] > avg_volume * vol_mult):
-                            log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used, "vol": completed_candle['volume'], "avg_vol": avg_volume}); continue
-
-                    try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                    except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
-
-                    with order_book_filter_enable_lock: use_filter = USE_ORDER_BOOK_FILTER
-                    if use_filter and not passes_final_order_book_check(symbol, entry_price):
-                        continue
-
-                    logger.info(f"  -> [{symbol}] ✅ نجحت جميع الفلاتر. تحضير الصفقة...")
-                    tp_sl_data = calculate_tp_sl(symbol, entry_price, df_with_indicators)
-                    if not tp_sl_data: continue
-
-                    new_signal = {
-                        'symbol': symbol, 'strategy_name': strategy_used,
-                        'signal_details': {'ML_Confidence': ml_confidence_score, **tp_sl_data},
-                        'entry_price': entry_price, **tp_sl_data
-                    }
-
-                    with trading_status_lock: is_enabled = is_trading_enabled
-                    if is_enabled:
-                        quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
-                        if quantity and quantity > 0:
-                            order_result = place_order(symbol, Client.SIDE_BUY, quantity)
-                            if order_result:
-                                new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
+                        with trading_status_lock: is_enabled = is_trading_enabled
+                        if is_enabled:
+                            quantity = calculate_position_size(symbol, entry_price, new_signal['stop_loss'])
+                            if quantity and quantity > 0:
+                                order_result = place_order(symbol, Client.SIDE_BUY, quantity)
+                                if order_result:
+                                    new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
+                                else: continue
                             else: continue
-                        else: continue
-                    
-                    saved_signal = insert_signal_into_db(new_signal)
-                    if saved_signal:
-                        with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                        log_and_notify('info', f"SIGNAL: New buy signal for {symbol} from {strategy_used}", "NEW_SIGNAL")
+                        
+                        saved_signal = insert_signal_into_db(new_signal)
+                        if saved_signal:
+                            with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
+                            log_and_notify('info', f"SIGNAL: New buy signal for {symbol} from {strategy_used}", "NEW_SIGNAL")
 
-                except Exception as e:
-                    logger.error(f"❌ [Processing Error] للعملة {symbol}: {e}", exc_info=True)
-                finally:
-                    time.sleep(0.2) # Small delay between symbols
-            
-            gc.collect()
-            
-            # V9.0: Dynamic sleep time based on session
+                    except Exception as e:
+                        logger.error(f"❌ [Processing Error] for symbol {symbol}: {e}", exc_info=True)
+                    finally:
+                        time.sleep(0.2)
+                
+                logger.info(f"🗑️ Batch {i // SYMBOL_PROCESSING_BATCH_SIZE + 1} processed. Clearing caches and collecting garbage.")
+                ml_models_cache.clear()
+                gc.collect()
+
             _, session_liquidity, _ = get_session_state()
             sleep_duration = 45 if session_liquidity == 'HIGH_LIQUIDITY' else 60
-            logger.info(f"✅ [End of Cycle] انتهت دورة المسح الكاملة. الانتظار {sleep_duration} ثانية...")
+            logger.info(f"✅ [End of Cycle] Full scan cycle finished. Waiting for {sleep_duration} seconds...")
             time.sleep(sleep_duration)
 
         except (KeyboardInterrupt, SystemExit):
             log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
         except Exception as main_err:
-            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); time.sleep(120)
+            log_and_notify("error", f"Critical error in main loop: {main_err}", "SYSTEM"); time.sleep(120)
 
 def price_update_loop():
     if not redis_client: return
@@ -1950,13 +1942,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.0.1 - Patched)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.1.0 - Batch Processing)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.0.1 - Patched) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.1.0 - Batch Processing) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
