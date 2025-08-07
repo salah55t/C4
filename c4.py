@@ -1,8 +1,9 @@
-# ملف c4.py - نسخة V8.7.0 (فلترة الشمعة المكتملة)
-# --- التغييرات الرئيسية (V8.7.0):
-# 1. تعديل فلتر نمط الشموع ليفحص النمط المنتهي بالشمعة السابقة المكتملة (شمعة -2).
-# 2. تعديل فلتر حجم التداول ليفحص حجم الشمعة السابقة المكتملة (شمعة -2).
-# 3. هذا التعديل يجعل الفلاتر تعتمد على بيانات مؤكدة وغير متغيرة.
+# ملف c4.py - نسخة V8.8.0 (إضافة 3 استراتيجيات سكالبينج جديدة)
+# --- التغييرات الرئيسية (V8.8.0):
+# 1. إضافة استراتيجية EMA Crossover + RSI (EMA_RSI_Cross).
+# 2. إضافة استراتيجية Pullback with 3 EMAs + MACD (Pullback_MACD).
+# 3. إضافة استراتيجية Bollinger Bands Squeeze Breakout (BB_Squeeze_Breakout).
+# 4. إضافة مفاتيح تحكم جديدة في الواجهة لتفعيل/تعطيل كل استراتيجية.
 
 import time
 import os
@@ -103,7 +104,7 @@ USE_VOLUME_FILTER: bool = True
 USE_ORDER_BOOK_FILTER: bool = True
 order_book_filter_enable_lock = Lock()
 
-# --- NEW: Strategy Toggles ---
+# --- Strategy Toggles ---
 USE_ML_STRATEGY: bool = False
 ml_strategy_lock = Lock()
 
@@ -115,6 +116,16 @@ macd_ema_strategy_lock = Lock()
 
 USE_QQE_SSL_STRATEGY: bool = True
 qqe_ssl_strategy_lock = Lock()
+
+# --- NEW SCALPING STRATEGY TOGGLES ---
+USE_EMA_RSI_STRATEGY: bool = True
+ema_rsi_strategy_lock = Lock()
+
+USE_PULLBACK_STRATEGY: bool = True
+pullback_strategy_lock = Lock()
+
+USE_BB_SQUEEZE_STRATEGY: bool = True
+bb_squeeze_strategy_lock = Lock()
 
 
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
@@ -133,9 +144,7 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات رحلة التداول الديناميكية (النسخة الجديدة) ---
 USE_DYNAMIC_JOURNEY = True
-# النسبة المئوية للخروج الجزئي عند تحقيق الهدف الأول
-PARTIAL_EXIT_AT_TP1_PERCENT: float = 0.5 # 50%
-# المضاعف المستخدم لتحديد الهدف التالي بناءً على ATR إذا لم يتم العثور على مقاومة
+PARTIAL_EXIT_AT_TP1_PERCENT: float = 0.5
 NEXT_TARGET_ATR_MULTIPLIER: float = 1.5
 
 
@@ -194,6 +203,9 @@ REJECTION_REASONS_AR = {
     "BB_Stoch Strategy Conditions Not Met": "شروط استراتيجية BB+Stoch لم تتحقق",
     "MACD_EMA Strategy Conditions Not Met": "شروط استراتيجية MACD+EMA لم تتحقق",
     "QQE_SSL Strategy Conditions Not Met": "شروط استراتيجية QQE+SSL لم تتحقق",
+    "EMA_RSI Strategy Conditions Not Met": "شروط استراتيجية EMA+RSI لم تتحقق",
+    "Pullback Strategy Conditions Not Met": "شروط استراتيجية Pullback لم تتحقق",
+    "BB Squeeze Strategy Conditions Not Met": "شروط استراتيجية BB Squeeze لم تتحقق",
 }
 
 
@@ -503,6 +515,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
     df_calc['ema_50'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+    df_calc['ema_100'] = df_calc['close'].ewm(span=100, adjust=False).mean() # Added for Pullback strategy
     df_calc['ema_120'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -540,6 +553,8 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     else:
         df_calc['btc_correlation'] = 0.0
     df_calc = calculate_advanced_momentum_features(df_calc)
+    # Add BB Width for Squeeze Strategy
+    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
     df_calc = calculate_market_microstructure_features(df_calc)
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
@@ -598,7 +613,7 @@ def load_notifications_to_cache():
 
 # ---------------------- Trading Logic & Filters ----------------------
 
-# --- NEW: Strategy Logic Functions ---
+# --- Strategy Logic Functions ---
 def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -624,10 +639,49 @@ def check_qqe_ssl_strategy_approx(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
     ssl_flipped_green = prev['supertrend_direction'] == -1 and last['supertrend_direction'] == 1
-    wae_explosion = last['relative_volume'] > 1.5 # Volume is 50% higher than average
+    wae_explosion = last['relative_volume'] > 1.5
     qqe_bullish = last['rsi'] > 55
     if ssl_flipped_green and wae_explosion and qqe_bullish:
         logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية QQE+SSL (تقريبية).")
+        return True
+    return False
+
+# --- NEW STRATEGY FUNCTIONS ---
+def check_ema_rsi_strategy(df: pd.DataFrame) -> bool:
+    if len(df) < 2: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    # EMA 9 crosses above EMA 21
+    ema_cross_up = prev['ema_9'] < prev['ema_21'] and last['ema_9'] > last['ema_21']
+    # RSI is above 50 to confirm bullish momentum
+    rsi_strong = last['rsi'] > 50
+    if ema_cross_up and rsi_strong:
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية EMA+RSI Cross.")
+        return True
+    return False
+
+def check_pullback_strategy(df: pd.DataFrame) -> bool:
+    if len(df) < 2: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    # Trend filter: Price > EMA50 and EMA50 > EMA100
+    uptrend_confirmed = last['close'] > last['ema_50'] and last['ema_50'] > last['ema_100']
+    # Entry signal: MACD crosses up from below the zero line (pullback ends)
+    macd_cross_from_below = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal'] and last['macd'] < 0
+    if uptrend_confirmed and macd_cross_from_below:
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية Pullback MACD.")
+        return True
+    return False
+
+def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
+    if len(df) < 100: return False # Need enough data for historical comparison
+    last = df.iloc[-1]
+    # Squeeze condition: Current BB width is in the lowest 10% of the last 100 periods
+    is_squeeze = last['bb_width'] < df['bb_width'].rolling(100).quantile(0.1).iloc[-1]
+    # Breakout condition: Price closes above the upper Bollinger Band
+    breakout = last['close'] > last['bb_upper']
+    # Volume confirmation
+    volume_confirmed = last['relative_volume'] > 1.2
+    if is_squeeze and breakout and volume_confirmed:
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
         return True
     return False
 
@@ -1057,7 +1111,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.7 - فلترة محسنة</title>
+    <title>لوحة تحكم التداول V8.8 - استراتيجيات متعددة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1075,6 +1129,7 @@ def get_dashboard_html():
         .save-btn { background-color: var(--accent-blue); color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: bold; transition: background-color 0.2s; }
         .save-btn:hover { background-color: #4a91e2; }
         .strategy-toggle { border-left: 4px solid var(--accent-blue); }
+        .strategy-toggle-new { border-left: 4px solid var(--accent-yellow); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1091,7 +1146,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.7 (Completed Candle)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.8 (New Strategies)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -1164,6 +1219,23 @@ def get_dashboard_html():
                          <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle">
                             <span class="font-semibold">استراتيجية QQE+SSL</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="qqe-ssl-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                    </div>
+                    <!-- NEW STRATEGIES SECTION -->
+                    <hr class="border-border-color my-6">
+                    <h4 class="text-lg font-bold mb-4 text-accent-yellow">استراتيجيات سكالبينج إضافية</h4>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-6">
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-new">
+                            <span class="font-semibold">EMA+RSI Cross</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="ema-rsi-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-new">
+                            <span class="font-semibold">Pullback MACD</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="pullback-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-new">
+                            <span class="font-semibold">BB Squeeze</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="bb-squeeze-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
                         </div>
                     </div>
 
@@ -1249,6 +1321,10 @@ function updateMarketStatus() {
             document.getElementById('bb-stoch-strategy-toggle').checked = data.settings.use_bb_stoch_strategy;
             document.getElementById('macd-ema-strategy-toggle').checked = data.settings.use_macd_ema_strategy;
             document.getElementById('qqe-ssl-strategy-toggle').checked = data.settings.use_qqe_ssl_strategy;
+            // New strategies
+            document.getElementById('ema-rsi-strategy-toggle').checked = data.settings.use_ema_rsi_strategy;
+            document.getElementById('pullback-strategy-toggle').checked = data.settings.use_pullback_strategy;
+            document.getElementById('bb-squeeze-strategy-toggle').checked = data.settings.use_bb_squeeze_strategy;
         }
     });
 }
@@ -1323,7 +1399,11 @@ function saveSettings() {
         use_ml_strategy: document.getElementById('ml-strategy-toggle').checked,
         use_bb_stoch_strategy: document.getElementById('bb-stoch-strategy-toggle').checked,
         use_macd_ema_strategy: document.getElementById('macd-ema-strategy-toggle').checked,
-        use_qqe_ssl_strategy: document.getElementById('qqe-ssl-strategy-toggle').checked
+        use_qqe_ssl_strategy: document.getElementById('qqe-ssl-strategy-toggle').checked,
+        // New strategies
+        use_ema_rsi_strategy: document.getElementById('ema-rsi-strategy-toggle').checked,
+        use_pullback_strategy: document.getElementById('pullback-strategy-toggle').checked,
+        use_bb_squeeze_strategy: document.getElementById('bb-squeeze-strategy-toggle').checked,
     };
     const feedbackEl = document.getElementById('settings-feedback');
     feedbackEl.textContent = 'جاري الحفظ...';
@@ -1383,6 +1463,10 @@ def get_market_status():
     with bb_stoch_strategy_lock: use_bb_stoch = USE_BB_STOCH_STRATEGY
     with macd_ema_strategy_lock: use_macd_ema = USE_MACD_EMA_STRATEGY
     with qqe_ssl_strategy_lock: use_qqe_ssl = USE_QQE_SSL_STRATEGY
+    with ema_rsi_strategy_lock: use_ema_rsi = USE_EMA_RSI_STRATEGY
+    with pullback_strategy_lock: use_pullback = USE_PULLBACK_STRATEGY
+    with bb_squeeze_strategy_lock: use_bb_squeeze = USE_BB_SQUEEZE_STRATEGY
+
 
     return jsonify({
         "market_state": state_copy, "active_sessions": active_sessions, "usdt_balance": usdt_balance,
@@ -1391,7 +1475,9 @@ def get_market_status():
             "ml_confidence": conf, "risk_percent": risk, "ob_ratio": ob_ratio, "vol_multiplier": vol_mult,
             "use_candle_filter": use_candle, "use_volume_filter": use_volume, "use_order_book_filter": use_ob,
             "use_ml_strategy": use_ml, "use_bb_stoch_strategy": use_bb_stoch,
-            "use_macd_ema_strategy": use_macd_ema, "use_qqe_ssl_strategy": use_qqe_ssl
+            "use_macd_ema_strategy": use_macd_ema, "use_qqe_ssl_strategy": use_qqe_ssl,
+            "use_ema_rsi_strategy": use_ema_rsi, "use_pullback_strategy": use_pullback,
+            "use_bb_squeeze_strategy": use_bb_squeeze,
         }
     })
 
@@ -1462,7 +1548,7 @@ def toggle_trading_status():
 def update_settings():
     global BUY_CONFIDENCE_THRESHOLD, RISK_PER_TRADE_PERCENT, ORDER_BOOK_MIN_BID_ASK_RATIO, VOLUME_FILTER_MULTIPLIER, \
            USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER, USE_ML_STRATEGY, USE_BB_STOCH_STRATEGY, \
-           USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY
+           USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_BB_SQUEEZE_STRATEGY
     try:
         data = request.get_json()
         with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = float(data['ml_confidence'])
@@ -1477,6 +1563,9 @@ def update_settings():
         with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = bool(data['use_bb_stoch_strategy'])
         with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = bool(data['use_macd_ema_strategy'])
         with qqe_ssl_strategy_lock: USE_QQE_SSL_STRATEGY = bool(data['use_qqe_ssl_strategy'])
+        with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = bool(data['use_ema_rsi_strategy'])
+        with pullback_strategy_lock: USE_PULLBACK_STRATEGY = bool(data['use_pullback_strategy'])
+        with bb_squeeze_strategy_lock: USE_BB_SQUEEZE_STRATEGY = bool(data['use_bb_squeeze_strategy'])
 
         log_and_notify('info', f"⚙️ Settings updated via dashboard: {data}", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "Settings updated successfully"})
@@ -1504,17 +1593,10 @@ def manual_close_trade_endpoint(signal_id):
 
 # ---------------------- System Loops ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
-    """
-    تحلل الشروط الحالية للسوق لتحديد ما إذا كان يجب تمديد الصفقة.
-    أصبحت الشروط أقل صرامة لتسمح باستمرارية أكبر للصفقات الواعدة.
-    """
     if df is None or len(df) < 20: return False
     last = df.iloc[-1]
-    # تم تخفيض متطلب قوة الترند (ADX) للسماح بالاستمرار في ظروف أقل مثالية
     trend_is_supportive = last.get('adx', 0) > 22
-    # تم تخفيض متطلب حجم التداول
     volume_is_supportive = last.get('relative_volume', 0) > 1.1
-    # التأكد من أن السعر لا يزال فوق متوسط متحرك قصير الأجل
     momentum_is_positive = last.get('close', 0) > last.get('ema_21', 0)
     
     should_extend = trend_is_supportive and volume_is_supportive and momentum_is_positive
@@ -1522,23 +1604,12 @@ def analyze_path_for_extension(df: pd.DataFrame) -> bool:
     return should_extend
 
 def find_next_resistance(df: pd.DataFrame, from_price: float) -> Optional[float]:
-    """
-    تبحث عن مستوى المقاومة التالي فوق سعر معين.
-    """
     if len(df) < 20: return None
-    
-    df_slice = df.iloc[-100:] # Look at last 100 candles
-    
-    # تحديد القمم المحلية كمرشحين للمقاومة
+    df_slice = df.iloc[-100:]
     resistance_candidates = df_slice[df_slice['high'] == df_slice['high'].rolling(7, center=True).max()]['high']
-    
-    # فلترة المرشحين الذين هم فقط فوق السعر الحالي
-    next_resistances = resistance_candidates[resistance_candidates > (from_price * 1.001)] # Must be at least 0.1% higher
-    
+    next_resistances = resistance_candidates[resistance_candidates > (from_price * 1.001)]
     if not next_resistances.empty:
-        # إرجاع أقرب مستوى مقاومة
         return next_resistances.min()
-        
     return None
 
 def trade_management_loop():
@@ -1565,22 +1636,17 @@ def trade_management_loop():
                 signal_id, symbol = signal['id'], signal['symbol']
                 tp, sl, entry = float(signal['target_price']), float(signal['stop_loss']), float(signal['entry_price'])
 
-                # 1. Check for Stop-Loss first
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     close_signal(signal_id, current_price, reason)
                     continue
 
-                # 2. Check for Take-Profit and Dynamic Journey Logic
                 if current_price >= tp:
                     if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
                         journey_state = signal['journey_state']
-                        
                         if journey_state.get('is_complete'): continue
-
                         logger.info(f"🎉 [{symbol}] الهدف عند {tp:.4f} تحقق بسعر {current_price:.4f}")
                         
-                        # --- Partial Exit Logic ---
                         if not journey_state.get('partial_exit_done') and PARTIAL_EXIT_AT_TP1_PERCENT > 0:
                             if signal.get('is_real_trade'):
                                 original_quantity = Decimal(str(signal.get('original_quantity', '0')))
@@ -1592,24 +1658,18 @@ def trade_management_loop():
                                     if sell_order:
                                         signal['quantity'] = float(Decimal(str(signal['quantity'])) - exit_quantity)
                                         log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
-                            
                             journey_state['partial_exit_done'] = True
                         
                         journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
                         
-                        # --- Logic to find the next target ---
                         df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 100)
                         if df_analysis is not None:
                             df_with_features = calculate_all_features(df_analysis, None)
                             
                             if analyze_path_for_extension(df_with_features):
-                                # Move Stop-Loss to the recently achieved Take-Profit level
                                 new_sl = tp
-                                
-                                # Find the next resistance level
                                 next_tp = find_next_resistance(df_with_features, current_price)
                                 
-                                # If no resistance found, use ATR
                                 if next_tp is None:
                                     last_atr = df_with_features['atr'].iloc[-1]
                                     next_tp = current_price + (last_atr * NEXT_TARGET_ATR_MULTIPLIER)
@@ -1617,7 +1677,6 @@ def trade_management_loop():
                                 else:
                                     logger.info(f"  -> [{symbol}] تم العثور على مقاومة تالية عند: {next_tp:.4f}")
                                 
-                                # Update signal in cache and DB
                                 signal['stop_loss'] = new_sl
                                 signal['target_price'] = next_tp
                                 signal['journey_state'] = journey_state
@@ -1633,17 +1692,14 @@ def trade_management_loop():
                                         conn.commit()
                                 except Exception as e:
                                     logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
-                                
                                 continue
                                 
                         logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد أو فشل جلب البيانات. إغلاق الصفقة.")
                         journey_state['is_complete'] = True
                         close_signal(signal_id, current_price, 'journey_completed')
-
                     else:
                         close_signal(signal_id, current_price, 'take_profit')
                 
-                # 3. Trailing Stop Logic
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1705,7 +1761,7 @@ def main_loop_enhanced():
                                 continue
 
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                        if df_15m is None or len(df_15m) < 50: continue
+                        if df_15m is None or len(df_15m) < 100: continue
 
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
                         df_with_indicators.name = symbol
@@ -1722,12 +1778,19 @@ def main_loop_enhanced():
                             if USE_BB_STOCH_STRATEGY: strategies_to_check.append('BB_STOCH')
                         with qqe_ssl_strategy_lock:
                             if USE_QQE_SSL_STRATEGY: strategies_to_check.append('QQE_SSL')
+                        # Add new strategies to the check list
+                        with ema_rsi_strategy_lock:
+                            if USE_EMA_RSI_STRATEGY: strategies_to_check.append('EMA_RSI')
+                        with pullback_strategy_lock:
+                            if USE_PULLBACK_STRATEGY: strategies_to_check.append('PULLBACK')
+                        with bb_squeeze_strategy_lock:
+                            if USE_BB_SQUEEZE_STRATEGY: strategies_to_check.append('BB_SQUEEZE')
+
                         
                         for strategy_key in strategies_to_check:
                             if signal_found: break
                             logger.info(f"  -> [{symbol}] فحص استراتيجية: {strategy_key}...")
 
-                            # The core strategy check still happens on the latest data to catch the signal
                             if strategy_key == 'ML':
                                 strategy_instance = EnhancedTradingStrategy(symbol)
                                 if strategy_instance.load_model():
@@ -1739,26 +1802,34 @@ def main_loop_enhanced():
                                             if ml_result:
                                                 with buy_confidence_lock: current_confidence_threshold = BUY_CONFIDENCE_THRESHOLD
                                                 if ml_result['prediction'] == 1 and ml_result['confidence'] >= current_confidence_threshold:
-                                                    signal_found, strategy_used = True, "ML_Signal_V8.7"
+                                                    signal_found, strategy_used = True, "ML_Signal_V8.8"
                                                     ml_confidence_score = f"{ml_result['confidence']:.2%}"
                                                 else: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": f"{ml_result['confidence']:.2%}"})
                             
                             elif strategy_key == 'MACD_EMA' and check_macd_ema_strategy(df_with_indicators):
-                                signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.7"
+                                signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.8"
                             
                             elif strategy_key == 'BB_STOCH' and check_bb_stoch_strategy(df_with_indicators):
-                                signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.7"
+                                signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.8"
 
                             elif strategy_key == 'QQE_SSL' and check_qqe_ssl_strategy_approx(df_with_indicators):
-                                signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.7"
+                                signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.8"
+                            
+                            elif strategy_key == 'EMA_RSI' and check_ema_rsi_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "EMA_RSI_Cross_V8.8"
+
+                            elif strategy_key == 'PULLBACK' and check_pullback_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "Pullback_MACD_V8.8"
+
+                            elif strategy_key == 'BB_SQUEEZE' and check_bb_squeeze_strategy(df_with_indicators):
+                                signal_found, strategy_used = True, "BB_Squeeze_Breakout_V8.8"
                         
                         if not signal_found: continue
 
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية على الشمعة المكتملة...")
                         
-                        # --- MODIFICATION: Filter on the completed candle ---
-                        df_for_filtering = df_with_indicators.iloc[:-1] # Exclude the last (live) candle
-                        df_for_filtering.name = symbol # Keep the name for logging
+                        df_for_filtering = df_with_indicators.iloc[:-1]
+                        df_for_filtering.name = symbol
 
                         with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
                         if use_filter and not is_bullish_reversal_pattern(df_for_filtering):
@@ -1766,8 +1837,7 @@ def main_loop_enhanced():
 
                         with volume_filter_lock: use_filter, vol_mult = USE_VOLUME_FILTER, VOLUME_FILTER_MULTIPLIER
                         if use_filter:
-                            completed_candle = df_with_indicators.iloc[-2] # The last completed candle
-                            # Average of the 20 candles before the completed one
+                            completed_candle = df_with_indicators.iloc[-2]
                             avg_volume = df_with_indicators['volume'].iloc[-22:-2].mean() 
                             if not (completed_candle['volume'] > avg_volume * vol_mult):
                                 log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used, "vol": completed_candle['volume'], "avg_vol": avg_volume}); continue
@@ -1846,13 +1916,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.7 - Completed Candle Filter)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.8 - New Strategies)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.7 - Completed Candle Filter) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.8 - New Strategies) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
