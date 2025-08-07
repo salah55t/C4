@@ -1,13 +1,6 @@
-# ملف c4.py - نسخة V9.0 (إعادة هيكلة الحلقة الرئيسية وتعديلات ديناميكية)
-# --- التغييرات الرئيسية (V9.0):
-# 1. [منع التداخل] إعادة هيكلة الحلقة الرئيسية لفحص كل رمز بكل الاستراتيجيات المفعّلة قبل الانتقال للرمز التالي.
-# 2. [مؤشرات/فلاتر] تعديل قيم المؤشرات والفلترة (الثقة، المخاطرة، دفتر الطلبات، إلخ) للقيم المقترحة الجديدة.
-# 3. [أهداف ديناميكية] جعل مضاعف ATR للهدف التالي (Take-Profit) متغيراً حسب سيولة الجلسة (لندن/نيويورك أو غيرها).
-# 4. [وقف متحرك] تقليل مضاعف وقف الخسارة المتحرك (ATR Trailing Stop) إلى 2.2 للاقتراب من الأرباح.
-# 5. [خروج جزئي] تعديل نسبة الخروج الجزئي عند الهدف الأول بناءً على نسبة المخاطرة/العائد (RR) للصفقة.
-# 6. [فلاتر] جعل فلتر الشموع اختيارياً لاستراتيجيات السكالبينج وتعديل فترة متوسط حجم الشمعة.
-# 7. [إدارة الأموال] زيادة الحد الأقصى للصفقات المفتوحة وتخفيض حجم الصفقة الافتراضي للإحصائيات.
-# 8. [أداء] تقليل زمن الانتظار بين دورات الفحص في أوقات الذروة.
+# ملف c4.py - نسخة V9.0.1 (إصلاح خطأ حفظ الإعدادات)
+# --- التغييرات الرئيسية (V9.0.1):
+# 1. [إصلاح] تعديل دالة `update_settings` لاستخدام `.get()` عند الوصول للقيم، مما يمنع حدوث `KeyError` في حال عدم إرسال المتصفح لجميع الإعدادات (بسبب الكاش مثلاً). هذا يجعل الواجهة البرمجية أكثر قوة ومرونة.
 
 import time
 import os
@@ -150,11 +143,6 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
 # --- إعدادات رحلة التداول الديناميكية (النسخة الجديدة) ---
 USE_DYNAMIC_JOURNEY = True
-# V9.0: تم جعل هذه القيمة ديناميكية في منطق الإدارة، لم تعد ثابتة
-# PARTIAL_EXIT_AT_TP1_PERCENT: float = 0.5
-# V9.0: تم جعل هذه القيمة ديناميكية في منطق الإدارة، لم تعد ثابتة
-# NEXT_TARGET_ATR_MULTIPLIER: float = 1.5
-
 
 # --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 50
@@ -1169,7 +1157,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.0 (Optimized Loop)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.0.1 (Patched)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1583,29 +1571,33 @@ def update_settings():
            USE_PULLBACK_STRATEGY, USE_BB_SQUEEZE_STRATEGY
     try:
         data = request.get_json()
-        with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = float(data['ml_confidence'])
-        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data['risk_percent'])
-        with order_book_ratio_lock: ORDER_BOOK_MIN_BID_ASK_RATIO = float(data['ob_ratio'])
-        with volume_filter_lock:
-            VOLUME_FILTER_MULTIPLIER = float(data['vol_multiplier'])
-            USE_VOLUME_FILTER = bool(data['use_volume_filter'])
         
-        MIN_PROFIT_PERCENT = float(data['min_profit'])
+        # V9.0.1: Use .get() for all keys to prevent KeyErrors if frontend is out of sync
+        with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = float(data.get('ml_confidence', BUY_CONFIDENCE_THRESHOLD))
+        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
+        with order_book_ratio_lock: ORDER_BOOK_MIN_BID_ASK_RATIO = float(data.get('ob_ratio', ORDER_BOOK_MIN_BID_ASK_RATIO))
+        
+        with volume_filter_lock:
+            VOLUME_FILTER_MULTIPLIER = float(data.get('vol_multiplier', VOLUME_FILTER_MULTIPLIER))
+            USE_VOLUME_FILTER = bool(data.get('use_volume_filter', USE_VOLUME_FILTER))
+        
+        # The specific fix for the reported error
+        MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
 
-        with candle_filter_lock: USE_CANDLESTICK_FILTER = bool(data['use_candle_filter'])
-        with order_book_filter_enable_lock: USE_ORDER_BOOK_FILTER = bool(data['use_order_book_filter'])
-        with ml_strategy_lock: USE_ML_STRATEGY = bool(data['use_ml_strategy'])
-        with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = bool(data['use_bb_stoch_strategy'])
-        with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = bool(data['use_macd_ema_strategy'])
-        with qqe_ssl_strategy_lock: USE_QQE_SSL_STRATEGY = bool(data['use_qqe_ssl_strategy'])
-        with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = bool(data['use_ema_rsi_strategy'])
-        with pullback_strategy_lock: USE_PULLBACK_STRATEGY = bool(data['use_pullback_strategy'])
-        with bb_squeeze_strategy_lock: USE_BB_SQUEEZE_STRATEGY = bool(data['use_bb_squeeze_strategy'])
+        with candle_filter_lock: USE_CANDLESTICK_FILTER = bool(data.get('use_candle_filter', USE_CANDLESTICK_FILTER))
+        with order_book_filter_enable_lock: USE_ORDER_BOOK_FILTER = bool(data.get('use_order_book_filter', USE_ORDER_BOOK_FILTER))
+        with ml_strategy_lock: USE_ML_STRATEGY = bool(data.get('use_ml_strategy', USE_ML_STRATEGY))
+        with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = bool(data.get('use_bb_stoch_strategy', USE_BB_STOCH_STRATEGY))
+        with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = bool(data.get('use_macd_ema_strategy', USE_MACD_EMA_STRATEGY))
+        with qqe_ssl_strategy_lock: USE_QQE_SSL_STRATEGY = bool(data.get('use_qqe_ssl_strategy', USE_QQE_SSL_STRATEGY))
+        with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = bool(data.get('use_ema_rsi_strategy', USE_EMA_RSI_STRATEGY))
+        with pullback_strategy_lock: USE_PULLBACK_STRATEGY = bool(data.get('use_pullback_strategy', USE_PULLBACK_STRATEGY))
+        with bb_squeeze_strategy_lock: USE_BB_SQUEEZE_STRATEGY = bool(data.get('use_bb_squeeze_strategy', USE_BB_SQUEEZE_STRATEGY))
 
-        log_and_notify('info', f"⚙️ Settings updated via dashboard: {data}", "SETTINGS_UPDATE")
+        log_and_notify('info', f"⚙️ Settings updated via dashboard.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "Settings updated successfully"})
     except Exception as e:
-        logger.error(f"❌ [API Settings] Failed to update settings: {e}")
+        logger.error(f"❌ [API Settings] Failed to update settings: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 400
 
 
@@ -1958,13 +1950,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.0 - Optimized Loop)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.0.1 - Patched)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.0 - Optimized Loop) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.0.1 - Patched) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
