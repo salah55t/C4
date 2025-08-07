@@ -1,9 +1,8 @@
-# ملف c4.py - نسخة V8.6.0 (رحلة تداول ديناميكية محسنة)
-# --- التغييرات الرئيسية (V8.6.0):
-# 1. استبدال الأهداف الثابتة بأهداف ديناميكية تعتمد على مستويات المقاومة أو مؤشر ATR.
-# 2. تخفيف شروط استمرار الصفقة لتكون أكثر مرونة مع ظروف السوق.
-# 3. إضافة خروج جزئي عند الهدف الأول وحجز الأرباح برفع وقف الخسارة تلقائياً.
-# 4. تحديث واجهة التحكم لتعكس عدد الأهداف المحققة بدلاً من شريط التقدم.
+# ملف c4.py - نسخة V8.7.0 (فلترة الشمعة المكتملة)
+# --- التغييرات الرئيسية (V8.7.0):
+# 1. تعديل فلتر نمط الشموع ليفحص النمط المنتهي بالشمعة السابقة المكتملة (شمعة -2).
+# 2. تعديل فلتر حجم التداول ليفحص حجم الشمعة السابقة المكتملة (شمعة -2).
+# 3. هذا التعديل يجعل الفلاتر تعتمد على بيانات مؤكدة وغير متغيرة.
 
 import time
 import os
@@ -126,7 +125,7 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 10.0
+STATS_TRADE_SIZE_USDT: float = 5.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 MIN_PROFIT_PERCENT: float = 0.8
@@ -183,8 +182,8 @@ TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 REJECTION_REASONS_AR = {
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
-    "Bullish Reversal Candle Pattern Failed": "لم يظهر نمط شمعة انعكاسية صاعدة",
-    "Signal Candle Volume Too Low": "حجم تداول شمعة الإشارة منخفض",
+    "Bullish Reversal Candle Pattern Failed": "لم يظهر نمط شمعة انعكاسية صاعدة (على الشمعة المكتملة)",
+    "Signal Candle Volume Too Low": "حجم تداول شمعة الإشارة منخفض (على الشمعة المكتملة)",
     "Order Book Filter Failed": "فشل فلتر دفتر الطلبات (Bids/Asks)",
     "Order Book Fetch Failed": "فشل جلب دفتر الطلبات",
     "Invalid Position Size": "حجم الصفقة غير صالح",
@@ -1058,7 +1057,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.6 - رحلة ديناميكية</title>
+    <title>لوحة تحكم التداول V8.7 - فلترة محسنة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1092,7 +1091,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.6 (Dynamic Journey)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.7 (Completed Candle)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -1728,6 +1727,7 @@ def main_loop_enhanced():
                             if signal_found: break
                             logger.info(f"  -> [{symbol}] فحص استراتيجية: {strategy_key}...")
 
+                            # The core strategy check still happens on the latest data to catch the signal
                             if strategy_key == 'ML':
                                 strategy_instance = EnhancedTradingStrategy(symbol)
                                 if strategy_instance.load_model():
@@ -1739,33 +1739,38 @@ def main_loop_enhanced():
                                             if ml_result:
                                                 with buy_confidence_lock: current_confidence_threshold = BUY_CONFIDENCE_THRESHOLD
                                                 if ml_result['prediction'] == 1 and ml_result['confidence'] >= current_confidence_threshold:
-                                                    signal_found, strategy_used = True, "ML_Signal_V8.5"
+                                                    signal_found, strategy_used = True, "ML_Signal_V8.7"
                                                     ml_confidence_score = f"{ml_result['confidence']:.2%}"
                                                 else: log_rejection(symbol, "ML Model Rejected Signal", {"confidence": f"{ml_result['confidence']:.2%}"})
                             
                             elif strategy_key == 'MACD_EMA' and check_macd_ema_strategy(df_with_indicators):
-                                signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.5"
+                                signal_found, strategy_used = True, "MACD_EMA_Crossover_V8.7"
                             
                             elif strategy_key == 'BB_STOCH' and check_bb_stoch_strategy(df_with_indicators):
-                                signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.5"
+                                signal_found, strategy_used = True, "BB_Stoch_Reversal_V8.7"
 
                             elif strategy_key == 'QQE_SSL' and check_qqe_ssl_strategy_approx(df_with_indicators):
-                                signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.5"
+                                signal_found, strategy_used = True, "QQE_SSL_Explosion_V8.7"
                         
                         if not signal_found: continue
 
-                        logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
+                        logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية على الشمعة المكتملة...")
                         
+                        # --- MODIFICATION: Filter on the completed candle ---
+                        df_for_filtering = df_with_indicators.iloc[:-1] # Exclude the last (live) candle
+                        df_for_filtering.name = symbol # Keep the name for logging
+
                         with candle_filter_lock: use_filter = USE_CANDLESTICK_FILTER
-                        if use_filter and not is_bullish_reversal_pattern(df_with_indicators):
+                        if use_filter and not is_bullish_reversal_pattern(df_for_filtering):
                             log_rejection(symbol, "Bullish Reversal Candle Pattern Failed", {"strategy": strategy_used}); continue
 
                         with volume_filter_lock: use_filter, vol_mult = USE_VOLUME_FILTER, VOLUME_FILTER_MULTIPLIER
                         if use_filter:
-                            last_candle = df_with_indicators.iloc[-1]
-                            avg_volume = df_with_indicators['volume'].iloc[-21:-1].mean()
-                            if not (last_candle['volume'] > avg_volume * vol_mult):
-                                log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used}); continue
+                            completed_candle = df_with_indicators.iloc[-2] # The last completed candle
+                            # Average of the 20 candles before the completed one
+                            avg_volume = df_with_indicators['volume'].iloc[-22:-2].mean() 
+                            if not (completed_candle['volume'] > avg_volume * vol_mult):
+                                log_rejection(symbol, "Signal Candle Volume Too Low", {"strategy": strategy_used, "vol": completed_candle['volume'], "avg_vol": avg_volume}); continue
 
                         try: entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
                         except Exception as e: logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
@@ -1841,13 +1846,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.6 - Dynamic Journey)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.7 - Completed Candle Filter)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.6 - Dynamic Journey) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.7 - Completed Candle Filter) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
