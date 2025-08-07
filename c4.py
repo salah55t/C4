@@ -1,7 +1,9 @@
-# ملف c4.py - نسخة V8.5.2
-# تم التحديث لإصلاح خطأ NameError المتعلق بالـ logger.
-# --- التغييرات الرئيسية (V8.5.2):
-# 1. تصحيح استدعاء getLogger ليصبح logging.getLogger.
+# ملف c4.py - نسخة V8.6.0 (رحلة تداول ديناميكية محسنة)
+# --- التغييرات الرئيسية (V8.6.0):
+# 1. استبدال الأهداف الثابتة بأهداف ديناميكية تعتمد على مستويات المقاومة أو مؤشر ATR.
+# 2. تخفيف شروط استمرار الصفقة لتكون أكثر مرونة مع ظروف السوق.
+# 3. إضافة خروج جزئي عند الهدف الأول وحجز الأرباح برفع وقف الخسارة تلقائياً.
+# 4. تحديث واجهة التحكم لتعكس عدد الأهداف المحققة بدلاً من شريط التقدم.
 
 import time
 import os
@@ -44,7 +46,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-# FIX: Corrected getLogger to logging.getLogger
 logger = logging.getLogger('CryptoBotV8_AdvCandles')
 
 # --- FIX: Custom JSON encoder for NumPy data types ---
@@ -125,16 +126,19 @@ TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
-STATS_TRADE_SIZE_USDT: float = 5.0
+STATS_TRADE_SIZE_USDT: float = 10.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 4
 MIN_PROFIT_PERCENT: float = 0.8
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
 
-# --- إعدادات رحلة التداول الديناميكية ---
+# --- إعدادات رحلة التداول الديناميكية (النسخة الجديدة) ---
 USE_DYNAMIC_JOURNEY = True
-TARGET_LEVELS = [1.0, 1.5, 2.2]
-PARTIAL_EXIT_PERCENTAGES = [0.5, 0.3, 0.2]
+# النسبة المئوية للخروج الجزئي عند تحقيق الهدف الأول
+PARTIAL_EXIT_AT_TP1_PERCENT: float = 0.5 # 50%
+# المضاعف المستخدم لتحديد الهدف التالي بناءً على ATR إذا لم يتم العثور على مقاومة
+NEXT_TARGET_ATR_MULTIPLIER: float = 1.5
+
 
 # --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 50
@@ -978,15 +982,12 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
 
             journey_state = None
             if USE_DYNAMIC_JOURNEY:
-                first_target_price = target_price
-                initial_targets = [{"price": first_target_price, "achieved": False}]
-                for level in TARGET_LEVELS:
-                    next_target_price = entry_price * (1 + level / 100)
-                    if next_target_price > first_target_price and not any(abs(t['price'] - next_target_price) < 1e-6 for t in initial_targets):
-                        initial_targets.append({"price": next_target_price, "achieved": False})
-                initial_targets.sort(key=lambda x: x['price'])
-                journey_state = {"current_target_index": 0, "targets": initial_targets, "partial_exit_percentages": PARTIAL_EXIT_PERCENTAGES, "exited_quantities": [], "is_complete": False}
-                signal_data['target_price'] = journey_state['targets'][0]['price']
+                # The journey state now initializes simply. Targets are added dynamically.
+                journey_state = {
+                    "targets_hit": 0,
+                    "is_complete": False,
+                    "partial_exit_done": False # Flag to track if the partial exit happened
+                }
 
             signal_details_json = json.dumps(signal_data['signal_details'], cls=NpEncoder)
             journey_state_json = json.dumps(journey_state, cls=NpEncoder) if journey_state else None
@@ -995,7 +996,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, journey_state)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
-                signal_data['symbol'], entry_price, signal_data['target_price'], stop_loss,
+                signal_data['symbol'], entry_price, target_price, stop_loss,
                 signal_data['strategy_name'], signal_details_json, signal_data.get('is_real_trade', False),
                 quantity, quantity, signal_data.get('order_id'), entry_price, journey_state_json
             ))
@@ -1007,7 +1008,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             telegram_message = (
                 f"💡 *توصية شراء {trade_type} جديدة*\n\n"
                 f"*العملة:* `{signal_data['symbol']}`\n*الاستراتيجية:* `{signal_data['strategy_name'].replace('_', ' ')}`\n"
-                f"*سعر الدخول:* `{entry_price:.4f}`\n*الهدف الأول:* `{signal_data['target_price']:.4f}`\n"
+                f"*سعر الدخول:* `{entry_price:.4f}`\n*الهدف الأول:* `{target_price:.4f}`\n"
                 f"*وقف الخسارة:* `{stop_loss:.4f}`\n\n"
                 f"Confidence: {signal_data['signal_details'].get('ML_Confidence', 'N/A')}"
             )
@@ -1057,7 +1058,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V8.5 - استراتيجيات متعددة</title>
+    <title>لوحة تحكم التداول V8.6 - رحلة ديناميكية</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1071,12 +1072,6 @@ def get_dashboard_html():
         .tab-btn.active { border-bottom-color: var(--accent-blue); }
         input:checked + .toggle-bg { background-color: var(--accent-green); }
         #modal-overlay { transition: opacity 0.3s ease; }
-        .journey-tracker { display: flex; gap: 4px; align-items: center; }
-        .journey-step { flex-grow: 1; height: 8px; background-color: var(--border-color); border-radius: 4px; position: relative; }
-        .journey-step.achieved { background-color: var(--accent-green); }
-        .journey-step.pending { background-color: #30363D; }
-        .journey-step-marker { width: 16px; height: 16px; border-radius: 50%; background: var(--border-color); border: 2px solid var(--bg-card); position: absolute; top: 50%; transform: translateY(-50%); right: 0; }
-        .journey-step.achieved .journey-step-marker { background: var(--accent-green); }
         .input-field { background-color: #0D1117; border: 1px solid var(--border-color); border-radius: 0.375rem; padding: 0.5rem 0.75rem; color: var(--text-primary); }
         .save-btn { background-color: var(--accent-blue); color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; font-weight: bold; transition: background-color 0.2s; }
         .save-btn:hover { background-color: #4a91e2; }
@@ -1097,7 +1092,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.5 (Multi-Strategy)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V8.6 (Dynamic Journey)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
@@ -1113,7 +1108,7 @@ def get_dashboard_html():
             <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button>
         </nav></div>
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold w-[30%]">رحلة الصفقة</th><th class="p-4 font-semibold">الدخول/الحالي/الهدف</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold">حالة الرحلة</th><th class="p-4 font-semibold">الدخول/الحالي/الهدف</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="settings-tab" class="tab-content hidden">
                 <div class="card p-6">
@@ -1210,18 +1205,16 @@ function showTab(tabId, el) {
 }
 async function fetchData(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { console.error('Fetch Error:', e); return null; } }
 
-function displayTradeJourney(journeyState, currentPrice) {
-    if (!journeyState || !journeyState.targets) return '<span>-</span>';
-    const { targets, current_target_index } = journeyState;
-    let html = '<div class="journey-tracker">';
-    targets.forEach((target, index) => {
-        const achieved = target.achieved || currentPrice >= target.price;
-        const statusClass = achieved ? 'achieved' : 'pending';
-        const tooltipText = `الهدف ${index + 1}: ${target.price.toFixed(4)}`;
-        html += `<div class="journey-step ${statusClass}" title="${tooltipText}"></div>`;
-    });
-    html += '</div>';
-    return html;
+function displayTradeJourney(journeyState) {
+    if (!journeyState) return '<span>-</span>';
+    const targetsHit = journeyState.targets_hit || 0;
+    if (targetsHit === 0) {
+        return '<span class="text-xs text-text-secondary">في انتظار الهدف الأول</span>';
+    }
+    return `<div class="flex items-center gap-2">
+                <span class="text-accent-green font-bold">🎯 ${targetsHit}</span>
+                <span class="text-xs text-text-secondary">أهداف محققة</span>
+            </div>`;
 }
 
 function updateMarketStatus() {
@@ -1270,8 +1263,8 @@ function updateSignals() {
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
             const entry = parseFloat(s.entry_price);
             const current = parseFloat(s.current_price || entry);
-            const journeyHTML = displayTradeJourney(s.journey_state, current);
-            const currentTarget = s.journey_state ? s.journey_state.targets[s.journey_state.current_target_index].price : s.target_price;
+            const journeyHTML = displayTradeJourney(s.journey_state);
+            const currentTarget = s.target_price;
 
             tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5">
                 <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace(/_/g, ' ')}</span></td>
@@ -1512,15 +1505,42 @@ def manual_close_trade_endpoint(signal_id):
 
 # ---------------------- System Loops ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
+    """
+    تحلل الشروط الحالية للسوق لتحديد ما إذا كان يجب تمديد الصفقة.
+    أصبحت الشروط أقل صرامة لتسمح باستمرارية أكبر للصفقات الواعدة.
+    """
     if df is None or len(df) < 20: return False
     last = df.iloc[-1]
-    trend_strong = last.get('adx', 0) > 25
-    volume_confirmed = last.get('volume_ratio', 0) > 1.2
-    momentum_positive = last.get('close', 0) > last.get('ema_21', 0)
-    should_extend = trend_strong and volume_confirmed and momentum_positive
-    logger.info(f"  -> [Path Analysis] Extend? {should_extend} (Trend: {trend_strong}, Volume: {volume_confirmed}, Momentum: {momentum_positive})")
+    # تم تخفيض متطلب قوة الترند (ADX) للسماح بالاستمرار في ظروف أقل مثالية
+    trend_is_supportive = last.get('adx', 0) > 22
+    # تم تخفيض متطلب حجم التداول
+    volume_is_supportive = last.get('relative_volume', 0) > 1.1
+    # التأكد من أن السعر لا يزال فوق متوسط متحرك قصير الأجل
+    momentum_is_positive = last.get('close', 0) > last.get('ema_21', 0)
+    
+    should_extend = trend_is_supportive and volume_is_supportive and momentum_is_positive
+    logger.info(f"  -> [تحليل المسار] تمديد؟ {should_extend} (الترند داعم: {trend_is_supportive}, حجم التداول داعم: {volume_is_supportive}, الزخم إيجابي: {momentum_is_positive})")
     return should_extend
 
+def find_next_resistance(df: pd.DataFrame, from_price: float) -> Optional[float]:
+    """
+    تبحث عن مستوى المقاومة التالي فوق سعر معين.
+    """
+    if len(df) < 20: return None
+    
+    df_slice = df.iloc[-100:] # Look at last 100 candles
+    
+    # تحديد القمم المحلية كمرشحين للمقاومة
+    resistance_candidates = df_slice[df_slice['high'] == df_slice['high'].rolling(7, center=True).max()]['high']
+    
+    # فلترة المرشحين الذين هم فقط فوق السعر الحالي
+    next_resistances = resistance_candidates[resistance_candidates > (from_price * 1.001)] # Must be at least 0.1% higher
+    
+    if not next_resistances.empty:
+        # إرجاع أقرب مستوى مقاومة
+        return next_resistances.min()
+        
+    return None
 
 def trade_management_loop():
     logger.info("✅ [Trade Manager] بدء حلقة إدارة الصفقات المدمجة...")
@@ -1546,59 +1566,85 @@ def trade_management_loop():
                 signal_id, symbol = signal['id'], signal['symbol']
                 tp, sl, entry = float(signal['target_price']), float(signal['stop_loss']), float(signal['entry_price'])
 
-                if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
-                    journey_state = signal['journey_state']
-                    if not journey_state.get('is_complete', False) and current_price >= tp:
-                        current_target_index = journey_state['current_target_index']
-                        logger.info(f"🎉 [{symbol}] الهدف رقم {current_target_index + 1} تحقق عند سعر {current_price:.4f}")
-                        journey_state['targets'][current_target_index]['achieved'] = True
-                        if signal.get('is_real_trade'):
-                            original_quantity = Decimal(str(signal.get('original_quantity', '0')))
-                            exit_percentage = Decimal(str(journey_state['partial_exit_percentages'][current_target_index]))
-                            adjusted_exit_quantity = adjust_quantity_to_lot_size(symbol, float(original_quantity * exit_percentage))
-                            if adjusted_exit_quantity and adjusted_exit_quantity > 0:
-                                sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_exit_quantity)
-                                if sell_order:
-                                    signal['quantity'] = float(Decimal(str(signal['quantity'])) - adjusted_exit_quantity)
-                                    journey_state['exited_quantities'].append(float(adjusted_exit_quantity))
-                                    log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {adjusted_exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
-
-                        if current_target_index < len(journey_state['targets']) - 1:
-                            df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 20)
-                            df_with_features = calculate_all_features(df_analysis, None) if df_analysis is not None else None
-                            if analyze_path_for_extension(df_with_features):
-                                journey_state['current_target_index'] += 1
-                                next_target_index = journey_state['current_target_index']
-                                signal['stop_loss'] = signal['target_price'] # Move SL to previous TP
-                                signal['target_price'] = journey_state['targets'][next_target_index]['price']
-                                logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {signal['target_price']:.4f}, وقف الخسارة الجديد: {signal['stop_loss']:.4f}")
-                            else:
-                                logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد. إغلاق الصفقة.")
-                                journey_state['is_complete'] = True
-                                close_signal(signal_id, current_price, 'journey_completed')
-                                continue
-                        else:
-                            logger.info(f"🏁 [{symbol}] تم تحقيق جميع الأهداف. اكتملت الرحلة!")
-                            journey_state['is_complete'] = True
-                            close_signal(signal_id, current_price, 'journey_completed')
-                            continue
-
-                        with signal_cache_lock: open_signals_cache[symbol] = signal
-                        try:
-                            if check_db_connection():
-                                with conn.cursor() as cur:
-                                    cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s",
-                                                (json.dumps(journey_state, cls=NpEncoder), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity', 0)), signal_id))
-                                conn.commit()
-                        except Exception as e:
-                            logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
-                        tp, sl = float(signal['target_price']), float(signal['stop_loss'])
-
+                # 1. Check for Stop-Loss first
                 if current_price <= sl:
                     reason = 'atr_trailing_stop' if USE_ATR_TRAILING_STOP and sl > float(signal.get('initial_stop_loss', sl)) else 'stop_loss'
                     close_signal(signal_id, current_price, reason)
                     continue
 
+                # 2. Check for Take-Profit and Dynamic Journey Logic
+                if current_price >= tp:
+                    if USE_DYNAMIC_JOURNEY and signal.get('journey_state'):
+                        journey_state = signal['journey_state']
+                        
+                        if journey_state.get('is_complete'): continue
+
+                        logger.info(f"🎉 [{symbol}] الهدف عند {tp:.4f} تحقق بسعر {current_price:.4f}")
+                        
+                        # --- Partial Exit Logic ---
+                        if not journey_state.get('partial_exit_done') and PARTIAL_EXIT_AT_TP1_PERCENT > 0:
+                            if signal.get('is_real_trade'):
+                                original_quantity = Decimal(str(signal.get('original_quantity', '0')))
+                                exit_percentage = Decimal(str(PARTIAL_EXIT_AT_TP1_PERCENT))
+                                exit_quantity = adjust_quantity_to_lot_size(symbol, float(original_quantity * exit_percentage))
+                                
+                                if exit_quantity and exit_quantity > 0:
+                                    sell_order = place_order(symbol, Client.SIDE_SELL, exit_quantity)
+                                    if sell_order:
+                                        signal['quantity'] = float(Decimal(str(signal['quantity'])) - exit_quantity)
+                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي: بيع {exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                            
+                            journey_state['partial_exit_done'] = True
+                        
+                        journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
+                        
+                        # --- Logic to find the next target ---
+                        df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 100)
+                        if df_analysis is not None:
+                            df_with_features = calculate_all_features(df_analysis, None)
+                            
+                            if analyze_path_for_extension(df_with_features):
+                                # Move Stop-Loss to the recently achieved Take-Profit level
+                                new_sl = tp
+                                
+                                # Find the next resistance level
+                                next_tp = find_next_resistance(df_with_features, current_price)
+                                
+                                # If no resistance found, use ATR
+                                if next_tp is None:
+                                    last_atr = df_with_features['atr'].iloc[-1]
+                                    next_tp = current_price + (last_atr * NEXT_TARGET_ATR_MULTIPLIER)
+                                    logger.info(f"  -> [{symbol}] لم يتم العثور على مقاومة، تم تحديد الهدف التالي باستخدام ATR: {next_tp:.4f}")
+                                else:
+                                    logger.info(f"  -> [{symbol}] تم العثور على مقاومة تالية عند: {next_tp:.4f}")
+                                
+                                # Update signal in cache and DB
+                                signal['stop_loss'] = new_sl
+                                signal['target_price'] = next_tp
+                                signal['journey_state'] = journey_state
+                                
+                                logger.info(f"🎯 [{symbol}] تمديد الرحلة! الهدف التالي: {next_tp:.4f}, وقف الخسارة الجديد: {new_sl:.4f}")
+                                
+                                with signal_cache_lock: open_signals_cache[symbol] = signal
+                                try:
+                                    if check_db_connection():
+                                        with conn.cursor() as cur:
+                                            cur.execute("UPDATE signals SET journey_state = %s, target_price = %s, stop_loss = %s, quantity = %s WHERE id = %s",
+                                                        (json.dumps(journey_state, cls=NpEncoder), float(signal['target_price']), float(signal['stop_loss']), float(signal.get('quantity', 0)), signal_id))
+                                        conn.commit()
+                                except Exception as e:
+                                    logger.error(f"DB error updating journey state for {symbol}: {e}"); conn.rollback()
+                                
+                                continue
+                                
+                        logger.info(f"⏹️ [{symbol}] تحليل المسار لا يدعم التمديد أو فشل جلب البيانات. إغلاق الصفقة.")
+                        journey_state['is_complete'] = True
+                        close_signal(signal_id, current_price, 'journey_completed')
+
+                    else:
+                        close_signal(signal_id, current_price, 'take_profit')
+                
+                # 3. Trailing Stop Logic
                 peak_price = float(signal.get('current_peak_price', entry))
                 new_peak = max(peak_price, current_price)
                 if new_peak > peak_price:
@@ -1631,6 +1677,7 @@ def trade_management_loop():
         except Exception as e:
             logger.error(f"❌ [Trade Manager] خطأ في حلقة الإدارة: {e}", exc_info=True)
             time.sleep(10)
+
 
 def main_loop_enhanced():
     logger.info("[Main Loop] انتظار اكتمال التهيئة...")
@@ -1794,13 +1841,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [Bot Services] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.5 - Multi-Strategy)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V8.6 - Dynamic Journey)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- Entry Point ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.5 - Multi-Strategy) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V8.6 - Dynamic Journey) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
