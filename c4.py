@@ -1,8 +1,7 @@
-# ملف c4.py - نسخة V9.2.0 (استراتيجية الزخم + تعريب السجلات)
-# --- التغييرات الرئيسية (V9.2.0):
-# 1. [استراتيجية جديدة] إضافة استراتيجية "متابعة الزخم الصعودي" (Bullish Momentum) مع مفتاح للتحكم بها من اللوحة.
-# 2. [تعريب] ترجمة جميع مخرجات السجل (Logs) إلى اللغة العربية لتسهيل المتابعة.
-# 3. [تحسين] الحفاظ على بنية المعالجة بالدفعات لتحسين استقرار الذاكرة.
+# ملف c4.py - نسخة V9.2.1 (تحسين استراتيجية الزخم)
+# --- التغييرات الرئيسية (V9.2.1):
+# 1. [تحسين استراتيجية] إضافة شرط تأكيد حركة السعر (Higher Highs & Higher Lows) إلى استراتيجية الزخم الصعودي.
+# 2. [توضيح] الكود يعكس الآن منطق الفحص الذي قدمته لتحسين جودة الإشارات.
 
 import time
 import os
@@ -125,7 +124,6 @@ pullback_strategy_lock = Lock()
 USE_BB_SQUEEZE_STRATEGY: bool = True
 bb_squeeze_strategy_lock = Lock()
 
-# V9.2: مفتاح استراتيجية الزخم الصعودي
 USE_BULLISH_MOMENTUM_STRATEGY: bool = True
 bullish_momentum_strategy_lock = Lock()
 
@@ -239,7 +237,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # ... (DB Schema creation remains the same)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -391,7 +388,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return None
 
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (Indicator calculations remain the same)
     highest_high = df['high'].rolling(window=14).max()
     lowest_low = df['low'].rolling(window=14).min()
     df['williams_r'] = -100 * (highest_high - df['close']) / (highest_high - lowest_low).replace(0, 1e-9)
@@ -421,7 +417,6 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (Indicator calculations remain the same)
     required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
     if not all(col in df.columns for col in required_cols): return df
     df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
@@ -441,7 +436,6 @@ def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (Indicator calculations remain the same)
     high_low = df['high'] - df['low']
     ema_high_low = high_low.ewm(span=10, adjust=False).mean()
     ema_high_low_shifted = ema_high_low.shift(10)
@@ -461,7 +455,6 @@ def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (Indicator calculations remain the same)
     df['hour_sin'] = np.sin(2 * np.pi * df.index.hour / 24)
     df['hour_cos'] = np.cos(2 * np.pi * df.index.hour / 24)
     df['day_of_week'] = df.index.dayofweek
@@ -474,7 +467,6 @@ def calculate_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -> pd.DataFrame:
-    # ... (Indicator calculations remain the same)
     high = df['high']
     low = df['low']
     close = df['close']
@@ -531,7 +523,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    # V9.2: Add DI+ and DI- to dataframe for momentum strategy
     df_calc['plus_di'] = plus_di
     df_calc['minus_di'] = minus_di
     delta = df_calc['close'].diff()
@@ -690,26 +681,50 @@ def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
         return True
     return False
 
-# V9.2: دالة استراتيجية الزخم الصعودي الجديدة
+# --- دالة استراتيجية الزخم الصعودي المحدثة ---
 def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
-    if len(df) < 50: return False
-    last = df.iloc[-1]
-    # 1. فلتر الاتجاه: السعر فوق المتوسط المتحرك 50
-    price_above_sma50 = last['close'] > last['sma_50']
-    # 2. قوة الزخم: مؤشر ADX يدل على اتجاه قوي
-    strong_trend = last['adx'] > 25
-    # 3. الاتجاه الصاعد: +DI أعلى من -DI
-    bullish_direction = last['plus_di'] > last['minus_di']
-    # 4. تأكيد RSI: الزخم نشط لكنه ليس في منطقة تشبع شرائي مفرط
-    rsi_is_bullish = last['rsi'] > 50 and last['rsi'] < 75
+    if len(df) < 50:
+        return False
 
-    if price_above_sma50 and strong_trend and bullish_direction and rsi_is_bullish:
-        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية زخم صعودي.")
+    last = df.iloc[-1]
+
+    # 1. السعر فوق المتوسط المتحرك 50
+    price_above_sma50 = last['close'] > last['sma_50']
+
+    # 2. ADX يشير إلى اتجاه قوي
+    strong_trend = last['adx'] > 25
+
+    # 3. +DI > -DI (الاتجاه صاعد)
+    bullish_direction = last['plus_di'] > last['minus_di']
+
+    # 4. RSI في منطقة صاعدة لكن ليس مفرطًا
+    rsi_is_bullish = 50 < last['rsi'] < 75
+
+    # ✅ 5. تأكيد الزخم السعري: آخر 3 قمم وقيعان تصاعدية
+    # (تم أخذ 6 شموع لفحص آخر 5 فترات)
+    if len(df) < 6:
+        return False
+        
+    recent_highs = df['high'].iloc[-6:-1]  # آخر 5 شموع (باستثناء الشمعة الحالية)
+    recent_lows = df['low'].iloc[-6:-1]
+
+    # التأكد من وجود بيانات كافية بعد التقطيع
+    if len(recent_highs) < 2 or len(recent_lows) < 2:
+        return False
+
+    is_higher_highs = all(recent_highs.iloc[i] > recent_highs.iloc[i - 1] for i in range(1, len(recent_highs)))
+    is_higher_lows = all(recent_lows.iloc[i] > recent_lows.iloc[i - 1] for i in range(1, len(recent_lows)))
+
+    price_momentum_confirmed = is_higher_highs and is_higher_lows
+
+    # ✅ النتيجة النهائية
+    if all([price_above_sma50, strong_trend, bullish_direction, rsi_is_bullish, price_momentum_confirmed]):
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية زخم صعودي (مع تأكيد حركة السعر).")
         return True
+
     return False
 
 class EnhancedTradingStrategy:
-    # ... (ML Strategy class remains the same)
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.ml_model, self.scaler, self.feature_names = None, None, None
@@ -1142,7 +1157,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.2.0 - استراتيجية الزخم</title>
+    <title>لوحة تحكم التداول V9.2.1 - استراتيجية الزخم</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1178,7 +1193,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.0 (Momentum Strategy)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.1 (Momentum Strategy Impr.)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1509,7 +1524,7 @@ def get_market_status():
     with ema_rsi_strategy_lock: use_ema_rsi = USE_EMA_RSI_STRATEGY
     with pullback_strategy_lock: use_pullback = USE_PULLBACK_STRATEGY
     with bb_squeeze_strategy_lock: use_bb_squeeze = USE_BB_SQUEEZE_STRATEGY
-    with bullish_momentum_strategy_lock: use_bullish_momentum = USE_BULLISH_MOMENTUM_STRATEGY # V9.2
+    with bullish_momentum_strategy_lock: use_bullish_momentum = USE_BULLISH_MOMENTUM_STRATEGY
     with signal_cache_lock: open_trades = len(open_signals_cache)
 
 
@@ -1525,7 +1540,7 @@ def get_market_status():
             "use_macd_ema_strategy": use_macd_ema, "use_qqe_ssl_strategy": use_qqe_ssl,
             "use_ema_rsi_strategy": use_ema_rsi, "use_pullback_strategy": use_pullback,
             "use_bb_squeeze_strategy": use_bb_squeeze,
-            "use_bullish_momentum_strategy": use_bullish_momentum, # V9.2
+            "use_bullish_momentum_strategy": use_bullish_momentum,
         }
     })
 
@@ -1619,7 +1634,7 @@ def update_settings():
         with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = bool(data.get('use_ema_rsi_strategy', USE_EMA_RSI_STRATEGY))
         with pullback_strategy_lock: USE_PULLBACK_STRATEGY = bool(data.get('use_pullback_strategy', USE_PULLBACK_STRATEGY))
         with bb_squeeze_strategy_lock: USE_BB_SQUEEZE_STRATEGY = bool(data.get('use_bb_squeeze_strategy', USE_BB_SQUEEZE_STRATEGY))
-        with bullish_momentum_strategy_lock: USE_BULLISH_MOMENTUM_STRATEGY = bool(data.get('use_bullish_momentum_strategy', USE_BULLISH_MOMENTUM_STRATEGY)) # V9.2
+        with bullish_momentum_strategy_lock: USE_BULLISH_MOMENTUM_STRATEGY = bool(data.get('use_bullish_momentum_strategy', USE_BULLISH_MOMENTUM_STRATEGY))
 
         log_and_notify('info', f"⚙️ تم تحديث الإعدادات من لوحة التحكم.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "Settings updated successfully"})
@@ -1976,13 +1991,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.0 - استراتيجية الزخم)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.1 - تحسين الزخم)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.0) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.1) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
