@@ -1,7 +1,7 @@
-# ملف c4.py - نسخة V9.2.1 (تحسين استراتيجية الزخم)
-# --- التغييرات الرئيسية (V9.2.1):
-# 1. [تحسين استراتيجية] إضافة شرط تأكيد حركة السعر (Higher Highs & Higher Lows) إلى استراتيجية الزخم الصعودي.
-# 2. [توضيح] الكود يعكس الآن منطق الفحص الذي قدمته لتحسين جودة الإشارات.
+# ملف c4.py - نسخة V9.2.2 (إصلاح إدارة الصفقات الصغيرة)
+# --- التغييرات الرئيسية (V9.2.2):
+# 1. [إصلاح] تحسين منطق الخروج الجزئي للتعرف على الإغلاق الكامل للصفقات الصغيرة التي لا يمكن تجزئتها.
+# 2. [إصلاح] جعل وظيفة الإغلاق اليدوي أكثر مرونة لتحديث قاعدة البيانات حتى لو فشل أمر البيع (لأن الكمية بيعت مسبقًا).
 
 import time
 import os
@@ -44,7 +44,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9')
+logger = logging.getLogger('CryptoBotV9.2.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1027,20 +1027,29 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             if signal_data['id'] == signal_id:
                 signal_to_close, symbol_to_close = signal_data, symbol
                 break
-        if not signal_to_close: return False
+        if not signal_to_close:
+            logger.warning(f"⚠️ [إغلاق] محاولة إغلاق صفقة غير موجودة في الكاش (ID: {signal_id}). ربما أغلقت بالفعل.")
+            return False
 
         entry_price = float(signal_to_close['entry_price'])
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
+        # --- START OF FIX V9.2.2 ---
         if signal_to_close.get('is_real_trade'):
-            try:
-                remaining_quantity_str = signal_to_close.get('quantity')
-                if remaining_quantity_str and float(remaining_quantity_str) > 0:
-                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, Decimal(str(remaining_quantity_str)))
-                    if not sell_order: return False
-            except Exception as e:
-                logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
-                return False
+            quantity_to_sell_str = signal_to_close.get('quantity')
+            if quantity_to_sell_str and float(quantity_to_sell_str) > 0:
+                logger.info(f"  -> [{symbol_to_close}] محاولة بيع الكمية المتبقية عند الإغلاق: {quantity_to_sell_str}")
+                try:
+                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, Decimal(str(quantity_to_sell_str)))
+                    if not sell_order:
+                        logger.warning(f"⚠️ [{symbol_to_close}] فشل أمر البيع عند الإغلاق (ربما تم البيع مسبقاً). سيتم إكمال عملية الإغلاق في قاعدة البيانات.")
+                except Exception as e:
+                    logger.error(f"❌ [{symbol_to_close}] خطأ أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
+                    if 'insufficient' in str(e).lower() or 'min_notional' in str(e).lower():
+                        logger.warning(f"⚠️ [{symbol_to_close}] الخطأ يشير إلى عدم وجود رصيد كافٍ، مما يؤكد أن الكمية بيعت. سيتم المتابعة بالإغلاق.")
+                    else:
+                        return False # For other critical errors, stop.
+        # --- END OF FIX V9.2.2 ---
 
         if not check_db_connection() or not conn: return False
 
@@ -1052,11 +1061,16 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 """, (closing_price, profit_percentage, reason, signal_id))
             conn.commit()
 
-            if symbol_to_close in open_signals_cache: del open_signals_cache[symbol_to_close]
+            if symbol_to_close in open_signals_cache:
+                del open_signals_cache[symbol_to_close]
 
             log_and_notify('info', f"تم الإغلاق: {symbol_to_close} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
 
-            reason_map = {'take_profit': '🎯 أخذ الربح', 'stop_loss': '🛑 وقف الخسارة', 'manual': '🖐️ إغلاق يدوي', 'atr_trailing_stop': '🛡️ وقف خسارة متحرك', 'journey_completed': '🏁 اكتملت الرحلة'}
+            reason_map = {
+                'take_profit': '🎯 أخذ الربح', 'stop_loss': '🛑 وقف الخسارة', 'manual': '🖐️ إغلاق يدوي',
+                'atr_trailing_stop': '🛡️ وقف خسارة متحرك', 'journey_completed': '🏁 اكتملت الرحلة',
+                'take_profit_full_exit_on_small_size': '🎯 أخذ الربح (إغلاق كامل لصفقة صغيرة)'
+            }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
             telegram_message = (
@@ -1157,7 +1171,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.2.1 - استراتيجية الزخم</title>
+    <title>لوحة تحكم التداول V9.2.2 - إصلاح الصفقات الصغيرة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1193,7 +1207,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.1 (Momentum Strategy Impr.)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.2 (Small Trade Fix)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1729,8 +1743,30 @@ def trade_management_loop():
                                 if exit_quantity and exit_quantity > 0:
                                     sell_order = place_order(symbol, Client.SIDE_SELL, exit_quantity)
                                     if sell_order:
-                                        signal['quantity'] = float(Decimal(str(signal['quantity'])) - exit_quantity)
-                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                        # --- START OF FIX V9.2.2 ---
+                                        executed_quantity = Decimal(sell_order.get('executedQty', '0'))
+                                        if executed_quantity == 0: executed_quantity = exit_quantity
+
+                                        remaining_quantity = Decimal(str(signal['quantity'])) - executed_quantity
+                                        signal['quantity'] = float(remaining_quantity)
+                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {executed_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                        
+                                        is_dust = False
+                                        if remaining_quantity > 0:
+                                            symbol_info = exchange_info_map.get(symbol)
+                                            if symbol_info:
+                                                min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+                                                if min_notional_filter:
+                                                    min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                                                    if (remaining_quantity * Decimal(str(current_price))) < min_notional:
+                                                        is_dust = True
+                                                        logger.warning(f"⚠️ [{symbol}] الكمية المتبقية ({remaining_quantity}) أقل من الحد الأدنى. سيتم إغلاق الصفقة بالكامل.")
+                                        
+                                        if remaining_quantity <= 0 or is_dust:
+                                            close_signal(signal_id, current_price, 'take_profit_full_exit_on_small_size')
+                                            continue 
+                                        # --- END OF FIX V9.2.2 ---
+
                             journey_state['partial_exit_done'] = True
                         
                         journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
@@ -1991,13 +2027,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.1 - تحسين الزخم)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.2 - إصلاح الصفقات الصغيرة)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.1) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.2) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
