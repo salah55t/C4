@@ -91,7 +91,7 @@ order_book_ratio_lock = Lock()
 VOLUME_FILTER_MULTIPLIER: float = 1.07
 volume_filter_lock = Lock()
 
-MIN_PROFIT_PERCENT: float = 0.7
+MIN_PROFIT_PERCENT: float = 1
 
 # --- إعدادات الفلاتر والاستراتيجيات ---
 USE_CANDLESTICK_FILTER: bool = True
@@ -2208,3 +2208,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port)
     logger.info("👋 [إيقاف] تم إيقاف تشغيل التطبيق.")
+
