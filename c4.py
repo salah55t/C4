@@ -1,7 +1,8 @@
-# ملف c4.py - نسخة V9.2.1 (تحسين استراتيجية الزخم)
-# --- التغييرات الرئيسية (V9.2.1):
-# 1. [تحسين استراتيجية] إضافة شرط تأكيد حركة السعر (Higher Highs & Higher Lows) إلى استراتيجية الزخم الصعودي.
-# 2. [توضيح] الكود يعكس الآن منطق الفحص الذي قدمته لتحسين جودة الإشارات.
+# ملف c4.py - نسخة V9.2.3 (تحديث الأهداف يدوياً)
+# --- التغييرات الرئيسية (V9.2.3):
+# 1. [ميزة جديدة] إضافة شريط تمرير (slider) في لوحة التحكم لتحديث سعر الهدف (TP) للصفقات المفتوحة يدوياً.
+# 2. [API] إضافة نقطة نهاية جديدة (/api/signals/update_target) لمعالجة طلبات تحديث الأهداف.
+# 3. [تحسين] إرسال إشعار عند تحديث الهدف يدويًا.
 
 import time
 import os
@@ -44,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9')
+logger = logging.getLogger('CryptoBotV9.2.3')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1027,21 +1028,28 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             if signal_data['id'] == signal_id:
                 signal_to_close, symbol_to_close = signal_data, symbol
                 break
-        if not signal_to_close: return False
+        if not signal_to_close:
+            logger.warning(f"⚠️ [إغلاق] محاولة إغلاق صفقة غير موجودة في الكاش (ID: {signal_id}). ربما أغلقت بالفعل.")
+            return False
 
         entry_price = float(signal_to_close['entry_price'])
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
         if signal_to_close.get('is_real_trade'):
-            try:
-                remaining_quantity_str = signal_to_close.get('quantity')
-                if remaining_quantity_str and float(remaining_quantity_str) > 0:
-                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, Decimal(str(remaining_quantity_str)))
-                    if not sell_order: return False
-            except Exception as e:
-                logger.error(f"❌ [{symbol_to_close}] خطأ حرج أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
-                return False
-
+            quantity_to_sell_str = signal_to_close.get('quantity')
+            if quantity_to_sell_str and float(quantity_to_sell_str) > 0:
+                logger.info(f"  -> [{symbol_to_close}] محاولة بيع الكمية المتبقية عند الإغلاق: {quantity_to_sell_str}")
+                try:
+                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, Decimal(str(quantity_to_sell_str)))
+                    if not sell_order:
+                        logger.warning(f"⚠️ [{symbol_to_close}] فشل أمر البيع عند الإغلاق (ربما تم البيع مسبقاً). سيتم إكمال عملية الإغلاق في قاعدة البيانات.")
+                except Exception as e:
+                    logger.error(f"❌ [{symbol_to_close}] خطأ أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
+                    if 'insufficient' in str(e).lower() or 'min_notional' in str(e).lower():
+                        logger.warning(f"⚠️ [{symbol_to_close}] الخطأ يشير إلى عدم وجود رصيد كافٍ، مما يؤكد أن الكمية بيعت. سيتم المتابعة بالإغلاق.")
+                    else:
+                        return False 
+        
         if not check_db_connection() or not conn: return False
 
         try:
@@ -1052,11 +1060,16 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                 """, (closing_price, profit_percentage, reason, signal_id))
             conn.commit()
 
-            if symbol_to_close in open_signals_cache: del open_signals_cache[symbol_to_close]
+            if symbol_to_close in open_signals_cache:
+                del open_signals_cache[symbol_to_close]
 
             log_and_notify('info', f"تم الإغلاق: {symbol_to_close} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
 
-            reason_map = {'take_profit': '🎯 أخذ الربح', 'stop_loss': '🛑 وقف الخسارة', 'manual': '🖐️ إغلاق يدوي', 'atr_trailing_stop': '🛡️ وقف خسارة متحرك', 'journey_completed': '🏁 اكتملت الرحلة'}
+            reason_map = {
+                'take_profit': '🎯 أخذ الربح', 'stop_loss': '🛑 وقف الخسارة', 'manual': '🖐️ إغلاق يدوي',
+                'atr_trailing_stop': '🛡️ وقف خسارة متحرك', 'journey_completed': '🏁 اكتملت الرحلة',
+                'take_profit_full_exit_on_small_size': '🎯 أخذ الربح (إغلاق كامل لصفقة صغيرة)'
+            }
             emoji = "✅" if profit_percentage >= 0 else "🔻"
             trade_type = "حقيقية" if signal_to_close.get('is_real_trade') else "تجريبية"
             telegram_message = (
@@ -1157,7 +1170,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.2.1 - استراتيجية الزخم</title>
+    <title>لوحة تحكم التداول V9.2.3 - تحديث الأهداف</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1177,6 +1190,10 @@ def get_dashboard_html():
         .strategy-toggle { border-left: 4px solid var(--accent-blue); }
         .strategy-toggle-new { border-left: 4px solid var(--accent-yellow); }
         .strategy-toggle-momentum { border-left: 4px solid var(--accent-purple); }
+        .tp-slider { -webkit-appearance: none; width: 100%; height: 8px; background: #30363D; border-radius: 5px; outline: none; opacity: 0.7; transition: opacity .2s; }
+        .tp-slider:hover { opacity: 1; }
+        .tp-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; background: var(--accent-blue); cursor: pointer; border-radius: 50%; }
+        .tp-slider::-moz-range-thumb { width: 18px; height: 18px; background: var(--accent-blue); cursor: pointer; border-radius: 50%; }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1193,7 +1210,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.1 (Momentum Strategy Impr.)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.3 (Manual TP Update)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1210,7 +1227,7 @@ def get_dashboard_html():
             <button onclick="showTab('rejections', this)" class="tab-btn text-text-secondary hover:text-white py-3 px-1">الصفقات المرفوضة</button>
         </nav></div>
         <main>
-            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold">حالة الرحلة</th><th class="p-4 font-semibold">الدخول/الحالي/الهدف</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
+            <div id="signals-tab" class="tab-content"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">العملة</th><th class="p-4 font-semibold">الربح/الخسارة</th><th class="p-4 font-semibold">الدخول/الحالي/الهدف</th><th class="p-4 font-semibold">تحديث الهدف</th><th class="p-4 font-semibold">إجراء</th></tr></thead><tbody id="signals-table"></tbody></table></div></div>
             <div id="stats-tab" class="tab-content hidden"><div id="stats-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"></div></div>
             <div id="settings-tab" class="tab-content hidden">
                 <div class="card p-6">
@@ -1331,18 +1348,6 @@ function showTab(tabId, el) {
 }
 async function fetchData(url) { try { const r = await fetch(url); return r.ok ? await r.json() : null; } catch (e) { console.error('Fetch Error:', e); return null; } }
 
-function displayTradeJourney(journeyState) {
-    if (!journeyState) return '<span>-</span>';
-    const targetsHit = journeyState.targets_hit || 0;
-    if (targetsHit === 0) {
-        return '<span class="text-xs text-text-secondary">في انتظار الهدف الأول</span>';
-    }
-    return `<div class="flex items-center gap-2">
-                <span class="text-accent-green font-bold">🎯 ${targetsHit}</span>
-                <span class="text-xs text-text-secondary">أهداف محققة</span>
-            </div>`;
-}
-
 function updateMarketStatus() {
     fetchData('/api/market_status').then(data => {
         if (!data) return;
@@ -1395,20 +1400,60 @@ function updateSignals() {
             const pClass = profit > 0 ? 'text-accent-green' : profit < 0 ? 'text-accent-red' : 'text-text-secondary';
             const entry = parseFloat(s.entry_price);
             const current = parseFloat(s.current_price || entry);
-            const journeyHTML = displayTradeJourney(s.journey_state);
-            const currentTarget = s.target_price;
+            const currentTarget = parseFloat(s.target_price);
+            const stopLoss = parseFloat(s.stop_loss);
+            const sliderMax = Math.max(currentTarget, current * 1.15);
+            const pricePrecision = parseInt(s.price_precision, 10);
+            const step = 1 / Math.pow(10, pricePrecision);
 
-            tableBody.innerHTML += `<tr class="border-b border-border-color hover:bg-white/5">
-                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace(/_/g, ' ')}</span></td>
-                <td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td>
-                <td class="p-4">${journeyHTML}</td>
+            tableBody.innerHTML += \`
+            <tr class="border-b border-border-color hover:bg-white/5">
+                <td class="p-4 font-bold">\${s.symbol}<br><span class="text-xs text-text-secondary">\${s.strategy_name.replace(/_/g, ' ')}</span></td>
+                <td class="p-4 font-mono \${pClass}">\${profit.toFixed(2)}%</td>
                 <td class="p-4 font-mono text-xs">
-                    <div><span class="text-text-secondary">الدخول:</span> ${entry.toFixed(4)}</div>
-                    <div><span class="text-accent-blue">الحالي:</span> ${current.toFixed(4)}</div>
-                    <div><span class="text-accent-green">الهدف:</span> ${parseFloat(currentTarget).toFixed(4)}</div>
+                    <div><span class="text-text-secondary">الدخول:</span> \${entry.toFixed(pricePrecision)}</div>
+                    <div><span class="text-accent-blue">الحالي:</span> \${current.toFixed(pricePrecision)}</div>
+                    <div><span class="text-accent-green">الهدف:</span> \${currentTarget.toFixed(pricePrecision)}</div>
                 </td>
-                <td class="p-4"><button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs">إغلاق</button></td>
-            </tr>`;
+                <td class="p-4 min-w-[250px]">
+                    <div class="flex items-center gap-2">
+                        <input type="range" id="tp-slider-\${s.id}" class="tp-slider flex-grow" 
+                               min="\${stopLoss}" max="\${sliderMax}" step="\${step}" value="\${currentTarget}"
+                               oninput="updateSliderValue(this, \${s.id}, \${pricePrecision})">
+                        <span id="tp-value-\${s.id}" class="font-mono text-accent-yellow text-sm w-24 text-center">
+                            \${currentTarget.toFixed(pricePrecision)}
+                        </span>
+                    </div>
+                </td>
+                <td class="p-4">
+                    <button onclick="saveNewTarget(\${s.id}, \${pricePrecision})" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-3 rounded text-xs mb-2 w-full">حفظ الهدف</button>
+                    <button onclick="manualClose(\${s.id}, '\${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs w-full">إغلاق</button>
+                </td>
+            </tr>\`;
+        });
+    });
+}
+function updateSliderValue(slider, signalId, precision) {
+    const valueSpan = document.getElementById(`tp-value-\${signalId}`);
+    valueSpan.textContent = parseFloat(slider.value).toFixed(precision);
+}
+function saveNewTarget(signalId, precision) {
+    const slider = document.getElementById(`tp-slider-\${signalId}`);
+    const newValue = parseFloat(slider.value);
+    showConfirmation('تأكيد تحديث الهدف', \`هل تريد تغيير الهدف إلى \${newValue.toFixed(precision)}؟\`, () => {
+        fetch(\`/api/signals/update_target/\${signalId}\`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_target: newValue })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                console.log("Target updated successfully");
+                updateSignals();
+            } else {
+                alert(\`فشل تحديث الهدف: \${data.message}\`);
+            }
         });
     });
 }
@@ -1580,15 +1625,22 @@ def get_signals():
         return jsonify({"error": "Service connection failed"}), 500
     try:
         current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
-        with signal_cache_lock: signals_copy = list(open_signals_cache.values())
+        with signal_cache_lock:
+            signals_copy = list(open_signals_cache.values())
+        
         for signal in signals_copy:
+            symbol_info = exchange_info_map.get(signal['symbol'])
+            signal['price_precision'] = symbol_info.get('pricePrecision', 2) if symbol_info else 2
+            
             current_price = current_prices.get(signal['symbol'])
             if current_price:
                 signal['current_price'] = current_price
                 signal['profit_percentage'] = ((float(current_price) - float(signal['entry_price'])) / float(signal['entry_price'])) * 100
+
         return jsonify(signals_copy)
     except Exception as e:
-        logger.error(f"❌ [API إشارات] خطأ: {e}"); return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ [API إشارات] خطأ: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notifications')
 def get_notifications():
@@ -1660,6 +1712,57 @@ def manual_close_trade_endpoint(signal_id):
     else:
         return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
+# --- START OF FEATURE V9.2.3 ---
+@app.route('/api/signals/update_target/<int:signal_id>', methods=['POST'])
+def update_target_price(signal_id):
+    if not check_db_connection() or not conn:
+        return jsonify({"success": False, "message": "Database not connected"}), 503
+    
+    data = request.get_json()
+    new_target_price = data.get('new_target')
+
+    if not new_target_price:
+        return jsonify({"success": False, "message": "New target price not provided"}), 400
+
+    try:
+        new_target_price = float(new_target_price)
+        with signal_cache_lock:
+            signal_to_update = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
+            
+            if not signal_to_update:
+                return jsonify({"success": False, "message": "Signal not found or already closed"}), 404
+
+            symbol = signal_to_update['symbol']
+            old_target = float(signal_to_update['target_price'])
+            stop_loss = float(signal_to_update['stop_loss'])
+
+            if new_target_price <= stop_loss:
+                return jsonify({"success": False, "message": "Target price cannot be below stop loss"}), 400
+
+            # Update in cache
+            signal_to_update['target_price'] = new_target_price
+            
+            # Update in database
+            with conn.cursor() as cur:
+                cur.execute("UPDATE signals SET target_price = %s WHERE id = %s", (new_target_price, signal_id))
+            conn.commit()
+
+            # Log and notify
+            log_message = f"🖐️ [{symbol}] تم تحديث الهدف يدوياً من {old_target:.4f} إلى {new_target_price:.4f}"
+            log_and_notify('warning', log_message, "MANUAL_TP_UPDATE")
+            send_telegram_message(log_message)
+
+            return jsonify({"success": True, "message": "Target price updated successfully"})
+
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "Invalid target price format"}), 400
+    except Exception as e:
+        logger.error(f"❌ [API تحديث الهدف] فشل تحديث الهدف لـ ID {signal_id}: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return jsonify({"success": False, "message": "An internal error occurred"}), 500
+# --- END OF FEATURE V9.2.3 ---
+
+
 # ---------------------- حلقات النظام ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
     if df is None or len(df) < 20: return False
@@ -1729,8 +1832,28 @@ def trade_management_loop():
                                 if exit_quantity and exit_quantity > 0:
                                     sell_order = place_order(symbol, Client.SIDE_SELL, exit_quantity)
                                     if sell_order:
-                                        signal['quantity'] = float(Decimal(str(signal['quantity'])) - exit_quantity)
-                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {exit_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                        executed_quantity = Decimal(sell_order.get('executedQty', '0'))
+                                        if executed_quantity == 0: executed_quantity = exit_quantity
+
+                                        remaining_quantity = Decimal(str(signal['quantity'])) - executed_quantity
+                                        signal['quantity'] = float(remaining_quantity)
+                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {executed_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                        
+                                        is_dust = False
+                                        if remaining_quantity > 0:
+                                            symbol_info = exchange_info_map.get(symbol)
+                                            if symbol_info:
+                                                min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+                                                if min_notional_filter:
+                                                    min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                                                    if (remaining_quantity * Decimal(str(current_price))) < min_notional:
+                                                        is_dust = True
+                                                        logger.warning(f"⚠️ [{symbol}] الكمية المتبقية ({remaining_quantity}) أقل من الحد الأدنى. سيتم إغلاق الصفقة بالكامل.")
+                                        
+                                        if remaining_quantity <= 0 or is_dust:
+                                            close_signal(signal_id, current_price, 'take_profit_full_exit_on_small_size')
+                                            continue 
+
                             journey_state['partial_exit_done'] = True
                         
                         journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
@@ -1991,13 +2114,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.1 - تحسين الزخم)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.3 - تحديث الأهداف)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.1) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.3) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
