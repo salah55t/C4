@@ -1,8 +1,6 @@
-# ملف c4.py - نسخة V9.4.0 (إضافة فلتر الزخم قصير الأجل)
-# --- التغييرات الرئيسية (V9.4.0):
-# 1. [إضافة] دالة passes_short_term_momentum_filter لاستراتيجيات الانفجار.
-# 2. [إضافة] خيار في لوحة التحكم لتفعيل/تعطيل فلتر الزخم قصير الأجل.
-# 3. [تعديل] تطبيق الفلتر تلقائياً على استراتيجيات BB_Squeeze, QQE_SSL, BB_Stoch.
+# ملف c4.py - نسخة V9.4.1 (إصلاح خطأ برمجي)
+# --- التغييرات الرئيسية (V9.4.1):
+# 1. [إصلاح] خطأ NameError في دالة get_market_status بسبب عدم تعريف متغير use_volume.
 
 import time
 import os
@@ -45,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.4.0')
+logger = logging.getLogger('CryptoBotV9.4.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -100,6 +98,8 @@ USE_CANDLESTICK_FILTER: bool = True
 candle_filter_lock = Lock()
 
 USE_VOLUME_FILTER: bool = True
+# volume_filter_lock is used for both USE_VOLUME_FILTER and VOLUME_FILTER_MULTIPLIER
+
 USE_ORDER_BOOK_FILTER: bool = True
 order_book_filter_enable_lock = Lock()
 
@@ -382,10 +382,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # لضمان جلب بيانات كافية لحساب المؤشرات الطويلة مثل EMA 200
-        # نطلب بيانات أكثر من المطلوب بشكل مباشر
-        # 200 شمعة * 4 ساعات = 800 ساعة = ~34 يوم. نطلب 50 يوم احتياطاً.
-        # 200 شمعة * 1 ساعة = 200 ساعة = ~9 أيام. نطلب 15 يوم احتياطاً.
         lookback_str = f"{days + 50} day" if 'd' in interval.lower() else f"{days * 24 + 200} hour"
         
         klines = client.get_historical_klines(symbol, interval, lookback_str)
@@ -704,27 +700,17 @@ def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
 
-    # 1. السعر فوق المتوسط المتحرك 50
     price_above_sma50 = last['close'] > last['sma_50']
-
-    # 2. ADX يشير إلى اتجاه قوي
     strong_trend = last['adx'] > 25
-
-    # 3. +DI > -DI (الاتجاه صاعد)
     bullish_direction = last['plus_di'] > last['minus_di']
-
-    # 4. RSI في منطقة صاعدة لكن ليس مفرطًا
     rsi_is_bullish = 50 < last['rsi'] < 75
 
-    # ✅ 5. تأكيد الزخم السعري: آخر 3 قمم وقيعان تصاعدية
-    # (تم أخذ 6 شموع لفحص آخر 5 فترات)
     if len(df) < 6:
         return False
         
-    recent_highs = df['high'].iloc[-6:-1]  # آخر 5 شموع (باستثناء الشمعة الحالية)
+    recent_highs = df['high'].iloc[-6:-1]
     recent_lows = df['low'].iloc[-6:-1]
 
-    # التأكد من وجود بيانات كافية بعد التقطيع
     if len(recent_highs) < 2 or len(recent_lows) < 2:
         return False
 
@@ -733,7 +719,6 @@ def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
 
     price_momentum_confirmed = is_higher_highs and is_higher_lows
 
-    # ✅ النتيجة النهائية
     if all([price_above_sma50, strong_trend, bullish_direction, rsi_is_bullish, price_momentum_confirmed]):
         logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية زخم صعودي (مع تأكيد حركة السعر).")
         return True
@@ -786,7 +771,7 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 20
         logger.error(f"❌ [HTF Confirm] خطأ في {symbol}: {e}")
         return False
 
-# --- [جديد] دالة فلتر الزخم قصير الأجل ---
+# --- دالة فلتر الزخم قصير الأجل ---
 def passes_short_term_momentum_filter(symbol: str, df: pd.DataFrame) -> bool:
     """
     مناسبة لـ BB_Squeeze, QQE_SSL, BB_Stoch
@@ -796,35 +781,27 @@ def passes_short_term_momentum_filter(symbol: str, df: pd.DataFrame) -> bool:
       - MACD أو RSI يعطي زخم قوي في اتجاه الإشارة
     """
     try:
-        if len(df) < 100: # مطلوب 100 شمعة لحساب quantile بشكل جيد
+        if len(df) < 100:
             return False
 
         last = df.iloc[-1]
-        
-        # 1. فحص البولنجر باند
-        # bb_width تم حسابه مسبقاً في calculate_all_features
+
         bb_width = last.get('bb_width', 0)
-        price_vs_bb_upper = abs(last['close'] - last['bb_upper']) / last['bb_upper']
-        price_vs_bb_lower = abs(last['close'] - last['bb_lower']) / last['bb_lower']
+        price_vs_bb_upper = abs(last['close'] - last['bb_upper']) / last['bb_upper'] if last['bb_upper'] > 0 else 0
+        price_vs_bb_lower = abs(last['close'] - last['bb_lower']) / last['bb_lower'] if last['bb_lower'] > 0 else 0
         
-        # يعتبر السعر قريباً إذا كان ضمن 0.5% من أحد حدي البولنجر
         close_to_bands = price_vs_bb_upper < 0.005 or price_vs_bb_lower < 0.005
 
-        # 2. حجم التداول
-        # relative_volume تم حسابه مسبقاً
         with volume_filter_lock:
             vol_mult = VOLUME_FILTER_MULTIPLIER
         volume_spike = last.get('relative_volume', 0) > vol_mult
 
-        # 3. زخم MACD أو RSI
         macd_momentum = last['macd'] > last['macd_signal'] and last['macd'] > 0
-        rsi_momentum  = last['rsi'] > 55 # نرفع الشرط قليلاً لزيادة القوة
+        rsi_momentum  = last['rsi'] > 55
 
-        # 4. نسبة الضغط (لـ BB_Squeeze)
         squeeze_threshold = df['bb_width'].rolling(100).quantile(0.25).iloc[-1]
         is_squeeze = bb_width < squeeze_threshold
 
-        # الشرط النهائي
         is_valid = (
             (is_squeeze or close_to_bands) and
             volume_spike and
@@ -1283,7 +1260,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.4.0 - فلاتر متقدمة</title>
+    <title>لوحة تحكم التداول V9.4.1 - إصلاح</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1323,7 +1300,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.4.0 (Momentum Filter)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.4.1 (Bugfix)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1675,7 +1652,12 @@ def get_market_status():
 
     with risk_per_trade_lock: risk = RISK_PER_TRADE_PERCENT
     with order_book_ratio_lock: ob_ratio = ORDER_BOOK_MIN_BID_ASK_RATIO
-    with volume_filter_lock: vol_mult = VOLUME_FILTER_MULTIPLIER
+    # --- [إصلاح V9.4.1] ---
+    # تم دمج قراءة كلا المتغيرين في قفل واحد لضمان التزامن وتجنب الخطأ
+    with volume_filter_lock:
+        vol_mult = VOLUME_FILTER_MULTIPLIER
+        use_volume = USE_VOLUME_FILTER
+    # --- نهاية الإصلاح ---
     with candle_filter_lock: use_candle = USE_CANDLESTICK_FILTER
     with order_book_filter_enable_lock: use_ob = USE_ORDER_BOOK_FILTER
     with htf_confirmation_lock: use_htf = USE_HTF_CONFIRMATION_FILTER
@@ -1791,11 +1773,11 @@ def update_settings():
         with order_book_ratio_lock: ORDER_BOOK_MIN_BID_ASK_RATIO = float(data.get('ob_ratio', ORDER_BOOK_MIN_BID_ASK_RATIO))
         with volume_filter_lock:
             VOLUME_FILTER_MULTIPLIER = float(data.get('vol_multiplier', VOLUME_FILTER_MULTIPLIER))
-        
+            USE_VOLUME_FILTER = bool(data.get('use_volume_filter', USE_VOLUME_FILTER))
+
         MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
 
         with candle_filter_lock: USE_CANDLESTICK_FILTER = bool(data.get('use_candle_filter', USE_CANDLESTICK_FILTER))
-        with volume_filter_lock: USE_VOLUME_FILTER = bool(data.get('use_volume_filter', USE_VOLUME_FILTER))
         with order_book_filter_enable_lock: USE_ORDER_BOOK_FILTER = bool(data.get('use_order_book_filter', USE_ORDER_BOOK_FILTER))
         with htf_confirmation_lock: USE_HTF_CONFIRMATION_FILTER = bool(data.get('use_htf_confirmation_filter', USE_HTF_CONFIRMATION_FILTER))
         with short_term_momentum_filter_lock: USE_SHORT_TERM_MOMENTUM_FILTER = bool(data.get('use_short_term_momentum_filter', USE_SHORT_TERM_MOMENTUM_FILTER))
@@ -1857,15 +1839,12 @@ def update_target_price(signal_id):
             if new_target_price <= stop_loss:
                 return jsonify({"success": False, "message": "Target price cannot be below stop loss"}), 400
 
-            # Update in cache
             signal_to_update['target_price'] = new_target_price
             
-            # Update in database
             with conn.cursor() as cur:
                 cur.execute("UPDATE signals SET target_price = %s WHERE id = %s", (new_target_price, signal_id))
             conn.commit()
 
-            # Log and notify
             log_message = f"🖐️ [{symbol}] تم تحديث الهدف يدوياً من {old_target:.4f} إلى {new_target_price:.4f}"
             log_and_notify('warning', log_message, "MANUAL_TP_UPDATE")
             send_telegram_message(log_message)
@@ -2075,18 +2054,16 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        logger.info(f"--- [{symbol}] بدء التحليل ---")
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         
                         if df_15m is None or len(df_15m) < 100:
-                            log_rejection(symbol, "Insufficient Historical Data", {"days": SIGNAL_GENERATION_LOOKBACK_DAYS})
+                            # log_rejection(symbol, "Insufficient Historical Data", {"days": SIGNAL_GENERATION_LOOKBACK_DAYS})
                             continue
                         
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
                         df_with_indicators.name = symbol
                         if df_with_indicators.empty:
                             continue
-                        logger.info(f"  -> [{symbol}] تم حساب المؤشرات. جاري فحص الاستراتيجيات...")
 
                         signal_found, strategy_used = False, None
 
@@ -2116,7 +2093,6 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
                         
-                        # --- [تطبيق الفلاتر المتقدمة] ---
                         with htf_confirmation_lock: use_htf_filter = USE_HTF_CONFIRMATION_FILTER
                         with short_term_momentum_filter_lock: use_stm_filter = USE_SHORT_TERM_MOMENTUM_FILTER
 
@@ -2124,15 +2100,12 @@ def main_loop_enhanced():
                         strategies_for_stm = ["BB_Squeeze_Breakout", "QQE_SSL_Explosion", "BB_Stoch_Reversal"]
 
                         if use_htf_filter and strategy_used in strategies_for_htf:
-                            logger.info(f"  -> [{symbol}] تطبيق فلتر تأكيد الترند ({HIGHER_TIMEFRAME})...")
                             if not is_htf_bullish_confirmation(symbol, htf=HIGHER_TIMEFRAME):
                                 log_rejection(symbol, "HTF Trend Confirmation Failed", {"strategy": strategy_used}); continue
                         
                         if use_stm_filter and strategy_used in strategies_for_stm:
-                            logger.info(f"  -> [{symbol}] تطبيق فلتر الزخم قصير الأجل...")
                             if not passes_short_term_momentum_filter(symbol, df_with_indicators):
                                 log_rejection(symbol, "Short-Term Momentum Filter Failed", {"strategy": strategy_used}); continue
-                        # --- نهاية تطبيق الفلاتر ---
 
                         df_for_filtering = df_with_indicators.iloc[:-1]
                         df_for_filtering.name = symbol
@@ -2180,7 +2153,6 @@ def main_loop_enhanced():
                     finally:
                         time.sleep(0.2)
                 
-                logger.info(f"🗑️ تم الانتهاء من الدفعة {i // SYMBOL_PROCESSING_BATCH_SIZE + 1}. جاري تنظيف الذاكرة...")
                 gc.collect()
 
             _, session_liquidity, _ = get_session_state()
@@ -2219,13 +2191,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.4.0 - فلاتر متقدمة)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.4.1 - إصلاح)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.4.0) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.4.1) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
