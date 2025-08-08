@@ -1,8 +1,6 @@
-# ملف c4.py - نسخة V9.2.3 (تحديث الأهداف يدوياً)
-# --- التغييرات الرئيسية (V9.2.3):
-# 1. [ميزة جديدة] إضافة شريط تمرير (slider) في لوحة التحكم لتحديث سعر الهدف (TP) للصفقات المفتوحة يدوياً.
-# 2. [API] إضافة نقطة نهاية جديدة (/api/signals/update_target) لمعالجة طلبات تحديث الأهداف.
-# 3. [تحسين] إرسال إشعار عند تحديث الهدف يدويًا.
+# ملف c4.py - نسخة V9.2.4 (إصلاح خطأ برمجي)
+# --- التغييرات الرئيسية (V9.2.4):
+# 1. [إصلاح] إزالة حرف الهروب (\) الزائد في كود الجافاسكريبت والذي كان يسبب SyntaxWarning.
 
 import time
 import os
@@ -45,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.2.3')
+logger = logging.getLogger('CryptoBotV9.2.4')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1170,7 +1168,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.2.3 - تحديث الأهداف</title>
+    <title>لوحة تحكم التداول V9.2.4 - إصلاح</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1210,7 +1208,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.3 (Manual TP Update)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.2.4 (Syntax Fix)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1406,42 +1404,44 @@ function updateSignals() {
             const pricePrecision = parseInt(s.price_precision, 10);
             const step = 1 / Math.pow(10, pricePrecision);
 
-            tableBody.innerHTML += \`
+            // --- START OF FIX V9.2.4 ---
+            tableBody.innerHTML += `
             <tr class="border-b border-border-color hover:bg-white/5">
-                <td class="p-4 font-bold">\${s.symbol}<br><span class="text-xs text-text-secondary">\${s.strategy_name.replace(/_/g, ' ')}</span></td>
-                <td class="p-4 font-mono \${pClass}">\${profit.toFixed(2)}%</td>
+                <td class="p-4 font-bold">${s.symbol}<br><span class="text-xs text-text-secondary">${s.strategy_name.replace(/_/g, ' ')}</span></td>
+                <td class="p-4 font-mono ${pClass}">${profit.toFixed(2)}%</td>
                 <td class="p-4 font-mono text-xs">
-                    <div><span class="text-text-secondary">الدخول:</span> \${entry.toFixed(pricePrecision)}</div>
-                    <div><span class="text-accent-blue">الحالي:</span> \${current.toFixed(pricePrecision)}</div>
-                    <div><span class="text-accent-green">الهدف:</span> \${currentTarget.toFixed(pricePrecision)}</div>
+                    <div><span class="text-text-secondary">الدخول:</span> ${entry.toFixed(pricePrecision)}</div>
+                    <div><span class="text-accent-blue">الحالي:</span> ${current.toFixed(pricePrecision)}</div>
+                    <div><span class="text-accent-green">الهدف:</span> ${currentTarget.toFixed(pricePrecision)}</div>
                 </td>
                 <td class="p-4 min-w-[250px]">
                     <div class="flex items-center gap-2">
-                        <input type="range" id="tp-slider-\${s.id}" class="tp-slider flex-grow" 
-                               min="\${stopLoss}" max="\${sliderMax}" step="\${step}" value="\${currentTarget}"
-                               oninput="updateSliderValue(this, \${s.id}, \${pricePrecision})">
-                        <span id="tp-value-\${s.id}" class="font-mono text-accent-yellow text-sm w-24 text-center">
-                            \${currentTarget.toFixed(pricePrecision)}
+                        <input type="range" id="tp-slider-${s.id}" class="tp-slider flex-grow" 
+                               min="${stopLoss}" max="${sliderMax}" step="${step}" value="${currentTarget}"
+                               oninput="updateSliderValue(this, ${s.id}, ${pricePrecision})">
+                        <span id="tp-value-${s.id}" class="font-mono text-accent-yellow text-sm w-24 text-center">
+                            ${currentTarget.toFixed(pricePrecision)}
                         </span>
                     </div>
                 </td>
                 <td class="p-4">
-                    <button onclick="saveNewTarget(\${s.id}, \${pricePrecision})" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-3 rounded text-xs mb-2 w-full">حفظ الهدف</button>
-                    <button onclick="manualClose(\${s.id}, '\${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs w-full">إغلاق</button>
+                    <button onclick="saveNewTarget(${s.id}, ${pricePrecision})" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-1 px-3 rounded text-xs mb-2 w-full">حفظ الهدف</button>
+                    <button onclick="manualClose(${s.id}, '${s.symbol}')" class="bg-red-600 hover:bg-red-700 text-white font-bold py-1 px-3 rounded text-xs w-full">إغلاق</button>
                 </td>
-            </tr>\`;
+            </tr>`;
+            // --- END OF FIX V9.2.4 ---
         });
     });
 }
 function updateSliderValue(slider, signalId, precision) {
-    const valueSpan = document.getElementById(`tp-value-\${signalId}`);
+    const valueSpan = document.getElementById(`tp-value-${signalId}`);
     valueSpan.textContent = parseFloat(slider.value).toFixed(precision);
 }
 function saveNewTarget(signalId, precision) {
-    const slider = document.getElementById(`tp-slider-\${signalId}`);
+    const slider = document.getElementById(`tp-slider-${signalId}`);
     const newValue = parseFloat(slider.value);
-    showConfirmation('تأكيد تحديث الهدف', \`هل تريد تغيير الهدف إلى \${newValue.toFixed(precision)}؟\`, () => {
-        fetch(\`/api/signals/update_target/\${signalId}\`, {
+    showConfirmation('تأكيد تحديث الهدف', `هل تريد تغيير الهدف إلى ${newValue.toFixed(precision)}؟`, () => {
+        fetch(`/api/signals/update_target/${signalId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ new_target: newValue })
@@ -1452,7 +1452,7 @@ function saveNewTarget(signalId, precision) {
                 console.log("Target updated successfully");
                 updateSignals();
             } else {
-                alert(\`فشل تحديث الهدف: \${data.message}\`);
+                alert(`فشل تحديث الهدف: ${data.message}`);
             }
         });
     });
@@ -1712,7 +1712,6 @@ def manual_close_trade_endpoint(signal_id):
     else:
         return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
-# --- START OF FEATURE V9.2.3 ---
 @app.route('/api/signals/update_target/<int:signal_id>', methods=['POST'])
 def update_target_price(signal_id):
     if not check_db_connection() or not conn:
@@ -1760,7 +1759,6 @@ def update_target_price(signal_id):
         logger.error(f"❌ [API تحديث الهدف] فشل تحديث الهدف لـ ID {signal_id}: {e}", exc_info=True)
         if conn: conn.rollback()
         return jsonify({"success": False, "message": "An internal error occurred"}), 500
-# --- END OF FEATURE V9.2.3 ---
 
 
 # ---------------------- حلقات النظام ----------------------
@@ -2114,13 +2112,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.3 - تحديث الأهداف)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.2.4 - إصلاح)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.3) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.2.4) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
