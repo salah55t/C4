@@ -1,6 +1,7 @@
-# ملف c4.py - نسخة V9.7.1 (إصلاح خطأ فلتر الأخبار)
-# --- التغييرات الرئيسية (V9.7.1):
-# 1. [إصلاح] خطأ UnboundLocalError في حلقة مراقبة الأخبار (news_check_loop) عن طريق تعريف المتغيرات كـ global.
+# ملف c4.py - نسخة V9.7.2 (إصلاح خطأ NameError وإضافة واجهة API)
+# --- التغييرات الرئيسية (V9.7.2):
+# 1. [إصلاح] خطأ NameError: name 'app' is not defined عن طريق تهيئة تطبيق Flask.
+# 2. [إضافة] واجهات API أساسية لعرض حالة البوت، الإعدادات، والتحكم في التداول.
 
 import time
 import os
@@ -43,7 +44,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.7.1')
+logger = logging.getLogger('CryptoBotV9.7.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -69,9 +70,7 @@ try:
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
-    # [إضافة] مفتاح API للأخبار
     NEWSDATA_API_KEY: str = config('NEWSDATA_API_KEY', default='pub_2c2d39760da740178b67ee1befd97206')
-
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
@@ -79,46 +78,26 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-
-# --- المتغيرات القابلة للتعديل ---
 RISK_PER_TRADE_PERCENT: float = 0.85
 risk_per_trade_lock = Lock()
-
 BUY_CONFIDENCE_THRESHOLD = 0.53
 buy_confidence_lock = Lock()
-
 ORDER_BOOK_MIN_BID_ASK_RATIO: float = 1.18
 order_book_ratio_lock = Lock()
-
 VOLUME_FILTER_MULTIPLIER: float = 1.07
 volume_filter_lock = Lock()
-
 MIN_PROFIT_PERCENT: float = 0.7
-
-# --- إعدادات الفلاتر والاستراتيجيات ---
 USE_CANDLESTICK_FILTER: bool = True
 candle_filter_lock = Lock()
-
 USE_VOLUME_FILTER: bool = True
-# volume_filter_lock is used for both USE_VOLUME_FILTER and VOLUME_FILTER_MULTIPLIER
-
 USE_ORDER_BOOK_FILTER: bool = True
 order_book_filter_enable_lock = Lock()
-
-# --- فلتر تأكيد الترند على فريم أعلى ---
 USE_HTF_CONFIRMATION_FILTER: bool = True
 htf_confirmation_lock = Lock()
-
-# --- فلتر الزخم قصير الأجل ---
 USE_SHORT_TERM_MOMENTUM_FILTER: bool = True
 short_term_momentum_filter_lock = Lock()
-
-# [إضافة] فلتر الأخبار
 USE_NEWS_FILTER: bool = True
 news_filter_lock = Lock()
-
-
-# --- مفاتيح تفعيل الاستراتيجيات ---
 USE_ML_STRATEGY: bool = False
 ml_strategy_lock = Lock()
 USE_BB_STOCH_STRATEGY: bool = True
@@ -141,16 +120,11 @@ USE_RSI_DIVERGENCE_STRATEGY: bool = True
 rsi_divergence_strategy_lock = Lock()
 USE_VWAP_REVERSAL_STRATEGY: bool = True
 vwap_reversal_strategy_lock = Lock()
-
-
-# --- تحديد الاستراتيجيات التي تعتبر سكالبينج لتخفيف الفلاتر ---
 SCALPING_STRATEGIES = ["Pullback_MACD", "BB_Squeeze_Breakout", "QQE_SSL_Explosion"]
-
-
 BASE_ML_MODEL_NAME: str = 'LightGBM_Scalping_V9_With_Microstructure'
 MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-HIGHER_TIMEFRAME: str = '1h' # الإطار الزمني الأعلى المستخدم في فلتر التأكيد
+HIGHER_TIMEFRAME: str = '1h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
@@ -159,11 +133,7 @@ STATS_TRADE_SIZE_USDT: float = 4.0
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 SYMBOL_PROCESSING_BATCH_SIZE: int = 10
-
-# --- إعدادات رحلة التداول الديناميكية ---
 USE_DYNAMIC_JOURNEY = True
-
-# --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 50
 EMA_SLOW_PERIOD: int = 120
 ADX_PERIOD: int = 14
@@ -177,17 +147,13 @@ SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 CANDLE_AVG_VOLUME_PERIOD: int = 15
 CMF_PERIOD: int = 20
-ASK_WALL_THRESHOLD_USDT: float = 20000.0 # قيمة جدار البيع بالدولار
-DIVERGENCE_LOOKBACK: int = 25 # نطاق البحث عن التباعد
-
-# --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
+ASK_WALL_THRESHOLD_USDT: float = 20000.0
+DIVERGENCE_LOOKBACK: int = 25
 ORDER_BOOK_DEPTH_LIMIT: int = 100
 ORDER_BOOK_ANALYSIS_RANGE_PCT: float = 0.005
 USE_ATR_TRAILING_STOP: bool = True
 ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.2
-
-# --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 redis_client: Optional[redis.Redis] = None
@@ -205,13 +171,10 @@ market_state_lock = Lock()
 last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
-
-# [إضافة] متغيرات حالة فلتر الأخبار
 news_lockdown_until: Optional[datetime] = None
 last_news_event: Optional[Dict[str, Any]] = None
 news_state_lock = Lock()
 
-# --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Trading paused due to high-impact news": "التداول متوقف بسبب خبر عالي التأثير",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
@@ -241,6 +204,144 @@ REJECTION_REASONS_AR = {
     "Large Ask Wall Ahead": "يوجد جدار بيع كبير في الأمام",
 }
 
+# --- [إصلاح] تهيئة تطبيق فلاسك ولوحة التحكم ---
+app = Flask(__name__)
+CORS(app) # للسماح بالطلبات من واجهات مختلفة
+
+# --- واجهات برمجة التطبيقات (API Endpoints) للوحة التحكم ---
+
+@app.route('/api/status', methods=['GET'])
+def get_status():
+    """
+    يوفر نقطة نهاية شاملة للحصول على حالة البوت الكاملة.
+    """
+    with trading_status_lock:
+        trading_on = is_trading_enabled
+    
+    with signal_cache_lock:
+        # تحويل قيم القاموس إلى قائمة لـ JSON
+        open_trades = list(open_signals_cache.values())
+
+    with notifications_lock:
+        # تحويل deque إلى قائمة لـ JSON
+        recent_notifications = list(notifications_cache)
+
+    with rejection_logs_lock:
+        rejection_logs = list(rejection_logs_cache)
+
+    with market_state_lock:
+        market_state = current_market_state.copy()
+
+    with news_state_lock:
+        news_lock = {
+            "active": news_lockdown_until is not None and datetime.now(timezone.utc) < news_lockdown_until,
+            "lockdown_until": news_lockdown_until.isoformat() if news_lockdown_until else None,
+            "last_event": last_news_event
+        }
+
+    status_data = {
+        'bot_version': 'V9.7.2',
+        'is_trading_enabled': trading_on,
+        'max_open_trades': MAX_OPEN_TRADES,
+        'open_trades_count': len(open_trades),
+        'market_state': market_state,
+        'news_lockdown': news_lock,
+        'open_trades': open_trades,
+        'notifications': recent_notifications,
+        'rejection_logs': rejection_logs,
+        'server_time_utc': datetime.now(timezone.utc).isoformat()
+    }
+    # استخدام json.dumps مع المشفر المخصص لضمان تحويل كل الأنواع بشكل صحيح
+    return app.response_class(
+        response=json.dumps(status_data, cls=NpEncoder),
+        status=200,
+        mimetype='application/json'
+    )
+
+@app.route('/api/toggle_trading', methods=['POST'])
+def toggle_trading():
+    """
+    لتفعيل أو إيقاف التداول الحقيقي.
+    """
+    global is_trading_enabled
+    with trading_status_lock:
+        is_trading_enabled = not is_trading_enabled
+        status = "مُفعّل" if is_trading_enabled else "مُعطّل"
+        message = f"تم {status} التداول الحقيقي."
+        log_and_notify('warning', message, 'TRADING_STATUS_CHANGE')
+    return jsonify({"status": "success", "message": message, "is_trading_enabled": is_trading_enabled})
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def manage_settings():
+    """
+    لعرض وتعديل الإعدادات الديناميكية للبوت.
+    """
+    if request.method == 'GET':
+        with risk_per_trade_lock:
+            risk = RISK_PER_TRADE_PERCENT
+        with buy_confidence_lock:
+            confidence = BUY_CONFIDENCE_THRESHOLD
+        with order_book_ratio_lock:
+            ob_ratio = ORDER_BOOK_MIN_BID_ASK_RATIO
+        with volume_filter_lock:
+            vol_mult = VOLUME_FILTER_MULTIPLIER
+
+        settings = {
+            'risk_per_trade_percent': risk,
+            'buy_confidence_threshold': confidence,
+            'order_book_min_bid_ask_ratio': ob_ratio,
+            'volume_filter_multiplier': vol_mult
+        }
+        return jsonify(settings)
+
+    if request.method == 'POST':
+        data = request.json
+        if not data:
+            return jsonify({"status": "error", "message": "No data provided"}), 400
+        
+        global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, ORDER_BOOK_MIN_BID_ASK_RATIO, VOLUME_FILTER_MULTIPLIER
+        with risk_per_trade_lock:
+            RISK_PER_TRADE_PERCENT = float(data.get('risk_per_trade_percent', RISK_PER_TRADE_PERCENT))
+        with buy_confidence_lock:
+            BUY_CONFIDENCE_THRESHOLD = float(data.get('buy_confidence_threshold', BUY_CONFIDENCE_THRESHOLD))
+        with order_book_ratio_lock:
+            ORDER_BOOK_MIN_BID_ASK_RATIO = float(data.get('order_book_min_bid_ask_ratio', ORDER_BOOK_MIN_BID_ASK_RATIO))
+        with volume_filter_lock:
+            VOLUME_FILTER_MULTIPLIER = float(data.get('volume_filter_multiplier', VOLUME_FILTER_MULTIPLIER))
+        
+        log_and_notify('info', f"تم تحديث الإعدادات: {data}", "SETTINGS_UPDATE")
+        return jsonify({"status": "success", "message": "Settings updated"})
+
+
+@app.route('/api/close_trade', methods=['POST'])
+def manual_close_trade():
+    """
+    لإغلاق صفقة مفتوحة يدويًا.
+    """
+    data = request.json
+    signal_id = data.get('signal_id')
+    if not signal_id:
+        return jsonify({"status": "error", "message": "signal_id is required"}), 400
+
+    with signal_cache_lock:
+        target_signal = None
+        for symbol, signal in open_signals_cache.items():
+            if signal['id'] == signal_id:
+                target_signal = signal
+                break
+    
+    if not target_signal:
+        return jsonify({"status": "error", "message": f"Signal with ID {signal_id} not found or not open."}), 404
+
+    try:
+        current_price = float(client.get_symbol_ticker(symbol=target_signal['symbol'])['price'])
+        if close_signal(signal_id, current_price, 'manual'):
+            return jsonify({"status": "success", "message": f"Signal {signal_id} for {target_signal['symbol']} closed successfully."})
+        else:
+            return jsonify({"status": "error", "message": "Failed to close signal."}), 500
+    except Exception as e:
+        logger.error(f"Error during manual close for signal {signal_id}: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- دالة إرسال رسائل تليجرام ---
 def send_telegram_message(message: str):
@@ -579,13 +680,9 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     else:
         df_calc['btc_correlation'] = 0.0
     
-    # [إضافة] حساب المؤشرات الجديدة
-    # VWAP
     typical_price = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
     df_calc['vwap'] = (typical_price * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
-    # OBV
     df_calc['obv'] = (np.sign(df_calc['close'].diff()) * df_calc['volume']).fillna(0).cumsum()
-    # CMF
     mfv = ((df_calc['close'] - df_calc['low']) - (df_calc['high'] - df_calc['close'])) / (df_calc['high'] - df_calc['low']).replace(0, 1e-9) * df_calc['volume']
     df_calc['cmf'] = mfv.rolling(CMF_PERIOD).sum() / df_calc['volume'].rolling(CMF_PERIOD).sum()
 
@@ -658,7 +755,6 @@ def load_notifications_to_cache():
 
 # ---------------------- منطق التداول والفلاتر ----------------------
 
-# --- دوال منطق الاستراتيجيات ---
 def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -723,7 +819,6 @@ def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
         return True
     return False
 
-# --- دالة استراتيجية الزخم الصعودي المحدثة ---
 def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 50:
         return False
@@ -755,24 +850,15 @@ def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
 
     return False
 
-# [إضافة] دالة الاستراتيجية الجديدة
 def check_smart_breakout_strategy(df: pd.DataFrame) -> bool:
-    """
-    المفهوم: اختراق فوق مقاومة ديناميكية (VWAP) مع فلتر حجم التداول والزخم.
-    """
     if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'cmf', 'obv', 'relative_volume']):
         return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # 1. الاختراق: السعر أغلق لتوه فوق VWAP
     breakout_occurred = last['close'] > last['vwap'] and prev['close'] <= prev['vwap']
-    
-    # 2. تأكيد الزخم: CMF إيجابي و OBV في صعود
     momentum_confirmed = last['cmf'] > 0.05 and last['obv'] > prev['obv']
-    
-    # 3. تأكيد حجم التداول: حجم التداول مرتفع أثناء الاختراق
     volume_confirmed = last['relative_volume'] > 1.5
 
     if breakout_occurred and momentum_confirmed and volume_confirmed:
@@ -781,35 +867,23 @@ def check_smart_breakout_strategy(df: pd.DataFrame) -> bool:
     
     return False
 
-# [إضافة] دالة استراتيجية التباعد الخفي
 def check_rsi_hidden_divergence_strategy(df: pd.DataFrame) -> bool:
-    """
-    المفهوم: اصطياد استمرار الترند عبر تباعد خفي (Hidden Divergence) على RSI 14.
-    """
     if len(df) < DIVERGENCE_LOOKBACK + 5 or not all(k in df.columns for k in ['rsi', 'low', 'ema_50']):
         return False
 
     last = df.iloc[-1]
 
-    # الشرط 1: الترند العام صاعد (السعر فوق EMA50)
     if last['close'] < last['ema_50']:
         return False
 
-    # البحث عن قاعين في السعر وقاعين في RSI
-    search_df = df.iloc[-DIVERGENCE_LOOKBACK:-1] # البحث في النطاق المحدد قبل الشمعة الأخيرة
+    search_df = df.iloc[-DIVERGENCE_LOOKBACK:-1]
     
-    # إيجاد أدنى قاع للسعر في النطاق
     price_low_idx = search_df['low'].idxmin()
     price_low_val = search_df.loc[price_low_idx]['low']
     
-    # إيجاد أدنى قاع لمؤشر RSI في نفس النطاق
     rsi_low_idx = search_df['rsi'].idxmin()
     rsi_low_val = search_df.loc[rsi_low_idx]['rsi']
     
-    # الشروط:
-    # 1. القاع الأخير للسعر (الشمعة الحالية) أدنى من القاع السابق
-    # 2. القاع الأخير لـ RSI أعلى من القاع السابق
-    # 3. يجب أن يكون RSI في منطقة ليست تشبع بيعي مفرط (مثلاً > 30)
     if (last['low'] < price_low_val and 
         last['rsi'] > rsi_low_val and 
         last['rsi'] > 30 and rsi_low_val > 30):
@@ -818,24 +892,15 @@ def check_rsi_hidden_divergence_strategy(df: pd.DataFrame) -> bool:
         
     return False
 
-# [إضافة] دالة استراتيجية الارتداد من VWAP
 def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
-    """
-    المفهوم: ارتداد من VWAP بعد اختبار حجم كبير.
-    """
     if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'relative_volume', 'macd_histogram']):
         return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # 1. السعر يلامس VWAP ضمن نطاق ضيق
-    vwap_touch = abs(last['close'] - last['vwap']) / last['vwap'] < 0.002 # ضمن 0.2%
-    
-    # 2. حجم تداول كبير
+    vwap_touch = abs(last['close'] - last['vwap']) / last['vwap'] < 0.002
     high_volume = last['relative_volume'] > 1.5
-    
-    # 3. انعكاس هيستوجرام الماكد (من سلبي إلى إيجابي أو يقلل من سلبيته)
     macd_reversal = last['macd_histogram'] > prev['macd_histogram'] and prev['macd_histogram'] < 0
 
     if vwap_touch and high_volume and macd_reversal:
@@ -845,28 +910,20 @@ def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
     return False
 
 
-# [إضافة] فلتر جدار البيع للاستراتيجية الجديدة
 def has_large_ask_wall_nearby(symbol: str, price: float) -> bool:
-    """
-    يتحقق من وجود جدار بيع كبير (Ask Wall) ضمن نطاق 0.5% فوق السعر الحالي.
-    """
-    if not client: return True # نفترض وجود جدار كإجراء وقائي
+    if not client: return True
     try:
         order_book = client.get_order_book(symbol=symbol, limit=100)
         asks = pd.DataFrame(order_book['asks'], columns=['price', 'qty'], dtype=float)
 
-        # تحديد النطاق العلوي للبحث عن جدار البيع
         price_range_upper = price * (1 + 0.005) 
         
-        # فلترة الأوامر ضمن النطاق
         relevant_asks = asks[asks['price'].between(price, price_range_upper)]
         if relevant_asks.empty:
             return False
 
-        # حساب قيمة كل أمر بيع بالـ USDT
         relevant_asks['value_usdt'] = relevant_asks['price'] * relevant_asks['qty']
         
-        # التحقق مما إذا كان أي أمر بيع يتجاوز العتبة
         if relevant_asks['value_usdt'].max() > ASK_WALL_THRESHOLD_USDT:
             wall_price = relevant_asks.loc[relevant_asks['value_usdt'].idxmax()]
             logger.warning(f"  -> [{symbol}] 🧱 تم اكتشاف جدار بيع كبير: {wall_price['qty']:.2f} @ {wall_price['price']:.4f} (قيمته ${wall_price['value_usdt']:.0f})")
@@ -876,15 +933,9 @@ def has_large_ask_wall_nearby(symbol: str, price: float) -> bool:
 
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ في فلتر جدار البيع: {e}")
-        return True # نفترض وجود جدار كإجراء وقائي
+        return True
 
-# --- دالة تأكيد الترند على فريم أعلى ---
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 200) -> bool:
-    """
-    تُرجع True إذا تحقق أحد شرطين:
-      1- الترند صاعد قوي (EMA50 > EMA200 + ADX > 25)
-      2- تحول صاعد حديث (MACD Crossover + EMA50 عبور EMA200 للأعلى)
-    """
     try:
         df = fetch_historical_data(symbol, htf, days=40) 
         if df is None or len(df) < lookback:
@@ -924,15 +975,7 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 20
         logger.error(f"❌ [HTF Confirm] خطأ في {symbol}: {e}")
         return False
 
-# --- دالة فلتر الزخم قصير الأجل ---
 def passes_short_term_momentum_filter(symbol: str, df: pd.DataFrame) -> bool:
-    """
-    مناسبة لـ BB_Squeeze, QQE_SSL, BB_Stoch
-    تُرجع True إذا:
-      - السعر قريب من حدود BB (Squeeze أو انعكاس)
-      - حجم التداول أعلى من المتوسط
-      - MACD أو RSI يعطي زخم قوي في اتجاه الإشارة
-    """
     try:
         if len(df) < 100:
             return False
@@ -1039,7 +1082,6 @@ class EnhancedTradingStrategy:
             logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد تنبؤ نموذج ML: {e}", exc_info=True)
             return None
 
-# --- التعرف على أنماط الشموع ---
 def is_hammer(candle: pd.Series, prev_candle: pd.Series) -> bool:
     body = abs(candle['open'] - candle['close'])
     lower_wick = candle['close'] - candle['low'] if candle['open'] < candle['close'] else candle['open'] - candle['low']
@@ -1127,10 +1169,6 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         log_rejection(symbol, "Order Book Fetch Failed", {"error": str(e)})
         return False
 
-# --- دوال حساب الأهداف ووقف الخسارة ---
-SR_LOOKBACK_CANDLES = 50
-SR_MIN_BOUNCES      = 2
-
 def find_sr_levels(df: pd.DataFrame, lookback: int = 50, min_bounces: int = 2) -> Dict[str, Optional[float]]:
     if len(df) < lookback:
         return {'support': None, 'resistance': None}
@@ -1160,7 +1198,7 @@ def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Option
             log_rejection(symbol, "Insufficient data for TP/SL calculation")
             return None
 
-        sr = find_sr_levels(df, lookback=SR_LOOKBACK_CANDLES, min_bounces=SR_MIN_BOUNCES)
+        sr = find_sr_levels(df, lookback=50, min_bounces=2)
         resistance = sr['resistance']
         support    = sr['support']
 
@@ -1403,7 +1441,6 @@ def determine_market_state_enhanced():
     except Exception as e:
         logger.error(f"❌ [حالة السوق] خطأ في التحديث: {e}", exc_info=True)
 
-# ---------------------- حلقات النظام ----------------------
 def analyze_path_for_extension(df: pd.DataFrame) -> bool:
     if df is None or len(df) < 20: return False
     last = df.iloc[-1]
@@ -1571,12 +1608,7 @@ def trade_management_loop():
             logger.error(f"❌ [مدير الصفقات] خطأ في حلقة الإدارة: {e}", exc_info=True)
             time.sleep(10)
 
-# [إضافة] حلقة مراقبة الأخبار
 def news_check_loop():
-    """
-    تتحقق من الأخبار كل 5 دقائق وتفعل قفل التداول إذا لزم الأمر.
-    """
-    # [إصلاح] تعريف المتغيرات كـ global لمعالجتها بشكل صحيح
     global news_lockdown_until, last_news_event
 
     if not NEWSDATA_API_KEY or NEWSDATA_API_KEY == "pub_2c2d39760da740178b67ee1befd97206":
@@ -1595,7 +1627,6 @@ def news_check_loop():
                     time.sleep(60)
                     continue
 
-            # التحقق مما إذا كان القفل الحالي قد انتهى
             with news_state_lock:
                 if news_lockdown_until and datetime.now(timezone.utc) > news_lockdown_until:
                     logger.info("✅ [الأخبار] انتهاء فترة قفل الأخبار، استئناف التداول.")
@@ -1603,7 +1634,6 @@ def news_check_loop():
                     news_lockdown_until = None
                     last_news_event = None
 
-            # جلب الأخبار الجديدة
             url = f"https://newsdata.io/api/1/news?apikey={NEWSDATA_API_KEY}&country=us&category=business,economics&language=en"
             response = requests.get(url, timeout=20)
             response.raise_for_status()
@@ -1617,14 +1647,11 @@ def news_check_loop():
                     if not title or not pub_date_str:
                         continue
                     
-                    # التحقق من الكلمات المفتاحية
                     if any(keyword in title for keyword in HIGH_IMPACT_KEYWORDS):
                         pub_date = datetime.strptime(pub_date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                         
-                        # التحقق مما إذا كان الخبر حديثًا (في آخر 10 دقائق)
                         if datetime.now(timezone.utc) - pub_date < timedelta(minutes=10):
                             with news_state_lock:
-                                # تفعيل القفل فقط إذا لم يكن هناك قفل نشط بالفعل
                                 if not (news_lockdown_until and datetime.now(timezone.utc) < news_lockdown_until):
                                     lockdown_duration = timedelta(minutes=30)
                                     news_lockdown_until = datetime.now(timezone.utc) + lockdown_duration
@@ -1634,9 +1661,9 @@ def news_check_loop():
                                     logger.warning(log_message)
                                     log_and_notify("warning", log_message, "NEWS_LOCKDOWN_START")
                                     send_telegram_message(f"🛑 *توقف مؤقت للتداول!*\n\nتم رصد خبر اقتصادي عالي التأثير وسيتم إيقاف فتح صفقات جديدة لمدة 30 دقيقة.\n\n*{article.get('title')}*")
-                                    break # نكتفي بأول خبر مؤثر
+                                    break
             
-            time.sleep(300) # تحقق كل 5 دقائق
+            time.sleep(300)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ [الأخبار] خطأ في الاتصال بواجهة الأخبار: {e}")
@@ -1646,9 +1673,6 @@ def news_check_loop():
             time.sleep(600)
 
 def is_trading_paused_due_to_news() -> bool:
-    """
-    يتحقق مما إذا كان التداول متوقفًا حاليًا بسبب الأخبار.
-    """
     with news_filter_lock:
         if not USE_NEWS_FILTER:
             return False
@@ -1666,7 +1690,6 @@ def main_loop_enhanced():
 
     while True:
         try:
-            # [إضافة] التحقق من قفل الأخبار في بداية كل دورة
             if is_trading_paused_due_to_news():
                 with news_state_lock:
                     remaining = (news_lockdown_until - datetime.now(timezone.utc)).total_seconds()
@@ -1836,16 +1859,15 @@ def initialize_bot_services():
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
-        # [إضافة] بدء حلقة مراقبة الأخبار
         Thread(target=news_check_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.1)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.2)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.1) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.2) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
