@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V9.7.0 (تحسين جلب البيانات مع Redis Caching)
-# --- التغييرات الرئيسية (V9.7.0):
-# 1. [إضافة] آلية تخزين مؤقت (Caching) للبيانات التاريخية في Redis.
-# 2. [تحسين] في الدورة الأولى، يتم جلب البيانات كاملة وحفظها في Redis.
-# 3. [تحسين] في الدورات اللاحقة، يتم جلب آخر شمعة فقط وتحديث البيانات المحفوظة، مما يسرّع الفحص ويقلل الحمل على API.
-# 4. [إضافة] دالة جديدة `get_optimized_historical_data` لتنفيذ هذه الآلية.
+# ملف c4.py - نسخة V9.6.0 (إضافة استراتيجيات Divergence و Reversal)
+# --- التغييرات الرئيسية (V9.6.0):
+# 1. [إضافة] استراتيجية التباعد الخفي على مؤشر القوة النسبية (RSI Hidden Divergence).
+# 2. [إضافة] استراتيجية الارتداد من متوسط السعر المرجح بالحجم (VWAP Reversal).
+# 3. [إضافة] أزرار تفعيل جديدة في لوحة التحكم لكلتا الاستراتيجيتين.
+# 4. [تحسين] تمييز أزرار الاستراتيجيات الجديدة بألوان مختلفة في لوحة التحكم.
 
 import time
 import os
@@ -46,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.7.0')
+logger = logging.getLogger('CryptoBotV9.6.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -143,6 +143,7 @@ bullish_momentum_strategy_lock = Lock()
 USE_SMART_BREAKOUT_STRATEGY: bool = True
 smart_breakout_strategy_lock = Lock()
 
+# [إضافة] مفاتيح تفعيل الاستراتيجيات الجديدة
 USE_RSI_DIVERGENCE_STRATEGY: bool = True
 rsi_divergence_strategy_lock = Lock()
 
@@ -183,9 +184,10 @@ EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 CANDLE_AVG_VOLUME_PERIOD: int = 15
+# [إضافة] إعدادات الاستراتيجية الجديدة
 CMF_PERIOD: int = 20
-ASK_WALL_THRESHOLD_USDT: float = 20000.0
-DIVERGENCE_LOOKBACK: int = 25
+ASK_WALL_THRESHOLD_USDT: float = 20000.0 # قيمة جدار البيع بالدولار
+DIVERGENCE_LOOKBACK: int = 25 # نطاق البحث عن التباعد
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
@@ -344,7 +346,7 @@ def init_redis() -> None:
     global redis_client
     logger.info("[Redis] تهيئة الاتصال...")
     try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=False) # Important: decode_responses=False for pickle
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         logger.info("✅ [Redis] تم الاتصال بنجاح.")
     except redis.exceptions.ConnectionError as e:
@@ -399,92 +401,10 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
-
-def get_optimized_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """
-    [مُحسَّن] تجلب البيانات التاريخية مع الاستفادة من التخزين المؤقت في Redis لتسريع العملية.
-    في الدورة الأولى، تجلب البيانات كاملة وتحفظها.
-    في الدورات التالية، تجلب فقط الشموع الجديدة وتدمجها مع البيانات المحفوظة.
-    """
-    if not client or not redis_client:
-        logger.error(f"[{symbol}] client أو redis_client غير مهيأ لجلب البيانات المحسنة.")
-        return None
-
-    redis_key = f"historical_data:{symbol}:{interval}"
-    cached_df = None
-    
-    try:
-        # 1. محاولة جلب البيانات من ذاكرة التخزين المؤقت (Redis)
-        cached_data_raw = redis_client.get(redis_key)
-        if cached_data_raw:
-            cached_df = pickle.loads(cached_data_raw)
-            # logger.info(f"  -> [{symbol}] تم العثور على بيانات محفوظة في Redis. جاري جلب التحديثات...")
-    except Exception as e:
-        logger.warning(f"⚠️ [{symbol}] لم يتم العثور على بيانات محفوظة في Redis أو حدث خطأ في القراءة: {e}. سيتم جلب البيانات كاملة.")
-        cached_df = None
-
-    try:
-        if cached_df is not None and not cached_df.empty:
-            # --- الدورة الثانية وما بعدها: جلب التحديثات فقط ---
-            last_timestamp = cached_df.index[-1].to_pydatetime()
-            start_time_ms = int(last_timestamp.timestamp() * 1000) + 1 
-            
-            new_klines = client.get_klines(symbol=symbol, interval=interval, startTime=start_time_ms)
-
-            if new_klines:
-                cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
-                new_df = pd.DataFrame(new_klines, columns=cols)
-                required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'quote_volume', 'taker_buy_base']
-                new_df = new_df[required_cols]
-                numeric_cols = {'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 'volume': 'float', 'quote_volume': 'float', 'taker_buy_base': 'float'}
-                new_df = new_df.astype(numeric_cols)
-                new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms', utc=True)
-                new_df.set_index('timestamp', inplace=True)
-                
-                updated_df = pd.concat([cached_df, new_df])
-                updated_df = updated_df[~updated_df.index.duplicated(keep='last')]
-                
-                interval_in_minutes = 0
-                if 'm' in interval:
-                    interval_in_minutes = int(re.sub(r'\D', '', interval))
-                elif 'h' in interval:
-                    interval_in_minutes = int(re.sub(r'\D', '', interval)) * 60
-                elif 'd' in interval:
-                    interval_in_minutes = int(re.sub(r'\D', '', interval)) * 1440
-
-                if interval_in_minutes > 0:
-                    lookback_candles = int(days * (1440 / interval_in_minutes))
-                    if len(updated_df) > lookback_candles * 1.2:
-                        updated_df = updated_df.tail(lookback_candles)
-
-                redis_client.set(redis_key, pickle.dumps(updated_df))
-                # logger.info(f"  -> [{symbol}] تم تحديث البيانات بـ {len(new_df)} شمعة جديدة.")
-                return updated_df.dropna()
-            else:
-                return cached_df.dropna()
-        else:
-            # --- الدورة الأولى: جلب البيانات كاملة ---
-            logger.info(f"  -> [{symbol}] لا توجد بيانات محفوظة. جاري جلب البيانات التاريخية كاملة لأول مرة...")
-            full_df = fetch_historical_data(symbol, interval, days)
-            if full_df is not None and not full_df.empty:
-                redis_client.set(redis_key, pickle.dumps(full_df))
-                logger.info(f"  -> [{symbol}] تم حفظ البيانات الكاملة في Redis.")
-                return full_df
-            else:
-                return None
-                
-    except Exception as e:
-        logger.error(f"❌ [جلب البيانات المحسن] خطأ في جلب البيانات لـ {symbol} ({interval}): {e}", exc_info=True)
-        return None
-
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """
-    الدالة الأصلية لجلب البيانات، تعمل كخيار احتياطي للدورة الأولى.
-    """
     if not client: return None
     try:
-        # زيادة طفيفة في فترة الجلب لضمان وجود بيانات كافية للمؤشرات الأولية
-        lookback_str = f"{days + 5} day ago UTC"
+        lookback_str = f"{days + 50} day" if 'd' in interval.lower() else f"{days * 24 + 200} hour"
         
         klines = client.get_historical_klines(symbol, interval, lookback_str)
         if not klines: return None
@@ -662,9 +582,13 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
     else:
         df_calc['btc_correlation'] = 0.0
     
+    # [إضافة] حساب المؤشرات الجديدة
+    # VWAP
     typical_price = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
     df_calc['vwap'] = (typical_price * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
+    # OBV
     df_calc['obv'] = (np.sign(df_calc['close'].diff()) * df_calc['volume']).fillna(0).cumsum()
+    # CMF
     mfv = ((df_calc['close'] - df_calc['low']) - (df_calc['high'] - df_calc['close'])) / (df_calc['high'] - df_calc['low']).replace(0, 1e-9) * df_calc['volume']
     df_calc['cmf'] = mfv.rolling(CMF_PERIOD).sum() / df_calc['volume'].rolling(CMF_PERIOD).sum()
 
@@ -703,7 +627,7 @@ def get_session_state() -> Tuple[List[str], str, str]:
         return [], "LOW_LIQUIDITY", "خارج أوقات الذروة"
 
 def get_btc_data_for_bot() -> Optional[pd.DataFrame]:
-    btc_data = get_optimized_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+    btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if btc_data is not None: btc_data['btc_returns'] = btc_data['close'].pct_change()
     return btc_data
 
@@ -737,6 +661,7 @@ def load_notifications_to_cache():
 
 # ---------------------- منطق التداول والفلاتر ----------------------
 
+# --- دوال منطق الاستراتيجيات ---
 def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -801,6 +726,7 @@ def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
         return True
     return False
 
+# --- دالة استراتيجية الزخم الصعودي المحدثة ---
 def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 50:
         return False
@@ -832,15 +758,24 @@ def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
 
     return False
 
+# [إضافة] دالة الاستراتيجية الجديدة
 def check_smart_breakout_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: اختراق فوق مقاومة ديناميكية (VWAP) مع فلتر حجم التداول والزخم.
+    """
     if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'cmf', 'obv', 'relative_volume']):
         return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
+    # 1. الاختراق: السعر أغلق لتوه فوق VWAP
     breakout_occurred = last['close'] > last['vwap'] and prev['close'] <= prev['vwap']
+    
+    # 2. تأكيد الزخم: CMF إيجابي و OBV في صعود
     momentum_confirmed = last['cmf'] > 0.05 and last['obv'] > prev['obv']
+    
+    # 3. تأكيد حجم التداول: حجم التداول مرتفع أثناء الاختراق
     volume_confirmed = last['relative_volume'] > 1.5
 
     if breakout_occurred and momentum_confirmed and volume_confirmed:
@@ -849,23 +784,35 @@ def check_smart_breakout_strategy(df: pd.DataFrame) -> bool:
     
     return False
 
+# [إضافة] دالة استراتيجية التباعد الخفي
 def check_rsi_hidden_divergence_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: اصطياد استمرار الترند عبر تباعد خفي (Hidden Divergence) على RSI 14.
+    """
     if len(df) < DIVERGENCE_LOOKBACK + 5 or not all(k in df.columns for k in ['rsi', 'low', 'ema_50']):
         return False
 
     last = df.iloc[-1]
 
+    # الشرط 1: الترند العام صاعد (السعر فوق EMA50)
     if last['close'] < last['ema_50']:
         return False
 
-    search_df = df.iloc[-DIVERGENCE_LOOKBACK:-1]
+    # البحث عن قاعين في السعر وقاعين في RSI
+    search_df = df.iloc[-DIVERGENCE_LOOKBACK:-1] # البحث في النطاق المحدد قبل الشمعة الأخيرة
     
+    # إيجاد أدنى قاع للسعر في النطاق
     price_low_idx = search_df['low'].idxmin()
     price_low_val = search_df.loc[price_low_idx]['low']
     
+    # إيجاد أدنى قاع لمؤشر RSI في نفس النطاق
     rsi_low_idx = search_df['rsi'].idxmin()
     rsi_low_val = search_df.loc[rsi_low_idx]['rsi']
     
+    # الشروط:
+    # 1. القاع الأخير للسعر (الشمعة الحالية) أدنى من القاع السابق
+    # 2. القاع الأخير لـ RSI أعلى من القاع السابق
+    # 3. يجب أن يكون RSI في منطقة ليست تشبع بيعي مفرط (مثلاً > 30)
     if (last['low'] < price_low_val and 
         last['rsi'] > rsi_low_val and 
         last['rsi'] > 30 and rsi_low_val > 30):
@@ -874,15 +821,24 @@ def check_rsi_hidden_divergence_strategy(df: pd.DataFrame) -> bool:
         
     return False
 
+# [إضافة] دالة استراتيجية الارتداد من VWAP
 def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: ارتداد من VWAP بعد اختبار حجم كبير.
+    """
     if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'relative_volume', 'macd_histogram']):
         return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    vwap_touch = abs(last['close'] - last['vwap']) / last['vwap'] < 0.002
+    # 1. السعر يلامس VWAP ضمن نطاق ضيق
+    vwap_touch = abs(last['close'] - last['vwap']) / last['vwap'] < 0.002 # ضمن 0.2%
+    
+    # 2. حجم تداول كبير
     high_volume = last['relative_volume'] > 1.5
+    
+    # 3. انعكاس هيستوجرام الماكد (من سلبي إلى إيجابي أو يقلل من سلبيته)
     macd_reversal = last['macd_histogram'] > prev['macd_histogram'] and prev['macd_histogram'] < 0
 
     if vwap_touch and high_volume and macd_reversal:
@@ -892,20 +848,28 @@ def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
     return False
 
 
+# [إضافة] فلتر جدار البيع للاستراتيجية الجديدة
 def has_large_ask_wall_nearby(symbol: str, price: float) -> bool:
-    if not client: return True
+    """
+    يتحقق من وجود جدار بيع كبير (Ask Wall) ضمن نطاق 0.5% فوق السعر الحالي.
+    """
+    if not client: return True # نفترض وجود جدار كإجراء وقائي
     try:
         order_book = client.get_order_book(symbol=symbol, limit=100)
         asks = pd.DataFrame(order_book['asks'], columns=['price', 'qty'], dtype=float)
 
+        # تحديد النطاق العلوي للبحث عن جدار البيع
         price_range_upper = price * (1 + 0.005) 
         
+        # فلترة الأوامر ضمن النطاق
         relevant_asks = asks[asks['price'].between(price, price_range_upper)]
         if relevant_asks.empty:
             return False
 
+        # حساب قيمة كل أمر بيع بالـ USDT
         relevant_asks['value_usdt'] = relevant_asks['price'] * relevant_asks['qty']
         
+        # التحقق مما إذا كان أي أمر بيع يتجاوز العتبة
         if relevant_asks['value_usdt'].max() > ASK_WALL_THRESHOLD_USDT:
             wall_price = relevant_asks.loc[relevant_asks['value_usdt'].idxmax()]
             logger.warning(f"  -> [{symbol}] 🧱 تم اكتشاف جدار بيع كبير: {wall_price['qty']:.2f} @ {wall_price['price']:.4f} (قيمته ${wall_price['value_usdt']:.0f})")
@@ -915,11 +879,17 @@ def has_large_ask_wall_nearby(symbol: str, price: float) -> bool:
 
     except Exception as e:
         logger.error(f"❌ [{symbol}] خطأ في فلتر جدار البيع: {e}")
-        return True
+        return True # نفترض وجود جدار كإجراء وقائي
 
+# --- دالة تأكيد الترند على فريم أعلى ---
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 200) -> bool:
+    """
+    تُرجع True إذا تحقق أحد شرطين:
+      1- الترند صاعد قوي (EMA50 > EMA200 + ADX > 25)
+      2- تحول صاعد حديث (MACD Crossover + EMA50 عبور EMA200 للأعلى)
+    """
     try:
-        df = get_optimized_historical_data(symbol, htf, days=40) 
+        df = fetch_historical_data(symbol, htf, days=40) 
         if df is None or len(df) < lookback:
             logger.warning(f"  -> [HTF {htf}] {symbol} بيانات غير كافية للتأكيد ({len(df) if df is not None else 0} شمعة).")
             return False
@@ -957,7 +927,15 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 20
         logger.error(f"❌ [HTF Confirm] خطأ في {symbol}: {e}")
         return False
 
+# --- دالة فلتر الزخم قصير الأجل ---
 def passes_short_term_momentum_filter(symbol: str, df: pd.DataFrame) -> bool:
+    """
+    مناسبة لـ BB_Squeeze, QQE_SSL, BB_Stoch
+    تُرجع True إذا:
+      - السعر قريب من حدود BB (Squeeze أو انعكاس)
+      - حجم التداول أعلى من المتوسط
+      - MACD أو RSI يعطي زخم قوي في اتجاه الإشارة
+    """
     try:
         if len(df) < 100:
             return False
@@ -1406,7 +1384,7 @@ def determine_market_state_enhanced():
     try:
         trend_details = {}
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            df = get_optimized_historical_data(BTC_SYMBOL, tf, 20)
+            df = fetch_historical_data(BTC_SYMBOL, tf, 20)
             if df is not None and not df.empty:
                 ema_fast = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
                 ema_slow = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
@@ -1438,7 +1416,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.7.0 - محسن الأداء</title>
+    <title>لوحة تحكم التداول V9.6.0 - استراتيجيات جديدة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1482,7 +1460,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.7.0</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.6.0</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1674,6 +1652,7 @@ function updateMarketStatus() {
             document.getElementById('htf-confirmation-toggle').checked = data.settings.use_htf_confirmation_filter;
             document.getElementById('short-term-momentum-filter-toggle').checked = data.settings.use_short_term_momentum_filter;
             
+            // [إضافة] تحديث أزرار الاستراتيجيات الجديدة
             document.getElementById('ml-strategy-toggle').checked = data.settings.use_ml_strategy;
             document.getElementById('smart-breakout-strategy-toggle').checked = data.settings.use_smart_breakout_strategy;
             document.getElementById('rsi-divergence-strategy-toggle').checked = data.settings.use_rsi_divergence_strategy;
@@ -1799,6 +1778,7 @@ function saveSettings() {
         use_htf_confirmation_filter: document.getElementById('htf-confirmation-toggle').checked,
         use_short_term_momentum_filter: document.getElementById('short-term-momentum-filter-toggle').checked,
         
+        // [إضافة] إرسال حالة كل الاستراتيجيات
         use_ml_strategy: document.getElementById('ml-strategy-toggle').checked,
         use_smart_breakout_strategy: document.getElementById('smart-breakout-strategy-toggle').checked,
         use_rsi_divergence_strategy: document.getElementById('rsi-divergence-strategy-toggle').checked,
@@ -1855,14 +1835,7 @@ def get_market_status():
     active_sessions, _, _ = get_session_state()
     usdt_balance = None
     if client:
-        try: 
-            if redis_client:
-                usdt_balance_raw = redis_client.get('usdt_balance')
-                if usdt_balance_raw:
-                    usdt_balance = float(usdt_balance_raw)
-            if usdt_balance is None:
-                usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
-                if redis_client: redis_client.set('usdt_balance', usdt_balance, ex=10)
+        try: usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
         except: usdt_balance = 'N/A'
 
     with risk_per_trade_lock: risk = RISK_PER_TRADE_PERCENT
@@ -1875,6 +1848,7 @@ def get_market_status():
     with htf_confirmation_lock: use_htf = USE_HTF_CONFIRMATION_FILTER
     with short_term_momentum_filter_lock: use_stm = USE_SHORT_TERM_MOMENTUM_FILTER
     
+    # [إضافة] قراءة حالة كل الاستراتيجيات
     with ml_strategy_lock: use_ml = USE_ML_STRATEGY
     with smart_breakout_strategy_lock: use_smart_breakout = USE_SMART_BREAKOUT_STRATEGY
     with rsi_divergence_strategy_lock: use_rsi_divergence = USE_RSI_DIVERGENCE_STRATEGY
@@ -1899,6 +1873,7 @@ def get_market_status():
             "use_candle_filter": use_candle, "use_volume_filter": use_volume, "use_order_book_filter": use_ob,
             "use_htf_confirmation_filter": use_htf,
             "use_short_term_momentum_filter": use_stm,
+            # [إضافة] إرسال حالة كل الاستراتيجيات للواجهة الأمامية
             "use_ml_strategy": use_ml,
             "use_smart_breakout_strategy": use_smart_breakout,
             "use_rsi_divergence_strategy": use_rsi_divergence,
@@ -1943,12 +1918,10 @@ def get_stats():
 
 @app.route('/api/signals')
 def get_signals():
-    if not redis_client:
+    if not (check_db_connection() and redis_client):
         return jsonify({"error": "Service connection failed"}), 500
     try:
-        current_prices_raw = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
-        current_prices = {k.decode('utf-8'): v.decode('utf-8') for k, v in current_prices_raw.items()}
-
+        current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
         with signal_cache_lock:
             signals_copy = list(open_signals_cache.values())
         
@@ -2006,6 +1979,7 @@ def update_settings():
         with htf_confirmation_lock: USE_HTF_CONFIRMATION_FILTER = bool(data.get('use_htf_confirmation_filter', USE_HTF_CONFIRMATION_FILTER))
         with short_term_momentum_filter_lock: USE_SHORT_TERM_MOMENTUM_FILTER = bool(data.get('use_short_term_momentum_filter', USE_SHORT_TERM_MOMENTUM_FILTER))
         
+        # [إضافة] تحديث حالة كل الاستراتيجيات
         with ml_strategy_lock: USE_ML_STRATEGY = bool(data.get('use_ml_strategy', USE_ML_STRATEGY))
         with smart_breakout_strategy_lock: USE_SMART_BREAKOUT_STRATEGY = bool(data.get('use_smart_breakout_strategy', USE_SMART_BREAKOUT_STRATEGY))
         with rsi_divergence_strategy_lock: USE_RSI_DIVERGENCE_STRATEGY = bool(data.get('use_rsi_divergence_strategy', USE_RSI_DIVERGENCE_STRATEGY))
@@ -2032,8 +2006,7 @@ def manual_close_trade_endpoint(signal_id):
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
     if not signal_to_close: return jsonify({"success": False, "message": "Signal not found"}), 404
     try:
-        current_price_raw = redis_client.hget(REDIS_PRICES_HASH_NAME, signal_to_close['symbol'])
-        current_price = float(current_price_raw)
+        current_price = float(redis_client.hget(REDIS_PRICES_HASH_NAME, signal_to_close['symbol']))
     except (TypeError, ValueError):
         try: current_price = float(client.get_symbol_ticker(symbol=signal_to_close['symbol'])['price'])
         except Exception as e: return jsonify({"success": False, "message": f"Could not fetch price: {e}"}), 500
@@ -2124,9 +2097,7 @@ def trade_management_loop():
                 time.sleep(5)
                 continue
 
-            current_prices_raw = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
-            current_prices = {k.decode('utf-8'): v.decode('utf-8') for k, v in current_prices_raw.items()}
-
+            current_prices = redis_client.hgetall(REDIS_PRICES_HASH_NAME)
             _, session_liquidity, _ = get_session_state()
 
             for signal in signals_to_check:
@@ -2186,7 +2157,7 @@ def trade_management_loop():
                         
                         journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
                         
-                        df_analysis = get_optimized_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 100)
+                        df_analysis = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 100)
                         if df_analysis is not None:
                             df_with_features = calculate_all_features(df_analysis, None)
                             
@@ -2232,7 +2203,7 @@ def trade_management_loop():
                     signal['current_peak_price'] = new_peak
                     if USE_ATR_TRAILING_STOP:
                         try:
-                            df_atr = get_optimized_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, ATR_TS_PERIOD + 1)
+                            df_atr = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, ATR_TS_PERIOD + 1)
                             if df_atr is not None and len(df_atr) >= ATR_TS_PERIOD:
                                 high_low = df_atr['high'] - df_atr['low']
                                 high_close_prev = (df_atr['high'] - df_atr['close'].shift()).abs()
@@ -2286,8 +2257,7 @@ def main_loop_enhanced():
                             if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
                                 continue
                         
-                        # [تعديل] استخدام الدالة المحسنة لجلب البيانات
-                        df_15m = get_optimized_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                        df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         
                         if df_15m is None or len(df_15m) < 100:
                             # log_rejection(symbol, "Insufficient Historical Data", {"days": SIGNAL_GENERATION_LOOKBACK_DAYS})
@@ -2301,6 +2271,7 @@ def main_loop_enhanced():
                         signal_found, strategy_used = False, None
 
                         strategies_to_check = []
+                        # [إضافة] ترتيب الاستراتيجيات للفحص
                         with smart_breakout_strategy_lock:
                             if USE_SMART_BREAKOUT_STRATEGY: strategies_to_check.append(('SMART_BREAKOUT', check_smart_breakout_strategy, "Smart_Breakout_VWAP"))
                         with rsi_divergence_strategy_lock:
@@ -2332,6 +2303,7 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
                         
+                        # [إضافة] فلتر جدار البيع الخاص باستراتيجية الاختراق
                         if strategy_used == "Smart_Breakout_VWAP":
                             if has_large_ask_wall_nearby(symbol, df_with_indicators.iloc[-1]['close']):
                                 log_rejection(symbol, "Large Ask Wall Ahead", {"strategy": strategy_used})
@@ -2435,13 +2407,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.0)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.6.0)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.0) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.6.0) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
