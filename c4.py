@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V9.6.0 (إضافة استراتيجيات Divergence و Reversal)
-# --- التغييرات الرئيسية (V9.6.0):
-# 1. [إضافة] استراتيجية التباعد الخفي على مؤشر القوة النسبية (RSI Hidden Divergence).
-# 2. [إضافة] استراتيجية الارتداد من متوسط السعر المرجح بالحجم (VWAP Reversal).
-# 3. [إضافة] أزرار تفعيل جديدة في لوحة التحكم لكلتا الاستراتيجيتين.
-# 4. [تحسين] تمييز أزرار الاستراتيجيات الجديدة بألوان مختلفة في لوحة التحكم.
+# ملف c4.py - نسخة V9.7.0 (فلتر الأخبار الاقتصادية)
+# --- التغييرات الرئيسية (V9.7.0):
+# 1. [إضافة] دمج واجهة NewsData.io لجلب الأخبار الاقتصادية الهامة.
+# 2. [إضافة] "قفل الأخبار": ميزة توقف البوت عن فتح صفقات جديدة لمدة 30 دقيقة بعد صدور خبر عالي التأثير.
+# 3. [إضافة] حلقة مخصصة تعمل في الخلفية لمراقبة الأخبار بشكل دوري.
+# 4. [تحديث] إضافة مؤشر لحالة قفل الأخبار في لوحة التحكم.
+# 5. [تحديث] إضافة زر تفعيل جديد لفلتر الأخبار في قسم الإعدادات.
 
 import time
 import os
@@ -46,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.6.0')
+logger = logging.getLogger('CryptoBotV9.7.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -72,6 +73,8 @@ try:
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
+    # [إضافة] مفتاح API للأخبار
+    NEWSDATA_API_KEY: str = config('NEWSDATA_API_KEY', default='pub_2c2d39760da740178b67ee1befd97206')
 
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
@@ -101,7 +104,7 @@ USE_CANDLESTICK_FILTER: bool = True
 candle_filter_lock = Lock()
 
 USE_VOLUME_FILTER: bool = True
-# volume_filter_lock is used for both USE_VOLUME_FILTER and VOLUME_FILTER_MULTIPLIER
+volume_filter_lock.acquire() # Used for both USE_VOLUME_FILTER and VOLUME_FILTER_MULTIPLIER
 
 USE_ORDER_BOOK_FILTER: bool = True
 order_book_filter_enable_lock = Lock()
@@ -114,39 +117,32 @@ htf_confirmation_lock = Lock()
 USE_SHORT_TERM_MOMENTUM_FILTER: bool = True
 short_term_momentum_filter_lock = Lock()
 
+# [إضافة] فلتر الأخبار
+USE_NEWS_FILTER: bool = True
+news_filter_lock = Lock()
+
 
 # --- مفاتيح تفعيل الاستراتيجيات ---
 USE_ML_STRATEGY: bool = False
 ml_strategy_lock = Lock()
-
 USE_BB_STOCH_STRATEGY: bool = True
 bb_stoch_strategy_lock = Lock()
-
 USE_MACD_EMA_STRATEGY: bool = True
 macd_ema_strategy_lock = Lock()
-
 USE_QQE_SSL_STRATEGY: bool = True
 qqe_ssl_strategy_lock = Lock()
-
 USE_EMA_RSI_STRATEGY: bool = True
 ema_rsi_strategy_lock = Lock()
-
 USE_PULLBACK_STRATEGY: bool = True
 pullback_strategy_lock = Lock()
-
 USE_BB_SQUEEZE_STRATEGY: bool = True
 bb_squeeze_strategy_lock = Lock()
-
 USE_BULLISH_MOMENTUM_STRATEGY: bool = True
 bullish_momentum_strategy_lock = Lock()
-
 USE_SMART_BREAKOUT_STRATEGY: bool = True
 smart_breakout_strategy_lock = Lock()
-
-# [إضافة] مفاتيح تفعيل الاستراتيجيات الجديدة
 USE_RSI_DIVERGENCE_STRATEGY: bool = True
 rsi_divergence_strategy_lock = Lock()
-
 USE_VWAP_REVERSAL_STRATEGY: bool = True
 vwap_reversal_strategy_lock = Lock()
 
@@ -184,7 +180,6 @@ EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 CANDLE_AVG_VOLUME_PERIOD: int = 15
-# [إضافة] إعدادات الاستراتيجية الجديدة
 CMF_PERIOD: int = 20
 ASK_WALL_THRESHOLD_USDT: float = 20000.0 # قيمة جدار البيع بالدولار
 DIVERGENCE_LOOKBACK: int = 25 # نطاق البحث عن التباعد
@@ -215,8 +210,14 @@ last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 5
 
+# [إضافة] متغيرات حالة فلتر الأخبار
+news_lockdown_until: Optional[datetime] = None
+last_news_event: Optional[Dict[str, Any]] = None
+news_state_lock = Lock()
+
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
+    "Trading paused due to high-impact news": "التداول متوقف بسبب خبر عالي التأثير",
     "ML Model Rejected Signal": "نموذج التعلم الآلي رفض الإشارة",
     "ML Model Load Failed": "فشل تحميل نموذج التعلم الآلي",
     "Bullish Reversal Candle Pattern Failed": "لم يظهر نمط شمعة انعكاسية صاعدة",
@@ -1416,7 +1417,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.6.0 - استراتيجيات جديدة</title>
+    <title>لوحة تحكم التداول V9.7.0 - فلتر الأخبار</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1444,6 +1445,7 @@ def get_dashboard_html():
         .tp-slider:hover { opacity: 1; }
         .tp-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; background: var(--accent-blue); cursor: pointer; border-radius: 50%; }
         .tp-slider::-moz-range-thumb { width: 18px; height: 18px; background: var(--accent-blue); cursor: pointer; border-radius: 50%; }
+        .news-lockdown-active { background-color: rgba(248, 81, 73, 0.1); border-color: var(--accent-red); }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -1460,14 +1462,15 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.6.0</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.7.0</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
-        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+        <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-5">
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الصفقات المفتوحة</h3><div id="open-trades-count" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4 flex flex-col justify-center items-center"><h3 class="font-bold text-lg text-text-secondary mb-2">التداول الحقيقي</h3><div class="flex items-center space-x-3 space-x-reverse"><span id="trading-status-text" class="font-bold text-lg"></span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="trading-toggle" class="sr-only" onchange="toggleTrading()"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label></div><div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div></div>
+            <div id="news-lockdown-card" class="card p-4 transition-colors duration-500"><h3 class="font-bold mb-2 text-lg text-text-secondary">قفل الأخبار</h3><div id="news-lockdown-status" class="text-xl font-bold text-center">...</div><div id="news-lockdown-details" class="text-xs text-center text-text-secondary mt-1"></div></div>
         </section>
         <div class="mb-4 border-b border-border-color"><nav class="flex space-x-6 space-x-reverse -mb-px">
             <button onclick="showTab('signals', this)" class="tab-btn active text-white py-3 px-1 font-semibold">الصفقات</button>
@@ -1529,6 +1532,10 @@ def get_dashboard_html():
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg border-l-4 border-yellow-500">
                             <span class="font-semibold">فلتر الزخم قصير الأجل</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="short-term-momentum-filter-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg border-l-4 border-red-500">
+                            <span class="font-semibold">فلتر الأخبار الاقتصادية</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="news-filter-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
                         </div>
                     </div>
                     
@@ -1640,6 +1647,23 @@ function updateMarketStatus() {
         tradeText.textContent = data.is_trading_enabled ? 'مُفعَّل' : 'غير مُفعَّل';
         tradeText.className = `font-bold text-lg ${data.is_trading_enabled ? 'text-accent-green' : 'text-accent-red'}`;
         document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
+        
+        // [إضافة] تحديث حالة قفل الأخبار
+        const newsCard = document.getElementById('news-lockdown-card');
+        const newsStatus = document.getElementById('news-lockdown-status');
+        const newsDetails = document.getElementById('news-lockdown-details');
+        if (data.news_lockdown.is_active) {
+            newsCard.classList.add('news-lockdown-active');
+            newsStatus.textContent = 'نشط';
+            newsStatus.className = 'text-xl font-bold text-center text-accent-red';
+            const remaining = Math.ceil(data.news_lockdown.remaining_seconds / 60);
+            newsDetails.textContent = `السبب: ${data.news_lockdown.reason.substring(0, 30)}... | متبقي: ${remaining} د`;
+        } else {
+            newsCard.classList.remove('news-lockdown-active');
+            newsStatus.textContent = 'غير نشط';
+            newsStatus.className = 'text-xl font-bold text-center text-accent-green';
+            newsDetails.textContent = 'لا توجد أخبار مؤثرة حديثة.';
+        }
 
         if(data.settings) {
             document.getElementById('risk-percent').value = data.settings.risk_percent;
@@ -1651,8 +1675,8 @@ function updateMarketStatus() {
             document.getElementById('ob-filter-toggle').checked = data.settings.use_order_book_filter;
             document.getElementById('htf-confirmation-toggle').checked = data.settings.use_htf_confirmation_filter;
             document.getElementById('short-term-momentum-filter-toggle').checked = data.settings.use_short_term_momentum_filter;
+            document.getElementById('news-filter-toggle').checked = data.settings.use_news_filter;
             
-            // [إضافة] تحديث أزرار الاستراتيجيات الجديدة
             document.getElementById('ml-strategy-toggle').checked = data.settings.use_ml_strategy;
             document.getElementById('smart-breakout-strategy-toggle').checked = data.settings.use_smart_breakout_strategy;
             document.getElementById('rsi-divergence-strategy-toggle').checked = data.settings.use_rsi_divergence_strategy;
@@ -1777,6 +1801,7 @@ function saveSettings() {
         use_order_book_filter: document.getElementById('ob-filter-toggle').checked,
         use_htf_confirmation_filter: document.getElementById('htf-confirmation-toggle').checked,
         use_short_term_momentum_filter: document.getElementById('short-term-momentum-filter-toggle').checked,
+        use_news_filter: document.getElementById('news-filter-toggle').checked,
         
         // [إضافة] إرسال حالة كل الاستراتيجيات
         use_ml_strategy: document.getElementById('ml-strategy-toggle').checked,
@@ -1847,8 +1872,8 @@ def get_market_status():
     with order_book_filter_enable_lock: use_ob = USE_ORDER_BOOK_FILTER
     with htf_confirmation_lock: use_htf = USE_HTF_CONFIRMATION_FILTER
     with short_term_momentum_filter_lock: use_stm = USE_SHORT_TERM_MOMENTUM_FILTER
+    with news_filter_lock: use_news = USE_NEWS_FILTER
     
-    # [إضافة] قراءة حالة كل الاستراتيجيات
     with ml_strategy_lock: use_ml = USE_ML_STRATEGY
     with smart_breakout_strategy_lock: use_smart_breakout = USE_SMART_BREAKOUT_STRATEGY
     with rsi_divergence_strategy_lock: use_rsi_divergence = USE_RSI_DIVERGENCE_STRATEGY
@@ -1861,19 +1886,29 @@ def get_market_status():
     with bb_squeeze_strategy_lock: use_bb_squeeze = USE_BB_SQUEEZE_STRATEGY
     with bullish_momentum_strategy_lock: use_bullish_momentum = USE_BULLISH_MOMENTUM_STRATEGY
     with signal_cache_lock: open_trades = len(open_signals_cache)
-
+    
+    # [إضافة] جلب حالة قفل الأخبار
+    with news_state_lock:
+        is_lockdown = news_lockdown_until is not None and datetime.now(timezone.utc) < news_lockdown_until
+        remaining_seconds = (news_lockdown_until - datetime.now(timezone.utc)).total_seconds() if is_lockdown else 0
+        news_data = {
+            "is_active": is_lockdown,
+            "remaining_seconds": remaining_seconds,
+            "reason": last_news_event['title'] if is_lockdown and last_news_event else "N/A"
+        }
 
     return jsonify({
         "market_state": state_copy, "active_sessions": active_sessions, "usdt_balance": usdt_balance,
         "is_trading_enabled": is_enabled,
         "open_trades_count": open_trades, "max_open_trades": MAX_OPEN_TRADES,
+        "news_lockdown": news_data,
         "settings": {
             "risk_percent": risk, "ob_ratio": ob_ratio, "vol_multiplier": vol_mult,
             "min_profit": MIN_PROFIT_PERCENT,
             "use_candle_filter": use_candle, "use_volume_filter": use_volume, "use_order_book_filter": use_ob,
             "use_htf_confirmation_filter": use_htf,
             "use_short_term_momentum_filter": use_stm,
-            # [إضافة] إرسال حالة كل الاستراتيجيات للواجهة الأمامية
+            "use_news_filter": use_news,
             "use_ml_strategy": use_ml,
             "use_smart_breakout_strategy": use_smart_breakout,
             "use_rsi_divergence_strategy": use_rsi_divergence,
@@ -1960,7 +1995,7 @@ def toggle_trading_status():
 def update_settings():
     global RISK_PER_TRADE_PERCENT, ORDER_BOOK_MIN_BID_ASK_RATIO, VOLUME_FILTER_MULTIPLIER, \
            MIN_PROFIT_PERCENT, USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER, USE_HTF_CONFIRMATION_FILTER, \
-           USE_SHORT_TERM_MOMENTUM_FILTER, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY, USE_EMA_RSI_STRATEGY, \
+           USE_SHORT_TERM_MOMENTUM_FILTER, USE_NEWS_FILTER, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY, USE_EMA_RSI_STRATEGY, \
            USE_PULLBACK_STRATEGY, USE_BB_SQUEEZE_STRATEGY, USE_BULLISH_MOMENTUM_STRATEGY, USE_ML_STRATEGY, USE_SMART_BREAKOUT_STRATEGY, \
            USE_RSI_DIVERGENCE_STRATEGY, USE_VWAP_REVERSAL_STRATEGY
     try:
@@ -1978,8 +2013,8 @@ def update_settings():
         with order_book_filter_enable_lock: USE_ORDER_BOOK_FILTER = bool(data.get('use_order_book_filter', USE_ORDER_BOOK_FILTER))
         with htf_confirmation_lock: USE_HTF_CONFIRMATION_FILTER = bool(data.get('use_htf_confirmation_filter', USE_HTF_CONFIRMATION_FILTER))
         with short_term_momentum_filter_lock: USE_SHORT_TERM_MOMENTUM_FILTER = bool(data.get('use_short_term_momentum_filter', USE_SHORT_TERM_MOMENTUM_FILTER))
+        with news_filter_lock: USE_NEWS_FILTER = bool(data.get('use_news_filter', USE_NEWS_FILTER))
         
-        # [إضافة] تحديث حالة كل الاستراتيجيات
         with ml_strategy_lock: USE_ML_STRATEGY = bool(data.get('use_ml_strategy', USE_ML_STRATEGY))
         with smart_breakout_strategy_lock: USE_SMART_BREAKOUT_STRATEGY = bool(data.get('use_smart_breakout_strategy', USE_SMART_BREAKOUT_STRATEGY))
         with rsi_divergence_strategy_lock: USE_RSI_DIVERGENCE_STRATEGY = bool(data.get('use_rsi_divergence_strategy', USE_RSI_DIVERGENCE_STRATEGY))
@@ -2230,6 +2265,87 @@ def trade_management_loop():
             logger.error(f"❌ [مدير الصفقات] خطأ في حلقة الإدارة: {e}", exc_info=True)
             time.sleep(10)
 
+# [إضافة] حلقة مراقبة الأخبار
+def news_check_loop():
+    """
+    تتحقق من الأخبار كل 5 دقائق وتفعل قفل التداول إذا لزم الأمر.
+    """
+    if not NEWSDATA_API_KEY or NEWSDATA_API_KEY == "YOUR_API_KEY":
+        logger.warning("⚠️ [الأخبار] مفتاح API غير متوفر، سيتم تعطيل فلتر الأخبار.")
+        return
+
+    HIGH_IMPACT_KEYWORDS = [
+        'cpi', 'fomc', 'nfp', 'non-farm payrolls', 'interest rate', 
+        'federal reserve', 'inflation', 'gdp', 'unemployment', 'retail sales'
+    ]
+    
+    while True:
+        try:
+            with news_filter_lock:
+                if not USE_NEWS_FILTER:
+                    time.sleep(60)
+                    continue
+
+            # التحقق مما إذا كان القفل الحالي قد انتهى
+            with news_state_lock:
+                if news_lockdown_until and datetime.now(timezone.utc) > news_lockdown_until:
+                    logger.info("✅ [الأخبار] انتهاء فترة قفل الأخبار، استئناف التداول.")
+                    log_and_notify("info", "استئناف التداول بعد انتهاء فترة قفل الأخبار.", "NEWS_LOCKDOWN_END")
+                    news_lockdown_until = None
+                    last_news_event = None
+
+            # جلب الأخبار الجديدة
+            url = f"https://newsdata.io/api/1/news?apikey={NEWSDATA_API_KEY}&country=us&category=business,economics&language=en"
+            response = requests.get(url, timeout=20)
+            response.raise_for_status()
+            news_data = response.json()
+
+            if news_data.get("status") == "success":
+                for article in news_data.get("results", []):
+                    title = article.get('title', '').lower()
+                    pub_date_str = article.get('pubDate')
+                    
+                    if not title or not pub_date_str:
+                        continue
+                    
+                    # التحقق من الكلمات المفتاحية
+                    if any(keyword in title for keyword in HIGH_IMPACT_KEYWORDS):
+                        pub_date = datetime.strptime(pub_date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+                        
+                        # التحقق مما إذا كان الخبر حديثًا (في آخر 10 دقائق)
+                        if datetime.now(timezone.utc) - pub_date < timedelta(minutes=10):
+                            with news_state_lock:
+                                # تفعيل القفل فقط إذا لم يكن هناك قفل نشط بالفعل
+                                if not (news_lockdown_until and datetime.now(timezone.utc) < news_lockdown_until):
+                                    lockdown_duration = timedelta(minutes=30)
+                                    news_lockdown_until = datetime.now(timezone.utc) + lockdown_duration
+                                    last_news_event = {'title': article.get('title'), 'time': pub_date.isoformat()}
+                                    
+                                    log_message = f"🚨 [الأخبار] تم تفعيل قفل التداول لمدة 30 دقيقة بسبب خبر: {article.get('title')}"
+                                    logger.warning(log_message)
+                                    log_and_notify("warning", log_message, "NEWS_LOCKDOWN_START")
+                                    send_telegram_message(f"🛑 *توقف مؤقت للتداول!*\n\nتم رصد خبر اقتصادي عالي التأثير وسيتم إيقاف فتح صفقات جديدة لمدة 30 دقيقة.\n\n*{article.get('title')}*")
+                                    break # نكتفي بأول خبر مؤثر
+            
+            time.sleep(300) # تحقق كل 5 دقائق
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ [الأخبار] خطأ في الاتصال بواجهة الأخبار: {e}")
+            time.sleep(300)
+        except Exception as e:
+            logger.error(f"❌ [الأخبار] خطأ غير متوقع في حلقة الأخبار: {e}", exc_info=True)
+            time.sleep(600)
+
+def is_trading_paused_due_to_news() -> bool:
+    """
+    يتحقق مما إذا كان التداول متوقفًا حاليًا بسبب الأخبار.
+    """
+    with news_filter_lock:
+        if not USE_NEWS_FILTER:
+            return False
+    with news_state_lock:
+        return news_lockdown_until is not None and datetime.now(timezone.utc) < news_lockdown_until
+
 
 def main_loop_enhanced():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
@@ -2241,6 +2357,14 @@ def main_loop_enhanced():
 
     while True:
         try:
+            # [إضافة] التحقق من قفل الأخبار في بداية كل دورة
+            if is_trading_paused_due_to_news():
+                with news_state_lock:
+                    remaining = (news_lockdown_until - datetime.now(timezone.utc)).total_seconds()
+                logger.info(f"⏳ [قفل الأخبار] التداول متوقف مؤقتًا. متبقي {remaining/60:.1f} دقيقة.")
+                time.sleep(60)
+                continue
+
             logger.info("🔄 [الحلقة الرئيسية] بدء دورة مسح جديدة...")
             determine_market_state_enhanced()
             btc_data = get_btc_data_for_bot()
@@ -2260,7 +2384,6 @@ def main_loop_enhanced():
                         df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                         
                         if df_15m is None or len(df_15m) < 100:
-                            # log_rejection(symbol, "Insufficient Historical Data", {"days": SIGNAL_GENERATION_LOOKBACK_DAYS})
                             continue
                         
                         df_with_indicators = calculate_all_features(df_15m, btc_data)
@@ -2271,7 +2394,6 @@ def main_loop_enhanced():
                         signal_found, strategy_used = False, None
 
                         strategies_to_check = []
-                        # [إضافة] ترتيب الاستراتيجيات للفحص
                         with smart_breakout_strategy_lock:
                             if USE_SMART_BREAKOUT_STRATEGY: strategies_to_check.append(('SMART_BREAKOUT', check_smart_breakout_strategy, "Smart_Breakout_VWAP"))
                         with rsi_divergence_strategy_lock:
@@ -2303,7 +2425,6 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
                         
-                        # [إضافة] فلتر جدار البيع الخاص باستراتيجية الاختراق
                         if strategy_used == "Smart_Breakout_VWAP":
                             if has_large_ask_wall_nearby(symbol, df_with_indicators.iloc[-1]['close']):
                                 log_rejection(symbol, "Large Ask Wall Ahead", {"strategy": strategy_used})
@@ -2406,14 +2527,16 @@ def initialize_bot_services():
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
+        # [إضافة] بدء حلقة مراقبة الأخبار
+        Thread(target=news_check_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.6.0)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.0)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.6.0) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.0) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
