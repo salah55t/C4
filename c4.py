@@ -1,6 +1,9 @@
-# ملف c4.py - نسخة V9.4.1 (إصلاح خطأ برمجي)
-# --- التغييرات الرئيسية (V9.4.1):
-# 1. [إصلاح] خطأ NameError في دالة get_market_status بسبب عدم تعريف متغير use_volume.
+# ملف c4.py - نسخة V9.6.0 (إضافة استراتيجيات Divergence و Reversal)
+# --- التغييرات الرئيسية (V9.6.0):
+# 1. [إضافة] استراتيجية التباعد الخفي على مؤشر القوة النسبية (RSI Hidden Divergence).
+# 2. [إضافة] استراتيجية الارتداد من متوسط السعر المرجح بالحجم (VWAP Reversal).
+# 3. [إضافة] أزرار تفعيل جديدة في لوحة التحكم لكلتا الاستراتيجيتين.
+# 4. [تحسين] تمييز أزرار الاستراتيجيات الجديدة بألوان مختلفة في لوحة التحكم.
 
 import time
 import os
@@ -43,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.4.1')
+logger = logging.getLogger('CryptoBotV9.6.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -137,6 +140,17 @@ bb_squeeze_strategy_lock = Lock()
 USE_BULLISH_MOMENTUM_STRATEGY: bool = True
 bullish_momentum_strategy_lock = Lock()
 
+USE_SMART_BREAKOUT_STRATEGY: bool = True
+smart_breakout_strategy_lock = Lock()
+
+# [إضافة] مفاتيح تفعيل الاستراتيجيات الجديدة
+USE_RSI_DIVERGENCE_STRATEGY: bool = True
+rsi_divergence_strategy_lock = Lock()
+
+USE_VWAP_REVERSAL_STRATEGY: bool = True
+vwap_reversal_strategy_lock = Lock()
+
+
 # --- تحديد الاستراتيجيات التي تعتبر سكالبينج لتخفيف الفلاتر ---
 SCALPING_STRATEGIES = ["Pullback_MACD", "BB_Squeeze_Breakout", "QQE_SSL_Explosion"]
 
@@ -170,6 +184,10 @@ EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 CANDLE_AVG_VOLUME_PERIOD: int = 15
+# [إضافة] إعدادات الاستراتيجية الجديدة
+CMF_PERIOD: int = 20
+ASK_WALL_THRESHOLD_USDT: float = 20000.0 # قيمة جدار البيع بالدولار
+DIVERGENCE_LOOKBACK: int = 25 # نطاق البحث عن التباعد
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
@@ -220,6 +238,10 @@ REJECTION_REASONS_AR = {
     "EMA_RSI Strategy Conditions Not Met": "شروط استراتيجية EMA+RSI لم تتحقق",
     "Pullback Strategy Conditions Not Met": "شروط استراتيجية Pullback لم تتحقق",
     "BB Squeeze Strategy Conditions Not Met": "شروط استراتيجية BB Squeeze لم تتحقق",
+    "Smart Breakout Strategy Conditions Not Met": "شروط استراتيجية الاختراق الذكي لم تتحقق",
+    "RSI Hidden Divergence Conditions Not Met": "شروط استراتيجية التباعد الخفي لم تتحقق",
+    "VWAP Reversal Conditions Not Met": "شروط استراتيجية الارتداد من VWAP لم تتحقق",
+    "Large Ask Wall Ahead": "يوجد جدار بيع كبير في الأمام",
 }
 
 
@@ -559,6 +581,17 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
         df_calc['btc_correlation'] = asset_returns.rolling(window=BTC_CORR_PERIOD).corr(merged_df['btc_returns'])
     else:
         df_calc['btc_correlation'] = 0.0
+    
+    # [إضافة] حساب المؤشرات الجديدة
+    # VWAP
+    typical_price = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
+    df_calc['vwap'] = (typical_price * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
+    # OBV
+    df_calc['obv'] = (np.sign(df_calc['close'].diff()) * df_calc['volume']).fillna(0).cumsum()
+    # CMF
+    mfv = ((df_calc['close'] - df_calc['low']) - (df_calc['high'] - df_calc['close'])) / (df_calc['high'] - df_calc['low']).replace(0, 1e-9) * df_calc['volume']
+    df_calc['cmf'] = mfv.rolling(CMF_PERIOD).sum() / df_calc['volume'].rolling(CMF_PERIOD).sum()
+
     df_calc = calculate_advanced_momentum_features(df_calc)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
     df_calc = calculate_market_microstructure_features(df_calc)
@@ -724,6 +757,129 @@ def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
         return True
 
     return False
+
+# [إضافة] دالة الاستراتيجية الجديدة
+def check_smart_breakout_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: اختراق فوق مقاومة ديناميكية (VWAP) مع فلتر حجم التداول والزخم.
+    """
+    if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'cmf', 'obv', 'relative_volume']):
+        return False
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. الاختراق: السعر أغلق لتوه فوق VWAP
+    breakout_occurred = last['close'] > last['vwap'] and prev['close'] <= prev['vwap']
+    
+    # 2. تأكيد الزخم: CMF إيجابي و OBV في صعود
+    momentum_confirmed = last['cmf'] > 0.05 and last['obv'] > prev['obv']
+    
+    # 3. تأكيد حجم التداول: حجم التداول مرتفع أثناء الاختراق
+    volume_confirmed = last['relative_volume'] > 1.5
+
+    if breakout_occurred and momentum_confirmed and volume_confirmed:
+        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية الاختراق الذكي (Smart Breakout).")
+        return True
+    
+    return False
+
+# [إضافة] دالة استراتيجية التباعد الخفي
+def check_rsi_hidden_divergence_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: اصطياد استمرار الترند عبر تباعد خفي (Hidden Divergence) على RSI 14.
+    """
+    if len(df) < DIVERGENCE_LOOKBACK + 5 or not all(k in df.columns for k in ['rsi', 'low', 'ema_50']):
+        return False
+
+    last = df.iloc[-1]
+
+    # الشرط 1: الترند العام صاعد (السعر فوق EMA50)
+    if last['close'] < last['ema_50']:
+        return False
+
+    # البحث عن قاعين في السعر وقاعين في RSI
+    search_df = df.iloc[-DIVERGENCE_LOOKBACK:-1] # البحث في النطاق المحدد قبل الشمعة الأخيرة
+    
+    # إيجاد أدنى قاع للسعر في النطاق
+    price_low_idx = search_df['low'].idxmin()
+    price_low_val = search_df.loc[price_low_idx]['low']
+    
+    # إيجاد أدنى قاع لمؤشر RSI في نفس النطاق
+    rsi_low_idx = search_df['rsi'].idxmin()
+    rsi_low_val = search_df.loc[rsi_low_idx]['rsi']
+    
+    # الشروط:
+    # 1. القاع الأخير للسعر (الشمعة الحالية) أدنى من القاع السابق
+    # 2. القاع الأخير لـ RSI أعلى من القاع السابق
+    # 3. يجب أن يكون RSI في منطقة ليست تشبع بيعي مفرط (مثلاً > 30)
+    if (last['low'] < price_low_val and 
+        last['rsi'] > rsi_low_val and 
+        last['rsi'] > 30 and rsi_low_val > 30):
+        logger.info(f"  -> [{df.name}] ✅ إشارة تباعد خفي: Price Low ({last['low']:.4f} < {price_low_val:.4f}), RSI Low ({last['rsi']:.2f} > {rsi_low_val:.2f})")
+        return True
+        
+    return False
+
+# [إضافة] دالة استراتيجية الارتداد من VWAP
+def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
+    """
+    المفهوم: ارتداد من VWAP بعد اختبار حجم كبير.
+    """
+    if len(df) < 2 or not all(k in df.columns for k in ['vwap', 'relative_volume', 'macd_histogram']):
+        return False
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. السعر يلامس VWAP ضمن نطاق ضيق
+    vwap_touch = abs(last['close'] - last['vwap']) / last['vwap'] < 0.002 # ضمن 0.2%
+    
+    # 2. حجم تداول كبير
+    high_volume = last['relative_volume'] > 1.5
+    
+    # 3. انعكاس هيستوجرام الماكد (من سلبي إلى إيجابي أو يقلل من سلبيته)
+    macd_reversal = last['macd_histogram'] > prev['macd_histogram'] and prev['macd_histogram'] < 0
+
+    if vwap_touch and high_volume and macd_reversal:
+        logger.info(f"  -> [{df.name}] ✅ إشارة ارتداد VWAP: Volume={last['relative_volume']:.2f}x, MACD Hist Reversal.")
+        return True
+        
+    return False
+
+
+# [إضافة] فلتر جدار البيع للاستراتيجية الجديدة
+def has_large_ask_wall_nearby(symbol: str, price: float) -> bool:
+    """
+    يتحقق من وجود جدار بيع كبير (Ask Wall) ضمن نطاق 0.5% فوق السعر الحالي.
+    """
+    if not client: return True # نفترض وجود جدار كإجراء وقائي
+    try:
+        order_book = client.get_order_book(symbol=symbol, limit=100)
+        asks = pd.DataFrame(order_book['asks'], columns=['price', 'qty'], dtype=float)
+
+        # تحديد النطاق العلوي للبحث عن جدار البيع
+        price_range_upper = price * (1 + 0.005) 
+        
+        # فلترة الأوامر ضمن النطاق
+        relevant_asks = asks[asks['price'].between(price, price_range_upper)]
+        if relevant_asks.empty:
+            return False
+
+        # حساب قيمة كل أمر بيع بالـ USDT
+        relevant_asks['value_usdt'] = relevant_asks['price'] * relevant_asks['qty']
+        
+        # التحقق مما إذا كان أي أمر بيع يتجاوز العتبة
+        if relevant_asks['value_usdt'].max() > ASK_WALL_THRESHOLD_USDT:
+            wall_price = relevant_asks.loc[relevant_asks['value_usdt'].idxmax()]
+            logger.warning(f"  -> [{symbol}] 🧱 تم اكتشاف جدار بيع كبير: {wall_price['qty']:.2f} @ {wall_price['price']:.4f} (قيمته ${wall_price['value_usdt']:.0f})")
+            return True
+
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] خطأ في فلتر جدار البيع: {e}")
+        return True # نفترض وجود جدار كإجراء وقائي
 
 # --- دالة تأكيد الترند على فريم أعلى ---
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 200) -> bool:
@@ -1260,11 +1416,11 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.4.1 - إصلاح</title>
+    <title>لوحة تحكم التداول V9.6.0 - استراتيجيات جديدة</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
-        :root { --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D; --text-primary: #E6EDF3; --text-secondary: #848D97; --accent-blue: #58A6FF; --accent-green: #3FB950; --accent-red: #F85149; --accent-yellow: #D29922; --accent-purple: #A371F7;}
+        :root { --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D; --text-primary: #E6EDF3; --text-secondary: #848D97; --accent-blue: #58A6FF; --accent-green: #3FB950; --accent-red: #F85149; --accent-yellow: #D29922; --accent-purple: #A371F7; --accent-teal: #39D3BB; --accent-orange: #F78166; --accent-pink: #DB61A2;}
         body { font-family: 'Tajawal', sans-serif; background-color: var(--bg-main); color: var(--text-primary); }
         .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.5rem; }
         .trend-light { width: 1rem; height: 1rem; border-radius: 9999px; border: 2px solid #30363D; transition: all 0.5s ease; }
@@ -1280,6 +1436,10 @@ def get_dashboard_html():
         .strategy-toggle { border-left: 4px solid var(--accent-blue); }
         .strategy-toggle-new { border-left: 4px solid var(--accent-yellow); }
         .strategy-toggle-momentum { border-left: 4px solid var(--accent-purple); }
+        .strategy-toggle-ml { border-left: 4px solid var(--accent-red); }
+        .strategy-toggle-breakout { border-left: 4px solid var(--accent-teal); }
+        .strategy-toggle-divergence { border-left: 4px solid var(--accent-orange); }
+        .strategy-toggle-reversal { border-left: 4px solid var(--accent-pink); }
         .tp-slider { -webkit-appearance: none; width: 100%; height: 8px; background: #30363D; border-radius: 5px; outline: none; opacity: 0.7; transition: opacity .2s; }
         .tp-slider:hover { opacity: 1; }
         .tp-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; background: var(--accent-blue); cursor: pointer; border-radius: 50%; }
@@ -1300,7 +1460,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.4.1 (Bugfix)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.6.0</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1376,6 +1536,22 @@ def get_dashboard_html():
                     
                     <h4 class="text-lg font-bold mb-4 text-text-secondary">الاستراتيجيات</h4>
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-ml">
+                            <span class="font-semibold">التعلم الآلي (ML)</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="ml-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-breakout">
+                            <span class="font-semibold">الاختراق الذكي</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="smart-breakout-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-divergence">
+                            <span class="font-semibold">تباعد RSI الخفي</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="rsi-divergence-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle-reversal">
+                            <span class="font-semibold">ارتداد VWAP</span>
+                            <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="vwap-reversal-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
+                        </div>
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle">
                             <span class="font-semibold">BB+Stoch</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="bb-stoch-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
@@ -1475,6 +1651,12 @@ function updateMarketStatus() {
             document.getElementById('ob-filter-toggle').checked = data.settings.use_order_book_filter;
             document.getElementById('htf-confirmation-toggle').checked = data.settings.use_htf_confirmation_filter;
             document.getElementById('short-term-momentum-filter-toggle').checked = data.settings.use_short_term_momentum_filter;
+            
+            // [إضافة] تحديث أزرار الاستراتيجيات الجديدة
+            document.getElementById('ml-strategy-toggle').checked = data.settings.use_ml_strategy;
+            document.getElementById('smart-breakout-strategy-toggle').checked = data.settings.use_smart_breakout_strategy;
+            document.getElementById('rsi-divergence-strategy-toggle').checked = data.settings.use_rsi_divergence_strategy;
+            document.getElementById('vwap-reversal-strategy-toggle').checked = data.settings.use_vwap_reversal_strategy;
             document.getElementById('bb-stoch-strategy-toggle').checked = data.settings.use_bb_stoch_strategy;
             document.getElementById('macd-ema-strategy-toggle').checked = data.settings.use_macd_ema_strategy;
             document.getElementById('qqe-ssl-strategy-toggle').checked = data.settings.use_qqe_ssl_strategy;
@@ -1595,6 +1777,12 @@ function saveSettings() {
         use_order_book_filter: document.getElementById('ob-filter-toggle').checked,
         use_htf_confirmation_filter: document.getElementById('htf-confirmation-toggle').checked,
         use_short_term_momentum_filter: document.getElementById('short-term-momentum-filter-toggle').checked,
+        
+        // [إضافة] إرسال حالة كل الاستراتيجيات
+        use_ml_strategy: document.getElementById('ml-strategy-toggle').checked,
+        use_smart_breakout_strategy: document.getElementById('smart-breakout-strategy-toggle').checked,
+        use_rsi_divergence_strategy: document.getElementById('rsi-divergence-strategy-toggle').checked,
+        use_vwap_reversal_strategy: document.getElementById('vwap-reversal-strategy-toggle').checked,
         use_bb_stoch_strategy: document.getElementById('bb-stoch-strategy-toggle').checked,
         use_macd_ema_strategy: document.getElementById('macd-ema-strategy-toggle').checked,
         use_qqe_ssl_strategy: document.getElementById('qqe-ssl-strategy-toggle').checked,
@@ -1652,16 +1840,19 @@ def get_market_status():
 
     with risk_per_trade_lock: risk = RISK_PER_TRADE_PERCENT
     with order_book_ratio_lock: ob_ratio = ORDER_BOOK_MIN_BID_ASK_RATIO
-    # --- [إصلاح V9.4.1] ---
-    # تم دمج قراءة كلا المتغيرين في قفل واحد لضمان التزامن وتجنب الخطأ
     with volume_filter_lock:
         vol_mult = VOLUME_FILTER_MULTIPLIER
         use_volume = USE_VOLUME_FILTER
-    # --- نهاية الإصلاح ---
     with candle_filter_lock: use_candle = USE_CANDLESTICK_FILTER
     with order_book_filter_enable_lock: use_ob = USE_ORDER_BOOK_FILTER
     with htf_confirmation_lock: use_htf = USE_HTF_CONFIRMATION_FILTER
     with short_term_momentum_filter_lock: use_stm = USE_SHORT_TERM_MOMENTUM_FILTER
+    
+    # [إضافة] قراءة حالة كل الاستراتيجيات
+    with ml_strategy_lock: use_ml = USE_ML_STRATEGY
+    with smart_breakout_strategy_lock: use_smart_breakout = USE_SMART_BREAKOUT_STRATEGY
+    with rsi_divergence_strategy_lock: use_rsi_divergence = USE_RSI_DIVERGENCE_STRATEGY
+    with vwap_reversal_strategy_lock: use_vwap_reversal = USE_VWAP_REVERSAL_STRATEGY
     with bb_stoch_strategy_lock: use_bb_stoch = USE_BB_STOCH_STRATEGY
     with macd_ema_strategy_lock: use_macd_ema = USE_MACD_EMA_STRATEGY
     with qqe_ssl_strategy_lock: use_qqe_ssl = USE_QQE_SSL_STRATEGY
@@ -1682,6 +1873,11 @@ def get_market_status():
             "use_candle_filter": use_candle, "use_volume_filter": use_volume, "use_order_book_filter": use_ob,
             "use_htf_confirmation_filter": use_htf,
             "use_short_term_momentum_filter": use_stm,
+            # [إضافة] إرسال حالة كل الاستراتيجيات للواجهة الأمامية
+            "use_ml_strategy": use_ml,
+            "use_smart_breakout_strategy": use_smart_breakout,
+            "use_rsi_divergence_strategy": use_rsi_divergence,
+            "use_vwap_reversal_strategy": use_vwap_reversal,
             "use_bb_stoch_strategy": use_bb_stoch,
             "use_macd_ema_strategy": use_macd_ema, "use_qqe_ssl_strategy": use_qqe_ssl,
             "use_ema_rsi_strategy": use_ema_rsi, "use_pullback_strategy": use_pullback,
@@ -1765,7 +1961,8 @@ def update_settings():
     global RISK_PER_TRADE_PERCENT, ORDER_BOOK_MIN_BID_ASK_RATIO, VOLUME_FILTER_MULTIPLIER, \
            MIN_PROFIT_PERCENT, USE_CANDLESTICK_FILTER, USE_VOLUME_FILTER, USE_ORDER_BOOK_FILTER, USE_HTF_CONFIRMATION_FILTER, \
            USE_SHORT_TERM_MOMENTUM_FILTER, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_QQE_SSL_STRATEGY, USE_EMA_RSI_STRATEGY, \
-           USE_PULLBACK_STRATEGY, USE_BB_SQUEEZE_STRATEGY, USE_BULLISH_MOMENTUM_STRATEGY
+           USE_PULLBACK_STRATEGY, USE_BB_SQUEEZE_STRATEGY, USE_BULLISH_MOMENTUM_STRATEGY, USE_ML_STRATEGY, USE_SMART_BREAKOUT_STRATEGY, \
+           USE_RSI_DIVERGENCE_STRATEGY, USE_VWAP_REVERSAL_STRATEGY
     try:
         data = request.get_json()
         
@@ -1781,6 +1978,12 @@ def update_settings():
         with order_book_filter_enable_lock: USE_ORDER_BOOK_FILTER = bool(data.get('use_order_book_filter', USE_ORDER_BOOK_FILTER))
         with htf_confirmation_lock: USE_HTF_CONFIRMATION_FILTER = bool(data.get('use_htf_confirmation_filter', USE_HTF_CONFIRMATION_FILTER))
         with short_term_momentum_filter_lock: USE_SHORT_TERM_MOMENTUM_FILTER = bool(data.get('use_short_term_momentum_filter', USE_SHORT_TERM_MOMENTUM_FILTER))
+        
+        # [إضافة] تحديث حالة كل الاستراتيجيات
+        with ml_strategy_lock: USE_ML_STRATEGY = bool(data.get('use_ml_strategy', USE_ML_STRATEGY))
+        with smart_breakout_strategy_lock: USE_SMART_BREAKOUT_STRATEGY = bool(data.get('use_smart_breakout_strategy', USE_SMART_BREAKOUT_STRATEGY))
+        with rsi_divergence_strategy_lock: USE_RSI_DIVERGENCE_STRATEGY = bool(data.get('use_rsi_divergence_strategy', USE_RSI_DIVERGENCE_STRATEGY))
+        with vwap_reversal_strategy_lock: USE_VWAP_REVERSAL_STRATEGY = bool(data.get('use_vwap_reversal_strategy', USE_VWAP_REVERSAL_STRATEGY))
         with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = bool(data.get('use_bb_stoch_strategy', USE_BB_STOCH_STRATEGY))
         with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = bool(data.get('use_macd_ema_strategy', USE_MACD_EMA_STRATEGY))
         with qqe_ssl_strategy_lock: USE_QQE_SSL_STRATEGY = bool(data.get('use_qqe_ssl_strategy', USE_QQE_SSL_STRATEGY))
@@ -2068,6 +2271,13 @@ def main_loop_enhanced():
                         signal_found, strategy_used = False, None
 
                         strategies_to_check = []
+                        # [إضافة] ترتيب الاستراتيجيات للفحص
+                        with smart_breakout_strategy_lock:
+                            if USE_SMART_BREAKOUT_STRATEGY: strategies_to_check.append(('SMART_BREAKOUT', check_smart_breakout_strategy, "Smart_Breakout_VWAP"))
+                        with rsi_divergence_strategy_lock:
+                            if USE_RSI_DIVERGENCE_STRATEGY: strategies_to_check.append(('RSI_DIVERGENCE', check_rsi_hidden_divergence_strategy, "RSI_Hidden_Divergence"))
+                        with vwap_reversal_strategy_lock:
+                            if USE_VWAP_REVERSAL_STRATEGY: strategies_to_check.append(('VWAP_REVERSAL', check_vwap_reversal_strategy, "VWAP_Reversal"))
                         with macd_ema_strategy_lock:
                             if USE_MACD_EMA_STRATEGY: strategies_to_check.append(('MACD_EMA', check_macd_ema_strategy, "MACD_EMA_Crossover"))
                         with bb_stoch_strategy_lock:
@@ -2093,10 +2303,16 @@ def main_loop_enhanced():
 
                         logger.info(f"  -> [{symbol}] إشارة أولية من {strategy_used}. بدء الفلاتر النهائية...")
                         
+                        # [إضافة] فلتر جدار البيع الخاص باستراتيجية الاختراق
+                        if strategy_used == "Smart_Breakout_VWAP":
+                            if has_large_ask_wall_nearby(symbol, df_with_indicators.iloc[-1]['close']):
+                                log_rejection(symbol, "Large Ask Wall Ahead", {"strategy": strategy_used})
+                                continue
+
                         with htf_confirmation_lock: use_htf_filter = USE_HTF_CONFIRMATION_FILTER
                         with short_term_momentum_filter_lock: use_stm_filter = USE_SHORT_TERM_MOMENTUM_FILTER
 
-                        strategies_for_htf = ["EMA_RSI_Cross", "Bullish_Momentum", "MACD_EMA_Crossover", "Pullback_MACD"]
+                        strategies_for_htf = ["EMA_RSI_Cross", "Bullish_Momentum", "MACD_EMA_Crossover", "Pullback_MACD", "Smart_Breakout_VWAP", "RSI_Hidden_Divergence", "VWAP_Reversal"]
                         strategies_for_stm = ["BB_Squeeze_Breakout", "QQE_SSL_Explosion", "BB_Stoch_Reversal"]
 
                         if use_htf_filter and strategy_used in strategies_for_htf:
@@ -2191,13 +2407,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.4.1 - إصلاح)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.6.0)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.4.1) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.6.0) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
