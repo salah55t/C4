@@ -677,9 +677,16 @@ def check_pullback_strategy(df: pd.DataFrame) -> bool:
 def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 100: return False
     last = df.iloc[-1]
-    is_squeeze = last['bb_width'] < df['bb_width'].rolling(100).quantile(0.20)
+    
+    # FIX: Compare the last 'bb_width' value with the last value of the rolling quantile series.
+    # The original code compared a single value with a whole Series, causing the "ambiguous" error.
+    squeeze_threshold = df['bb_width'].rolling(100).quantile(0.20).iloc[-1]
+    is_squeeze = last['bb_width'] < squeeze_threshold
+    
     breakout = last['close'] > last['bb_upper']
     volume_confirmed = last['relative_volume'] > 1.25
+    
+    # Now 'is_squeeze' is a single boolean, so the 'if' statement works correctly.
     if is_squeeze and breakout and volume_confirmed:
         logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
         return True
