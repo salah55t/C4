@@ -1,10 +1,8 @@
-# ملف c4.py - نسخة V9.7.0 (دمج تحسينات المستخدم)
-# --- التغييرات الرئيسية (V9.7.0):
-# 1. [إضافة] تم إضافة فلاتر جديدة لتأكيد الدخول: فلتر تقلب السوق (ATR Percent) وفلتر قوة الاتجاه (ADX & ROC).
-# 2. [تحسين] تم تعزيز استراتيجية BB+Stoch بفلاتر إضافية لحجم التداول، حالة السوق، عرض نطاق بولينجر، ومؤشر القوة النسبية.
-# 3. [تحسين] تم تعزيز استراتيجية اختراق الدعم والمقاومة (S/R Breakout) للتحقق من قوة المستوى وتجنب الاختراقات الكاذبة.
-# 4. [تحسين] تم استبدال دالة حساب TP/SL بأخرى ديناميكية تعتمد على ATR وتتكيف مع تقلب السوق.
-# 5. [دمج] تم دمج التحسينات المقترحة من المستخدم مباشرة في بنية الكود الحالية.
+# ملف c4.py - نسخة V9.7.1 (إصلاح خطأ الرصيد غير الكافي)
+# --- التغييرات الرئيسية (V9.7.1):
+# 1. [إصلاح] تم تعديل دالة `close_signal` لتقوم بالاستعلام عن الرصيد الفعلي للعملة من المنصة قبل محاولة البيع، وذلك لتجنب خطأ "insufficient balance".
+# 2. [إصلاح] تم تعديل منطق الخروج الجزئي في `trade_management_loop` ليأخذ في الاعتبار الرصيد الفعلي أيضًا، مما يزيد من موثوقية العملية.
+# 3. [تحسين] تم إضافة المزيد من التسجيل (Logging) حول عمليات التحقق من الرصيد لتسهيل المراقبة وتصحيح الأخطاء.
 
 import time
 import os
@@ -47,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.7.0')
+logger = logging.getLogger('CryptoBotV9.7.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1222,20 +1220,41 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         entry_price = float(signal_to_close['entry_price'])
         profit_percentage = ((closing_price - entry_price) / entry_price) * 100
 
+        # --- [إصلاح] منطق البيع عند الإغلاق ---
         if signal_to_close.get('is_real_trade'):
-            quantity_to_sell_str = signal_to_close.get('quantity')
-            if quantity_to_sell_str and float(quantity_to_sell_str) > 0:
-                logger.info(f"  -> [{symbol_to_close}] محاولة بيع الكمية المتبقية عند الإغلاق: {quantity_to_sell_str}")
-                try:
-                    sell_order = place_order(symbol_to_close, Client.SIDE_SELL, Decimal(str(quantity_to_sell_str)))
-                    if not sell_order:
-                        logger.warning(f"⚠️ [{symbol_to_close}] فشل أمر البيع عند الإغلاق (ربما تم البيع مسبقاً). سيتم إكمال عملية الإغلاق في قاعدة البيانات.")
-                except Exception as e:
-                    logger.error(f"❌ [{symbol_to_close}] خطأ أثناء إغلاق الجزء المتبقي من الصفقة: {e}", exc_info=True)
-                    if 'insufficient' in str(e).lower() or 'min_notional' in str(e).lower():
-                        logger.warning(f"⚠️ [{symbol_to_close}] الخطأ يشير إلى عدم وجود رصيد كافٍ، مما يؤكد أن الكمية بيعت. سيتم المتابعة بالإغلاق.")
+            try:
+                base_asset = symbol_to_close.replace('USDT', '')
+                balance_response = client.get_asset_balance(asset=base_asset)
+                actual_free_balance = Decimal(balance_response['free'])
+                
+                logger.info(f"  -> [{symbol_to_close}] التحقق من الرصيد للإغلاق الكامل. الرصيد الفعلي: {actual_free_balance} {base_asset}")
+
+                if actual_free_balance > 0:
+                    # نبيع الرصيد الفعلي المتاح بالكامل
+                    quantity_to_sell = adjust_quantity_to_lot_size(symbol_to_close, float(actual_free_balance))
+                    
+                    if quantity_to_sell and quantity_to_sell > 0:
+                        # التحقق من فلتر MIN_NOTIONAL قبل البيع
+                        notional_value = quantity_to_sell * Decimal(str(closing_price))
+                        symbol_info = exchange_info_map.get(symbol_to_close)
+                        min_notional_ok = True
+                        if symbol_info:
+                            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+                            if min_notional_filter:
+                                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                                if notional_value < min_notional:
+                                    min_notional_ok = False
+                                    logger.warning(f"⚠️ [{symbol_to_close}] الرصيد الفعلي للبيع ({quantity_to_sell}) أقل من الحد الأدنى ({min_notional}). سيتم اعتباره غبارًا.")
+                        
+                        if min_notional_ok:
+                            sell_order = place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
+                            if not sell_order:
+                                logger.warning(f"⚠️ [{symbol_to_close}] فشل أمر البيع عند الإغلاق. سيتم إكمال عملية الإغلاق في قاعدة البيانات على أي حال.")
                     else:
-                        return False 
+                        logger.info(f"  -> [{symbol_to_close}] الرصيد الفعلي بعد الضبط هو صفر أو لا شيء. لا يوجد ما يمكن بيعه.")
+            except Exception as e:
+                logger.error(f"❌ [{symbol_to_close}] خطأ أثناء محاولة بيع الرصيد عند الإغلاق: {e}", exc_info=True)
+                # نستمر في إغلاق الصفقة في قاعدة البيانات على أي حال
         
         if not check_db_connection() or not conn: return False
 
@@ -1357,7 +1376,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.7.0 - تحسينات مدمجة</title>
+    <title>لوحة تحكم التداول V9.7.1 - إصلاح الرصيد</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1397,7 +1416,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.7.0 (Enhanced)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.7.1 (Balance Fix)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1957,36 +1976,50 @@ def trade_management_loop():
                             rr_ratio = float(signal.get('rr_ratio', 0.0))
                             partial_exit_percent = 0.6 if rr_ratio >= 2.0 else 0.4
                             
+                            # --- [إصلاح] منطق الخروج الجزئي ---
                             if signal.get('is_real_trade') and partial_exit_percent > 0:
-                                original_quantity = Decimal(str(signal.get('original_quantity', '0')))
-                                exit_percentage = Decimal(str(partial_exit_percent))
-                                exit_quantity = adjust_quantity_to_lot_size(symbol, float(original_quantity * exit_percentage))
-                                
-                                if exit_quantity and exit_quantity > 0:
-                                    sell_order = place_order(symbol, Client.SIDE_SELL, exit_quantity)
-                                    if sell_order:
-                                        executed_quantity = Decimal(sell_order.get('executedQty', '0'))
-                                        if executed_quantity == 0: executed_quantity = exit_quantity
+                                try:
+                                    current_db_quantity = Decimal(str(signal.get('quantity', '0')))
+                                    original_quantity = Decimal(str(signal.get('original_quantity', '0')))
+                                    desired_exit_quantity = original_quantity * Decimal(str(partial_exit_percent))
 
-                                        remaining_quantity = Decimal(str(signal['quantity'])) - executed_quantity
-                                        signal['quantity'] = float(remaining_quantity)
-                                        log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {executed_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
-                                        
-                                        is_dust = False
-                                        if remaining_quantity > 0:
-                                            symbol_info = exchange_info_map.get(symbol)
-                                            if symbol_info:
-                                                min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
-                                                if min_notional_filter:
-                                                    min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
-                                                    if (remaining_quantity * Decimal(str(current_price))) < min_notional:
-                                                        is_dust = True
-                                                        logger.warning(f"⚠️ [{symbol}] الكمية المتبقية ({remaining_quantity}) أقل من الحد الأدنى. سيتم إغلاق الصفقة بالكامل.")
-                                        
-                                        if remaining_quantity <= 0 or is_dust:
-                                            close_signal(signal_id, current_price, 'take_profit_full_exit_on_small_size')
-                                            continue 
+                                    base_asset = symbol.replace('USDT', '')
+                                    balance_response = client.get_asset_balance(asset=base_asset)
+                                    actual_free_balance = Decimal(balance_response['free'])
 
+                                    logger.info(f"  -> [{symbol}] التحقق من الرصيد للخروج الجزئي. المطلوب: {desired_exit_quantity:.8f}, المسجل: {current_db_quantity:.8f}, الفعلي: {actual_free_balance:.8f}")
+
+                                    quantity_to_sell = min(desired_exit_quantity, current_db_quantity, actual_free_balance)
+                                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                                    
+                                    if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
+                                        sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_quantity_to_sell)
+                                        if sell_order:
+                                            executed_quantity = Decimal(sell_order.get('executedQty', '0'))
+                                            if executed_quantity == 0: executed_quantity = adjusted_quantity_to_sell
+
+                                            remaining_quantity = Decimal(str(signal['quantity'])) - executed_quantity
+                                            signal['quantity'] = float(remaining_quantity)
+                                            log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({partial_exit_percent*100}%): بيع {executed_quantity} عند {current_price:.4f}", "PARTIAL_EXIT")
+                                            
+                                            is_dust = False
+                                            if remaining_quantity > 0:
+                                                symbol_info = exchange_info_map.get(symbol)
+                                                if symbol_info:
+                                                    min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+                                                    if min_notional_filter:
+                                                        min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                                                        if (remaining_quantity * Decimal(str(current_price))) < min_notional:
+                                                            is_dust = True
+                                                            logger.warning(f"⚠️ [{symbol}] الكمية المتبقية ({remaining_quantity}) أقل من الحد الأدنى. سيتم إغلاق الصفقة بالكامل.")
+                                            
+                                            if remaining_quantity <= 0 or is_dust:
+                                                close_signal(signal_id, current_price, 'take_profit_full_exit_on_small_size')
+                                                continue
+                                except Exception as e:
+                                    logger.error(f"❌ [{symbol}] خطأ أثناء الخروج الجزئي: {e}", exc_info=True)
+                                    continue
+                            
                             journey_state['partial_exit_done'] = True
                         
                         journey_state['targets_hit'] = journey_state.get('targets_hit', 0) + 1
@@ -2209,13 +2242,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.0 - محسن)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.1 - إصلاح الرصيد)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.0) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.1) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
