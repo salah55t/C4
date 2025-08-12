@@ -152,6 +152,8 @@ EMA_SLOPE_PERIOD: int = 5
 SUPERTREND_ATR_PERIOD: int = 10
 SUPERTREND_MULTIPLIER: float = 3.0
 CANDLE_AVG_VOLUME_PERIOD: int = 15
+SR_LOOKBACK_CANDLES: int = 60 # <<<-- تمت الإضافة
+SR_MIN_BOUNCES: int = 2 # <<<-- تمت الإضافة
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
 ORDER_BOOK_DEPTH_LIMIT: int = 100
@@ -1014,6 +1016,69 @@ def passes_final_order_book_check(symbol: str, entry_price: float) -> bool:
         return False
 
 # --- دوال حساب الأهداف ووقف الخسارة ---
+
+# <<<-- تمت إضافة الدالة المفقودة هنا
+def find_sr_levels(df: pd.DataFrame, lookback: int, min_bounces: int) -> Dict[str, Optional[float]]:
+    """
+    Finds the closest support and resistance levels.
+    """
+    df_slice = df.iloc[-lookback:]
+    
+    # Simple pivot point detection
+    df_slice['is_pivot'] = 0
+    df_slice.loc[
+        (df_slice['high'].shift(1) < df_slice['high']) & (df_slice['high'].shift(-1) < df_slice['high']),
+        'is_pivot'
+    ] = 1 # Resistance
+    df_slice.loc[
+        (df_slice['low'].shift(1) > df_slice['low']) & (df_slice['low'].shift(-1) > df_slice['low']),
+        'is_pivot'
+    ] = -1 # Support
+
+    pivots = df_slice[df_slice['is_pivot'] != 0]
+    
+    # Group close pivots into levels
+    def group_levels(prices: pd.Series, tolerance_pct=0.01) -> List[float]:
+        if prices.empty:
+            return []
+        
+        sorted_prices = sorted(prices.unique())
+        levels = []
+        current_level_prices = [sorted_prices[0]]
+
+        for price in sorted_prices[1:]:
+            if price <= current_level_prices[-1] * (1 + tolerance_pct):
+                current_level_prices.append(price)
+            else:
+                levels.append(np.mean(current_level_prices))
+                current_level_prices = [price]
+        
+        levels.append(np.mean(current_level_prices))
+        return levels
+
+    resistance_prices = pivots[pivots['is_pivot'] == 1]['high']
+    support_prices = pivots[pivots['is_pivot'] == -1]['low']
+    
+    resistance_levels = group_levels(resistance_prices)
+    support_levels = group_levels(support_prices)
+    
+    current_price = df['close'].iloc[-1]
+    
+    # Find the closest resistance above the current price
+    closest_resistance = None
+    resistances_above = [r for r in resistance_levels if r > current_price]
+    if resistances_above:
+        closest_resistance = min(resistances_above)
+
+    # Find the closest support below the current price
+    closest_support = None
+    supports_below = [s for s in support_levels if s < current_price]
+    if supports_below:
+        closest_support = max(supports_below)
+
+    return {'resistance': closest_resistance, 'support': closest_support}
+
+
 def calculate_tp_sl(symbol: str, entry_price: float, df: pd.DataFrame) -> Optional[Dict[str, Any]]:
     try:
         if df.empty or len(df) < 50 or 'atr' not in df.columns:
