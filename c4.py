@@ -1,8 +1,9 @@
-# ملف c4.py - نسخة V9.7.1 (إصلاح خطأ الرصيد غير الكافي)
-# --- التغييرات الرئيسية (V9.7.1):
-# 1. [إصلاح] تم تعديل دالة `close_signal` لتقوم بالاستعلام عن الرصيد الفعلي للعملة من المنصة قبل محاولة البيع، وذلك لتجنب خطأ "insufficient balance".
-# 2. [إصلاح] تم تعديل منطق الخروج الجزئي في `trade_management_loop` ليأخذ في الاعتبار الرصيد الفعلي أيضًا، مما يزيد من موثوقية العملية.
-# 3. [تحسين] تم إضافة المزيد من التسجيل (Logging) حول عمليات التحقق من الرصيد لتسهيل المراقبة وتصحيح الأخطاء.
+# ملف c4.py - نسخة V9.8 (تحسين استراتيجية BB+Stoch للدخول المبكر)
+# --- التغييرات الرئيسية (V9.8):
+# 1. [تحسين] تم استبدال دالة `check_bb_stoch_strategy_enhanced` بدالة جديدة `check_bb_stoch_strategy_revised`.
+# 2. [منطق جديد] الاستراتيجية الجديدة تركز على الدخول المبكر عند ظهور أول شمعة صاعدة بعد لمس الحد السفلي لبولينجر.
+# 3. [منطق جديد] تم تغيير شرط ستوكاستيك من انتظار التقاطع الكامل (إشارة متأخرة) إلى مراقبة بدء صعود خط K من منطقة التشبع البيعي (إشارة مبكرة).
+# 4. [تخفيف] تم تخفيف الشروط الإضافية التي كانت تؤخر الدخول.
 
 import time
 import os
@@ -45,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.7.1')
+logger = logging.getLogger('CryptoBotV9.8')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -656,48 +657,52 @@ def check_trend_strength_filter(df: pd.DataFrame) -> bool:
 
 
 # --- [تحسين] دوال منطق الاستراتيجيات (تم تحسينها) ---
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """استراتيجية BB+Stoch المحسنة مع فلاتر إضافية"""
-    if len(df) < 21: 
+def check_bb_stoch_strategy_revised(df: pd.DataFrame) -> bool:
+    """
+    استراتيجية BB+Stoch المعدلة للدخول المبكر.
+    المنطق: البحث عن شمعة خضراء (صاعدة) تظهر مباشرة بعد لمس الحد السفلي لبولينجر،
+    مع بداية صعود مؤشر ستوكاستيك من منطقة التشبع البيعي.
+    """
+    if len(df) < 21:
         return False
-        
+
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    # الشروط الأساسية
-    price_touch_bb = last['low'] <= (last['bb_lower'] * 1.002)
-    stoch_cross_up = prev['stoch_rsi_k'] < prev['stoch_rsi_d'] and last['stoch_rsi_k'] > last['stoch_rsi_d']
-    oversold_area = last['stoch_rsi_k'] < 35 and last['stoch_rsi_d'] < 35
-    
-    # فلاتر إضافية
-    volume_spike = last['volume'] > last['volume_sma_20'] * 1.2
+
+    # الشرط 1: الشمعة السابقة لمست أو اخترقت الحد السفلي لبولينجر باند
+    prev_candle_touch_bb = prev['low'] <= prev['bb_lower']
+
+    # الشرط 2: الشمعة الحالية هي شمعة صاعدة (خضراء)
+    current_candle_is_bullish = last['close'] > last['open']
+
+    # الشرط 3: ستوكاستيك في منطقة التشبع البيعي وبدأ في الصعود (إشارة مبكرة)
+    stoch_turning_up = (last['stoch_rsi_k'] < 40 and last['stoch_rsi_k'] > prev['stoch_rsi_k'])
+
+    # الشرط 4: فلتر RSI لتجنب "السكاكين الساقطة" (السقوط الحر)
+    rsi_not_extreme = last['rsi'] > 20
+
+    # الشرط 5: فلتر الاتجاه العام للسوق (اختياري ولكنه آمن)
     with market_state_lock:
         trend_ok = "DOWNTREND" not in current_market_state.get("overall_regime", "UNCERTAIN")
-    
-    # فلتر جديد: تجنب الإشارات في الأسواق الجانبية
-    bb_width_ok = last['bb_width'] > 0.02  # تجنب الأسواق ذات النطاق الضيق جدًا
-    
-    # فلتر جديد: التأكد من أن السعر ليس بعيدًا جدًا عن المتوسطات
-    price_not_oversold = last['rsi'] > 25
-    
+
+
     conditions = {
-        "price_touch_bb": price_touch_bb,
-        "stoch_cross_up": stoch_cross_up,
-        "oversold_area": oversold_area,
-        "volume_spike": volume_spike,
-        "trend_ok": trend_ok,
-        "bb_width_ok": bb_width_ok,
-        "price_not_oversold": price_not_oversold
+        "prev_candle_touch_bb": prev_candle_touch_bb,
+        "current_candle_is_bullish": current_candle_is_bullish,
+        "stoch_turning_up": stoch_turning_up,
+        "rsi_not_extreme": rsi_not_extreme,
+        "trend_ok": trend_ok
     }
-    
+
     if all(conditions.values()):
-        logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch (معززة).")
+        logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch (المعدلة للدخول المبكر).")
         return True
-    
+
     # تسجيل الشروط الفاشلة للمساعدة في التحليل
     failed_conditions = {k: v for k, v in conditions.items() if not v}
-    if any(failed_conditions): # نسجل فقط إذا كانت هناك إشارة محتملة لكنها فشلت
-        if price_touch_bb or stoch_cross_up:
-             log_rejection(df.name, "BB_Stoch Strategy Conditions Not Met", {"failed": list(failed_conditions.keys())})
+    # نسجل فقط إذا كانت هناك إشارة محتملة لكنها فشلت في شرط أو شرطين
+    if prev_candle_touch_bb and current_candle_is_bullish and len(failed_conditions) > 0:
+         log_rejection(df.name, "BB_Stoch Strategy Conditions Not Met", {"failed": list(failed_conditions.keys())})
+
     return False
 
 def check_macd_ema_strategy(df: pd.DataFrame) -> bool:
@@ -1376,7 +1381,7 @@ def get_dashboard_html():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم التداول V9.7.1 - إصلاح الرصيد</title>
+    <title>لوحة تحكم التداول V9.8 - دخول مبكر</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1416,7 +1421,7 @@ def get_dashboard_html():
 
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.7.1 (Balance Fix)</span></h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-accent-blue">لوحة تحكم</span><span class="text-text-secondary font-medium"> V9.8 (Early Entry)</span></h1>
             <div id="trend-lights-container" class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color"></div>
         </header>
         <section class="mb-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -1462,7 +1467,7 @@ def get_dashboard_html():
                     <h4 class="text-lg font-bold mb-4 text-text-secondary">الاستراتيجيات المفعّلة</h4>
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mt-6">
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle">
-                            <span class="font-semibold">BB+Stoch (Enhanced)</span>
+                            <span class="font-semibold">BB+Stoch (Early Entry)</span>
                             <label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="bb-stoch-strategy-toggle" class="sr-only"><div class="toggle-bg block bg-gray-600 w-12 h-7 rounded-full"></div></div></label>
                         </div>
                         <div class="flex items-center justify-between p-3 bg-black/20 rounded-lg strategy-toggle">
@@ -2146,7 +2151,7 @@ def main_loop_enhanced():
                         with macd_ema_strategy_lock:
                             if USE_MACD_EMA_STRATEGY: strategies_to_check.append(('MACD_EMA', check_macd_ema_strategy, "MACD_EMA_Crossover"))
                         with bb_stoch_strategy_lock:
-                            if USE_BB_STOCH_STRATEGY: strategies_to_check.append(('BB_STOCH', check_bb_stoch_strategy_enhanced, "BB_Stoch_Reversal_Enhanced"))
+                            if USE_BB_STOCH_STRATEGY: strategies_to_check.append(('BB_STOCH', check_bb_stoch_strategy_revised, "BB_Stoch_Early_Entry"))
                         with ema_rsi_strategy_lock:
                             if USE_EMA_RSI_STRATEGY: strategies_to_check.append(('EMA_RSI', check_ema_rsi_strategy, "EMA_RSI_Cross"))
                         with pullback_strategy_lock:
@@ -2242,13 +2247,13 @@ def initialize_bot_services():
         Thread(target=price_update_loop, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.7.1 - إصلاح الرصيد)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V9.8 - دخول مبكر)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # ---------------------- نقطة الدخول ----------------------
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.7.1) 🚀")
+    logger.info("🚀 إطلاق بوت التداول ولوحة التحكم (V9.8) 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
