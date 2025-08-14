@@ -48,6 +48,7 @@ class NpEncoder(json.JSONEncoder):
         if isinstance(obj, np.integer): return int(obj)
         if isinstance(obj, np.floating): return float(obj)
         if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, np.bool_): return bool(obj) # --- FIX: Handle NumPy boolean type ---
         if isinstance(obj, Decimal): return float(obj)
         if isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
         return super(NpEncoder, self).default(obj)
@@ -1117,24 +1118,18 @@ def trade_management_loop():
                         continue
 
                 if USE_TRAILING_STOP_LOSS:
-                    # --- FIX START ---
-                    # Safely get the 'atr' value to prevent KeyError for older signals from the DB
-                    # This checks for the existence of 'signal_details' and then for 'atr' within it.
                     atr_value = signal.get('signal_details', {}).get('atr')
                     
                     if atr_value:
-                        # Proceed with trailing stop loss calculation only if 'atr' is available
                         activation_price = float(signal['entry_price']) + (float(atr_value) * TRAILING_STOP_ACTIVATION_ATR)
                         if current_price >= activation_price:
-                            new_stop_loss = current_price * 0.99  # 1% trailing
+                            new_stop_loss = current_price * 0.99
                             if new_stop_loss > float(signal['stop_loss']):
                                 signal['stop_loss'] = new_stop_loss
                                 update_signal_in_db(signal['id'], {'stop_loss': new_stop_loss})
                                 logger.info(f"🛡️ [{symbol}] تم تحريك وقف الخسارة إلى {new_stop_loss:.4f}")
                     else:
-                        # Log a warning if 'atr' is not found for a specific signal, then continue to the next signal
                         logger.warning(f"⚠️ [{symbol}] مفتاح 'atr' غير موجود في تفاصيل الإشارة ID {signal.get('id')}. سيتم تخطي حساب وقف الخسارة المتحرك.")
-                    # --- FIX END ---
 
             time.sleep(3)
         except Exception as e:
