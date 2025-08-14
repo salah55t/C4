@@ -25,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 from decouple import config
 from typing import List, Dict, Optional, Any, Tuple
 from functools import wraps
+import random
 
 # --- إعدادات التجاهل واللوجر ---
 warnings = __import__('warnings')
@@ -582,17 +583,19 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     try:
         if USE_SMART_EXIT_SYSTEM:
             entry_price = float(signal_data['entry_price'])
-            atr_value = float(signal_data['signal_details']['atr'])
-            exit_levels = {}
-            for level, config in TAKE_PROFIT_LEVELS.items():
-                exit_levels[str(level)] = {
-                    "target_price": entry_price + (atr_value * config['atr_multiplier']),
-                    "exit_percentage": config['exit_percentage'],
-                    "is_hit": False
-                }
-            signal_data['exit_levels'] = exit_levels
-            # الهدف الرئيسي يكون هو الهدف الأخير
-            signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
+            # Safely get atr_value, it should exist for new signals
+            atr_value = float(signal_data.get('signal_details', {}).get('atr', 0))
+            if atr_value > 0:
+                exit_levels = {}
+                for level, config in TAKE_PROFIT_LEVELS.items():
+                    exit_levels[str(level)] = {
+                        "target_price": entry_price + (atr_value * config['atr_multiplier']),
+                        "exit_percentage": config['exit_percentage'],
+                        "is_hit": False
+                    }
+                signal_data['exit_levels'] = exit_levels
+                # الهدف الرئيسي يكون هو الهدف الأخير
+                signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
 
         with conn.cursor() as cur:
             cur.execute("""
@@ -1062,21 +1065,34 @@ def trade_management_loop():
     while True:
         try:
             with signal_cache_lock:
-                if not open_signals_cache: time.sleep(5); continue
+                if not open_signals_cache:
+                    time.sleep(5)
+                    continue
                 signals_to_check = list(open_signals_cache.values())
-            if not redis_client: time.sleep(5); continue
+            
+            if not redis_client:
+                time.sleep(5)
+                continue
+            
             current_prices = redis_client.hgetall("crypto_bot_prices")
 
             for signal in signals_to_check:
                 current_price_str = current_prices.get(signal['symbol'])
-                if not current_price_str: continue
+                if not current_price_str:
+                    continue
+                
                 current_price = float(current_price_str)
                 symbol = signal['symbol']
                 signal['candles_since_entry'] = signal.get('candles_since_entry', 0) + 1
 
-                if current_price <= float(signal['stop_loss']): close_signal(signal['id'], current_price, 'stop_loss'); continue
+                if current_price <= float(signal['stop_loss']):
+                    close_signal(signal['id'], current_price, 'stop_loss')
+                    continue
+                
                 if TIME_BASED_EXIT_CANDLES > 0 and signal['candles_since_entry'] > TIME_BASED_EXIT_CANDLES and not signal.get('exit_levels', {}).get('1', {}).get('is_hit', True):
-                    logger.info(f"⏳ [{symbol}] خروج زمني بعد {TIME_BASED_EXIT_CANDLES} شمعة."); close_signal(signal['id'], current_price, 'time_based_exit'); continue
+                    logger.info(f"⏳ [{symbol}] خروج زمني بعد {TIME_BASED_EXIT_CANDLES} شمعة.")
+                    close_signal(signal['id'], current_price, 'time_based_exit')
+                    continue
 
                 if USE_SMART_EXIT_SYSTEM and 'exit_levels' in signal and signal['exit_levels']:
                     exit_levels = signal['exit_levels']
@@ -1088,25 +1104,42 @@ def trade_management_loop():
                             exit_qty_percent = Decimal(str(config['exit_percentage']))
                             original_quantity = Decimal(str(signal['original_quantity']))
                             quantity_to_sell = original_quantity * exit_qty_percent
-                            if signal.get('is_real_trade') and place_order(symbol, Client.SIDE_SELL, quantity_to_sell) is None: continue
+                            if signal.get('is_real_trade') and place_order(symbol, Client.SIDE_SELL, quantity_to_sell) is None:
+                                continue
                             remaining_quantity -= quantity_to_sell
                             signal['quantity'] = float(remaining_quantity)
                             log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({exit_qty_percent*100}%): بيع {quantity_to_sell} عند الهدف {level}", "PARTIAL_EXIT")
+                    
                     signal['exit_levels'] = exit_levels
                     update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity), 'candles_since_entry': signal['candles_since_entry']})
-                    if remaining_quantity <= 0.00000001: close_signal(signal['id'], current_price, 'all_tp_hit'); continue
+                    if remaining_quantity <= 0.00000001:
+                        close_signal(signal['id'], current_price, 'all_tp_hit')
+                        continue
 
                 if USE_TRAILING_STOP_LOSS:
-                    activation_price = float(signal['entry_price']) + (float(signal['signal_details']['atr']) * TRAILING_STOP_ACTIVATION_ATR)
-                    if current_price >= activation_price:
-                        new_stop_loss = current_price * 0.99 # 1% trailing
-                        if new_stop_loss > float(signal['stop_loss']):
-                            signal['stop_loss'] = new_stop_loss
-                            update_signal_in_db(signal['id'], {'stop_loss': new_stop_loss})
-                            logger.info(f"🛡️ [{symbol}] تم تحريك وقف الخسارة إلى {new_stop_loss:.4f}")
+                    # --- FIX START ---
+                    # Safely get the 'atr' value to prevent KeyError for older signals from the DB
+                    # This checks for the existence of 'signal_details' and then for 'atr' within it.
+                    atr_value = signal.get('signal_details', {}).get('atr')
+                    
+                    if atr_value:
+                        # Proceed with trailing stop loss calculation only if 'atr' is available
+                        activation_price = float(signal['entry_price']) + (float(atr_value) * TRAILING_STOP_ACTIVATION_ATR)
+                        if current_price >= activation_price:
+                            new_stop_loss = current_price * 0.99  # 1% trailing
+                            if new_stop_loss > float(signal['stop_loss']):
+                                signal['stop_loss'] = new_stop_loss
+                                update_signal_in_db(signal['id'], {'stop_loss': new_stop_loss})
+                                logger.info(f"🛡️ [{symbol}] تم تحريك وقف الخسارة إلى {new_stop_loss:.4f}")
+                    else:
+                        # Log a warning if 'atr' is not found for a specific signal, then continue to the next signal
+                        logger.warning(f"⚠️ [{symbol}] مفتاح 'atr' غير موجود في تفاصيل الإشارة ID {signal.get('id')}. سيتم تخطي حساب وقف الخسارة المتحرك.")
+                    # --- FIX END ---
+
             time.sleep(3)
         except Exception as e:
-            logger.error(f"❌ [مدير الصفقات] خطأ في حلقة الإدارة: {e}", exc_info=True); time.sleep(10)
+            logger.error(f"❌ [مدير الصفقات] خطأ في حلقة الإدارة: {e}", exc_info=True)
+            time.sleep(10)
 
 def main_loop_enhanced():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
@@ -1194,10 +1227,19 @@ def load_initial_data():
             open_signals = cur.fetchall()
             with signal_cache_lock:
                 open_signals_cache.clear()
-                for signal in open_signals: open_signals_cache[signal['symbol']] = dict(signal)
+                for signal in open_signals:
+                    # Ensure signal_details is a dict, not a string
+                    if isinstance(signal.get('signal_details'), str):
+                        try:
+                            signal['signal_details'] = json.loads(signal['signal_details'])
+                        except json.JSONDecodeError:
+                            signal['signal_details'] = {}
+                    elif signal.get('signal_details') is None:
+                        signal['signal_details'] = {}
+                    open_signals_cache[signal['symbol']] = dict(signal)
             logger.info(f"✅ [تحميل] تم تحميل {len(open_signals)} صفقة مفتوحة إلى الذاكرة المؤقتة.")
             cur.execute("SELECT * FROM notifications ORDER BY timestamp DESC LIMIT 100;")
-            with notifications_lock: notifications_cache.extend(cur.fetchall())
+            with notifications_lock: notifications_cache.extend([dict(n) for n in cur.fetchall()])
     except Exception as e:
         logger.error(f"❌ [تحميل] فشل تحميل البيانات الأولية: {e}")
 
