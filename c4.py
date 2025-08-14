@@ -48,7 +48,7 @@ class NpEncoder(json.JSONEncoder):
         if isinstance(obj, np.integer): return int(obj)
         if isinstance(obj, np.floating): return float(obj)
         if isinstance(obj, np.ndarray): return obj.tolist()
-        if isinstance(obj, np.bool_): return bool(obj) # --- FIX: Handle NumPy boolean type ---
+        if isinstance(obj, np.bool_): return bool(obj)
         if isinstance(obj, Decimal): return float(obj)
         if isinstance(obj, (datetime, pd.Timestamp)): return obj.isoformat()
         return super(NpEncoder, self).default(obj)
@@ -582,9 +582,9 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
 def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     if not check_db_connection() or not conn: return None
     try:
+        atr_value = 0
         if USE_SMART_EXIT_SYSTEM:
             entry_price = float(signal_data['entry_price'])
-            # Safely get atr_value, it should exist for new signals
             atr_value = float(signal_data.get('signal_details', {}).get('atr', 0))
             if atr_value > 0:
                 exit_levels = {}
@@ -595,7 +595,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                         "is_hit": False
                     }
                 signal_data['exit_levels'] = exit_levels
-                # الهدف الرئيسي يكون هو الهدف الأخير
                 signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
 
         with conn.cursor() as cur:
@@ -611,6 +610,22 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
+            
+            # --- TELEGRAM NOTIFICATION FOR NEW TRADE ---
+            trade_type = "صفقة حقيقية" if signal_data.get('is_real_trade') else "إشارة ورقية"
+            message = (
+                f"🚨 *{trade_type} جديدة*\n\n"
+                f"*{signal_data['symbol']}* | `{signal_data['strategy_name']}`\n\n"
+                f"🔹 *الدخول:* `{signal_data['entry_price']:.4f}`\n"
+                f"🛑 *وقف الخسارة:* `{signal_data['stop_loss']:.4f}`\n\n"
+            )
+            if 'exit_levels' in signal_data and signal_data['exit_levels']:
+                message += "*الأهداف:*\n"
+                for level, config in signal_data['exit_levels'].items():
+                    message += f"  - الهدف {level}: `{config['target_price']:.4f}`\n"
+            send_telegram_message(message)
+            # --- END TELEGRAM NOTIFICATION ---
+
             return dict(saved_signal)
     except Exception as e:
         logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}", exc_info=True); conn.rollback(); return None
@@ -662,7 +677,26 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         with signal_cache_lock:
             if symbol_to_close in open_signals_cache:
                 del open_signals_cache[symbol_to_close]
+        
         log_and_notify('info', f"تم الإغلاق: {symbol_to_close} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
+        
+        # --- TELEGRAM NOTIFICATION FOR CLOSED TRADE ---
+        reason_map = {
+            'stop_loss': '🛑 تم ضرب وقف الخسارة',
+            'all_tp_hit': '✅ تم تحقيق جميع الأهداف',
+            'manual': ' manualmente تم الإغلاق يدوياً',
+            'time_based_exit': '⏳ تم الإغلاق بسبب انتهاء الوقت'
+        }
+        emoji = "✅" if profit_percentage > 0 else "🛑"
+        message = (
+            f"{emoji} *إغلاق صفقة {symbol_to_close}*\n\n"
+            f"السبب: *{reason_map.get(reason, reason)}*\n"
+            f"سعر الإغلاق: `{closing_price:.4f}`\n"
+            f"الربح/الخسارة: `{profit_percentage:.2f}%`"
+        )
+        send_telegram_message(message)
+        # --- END TELEGRAM NOTIFICATION ---
+
         return True
     except Exception as e:
         logger.error(f"❌ [DB Close] فشل تحديث الصفقة المغلقة: {e}"); conn.rollback(); return False
@@ -1110,7 +1144,16 @@ def trade_management_loop():
                             remaining_quantity -= quantity_to_sell
                             signal['quantity'] = float(remaining_quantity)
                             log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({exit_qty_percent*100}%): بيع {quantity_to_sell} عند الهدف {level}", "PARTIAL_EXIT")
-                    
+                            
+                            # --- TELEGRAM NOTIFICATION FOR PARTIAL EXIT ---
+                            message = (
+                                f"↗️ *خروج جزئي من {symbol}*\n\n"
+                                f"تم تحقيق الهدف {level} عند `{config['target_price']:.4f}`.\n"
+                                f"تم بيع `{exit_qty_percent*100}%` من الكمية."
+                            )
+                            send_telegram_message(message)
+                            # --- END TELEGRAM NOTIFICATION ---
+
                     signal['exit_levels'] = exit_levels
                     update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity), 'candles_since_entry': signal['candles_since_entry']})
                     if remaining_quantity <= 0.00000001:
