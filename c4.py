@@ -1,5 +1,5 @@
 # ملف c4_enhanced_v10.1_dashboard_complete.py - نسخة V10.1 "Phoenix"
-# --- نسخة معدلة مع إعدادات UI إضافية وإصلاحات ---
+# --- نسخة معدلة مع إصلاح جذري لمشكلة حدود الـ API ---
 # هذا الملف يدمج جميع الدوال والوظائف في هيكل واحد متكامل،
 # ويحتوي على كل التحسينات المطلوبة بما في ذلك لوحة التحكم المطورة.
 
@@ -95,7 +95,6 @@ FILTER_CONFIG = {
     "VWAP_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (VWAP Reversal)"},
     "TRIPLE_CONF_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (Triple Conf)"}, # 'strict' or 'relaxed'
     "VWAP_REVERSAL_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (VWAP Reversal)"}, # 'strict' or 'relaxed'
-    # --- إضافة: جعل زمن الإغلاق قابلاً للتعديل ---
     "TIME_BASED_EXIT_CANDLES": {"value": 20, "lock": Lock(), "display_name": "إغلاق الصفقة بعد (شمعة)"}
 }
 
@@ -117,7 +116,6 @@ TAKE_PROFIT_LEVELS = {
 }
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_STOP_ACTIVATION_ATR: float = 2.0
-# TIME_BASED_EXIT_CANDLES is now in FILTER_CONFIG
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -703,7 +701,6 @@ def block_method():
     pass
 
 def get_dashboard_html_v10_1():
-    # --- تعديل: إضافة حقل إعداد زمن الإغلاق وإصلاح مصابيح الفريمات ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -739,7 +736,6 @@ def get_dashboard_html_v10_1():
                     </div>
                 </div>
                 <div id="market-trend-lights" class="flex items-center gap-x-4">
-                    <!-- Market trend lights will be dynamically inserted here by JavaScript -->
                 </div>
             </div>
         </header>
@@ -1067,7 +1063,6 @@ def update_settings():
         for key, value in filters_data.items():
             if key in FILTER_CONFIG:
                 with FILTER_CONFIG[key]['lock']:
-                    # Ensure correct type casting for numeric values
                     if isinstance(FILTER_CONFIG[key]['value'], (int, float)):
                         FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(float(value))
                     else:
@@ -1171,7 +1166,6 @@ def trade_management_loop():
             
             current_prices = redis_client.hgetall("crypto_bot_prices")
             
-            # --- تعديل: استخدام قيمة زمن الإغلاق من الإعدادات الديناميكية ---
             with FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["lock"]:
                 time_based_exit_candles = FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["value"]
 
@@ -1270,7 +1264,9 @@ def main_loop_enhanced():
                 
                 df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_15m is None or len(df_15m) < 201: 
-                    time.sleep(1)
+                    # --- إصلاح: زيادة فترة الانتظار لتجنب استهلاك حدود الـ API ---
+                    # هذا التأخير ضروري جداً لتوزيع طلبات البيانات التاريخية على فترة أطول
+                    time.sleep(3)
                     continue
                 
                 df_with_indicators = calculate_all_features(df_15m)
@@ -1319,7 +1315,7 @@ def main_loop_enhanced():
                     if saved_signal:
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                 
-                time.sleep(0.5) 
+                time.sleep(3) 
             
             logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 10 ثوانٍ..."); time.sleep(10)
         except (KeyboardInterrupt, SystemExit): log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
