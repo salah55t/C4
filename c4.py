@@ -154,21 +154,22 @@ def rate_limiter(weight=1):
         def wrapper(*args, **kwargs):
             global api_used_weight, last_api_weight_reset
             with api_weight_lock:
-                if time.time() - last_api_weight_reset > 60:
+                current_time = time.time()
+                if current_time - last_api_weight_reset > 60:
+                    api_used_weight = 0
+                    last_api_weight_reset = current_time
+                
+                if api_used_weight + weight > 5800:
+                    sleep_time = 60 - (current_time - last_api_weight_reset)
+                    logger.warning(f"⚠️ [API Limiter] الاقتراب من حد الوزن (المستخدم: {api_used_weight}). الانتظار {sleep_time:.2f} ثانية...")
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
                     api_used_weight = 0
                     last_api_weight_reset = time.time()
-                
-                if api_used_weight + weight > 5800: # Adjusted limit
-                    logger.warning(f"⚠️ [API Limiter] الاقتراب من حد الوزن (المستخدم: {api_used_weight}). الانتظار...")
-                    time.sleep(5)
-                
+
                 try:
                     response = func(*args, **kwargs)
-                    # For functions that return API weight in headers
-                    if hasattr(response, 'headers') and 'x-mbx-used-weight-1m' in response.headers:
-                        api_used_weight = int(response.headers['x-mbx-used-weight-1m'])
-                    else: # Fallback for functions without headers
-                        api_used_weight += weight
+                    api_used_weight += weight
                     return response
                 except (BinanceAPIException, BinanceRequestException) as e:
                     if e.status_code == 429 or e.status_code == 418:
@@ -205,7 +206,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # Create tables if they don't exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -229,11 +229,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 
-                # --- DB SCHEMA UPDATE FIX ---
-                # Check and add missing columns to the signals table for backward compatibility
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_levels JSONB;")
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;")
-                # --- END DB FIX ---
 
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
@@ -588,6 +585,8 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
             
+            # --- NOTIFICATION LOGIC MOVED HERE ---
+            # Send notification ONLY AFTER successful database commit
             trade_type = "صفقة حقيقية" if signal_data.get('is_real_trade') else "إشارة ورقية"
             message = (
                 f"🚨 *{trade_type} جديدة*\n\n"
@@ -600,10 +599,13 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 for level, config in signal_data['exit_levels'].items():
                     message += f"  - الهدف {level}: `{config['target_price']:.4f}`\n"
             send_telegram_message(message)
+            # --- END OF NOTIFICATION LOGIC ---
 
             return dict(saved_signal)
     except Exception as e:
-        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}", exc_info=True); conn.rollback(); return None
+        logger.error(f"❌ [DB Insert] فشل إدراج الإشارة: {e}", exc_info=True)
+        if conn: conn.rollback()
+        return None
 
 def update_signal_in_db(signal_id: int, updates: Dict):
     if not check_db_connection() or not conn: return
@@ -1030,7 +1032,7 @@ def get_performance():
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM strategy_performance ORDER BY total_pnl_percent DESC;")
-            return jsonify(cur.fetchall())
+            return jsonify([dict(row) for row in cur.fetchall()])
     except Exception as e:
         logger.error(f"❌ [API Performance] خطأ: {e}"); return jsonify([]), 500
 
@@ -1258,7 +1260,9 @@ def main_loop_enhanced():
                     if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
                 
                 df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_15m is None or len(df_15m) < 201: continue
+                if df_15m is None or len(df_15m) < 201: 
+                    time.sleep(3) # Add delay even if data fetch fails
+                    continue
                 
                 df_with_indicators = calculate_all_features(df_15m)
                 df_with_indicators.name = symbol
@@ -1298,13 +1302,14 @@ def main_loop_enhanced():
                     saved_signal = insert_signal_into_db(new_signal)
                     if saved_signal:
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-                time.sleep(1)
-            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 60 ثانية..."); time.sleep(60)
+                
+                time.sleep(3) # CRITICAL: Delay between processing each symbol to avoid API rate limits
+            
+            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 10 ثوانٍ..."); time.sleep(10)
         except (KeyboardInterrupt, SystemExit): log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
         except Exception as main_err: log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); traceback.print_exc(); time.sleep(120)
 
-# --- API RATE LIMIT FIX ---
-@rate_limiter(weight=40) # get_symbol_ticker for all symbols has a weight of 40
+@rate_limiter(weight=40)
 def get_all_tickers():
     return client.get_symbol_ticker()
 
@@ -1316,22 +1321,18 @@ def price_update_loop():
             if validated_symbols_to_scan:
                 all_tickers = get_all_tickers()
                 
-                # Create a set for faster lookups
                 symbols_needed = set(validated_symbols_to_scan)
                 symbols_needed.add(BTC_SYMBOL)
                 
-                # Filter in memory
                 prices_to_set = {t['symbol']: t['price'] for t in all_tickers if t['symbol'] in symbols_needed}
                 
                 if prices_to_set:
                     redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
             
-            # Sleep longer to respect API limits even more
             time.sleep(2) 
         except Exception as e: 
             logger.error(f"❌ خطأ في حلقة تحديث الأسعار: {e}")
             time.sleep(10)
-# --- END API RATE LIMIT FIX ---
 
 def load_initial_data():
     global validated_symbols_to_scan
