@@ -129,8 +129,7 @@ notifications_lock = Lock()
 current_market_state: Dict[str, Any] = {"status": "INITIALIZING"}
 market_state_lock = Lock()
 
-# --- [بداية الإصلاح] ---
-# 1. إعادة إضافة القاموس المفقود
+# --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Market Status Filter: BTC Downtrend (5m)": "فلتر السوق: اتجاه البيتكوين هابط (5 دقائق)",
     "Market Status Filter: BTC Downtrend (4h)": "فلتر السوق: اتجاه البيتكوين هابط (4 ساعات)",
@@ -148,7 +147,6 @@ REJECTION_REASONS_AR = {
     "Invalid Position Size": "حجم الصفقة غير صالح",
     "Lot Size Adjustment Failed": "فشل تعديل حجم العقد"
 }
-# --- [نهاية الإصلاح] ---
 
 # --- آلية تنظيم الطلبات المتقدمة (Token Bucket) ---
 class RequestThrottler:
@@ -384,10 +382,24 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 def _df_to_json(df: pd.DataFrame) -> str:
     return df.to_json(orient='split', date_format='iso')
 
-def _json_to_df(json_str: str) -> pd.DataFrame:
+# --- [بداية الإصلاح] ---
+# 2. تعديل الدالة للتعامل مع القاموس القادم من قاعدة البيانات
+def _json_to_df(json_data: Any) -> pd.DataFrame:
+    """
+    يعيد تحويل بيانات JSON (التي تم تحليلها إلى قاموس بواسطة psycopg2)
+    من قاعدة البيانات إلى DataFrame.
+    """
+    # psycopg2 يقوم بتحويل حقل JSONB إلى قاموس تلقائياً.
+    # pandas.read_json يتوقع سلسلة نصية، لذا نعيد تحويل القاموس إلى سلسلة JSON.
+    if not isinstance(json_data, str):
+        json_str = json.dumps(json_data)
+    else:
+        json_str = json_data # Fallback in case it's already a string
+
     df = pd.read_json(json_str, orient='split')
     df.index = pd.to_datetime(df.index, utc=True)
     return df
+# --- [نهاية الإصلاح] ---
 
 def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
     if timeframe == '5m':
