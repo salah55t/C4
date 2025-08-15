@@ -1,7 +1,10 @@
-# ملف c4_enhanced_v10.3_sentinel.py - نسخة V10.3 "Sentinel"
+# ملف c4_enhanced_v10.4_sentinel.py - نسخة V10.4 "Sentinel"
 # --- نسخة معدلة مع منظم طلبات استباقي لمنع الحظر ---
 # هذا الإصدار يقدم آلية "Token Bucket" لتنظيم وتيرة إرسال الطلبات
 # وتوزيعها على مدار الدقيقة، مما يمنع الاندفاعات التي تؤدي للحظر.
+# --- تحديثات v10.4 ---
+# 1. إزالة فلتر اتجاه البيتكوين على إطار 5 دقائق.
+# 2. إضافة مؤشرات ضوئية لاتجاه السوق في لوحة التحكم.
 
 import time
 import os
@@ -37,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10.3_sentinel.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10.4_sentinel.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10.3-Sentinel')
+logger = logging.getLogger('CryptoBotV10.4-Sentinel')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -382,24 +385,14 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 def _df_to_json(df: pd.DataFrame) -> str:
     return df.to_json(orient='split', date_format='iso')
 
-# --- [بداية الإصلاح] ---
-# 2. تعديل الدالة للتعامل مع القاموس القادم من قاعدة البيانات
 def _json_to_df(json_data: Any) -> pd.DataFrame:
-    """
-    يعيد تحويل بيانات JSON (التي تم تحليلها إلى قاموس بواسطة psycopg2)
-    من قاعدة البيانات إلى DataFrame.
-    """
-    # psycopg2 يقوم بتحويل حقل JSONB إلى قاموس تلقائياً.
-    # pandas.read_json يتوقع سلسلة نصية، لذا نعيد تحويل القاموس إلى سلسلة JSON.
     if not isinstance(json_data, str):
         json_str = json.dumps(json_data)
     else:
-        json_str = json_data # Fallback in case it's already a string
-
+        json_str = json_data
     df = pd.read_json(json_str, orient='split')
     df.index = pd.to_datetime(df.index, utc=True)
     return df
-# --- [نهاية الإصلاح] ---
 
 def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
     if timeframe == '5m':
@@ -746,7 +739,7 @@ CORS(app)
 def block_method(): pass
 
 @app.route('/')
-def home(): return render_template_string(get_dashboard_html_v10_3())
+def home(): return render_template_string(get_dashboard_html_v10_4())
 
 @app.route('/api/status')
 def get_status():
@@ -849,13 +842,13 @@ def manual_close_trade_endpoint(signal_id):
     if close_signal(signal_id, current_price, 'manual'): return jsonify({"success": True, "message": "Signal closed."})
     else: return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
-def get_dashboard_html_v10_3():
+def get_dashboard_html_v10_4():
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V10.3 - لوحة تحكم التداول</title>
+    <title>Sentinel V10.4 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -875,7 +868,7 @@ def get_dashboard_html_v10_3():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
                 <span class="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-500">Sentinel</span>
-                <span class="text-text-secondary font-medium">V10.3</span>
+                <span class="text-text-secondary font-medium">V10.4</span>
             </h1>
             <div class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="w-32">
@@ -884,6 +877,7 @@ def get_dashboard_html_v10_3():
                         <div id="api-weight-bar" class="progress-bar-inner"></div>
                     </div>
                 </div>
+                <!-- حاوية مصابيح اتجاه السوق -->
                 <div id="market-trend-lights" class="flex items-center gap-x-4">
                 </div>
             </div>
@@ -951,7 +945,9 @@ function updateSignals(){fetchData('/api/signals').then(data=>{if(!data)return;c
 data.forEach(s=>{const profit=parseFloat(s.profit_percentage||0);const pClass=profit>0?'text-accent-green':profit<0?'text-accent-red':'text-text-secondary';const entry=parseFloat(s.entry_price);const current=parseFloat(s.current_price||entry);const stopLoss=parseFloat(s.stop_loss);const finalTarget=s.exit_levels?Math.max(...Object.values(s.exit_levels).map(l=>l.target_price)):parseFloat(s.target_price);let tpLevelsHTML='';if(s.exit_levels){Object.entries(s.exit_levels).forEach(([level,config])=>{const hitClass=config.is_hit?'text-accent-green':'text-text-secondary';tpLevelsHTML+=`<div class="flex justify-between items-center text-xs ${hitClass}"><span>الهدف ${level} (${config.exit_percentage*100}%)</span> <span class="font-mono">${config.target_price.toFixed(4)}</span></div>`})}
 container.innerHTML+=`<div class="card p-4 flex flex-col justify-between"><div><div class="flex justify-between items-center mb-2"><h4 class="text-lg font-bold">${s.symbol}</h4><span class="font-mono text-lg ${pClass}">${profit.toFixed(2)}%</span></div><p class="text-xs text-text-secondary mb-3">${s.strategy_name.replace(/_/g,' ')}</p><div class="font-mono text-xs space-y-1 mb-4"><div class="flex justify-between"><span>الدخول:</span> <span>${entry.toFixed(4)}</span></div><div class="flex justify-between text-accent-blue"><span>الحالي:</span> <span>${current.toFixed(4)}</span></div><div class="flex justify-between text-accent-red"><span>الوقف:</span> <span>${stopLoss.toFixed(4)}</span></div></div>${renderPriceBar(entry,current,stopLoss,finalTarget)}<div class="mt-4 space-y-1">${tpLevelsHTML}</div></div><div class="mt-4 pt-4 border-t border-border-color"><button onclick="manualClose(${s.id},'${s.symbol}')" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-lg text-sm">إغلاق يدوي</button></div></div>`})})}
 function updateStatus(){fetchData('/api/status').then(data=>{if(!data)return;document.getElementById('overall-regime').textContent=(data.market_state?.primary_trend||'...').replace(/_/g,' ');document.getElementById('open-trades-count').textContent=`${data.open_trades_count} / ${data.max_open_trades}`;document.getElementById('active-sessions-list').innerHTML=data.market_state?.session_status?.name||'N/A';const tradeToggle=document.getElementById('trading-toggle');const tradeText=document.getElementById('trading-status-text');tradeToggle.checked=data.is_trading_enabled;tradeText.textContent=data.is_trading_enabled?'مُفعَّل':'غير مُفعَّل';tradeText.className=`font-bold text-lg ${data.is_trading_enabled?'text-accent-green':'text-accent-red'}`;document.getElementById('usdt-balance').textContent=data.usdt_balance?parseFloat(data.usdt_balance).toFixed(2):'N/A';const weightPercent=(data.api_weight/6000)*100;document.getElementById('api-weight-bar').style.width=`${weightPercent}%`;
+// --- [بداية] كود تحديث مصابيح اتجاه السوق ---
 const lightsContainer=document.getElementById('market-trend-lights');lightsContainer.innerHTML='';const trends=data.market_state?.market_trends;if(trends){const timeframes=['5m','15m','1h','4h'];timeframes.forEach(tf=>{const trend=trends[tf]||'RANGING';let lightClass='bg-accent-yellow';if(trend.includes('UPTREND'))lightClass='bg-accent-green';else if(trend.includes('DOWNTREND'))lightClass='bg-accent-red';lightsContainer.innerHTML+=`<div class="flex items-center gap-2" title="Trend for ${tf} is ${trend}"><div class="w-3 h-3 rounded-full ${lightClass}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`})}
+// --- [نهاية] كود تحديث مصابيح اتجاه السوق ---
 if(data.settings){document.getElementById('risk-percent').value=data.settings.risk_percent;const togglesContainer=document.getElementById('strategy-toggles-container');togglesContainer.innerHTML='';Object.entries(data.settings.strategies).forEach(([key,config])=>{togglesContainer.innerHTML+=`<div class="flex items-center justify-between"><span class="text-sm">${config.display_name}</span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="strategy-${key}" data-strategy-key="${key}" class="sr-only strategy-toggle-input" ${config.enabled?'checked':''}><div class="toggle-bg block bg-gray-600 w-10 h-6 rounded-full"></div></div></label></div>`});
 const filtersContainer=document.getElementById('filter-settings-container');filtersContainer.innerHTML='';Object.entries(data.settings.filters).forEach(([key,config])=>{let inputHTML='';if(typeof config.value==='number'){inputHTML=`<input type="number" id="filter-${key}" data-filter-key="${key}" value="${config.value}" step="${key==='TIME_BASED_EXIT_CANDLES'?'1':'0.1'}" class="input-field w-full filter-input">`}else{inputHTML=`<select id="filter-${key}" data-filter-key="${key}" class="input-field w-full filter-input"><option value="strict" ${config.value==='strict'?'selected':''}>صارم</option><option value="relaxed" ${config.value==='relaxed'?'selected':''}>مخفف</option></select>`}
 filtersContainer.innerHTML+=`<div><label for="filter-${key}" class="block text-sm font-medium text-text-secondary mb-1">${config.display_name}</label>${inputHTML}</div>`})}})}
@@ -1004,18 +1000,23 @@ def determine_market_state_enhanced():
 def passes_comprehensive_market_filter() -> bool:
     with market_state_lock: state = current_market_state
     if state.get("status") != "OK": return False
-    short_term_trend = state.get('market_trends', {}).get('5m', 'RANGING')
-    if "DOWNTREND" in short_term_trend:
-        log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend (5m)", {"btc_trend_5m": short_term_trend})
-        return False
+    
+    # --- [تم التعديل] تعطيل فلتر اتجاه البيتكوين على 5 دقائق ---
+    # short_term_trend = state.get('market_trends', {}).get('5m', 'RANGING')
+    # if "DOWNTREND" in short_term_trend:
+    #     log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend (5m)", {"btc_trend_5m": short_term_trend})
+    #     return False
+    
     primary_trend = state.get('primary_trend', 'RANGING')
     if "DOWNTREND" in primary_trend: 
         log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend (4h)", {"btc_trend_4h": primary_trend})
         return False
+        
     liquidity = state.get('session_status', {}).get('liquidity', 'LOW')
     if liquidity == 'LOW': 
         log_rejection("GLOBAL", "Market Status Filter: Low Liquidity")
         return False
+        
     logger.info("✅ [فلتر السوق] ظروف السوق العامة مناسبة للتداول.")
     return True
 
@@ -1244,13 +1245,13 @@ def initialize_bot_services():
         Thread(target=trade_management_loop, daemon=True).start()
         start_websocket_streams()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.3 - Sentinel)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.4 - Sentinel)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # --- نقطة الدخول الرئيسية ---
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول V10.3 'Sentinel' مع لوحة التحكم 🚀")
+    logger.info("🚀 إطلاق بوت التداول V10.4 'Sentinel' مع لوحة التحكم 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
