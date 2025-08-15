@@ -1,9 +1,10 @@
-# ملف c4_enhanced_v10.5_sentinel.py - نسخة V10.5 "Sentinel"
+# ملف c4_enhanced_v10.6_sentinel.py - نسخة V10.6 "Sentinel"
 # --- نسخة معدلة مع منظم طلبات استباقي لمنع الحظر ---
 # هذا الإصدار يقدم آلية "Token Bucket" لتنظيم وتيرة إرسال الطلبات
 # وتوزيعها على مدار الدقيقة، مما يمنع الاندفاعات التي تؤدي للحظر.
-# --- تحديثات v10.5 ---
-# 1. تأكيد وضبط الإطار الزمني لتوليد إشارات جميع الاستراتيجيات على 15 دقيقة.
+# --- تحديثات v10.6 ---
+# 1. تطبيق نظام الفحص بالدفعات (Batch Processing) لتحسين إدارة الذاكرة.
+# 2. إضافة جامع القمامة (Garbage Collector) لتحرير الذاكرة بعد كل دفعة.
 
 import time
 import os
@@ -15,6 +16,7 @@ import pandas as pd
 import psycopg2
 import redis
 import traceback
+import gc # <-- تم استيراد مكتبة جامع القمامة
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -39,11 +41,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10.5_sentinel.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10.6_sentinel.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10.5-Sentinel')
+logger = logging.getLogger('CryptoBotV10.6-Sentinel')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -98,7 +100,6 @@ FILTER_CONFIG = {
 }
 
 # --- إعدادات المؤشرات الفنية والإطارات الزمنية ---
-# [تم التعديل] هذا المتغير هو المتحكم الرئيسي في الإطار الزمني الذي تعمل عليه جميع الاستراتيجيات لتوليد الإشارات.
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 BTC_SYMBOL: str = 'BTCUSDT'
@@ -106,6 +107,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
 ADX_PERIOD: int = 14
 CACHE_EXPIRATION_MINUTES: int = 15
+BATCH_SIZE: int = 50 # <-- حجم الدفعة للفحص
 
 # --- إعدادات إدارة المخاطر والخروج ---
 USE_SMART_EXIT_SYSTEM: bool = True
@@ -739,7 +741,7 @@ CORS(app)
 def block_method(): pass
 
 @app.route('/')
-def home(): return render_template_string(get_dashboard_html_v10_5())
+def home(): return render_template_string(get_dashboard_html_v10_6())
 
 @app.route('/api/status')
 def get_status():
@@ -842,13 +844,13 @@ def manual_close_trade_endpoint(signal_id):
     if close_signal(signal_id, current_price, 'manual'): return jsonify({"success": True, "message": "Signal closed."})
     else: return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
-def get_dashboard_html_v10_5():
+def get_dashboard_html_v10_6():
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V10.5 - لوحة تحكم التداول</title>
+    <title>Sentinel V10.6 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -868,7 +870,7 @@ def get_dashboard_html_v10_5():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
                 <span class="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-500">Sentinel</span>
-                <span class="text-text-secondary font-medium">V10.5</span>
+                <span class="text-text-secondary font-medium">V10.6</span>
             </h1>
             <div class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="w-32">
@@ -1101,58 +1103,102 @@ def trade_management_loop():
 def main_loop_enhanced():
     logger.info("[الحلقة الرئيسية] انتظار اكتمال التهيئة...")
     time.sleep(15)
-    if not validated_symbols_to_scan: log_and_notify("critical", "قائمة العملات فارغة.", "SYSTEM_ERROR"); return
+    if not validated_symbols_to_scan: 
+        log_and_notify("critical", "قائمة العملات فارغة.", "SYSTEM_ERROR")
+        return
     log_and_notify("info", f"✅ بدء حلقة المسح لـ {len(validated_symbols_to_scan)} عملة.", "SYSTEM")
+    
     while True:
         try:
             determine_market_state_enhanced()
             if not passes_comprehensive_market_filter():
-                logger.info("⏸️ [الحلقة الرئيسية] السوق في حالة غير مناسبة. الانتظار 5 دقائق..."); time.sleep(300); continue
+                logger.info("⏸️ [الحلقة الرئيسية] السوق في حالة غير مناسبة. الانتظار 5 دقائق...")
+                time.sleep(300)
+                continue
+
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
-            for symbol in symbols_to_process:
-                with signal_cache_lock:
-                    if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
-                df_signal = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df_signal is None or len(df_signal) < 201: continue
-                df_with_indicators = calculate_all_features(df_signal)
-                df_with_indicators.name = symbol
-                signal_found, strategy_used = False, None
-                strategies_to_check = [('BB_Stoch', check_bb_stoch_strategy_enhanced), ('SR_Breakout', check_sr_breakout_strategy_enhanced), 
-                                       ('Triple_Confirmation', check_triple_confirmation_strategy), ('VWAP_Reversal', check_vwap_reversal_strategy)]
-                for key, func in strategies_to_check:
-                    with STRATEGY_CONFIG[key]['lock']: is_enabled = STRATEGY_CONFIG[key]['enabled']
-                    if is_enabled and func(df_with_indicators):
-                        signal_found, strategy_used = True, key; break
-                if signal_found:
-                    logger.info(f"  -> [{symbol}] إشارة ناجحة من {strategy_used}. جاري التحقق النهائي...")
-                    try: 
-                        entry_price_str = redis_client.hget("crypto_bot_prices", symbol)
-                        if not entry_price_str:
-                            logger.warning(f"⚠️ [{symbol}] لم يتم العثور على السعر في Redis. سيتم جلبه عبر API.")
-                            entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
-                        else:
-                            entry_price = float(entry_price_str)
-                    except Exception as e: 
-                        logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}."); continue
-                    last_atr = df_with_indicators.iloc[-1]['atr']
-                    size_result = calculate_dynamic_position_size(symbol, entry_price, last_atr)
-                    if not size_result: continue
-                    quantity, stop_loss_price = size_result
-                    new_signal = {'symbol': symbol, 'strategy_name': strategy_used, 'entry_price': entry_price,
-                                  'stop_loss': stop_loss_price, 'signal_details': {'atr': last_atr}}
-                    with trading_status_lock: is_enabled = is_trading_enabled
-                    if is_enabled:
-                        order_result = place_order(symbol, Client.SIDE_BUY, quantity)
-                        if order_result:
-                            new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
-                        else: continue
-                    saved_signal = insert_signal_into_db(new_signal)
-                    if saved_signal:
-                        with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
-            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 3 دقائق...");
+            num_batches = (len(symbols_to_process) + BATCH_SIZE - 1) // BATCH_SIZE
+
+            for i in range(num_batches):
+                batch_symbols = symbols_to_process[i * BATCH_SIZE:(i + 1) * BATCH_SIZE]
+                logger.info(f"--- 🔄 بدء الدفعة {i+1}/{num_batches} | فحص {len(batch_symbols)} عملة ---")
+
+                for symbol in batch_symbols:
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES:
+                            continue
+                    
+                    df_signal = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df_signal is None or len(df_signal) < 201:
+                        continue
+                        
+                    df_with_indicators = calculate_all_features(df_signal)
+                    df_with_indicators.name = symbol
+                    signal_found, strategy_used = False, None
+                    
+                    strategies_to_check = [
+                        ('BB_Stoch', check_bb_stoch_strategy_enhanced), 
+                        ('SR_Breakout', check_sr_breakout_strategy_enhanced), 
+                        ('Triple_Confirmation', check_triple_confirmation_strategy), 
+                        ('VWAP_Reversal', check_vwap_reversal_strategy)
+                    ]
+                    
+                    for key, func in strategies_to_check:
+                        with STRATEGY_CONFIG[key]['lock']: 
+                            is_enabled = STRATEGY_CONFIG[key]['enabled']
+                        if is_enabled and func(df_with_indicators):
+                            signal_found, strategy_used = True, key
+                            break
+                            
+                    if signal_found:
+                        logger.info(f"  -> [{symbol}] إشارة ناجحة من {strategy_used}. جاري التحقق النهائي...")
+                        try: 
+                            entry_price_str = redis_client.hget("crypto_bot_prices", symbol)
+                            if not entry_price_str:
+                                logger.warning(f"⚠️ [{symbol}] لم يتم العثور على السعر في Redis. سيتم جلبه عبر API.")
+                                entry_price = float(client.get_symbol_ticker(symbol=symbol)['price'])
+                            else:
+                                entry_price = float(entry_price_str)
+                        except Exception as e: 
+                            logger.error(f"❌ [{symbol}] فشل جلب سعر الدخول: {e}.")
+                            continue
+                            
+                        last_atr = df_with_indicators.iloc[-1]['atr']
+                        size_result = calculate_dynamic_position_size(symbol, entry_price, last_atr)
+                        if not size_result:
+                            continue
+                            
+                        quantity, stop_loss_price = size_result
+                        new_signal = {
+                            'symbol': symbol, 'strategy_name': strategy_used, 'entry_price': entry_price,
+                            'stop_loss': stop_loss_price, 'signal_details': {'atr': last_atr}
+                        }
+                        
+                        with trading_status_lock: 
+                            is_enabled = is_trading_enabled
+                        if is_enabled:
+                            order_result = place_order(symbol, Client.SIDE_BUY, quantity)
+                            if order_result:
+                                new_signal.update({'is_real_trade': True, 'quantity': float(quantity), 'order_id': order_result['orderId']})
+                            else:
+                                continue
+                                
+                        saved_signal = insert_signal_into_db(new_signal)
+                        if saved_signal:
+                            with signal_cache_lock:
+                                open_signals_cache[saved_signal['symbol']] = saved_signal
+                
+                logger.info(f"--- ✅ انتهت الدفعة {i+1}/{num_batches}. جاري تحرير الذاكرة... ---")
+                gc.collect()
+                logger.info("--- 🗑️ تم استدعاء جامع القمامة. ---")
+                time.sleep(10) # فاصل زمني بين الدفعات
+
+            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح الكاملة. الانتظار 3 دقائق...");
             time.sleep(180)
+
         except (KeyboardInterrupt, SystemExit):
-            log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
+            log_and_notify("info", "إيقاف البوت.", "SYSTEM")
+            break
         except BinanceAPIException as e:
             if e.code == -1003:
                 logger.critical("🚨 [API BAN] تم حظر الـ IP! سيتوقف البوت لمدة 30 دقيقة لاحترام الحظر.")
@@ -1166,6 +1212,7 @@ def main_loop_enhanced():
             log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM")
             traceback.print_exc()
             time.sleep(120)
+
 
 # --- دوال WebSocket وتهيئة البوت ---
 def handle_socket_message(msg: Dict[str, Any]):
@@ -1237,13 +1284,13 @@ def initialize_bot_services():
         Thread(target=trade_management_loop, daemon=True).start()
         start_websocket_streams()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.5 - Sentinel)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.6 - Sentinel)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # --- نقطة الدخول الرئيسية ---
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول V10.5 'Sentinel' مع لوحة التحكم 🚀")
+    logger.info("🚀 إطلاق بوت التداول V10.6 'Sentinel' مع لوحة التحكم 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
