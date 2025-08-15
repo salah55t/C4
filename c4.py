@@ -101,7 +101,7 @@ FILTER_CONFIG = {
 
 # --- إعدادات المؤشرات الفنية والإطارات الزمنية ---
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
@@ -131,11 +131,14 @@ notifications_cache = []
 notifications_lock = Lock()
 current_market_state: Dict[str, Any] = {"status": "INITIALIZING"}
 market_state_lock = Lock()
-# --- FIX START: Initialize cache for historical data ---
+
+# --- [بداية الإصلاح] ---
+# 1. تعريف متغيرات الذاكرة المؤقتة (الكاش)
+# سيتم استخدام هذا القاموس لتخزين البيانات التاريخية التي يتم جلبها من المنصة
 historical_data_cache = {}
-cache_lock = Lock()
-CACHE_EXPIRATION_SECONDS = 15 * 60 # 15 minutes
-# --- FIX END ---
+cache_lock = Lock() # قفل لضمان عدم حدوث تضارب عند الوصول للكاش من عدة عمليات
+CACHE_EXPIRATION_SECONDS = 15 * 60 # مدة صلاحية البيانات في الكاش (15 دقيقة)
+# --- [نهاية الإصلاح] ---
 
 # --- قاموس أسباب الرفض باللغة العربية (موسع) ---
 REJECTION_REASONS_AR = {
@@ -417,24 +420,25 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
     return df_calc.dropna()
 
-# --- FIX START: New function to get data using cache ---
+# --- [بداية الإصلاح] ---
+# 2. إنشاء دالة جديدة لجلب البيانات باستخدام الكاش
 def get_data_for_symbol(symbol: str) -> Optional[pd.DataFrame]:
     """
-    Fetches historical data for a symbol, using a cache to avoid excessive API calls.
+    تجلب البيانات التاريخية لعملة معينة، مع استخدام الكاش لتجنب استدعاءات API المفرطة.
     """
     with cache_lock:
         cache_entry = historical_data_cache.get(symbol)
-        # Check if cache entry exists and is not expired
+        # التحقق مما إذا كانت البيانات موجودة في الكاش ولم تنتهِ صلاحيتها
         if cache_entry and (time.time() - cache_entry['timestamp']) < CACHE_EXPIRATION_SECONDS:
-            logger.info(f"  -> [{symbol}] 🧠 Using cached data.")
+            logger.info(f"  -> [{symbol}] 🧠 استخدام البيانات من الذاكرة المؤقتة (الكاش).")
             return cache_entry['data']
 
-    # If not in cache or expired, fetch new data from API
-    logger.info(f"  -> [{symbol}] 🌐 Fetching new historical data from API.")
+    # إذا لم تكن في الكاش أو انتهت صلاحيتها، يتم جلب بيانات جديدة من المنصة
+    logger.info(f"  -> [{symbol}] 🌐 جلب بيانات تاريخية جديدة من المنصة.")
     try:
         df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
         if df is not None and not df.empty:
-            # Update the cache with the new data
+            # تحديث الكاش بالبيانات الجديدة
             with cache_lock:
                 historical_data_cache[symbol] = {
                     'timestamp': time.time(),
@@ -443,15 +447,15 @@ def get_data_for_symbol(symbol: str) -> Optional[pd.DataFrame]:
             return df
         return None
     except BinanceAPIException as e:
-        # Re-raise the exception to be handled by the main loop's specific ban handler
+        # إعادة إرسال الخطأ ليتم التعامل معه في الحلقة الرئيسية
         if e.code == -1003:
             raise
-        logger.error(f"❌ [{symbol}] Unhandled API exception in get_data_for_symbol: {e}")
+        logger.error(f"❌ [{symbol}] خطأ API غير معالج في get_data_for_symbol: {e}")
         return None
     except Exception as e:
-        logger.error(f"❌ [{symbol}] General exception in get_data_for_symbol: {e}")
+        logger.error(f"❌ [{symbol}] خطأ عام في get_data_for_symbol: {e}")
         return None
-# --- FIX END ---
+# --- [نهاية الإصلاح] ---
 
 # --- دوال منطق الاستراتيجيات المحسنة والجديدة ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
@@ -1152,7 +1156,10 @@ def determine_market_state_enhanced():
         market_trends = {}
         
         for tf, days in timeframes.items():
-            df_btc = get_data_for_symbol(BTC_SYMBOL) # Use caching for BTC data as well
+            # --- [بداية الإصلاح] ---
+            # 3. استخدام الدالة الجديدة لجلب بيانات البيتكوين من الكاش
+            df_btc = get_data_for_symbol(BTC_SYMBOL)
+            # --- [نهاية الإصلاح] ---
             if df_btc is not None:
                 df_with_features = calculate_all_features(df_btc)
                 market_trends[tf] = get_trend(df_with_features)
@@ -1328,12 +1335,13 @@ def main_loop_enhanced():
                 with signal_cache_lock:
                     if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
                 
-                # --- FIX START: Use the new caching function ---
+                # --- [بداية الإصلاح] ---
+                # 4. استبدال الاستدعاء المباشر بالاستدعاء عبر دالة الكاش
                 df_15m = get_data_for_symbol(symbol)
-                # --- FIX END ---
+                # --- [نهاية الإصلاح] ---
 
                 if df_15m is None or len(df_15m) < 201: 
-                    time.sleep(0.5) # Shorter sleep, as calls are less frequent now
+                    time.sleep(0.5)
                     continue
                 
                 df_with_indicators = calculate_all_features(df_15m)
@@ -1504,4 +1512,3 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port, debug=False)
     logger.info("👋 [إيقاف] تم إيقاف تشغيل التطبيق.")
-
