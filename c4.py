@@ -101,7 +101,7 @@ FILTER_CONFIG = {
 
 # --- إعدادات المؤشرات الفنية والإطارات الزمنية ---
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 90
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 30
 BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
@@ -1504,3 +1504,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port, debug=False)
     logger.info("👋 [إيقاف] تم إيقاف تشغيل التطبيق.")
+
