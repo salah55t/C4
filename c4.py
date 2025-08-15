@@ -1,5 +1,5 @@
 # ملف c4_enhanced_v10.1_dashboard_complete.py - نسخة V10.1 "Phoenix"
-# --- نسخة معدلة مع WebSocket لحل مشكلة حدود الـ API ---
+# --- نسخة معدلة مع إصلاحات WebSocket و Decimal Conversion ---
 # هذا الملف يدمج جميع الدوال والوظائف في هيكل واحد متكامل،
 # ويحتوي على كل التحسينات المطلوبة بما في ذلك لوحة التحكم المطورة.
 
@@ -13,11 +13,10 @@ import pandas as pd
 import psycopg2
 import redis
 import traceback
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
-# --- تعديل: إضافة مدير WebSocket ---
 from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException, BinanceRequestException
 from flask import Flask, jsonify, render_template_string, request, abort
@@ -171,7 +170,6 @@ def rate_limiter(weight=1):
 
                 try:
                     response = func(*args, **kwargs)
-                    # Note: We still track weight for non-websocket calls
                     api_used_weight += weight
                     return response
                 except (BinanceAPIException, BinanceRequestException) as e:
@@ -348,7 +346,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        # We still need this for initial data loading and strategy calculation
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
@@ -661,7 +658,7 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         reason_map = {
             'stop_loss': '🛑 تم ضرب وقف الخسارة',
             'all_tp_hit': '✅ تم تحقيق جميع الأهداف',
-            'manual': ' manualmente تم الإغلاق يدوياً',
+            'manual': ' تم الإغلاق يدوياً',
             'time_based_exit': '⏳ تم الإغلاق بسبب انتهاء الوقت'
         }
         emoji = "✅" if profit_percentage > 0 else "🛑"
@@ -699,10 +696,8 @@ def update_strategy_performance(strategy_name: str, pnl_percent: float):
 app = Flask(__name__)
 CORS(app)
 
-# ... (The entire Flask section remains unchanged) ...
 @app.before_request
 def block_method():
-    # This is a placeholder, in a real scenario you'd have a banned_ips table
     pass
 
 def get_dashboard_html_v10_1():
@@ -1189,8 +1184,20 @@ def trade_management_loop():
                     continue
 
                 if USE_SMART_EXIT_SYSTEM and 'exit_levels' in signal and signal['exit_levels']:
+                    # --- إصلاح: التحقق من وجود كمية قبل محاولة إدارتها ---
+                    # هذا يمنع الخطأ عند التعامل مع الصفقات الورقية التي ليس لها كمية
+                    if signal.get('quantity') is None:
+                        continue
+                    
+                    try:
+                        remaining_quantity = Decimal(str(signal['quantity']))
+                    except (InvalidOperation, TypeError):
+                        logger.warning(f"⚠️ [{symbol}] قيمة الكمية غير صالحة ({signal.get('quantity')}) للصفقة ID {signal.get('id')}. سيتم تخطي إدارة الخروج الجزئي.")
+                        continue
+                    # --- نهاية الإصلاح ---
+
                     exit_levels = signal['exit_levels']
-                    remaining_quantity = Decimal(str(signal['quantity']))
+                    
                     for level, config in sorted(exit_levels.items()):
                         if not config['is_hit'] and current_price >= config['target_price']:
                             logger.info(f"🎯 [{symbol}] تم الوصول إلى الهدف {level} عند {config['target_price']:.4f}")
@@ -1213,7 +1220,7 @@ def trade_management_loop():
 
                     signal['exit_levels'] = exit_levels
                     update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity), 'candles_since_entry': signal['candles_since_entry']})
-                    if remaining_quantity <= 0.00000001:
+                    if remaining_quantity <= Decimal('0.00000001'):
                         close_signal(signal['id'], current_price, 'all_tp_hit')
                         continue
 
@@ -1256,7 +1263,7 @@ def main_loop_enhanced():
                 
                 df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_15m is None or len(df_15m) < 201: 
-                    time.sleep(1) # A small delay to prevent tight looping on failed data fetches
+                    time.sleep(1)
                     continue
                 
                 df_with_indicators = calculate_all_features(df_15m)
@@ -1277,7 +1284,6 @@ def main_loop_enhanced():
                 if signal_found:
                     logger.info(f"  -> [{symbol}] إشارة ناجحة من {strategy_used}. جاري التحقق النهائي...")
                     try: 
-                        # Get price from Redis cache, which is updated by WebSocket
                         entry_price_str = redis_client.hget("crypto_bot_prices", symbol)
                         if not entry_price_str:
                             logger.warning(f"⚠️ [{symbol}] لم يتم العثور على السعر في Redis. سيتم جلبه عبر API.")
@@ -1306,43 +1312,45 @@ def main_loop_enhanced():
                     if saved_signal:
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                 
-                # We can reduce this sleep as we are not hammering the API for prices anymore
                 time.sleep(0.5) 
             
             logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 10 ثوانٍ..."); time.sleep(10)
         except (KeyboardInterrupt, SystemExit): log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
         except Exception as main_err: log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); traceback.print_exc(); time.sleep(120)
 
-# --- إضافة: دوال WebSocket الجديدة ---
+# --- دوال WebSocket الجديدة والمعدلة ---
 def handle_socket_message(msg: Dict[str, Any]):
     """
     Handles incoming WebSocket messages for mini-tickers.
     Updates prices in Redis.
     """
-    if msg.get('e') == 'error':
-        logger.error(f"❌ [WebSocket] Error: {msg.get('m')}")
-    else:
-        try:
-            # For multiplex streams, msg is a dictionary containing stream and data
-            if 'data' in msg and isinstance(msg['data'], list):
-                # Handle combined stream format if library wraps it
-                payload = msg['data']
-            elif isinstance(msg, list):
-                 # Handle direct list of tickers
-                payload = msg
-            else:
-                # This case should not happen with miniTicker, but as a fallback
-                logger.warning(f"⚠️ [WebSocket] Received unexpected message format: {msg}")
-                return
+    try:
+        if msg.get('e') == 'error':
+            logger.error(f"❌ [WebSocket] Error: {msg.get('m')}")
+            return
 
-            prices_to_set = {item['s']: item['c'] for item in payload if 's' in item and 'c' in item}
+        # --- إصلاح: التعامل مع صيغة الرسائل المتعددة (multiplex) ---
+        # هذه الصيغة تأتي كـ {'stream': '...', 'data': {...}}
+        if 'stream' in msg and 'data' in msg:
+            payload = msg['data']
+            if isinstance(payload, dict) and 's' in payload and 'c' in payload:
+                prices_to_set = {payload['s']: payload['c']}
+                if prices_to_set and redis_client:
+                    redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
+            return
+        # --- نهاية الإصلاح ---
+        
+        # التعامل مع الرسائل التي تأتي كقائمة (في حال تغير سلوك المكتبة)
+        if isinstance(msg, list):
+            prices_to_set = {item['s']: item['c'] for item in msg if 's' in item and 'c' in item}
             if prices_to_set and redis_client:
                 redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
+            return
 
-        except (KeyError, TypeError) as e:
-            logger.error(f"❌ [WebSocket] Error processing message: {e} | Data: {msg}")
-        except Exception as e:
-            logger.error(f"❌ [WebSocket] Unexpected error in handler: {e}", exc_info=True)
+    except (KeyError, TypeError) as e:
+        logger.error(f"❌ [WebSocket] Error processing message: {e} | Data: {msg}")
+    except Exception as e:
+        logger.error(f"❌ [WebSocket] Unexpected error in handler: {e}", exc_info=True)
 
 def start_websocket_streams():
     """
@@ -1356,7 +1364,6 @@ def start_websocket_streams():
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
 
-    # Use the combined mini-ticker stream for efficiency.
     streams = [f"{s.lower()}@miniTicker" for s in validated_symbols_to_scan]
     if BTC_SYMBOL not in validated_symbols_to_scan:
          streams.append(f"{BTC_SYMBOL.lower()}@miniTicker")
@@ -1364,9 +1371,6 @@ def start_websocket_streams():
     twm.start_multiplex_socket(callback=handle_socket_message, streams=streams)
     logger.info(f"✅ [WebSocket] Subscribed to {len(streams)} mini-ticker streams.")
 
-
-# --- حذف: الدوال القديمة التي تم استبدالها ---
-# The functions `price_update_loop` and `get_all_tickers` are now removed.
 
 def load_initial_data():
     global validated_symbols_to_scan
@@ -1401,15 +1405,11 @@ def initialize_bot_services():
         client = Client(API_KEY, API_SECRET)
         init_db()
         init_redis()
-        # Must load symbols before starting websocket
         load_initial_data()
         
-        # Start background threads for core logic
         Thread(target=main_loop_enhanced, daemon=True).start()
         Thread(target=trade_management_loop, daemon=True).start()
         
-        # --- تعديل: بدء WebSocket بدلاً من حلقة جلب الأسعار القديمة ---
-        # The WebSocket manager runs its own background threads
         start_websocket_streams()
 
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
