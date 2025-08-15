@@ -1,5 +1,5 @@
 # ملف c4_enhanced_v10.1_dashboard_complete.py - نسخة V10.1 "Phoenix"
-# --- نسخة معدلة مع إصلاحات WebSocket و Decimal Conversion ---
+# --- نسخة معدلة مع إعدادات UI إضافية وإصلاحات ---
 # هذا الملف يدمج جميع الدوال والوظائف في هيكل واحد متكامل،
 # ويحتوي على كل التحسينات المطلوبة بما في ذلك لوحة التحكم المطورة.
 
@@ -94,7 +94,9 @@ FILTER_CONFIG = {
     "TRIPLE_CONF_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (Triple Conf)"},
     "VWAP_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (VWAP Reversal)"},
     "TRIPLE_CONF_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (Triple Conf)"}, # 'strict' or 'relaxed'
-    "VWAP_REVERSAL_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (VWAP Reversal)"} # 'strict' or 'relaxed'
+    "VWAP_REVERSAL_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (VWAP Reversal)"}, # 'strict' or 'relaxed'
+    # --- إضافة: جعل زمن الإغلاق قابلاً للتعديل ---
+    "TIME_BASED_EXIT_CANDLES": {"value": 20, "lock": Lock(), "display_name": "إغلاق الصفقة بعد (شمعة)"}
 }
 
 
@@ -115,7 +117,7 @@ TAKE_PROFIT_LEVELS = {
 }
 USE_TRAILING_STOP_LOSS: bool = True
 TRAILING_STOP_ACTIVATION_ATR: float = 2.0
-TIME_BASED_EXIT_CANDLES: int = 20
+# TIME_BASED_EXIT_CANDLES is now in FILTER_CONFIG
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -701,6 +703,7 @@ def block_method():
     pass
 
 def get_dashboard_html_v10_1():
+    # --- تعديل: إضافة حقل إعداد زمن الإغلاق وإصلاح مصابيح الفريمات ---
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -735,7 +738,9 @@ def get_dashboard_html_v10_1():
                         <div id="api-weight-bar" class="progress-bar-inner"></div>
                     </div>
                 </div>
-                <div id="market-trend-lights" class="flex items-center gap-x-4"></div>
+                <div id="market-trend-lights" class="flex items-center gap-x-4">
+                    <!-- Market trend lights will be dynamically inserted here by JavaScript -->
+                </div>
             </div>
         </header>
 
@@ -872,7 +877,7 @@ function updateStatus() {
                 let lightClass = 'bg-accent-yellow';
                 if (trend.includes('UPTREND')) lightClass = 'bg-accent-green';
                 else if (trend.includes('DOWNTREND')) lightClass = 'bg-accent-red';
-                lightsContainer.innerHTML += `<div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full ${lightClass}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
+                lightsContainer.innerHTML += `<div class="flex items-center gap-2" title="Trend for ${tf} is ${trend}"><div class="w-3 h-3 rounded-full ${lightClass}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
             });
         }
 
@@ -889,7 +894,7 @@ function updateStatus() {
             Object.entries(data.settings.filters).forEach(([key, config]) => {
                 let inputHTML = '';
                 if (typeof config.value === 'number') {
-                    inputHTML = `<input type="number" id="filter-${key}" data-filter-key="${key}" value="${config.value}" step="0.1" class="input-field w-full filter-input">`;
+                    inputHTML = `<input type="number" id="filter-${key}" data-filter-key="${key}" value="${config.value}" step="${key === 'TIME_BASED_EXIT_CANDLES' ? '1' : '0.1'}" class="input-field w-full filter-input">`;
                 } else {
                     inputHTML = `<select id="filter-${key}" data-filter-key="${key}" class="input-field w-full filter-input">
                         <option value="strict" ${config.value === 'strict' ? 'selected' : ''}>صارم</option>
@@ -1062,8 +1067,9 @@ def update_settings():
         for key, value in filters_data.items():
             if key in FILTER_CONFIG:
                 with FILTER_CONFIG[key]['lock']:
+                    # Ensure correct type casting for numeric values
                     if isinstance(FILTER_CONFIG[key]['value'], (int, float)):
-                        FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(value)
+                        FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(float(value))
                     else:
                         FILTER_CONFIG[key]['value'] = str(value)
 
@@ -1164,6 +1170,10 @@ def trade_management_loop():
                 continue
             
             current_prices = redis_client.hgetall("crypto_bot_prices")
+            
+            # --- تعديل: استخدام قيمة زمن الإغلاق من الإعدادات الديناميكية ---
+            with FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["lock"]:
+                time_based_exit_candles = FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["value"]
 
             for signal in signals_to_check:
                 current_price_str = current_prices.get(signal['symbol'])
@@ -1178,14 +1188,12 @@ def trade_management_loop():
                     close_signal(signal['id'], current_price, 'stop_loss')
                     continue
                 
-                if TIME_BASED_EXIT_CANDLES > 0 and signal['candles_since_entry'] > TIME_BASED_EXIT_CANDLES and not signal.get('exit_levels', {}).get('1', {}).get('is_hit', True):
-                    logger.info(f"⏳ [{symbol}] خروج زمني بعد {TIME_BASED_EXIT_CANDLES} شمعة.")
+                if time_based_exit_candles > 0 and signal['candles_since_entry'] > time_based_exit_candles and not signal.get('exit_levels', {}).get('1', {}).get('is_hit', True):
+                    logger.info(f"⏳ [{symbol}] خروج زمني بعد {time_based_exit_candles} شمعة.")
                     close_signal(signal['id'], current_price, 'time_based_exit')
                     continue
 
                 if USE_SMART_EXIT_SYSTEM and 'exit_levels' in signal and signal['exit_levels']:
-                    # --- إصلاح: التحقق من وجود كمية قبل محاولة إدارتها ---
-                    # هذا يمنع الخطأ عند التعامل مع الصفقات الورقية التي ليس لها كمية
                     if signal.get('quantity') is None:
                         continue
                     
@@ -1194,7 +1202,6 @@ def trade_management_loop():
                     except (InvalidOperation, TypeError):
                         logger.warning(f"⚠️ [{symbol}] قيمة الكمية غير صالحة ({signal.get('quantity')}) للصفقة ID {signal.get('id')}. سيتم تخطي إدارة الخروج الجزئي.")
                         continue
-                    # --- نهاية الإصلاح ---
 
                     exit_levels = signal['exit_levels']
                     
@@ -1320,17 +1327,11 @@ def main_loop_enhanced():
 
 # --- دوال WebSocket الجديدة والمعدلة ---
 def handle_socket_message(msg: Dict[str, Any]):
-    """
-    Handles incoming WebSocket messages for mini-tickers.
-    Updates prices in Redis.
-    """
     try:
         if msg.get('e') == 'error':
             logger.error(f"❌ [WebSocket] Error: {msg.get('m')}")
             return
 
-        # --- إصلاح: التعامل مع صيغة الرسائل المتعددة (multiplex) ---
-        # هذه الصيغة تأتي كـ {'stream': '...', 'data': {...}}
         if 'stream' in msg and 'data' in msg:
             payload = msg['data']
             if isinstance(payload, dict) and 's' in payload and 'c' in payload:
@@ -1338,9 +1339,7 @@ def handle_socket_message(msg: Dict[str, Any]):
                 if prices_to_set and redis_client:
                     redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
             return
-        # --- نهاية الإصلاح ---
         
-        # التعامل مع الرسائل التي تأتي كقائمة (في حال تغير سلوك المكتبة)
         if isinstance(msg, list):
             prices_to_set = {item['s']: item['c'] for item in msg if 's' in item and 'c' in item}
             if prices_to_set and redis_client:
@@ -1353,9 +1352,6 @@ def handle_socket_message(msg: Dict[str, Any]):
         logger.error(f"❌ [WebSocket] Unexpected error in handler: {e}", exc_info=True)
 
 def start_websocket_streams():
-    """
-    Initializes and starts the WebSocket streams for all validated symbols.
-    """
     if not validated_symbols_to_scan:
         logger.warning("⚠️ [WebSocket] No symbols to stream. Skipping WebSocket start.")
         return
