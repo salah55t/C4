@@ -130,7 +130,7 @@ REJECTION_REASONS_AR = {
     "Market Status Filter: Low Liquidity": "فلتر السوق: سيولة منخفضة",
     "Market Status Filter: Extreme Volatility": "فلتر السوق: تقلبات مفرطة",
     "Market Status Filter: Weak Trend": "فلتر السوق: اتجاه عام ضعيف (ADX < 20)",
-    "BB_Stoch: ADX Filter Failed": "BB_Stoch: فلتر قوة الاتجاه ADX < 25",
+    "BB_Stoch: ADX Filter Failed": "BB_Stoch: فلتر قوة الاتجاه ADX < 20",
     "BB_Stoch: BBW Filter Failed": "BB_Stoch: فلتر توسع البولينجر BBW < 0.02",
     "BB_Stoch: Volume Filter Failed": "BB_Stoch: فلتر تأكيد حجم التداول",
     "MACD_EMA: RSI Filter Failed": "MACD_EMA: فلتر RSI < 55",
@@ -382,7 +382,8 @@ def calculate_fibonacci_levels(df: pd.DataFrame) -> pd.DataFrame:
     df['fib_618'] = highest_high - (diff * 0.618)
     return df
 
-def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty: return pd.DataFrame()
     df_calc = df.copy()
     # EMAs and SMAs
     df_calc['ema_50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
@@ -437,11 +438,11 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     price_touch_bb = last['low'] <= last['bb_lower']
     stoch_oversold = last['stoch_rsi_k'] < 30 and last['stoch_rsi_d'] < 30
-    adx_strong = last['adx'] > 25
+    adx_strong = last['adx'] > 20 # RELAXED from 25
     if not adx_strong: log_rejection(df.name, "BB_Stoch: ADX Filter Failed", {"adx": f"{last['adx']:.2f}"}); return False
     bb_width_expanding = last['bb_width'] > 0.02
     if not bb_width_expanding: log_rejection(df.name, "BB_Stoch: BBW Filter Failed", {"bb_width": f"{last['bb_width']:.4f}"}); return False
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.2)
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.1) # RELAXED from 1.2
     if not volume_confirmed: log_rejection(df.name, "BB_Stoch: Volume Filter Failed", {"volume_ratio": f"{last['volume'] / last['volume_sma_20']:.2f}"}); return False
     if price_touch_bb and stoch_oversold: logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch (معززة)."); return True
     return False
@@ -467,7 +468,7 @@ def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> bool:
     if not breakout: return False
     retest_found = any(abs(df.iloc[-i]['high'] - resistance_level) / resistance_level < 0.002 for i in range(2, 12))
     if not retest_found: log_rejection(df.name, "SR_Breakout: Retest Failed", {"level": f"{resistance_level:.4f}"}); return False
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.5)
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.3) # RELAXED from 1.5
     if volume_confirmed: logger.info(f"  -> [{df.name}] ✅ إشارة اختراق دعم/مقاومة (معززة)."); return True
     return False
 
@@ -476,10 +477,13 @@ def check_triple_confirmation_strategy(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     trend_confirmed = last['ema_50'] > last['ema_200']
     momentum_confirmed = last['macd'] > last['macd_signal'] and last['rsi'] > 55
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.3)
-    if trend_confirmed and momentum_confirmed and volume_confirmed:
-        logger.info(f"  -> [{df.name}] ✅ إشارة التأكيد الثلاثي.")
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.1) # RELAXED from 1.3
+    
+    # RELAXED: Require at least 2 out of 3 conditions
+    if sum([trend_confirmed, momentum_confirmed, volume_confirmed]) >= 2:
+        logger.info(f"  -> [{df.name}] ✅ إشارة التأكيد الثلاثي (المخفف).")
         return True
+        
     log_rejection(df.name, "Triple_Confirmation: Conditions Not Met", {"trend": trend_confirmed, "momentum": momentum_confirmed, "volume": volume_confirmed})
     return False
 
@@ -489,10 +493,13 @@ def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
     vwap_reversal = prev['close'] < prev['vwap'] and last['close'] > last['vwap']
     is_bullish_engulfing = prev['close'] < prev['open'] and last['close'] > last['open'] and last['close'] > prev['open']
     is_hammer = (last['close'] > last['open']) and (last['open'] - last['low']) > 2 * (last['close'] - last['open'])
-    volume_confirmed = last['volume'] > (df['volume'].iloc[-11:-1].mean() * 1.5)
-    if vwap_reversal and (is_bullish_engulfing or is_hammer) and volume_confirmed:
-        logger.info(f"  -> [{df.name}] ✅ إشارة انعكاس VWAP.")
+    volume_confirmed = last['volume'] > (df['volume'].iloc[-11:-1].mean() * 1.2) # RELAXED from 1.5
+    
+    # RELAXED: Require reversal and (candle confirmation OR volume confirmation)
+    if vwap_reversal and ((is_bullish_engulfing or is_hammer) or volume_confirmed):
+        logger.info(f"  -> [{df.name}] ✅ إشارة انعكاس VWAP (المخفف).")
         return True
+        
     log_rejection(df.name, "VWAP_Reversal: Conditions Not Met", {"reversal": vwap_reversal, "candle": (is_bullish_engulfing or is_hammer), "volume": volume_confirmed})
     return False
 
@@ -611,7 +618,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
             
-            # --- TELEGRAM NOTIFICATION FOR NEW TRADE ---
             trade_type = "صفقة حقيقية" if signal_data.get('is_real_trade') else "إشارة ورقية"
             message = (
                 f"🚨 *{trade_type} جديدة*\n\n"
@@ -624,7 +630,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 for level, config in signal_data['exit_levels'].items():
                     message += f"  - الهدف {level}: `{config['target_price']:.4f}`\n"
             send_telegram_message(message)
-            # --- END TELEGRAM NOTIFICATION ---
 
             return dict(saved_signal)
     except Exception as e:
@@ -680,7 +685,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
         
         log_and_notify('info', f"تم الإغلاق: {symbol_to_close} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
         
-        # --- TELEGRAM NOTIFICATION FOR CLOSED TRADE ---
         reason_map = {
             'stop_loss': '🛑 تم ضرب وقف الخسارة',
             'all_tp_hit': '✅ تم تحقيق جميع الأهداف',
@@ -695,7 +699,6 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
             f"الربح/الخسارة: `{profit_percentage:.2f}%`"
         )
         send_telegram_message(message)
-        # --- END TELEGRAM NOTIFICATION ---
 
         return True
     except Exception as e:
@@ -761,14 +764,14 @@ def get_dashboard_html_v10_1():
                 <span class="text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-yellow-500">Phoenix</span>
                 <span class="text-text-secondary font-medium">V10.1</span>
             </h1>
-            <div class="flex items-center gap-x-4 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
+            <div class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="w-32">
                     <div class="text-xs text-text-secondary mb-1">API Weight</div>
                     <div class="progress-bar h-2 w-full">
                         <div id="api-weight-bar" class="progress-bar-inner"></div>
                     </div>
                 </div>
-                <div id="trend-lights-container" class="flex items-center gap-x-3"></div>
+                <div id="market-trend-lights" class="flex items-center gap-x-4"></div>
             </div>
         </header>
 
@@ -781,7 +784,7 @@ def get_dashboard_html_v10_1():
                 </div>
                 <div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div>
             </div>
-            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
+            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الصفقات المفتوحة</h3><div id="open-trades-count" class="text-2xl font-bold text-center">...</div></div>
         </section>
@@ -879,7 +882,7 @@ function updateSignals() {
 function updateStatus() {
     fetchData('/api/status').then(data => {
         if (!data) return;
-        document.getElementById('overall-regime').textContent = (data.market_state?.btc_status?.trend || 'UNCERTAIN').replace(/_/g, ' ');
+        document.getElementById('overall-regime').textContent = (data.market_state?.primary_trend || '...').replace(/_/g, ' ');
         document.getElementById('open-trades-count').textContent = `${data.open_trades_count} / ${data.max_open_trades}`;
         document.getElementById('active-sessions-list').innerHTML = data.market_state?.session_status?.name || 'N/A';
         const tradeToggle = document.getElementById('trading-toggle');
@@ -890,10 +893,21 @@ function updateStatus() {
         document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
         const weightPercent = (data.api_weight / 1200) * 100;
         document.getElementById('api-weight-bar').style.width = `${weightPercent}%`;
-        const lightsContainer = document.getElementById('trend-lights-container');
-        const btcTrend = data.market_state?.btc_status?.trend || 'Uncertain';
-        let lightClass = btcTrend.includes('Uptrend') ? 'bg-accent-green' : btcTrend.includes('Downtrend') ? 'bg-accent-red' : 'bg-accent-yellow';
-        lightsContainer.innerHTML = `<div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full ${lightClass}"></div><span class="text-sm font-bold text-text-secondary">BTC</span></div>`;
+        
+        const lightsContainer = document.getElementById('market-trend-lights');
+        lightsContainer.innerHTML = '';
+        const trends = data.market_state?.market_trends;
+        if (trends) {
+            const timeframes = ['15m', '1h', '4h'];
+            timeframes.forEach(tf => {
+                const trend = trends[tf] || 'RANGING';
+                let lightClass = 'bg-accent-yellow';
+                if (trend.includes('UPTREND')) lightClass = 'bg-accent-green';
+                else if (trend.includes('DOWNTREND')) lightClass = 'bg-accent-red';
+                lightsContainer.innerHTML += `<div class="flex items-center gap-2"><div class="w-3 h-3 rounded-full ${lightClass}"></div><span class="text-sm font-bold text-text-secondary">${tf}</span></div>`;
+            });
+        }
+
         if(data.settings) {
             document.getElementById('risk-percent').value = data.settings.risk_percent;
             const togglesContainer = document.getElementById('strategy-toggles-container');
@@ -1050,17 +1064,27 @@ def manual_close_trade_endpoint(signal_id):
 def determine_market_state_enhanced():
     global current_market_state
     logger.info("🧠 [حالة السوق] جاري تحديث حالة السوق العامة...")
+    
+    def get_trend(df: pd.DataFrame) -> str:
+        if df is None or df.empty or len(df) < 200:
+            return "RANGING"
+        last = df.iloc[-1]
+        if last['ema_50'] > last['ema_200']:
+            return "UPTREND"
+        elif last['ema_50'] < last['ema_200']:
+            return "DOWNTREND"
+        return "RANGING"
+
     try:
-        df_btc = fetch_historical_data(BTC_SYMBOL, '1h', 10)
-        if df_btc is None or df_btc.empty: return
-        df_btc = calculate_all_features(df_btc, None)
-        last_btc = df_btc.iloc[-1]
+        timeframes = {'15m': 10, '1h': 10, '4h': 20}
+        market_trends = {}
         
-        btc_trend = "RANGING"
-        if last_btc['ema_50'] > last_btc['ema_200'] and last_btc['adx'] > 25: btc_trend = "STRONG_UPTREND"
-        elif last_btc['ema_50'] > last_btc['ema_200']: btc_trend = "UPTREND"
-        elif last_btc['ema_50'] < last_btc['ema_200'] and last_btc['adx'] > 25: btc_trend = "STRONG_DOWNTREND"
-        elif last_btc['ema_50'] < last_btc['ema_200']: btc_trend = "DOWNTREND"
+        for tf, days in timeframes.items():
+            df_btc = fetch_historical_data(BTC_SYMBOL, tf, days)
+            df_with_features = calculate_all_features(df_btc)
+            market_trends[tf] = get_trend(df_with_features)
+
+        primary_trend = market_trends.get('4h', 'RANGING')
         
         sessions = {"London": (8, 17), "New York": (13, 22), "Tokyo": (0, 9)}
         now_utc = datetime.now(timezone.utc)
@@ -1073,25 +1097,30 @@ def determine_market_state_enhanced():
         with market_state_lock:
             current_market_state = {
                 "status": "OK",
-                "btc_status": {"trend": btc_trend, "adx": float(last_btc['adx']), "atr_percent": (last_btc['atr'] / last_btc['close']) * 100},
+                "primary_trend": primary_trend,
+                "market_trends": market_trends,
                 "session_status": {"name": session_name, "liquidity": liquidity},
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
-        logger.info(f"✅ [حالة السوق] الحالة: {btc_trend}, السيولة: {liquidity}")
+        logger.info(f"✅ [حالة السوق] 15m: {market_trends['15m']}, 1h: {market_trends['1h']}, 4h: {market_trends['4h']}")
     except Exception as e:
         logger.error(f"❌ [حالة السوق] خطأ في التحديث: {e}", exc_info=True)
 
 def passes_comprehensive_market_filter() -> bool:
     with market_state_lock: state = current_market_state
     if state.get("status") != "OK": return False
-    btc_trend = state.get('btc_status', {}).get('trend', 'UNCERTAIN')
-    if "DOWNTREND" in btc_trend: log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend", {"btc_trend": btc_trend}); return False
+    
+    # The main filter will now rely on the 4h trend
+    primary_trend = state.get('primary_trend', 'RANGING')
+    if "DOWNTREND" in primary_trend: 
+        log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend", {"btc_trend_4h": primary_trend})
+        return False
+        
     liquidity = state.get('session_status', {}).get('liquidity', 'LOW')
-    if liquidity == 'LOW': log_rejection("GLOBAL", "Market Status Filter: Low Liquidity"); return False
-    btc_atr_percent = state.get('btc_status', {}).get('atr_percent', 0)
-    if btc_atr_percent > 4.0: log_rejection("GLOBAL", "Market Status Filter: Extreme Volatility", {"btc_atr_percent": f"{btc_atr_percent:.2f}%"}); return False
-    btc_adx = state.get('btc_status', {}).get('adx', 0)
-    if btc_adx < 20: log_rejection("GLOBAL", "Market Status Filter: Weak Trend", {"btc_adx": f"{btc_adx:.2f}"}); return False
+    if liquidity == 'LOW': 
+        log_rejection("GLOBAL", "Market Status Filter: Low Liquidity")
+        return False
+
     logger.info("✅ [فلتر السوق] ظروف السوق العامة مناسبة للتداول.")
     return True
 
@@ -1145,14 +1174,12 @@ def trade_management_loop():
                             signal['quantity'] = float(remaining_quantity)
                             log_and_notify('info', f"↗️ [{symbol}] خروج جزئي ({exit_qty_percent*100}%): بيع {quantity_to_sell} عند الهدف {level}", "PARTIAL_EXIT")
                             
-                            # --- TELEGRAM NOTIFICATION FOR PARTIAL EXIT ---
                             message = (
                                 f"↗️ *خروج جزئي من {symbol}*\n\n"
                                 f"تم تحقيق الهدف {level} عند `{config['target_price']:.4f}`.\n"
                                 f"تم بيع `{exit_qty_percent*100}%` من الكمية."
                             )
                             send_telegram_message(message)
-                            # --- END TELEGRAM NOTIFICATION ---
 
                     signal['exit_levels'] = exit_levels
                     update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity), 'candles_since_entry': signal['candles_since_entry']})
@@ -1191,7 +1218,6 @@ def main_loop_enhanced():
             if not passes_comprehensive_market_filter():
                 logger.info("⏸️ [الحلقة الرئيسية] السوق في حالة غير مناسبة. الانتظار 5 دقائق..."); time.sleep(300); continue
             
-            btc_data = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
             symbols_to_process = random.sample(validated_symbols_to_scan, len(validated_symbols_to_scan))
             
             for symbol in symbols_to_process:
@@ -1201,7 +1227,7 @@ def main_loop_enhanced():
                 df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_15m is None or len(df_15m) < 201: continue
                 
-                df_with_indicators = calculate_all_features(df_15m, btc_data)
+                df_with_indicators = calculate_all_features(df_15m)
                 df_with_indicators.name = symbol
                 
                 signal_found, strategy_used = False, None
@@ -1266,7 +1292,6 @@ def load_initial_data():
             with signal_cache_lock:
                 open_signals_cache.clear()
                 for signal in open_signals:
-                    # Ensure signal_details is a dict, not a string
                     if isinstance(signal.get('signal_details'), str):
                         try:
                             signal['signal_details'] = json.loads(signal['signal_details'])
