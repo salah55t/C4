@@ -131,6 +131,11 @@ notifications_cache = []
 notifications_lock = Lock()
 current_market_state: Dict[str, Any] = {"status": "INITIALIZING"}
 market_state_lock = Lock()
+# --- FIX START: Initialize cache for historical data ---
+historical_data_cache = {}
+cache_lock = Lock()
+CACHE_EXPIRATION_SECONDS = 15 * 60 # 15 minutes
+# --- FIX END ---
 
 # --- قاموس أسباب الرفض باللغة العربية (موسع) ---
 REJECTION_REASONS_AR = {
@@ -207,7 +212,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # --- FIX START: Add opened_at column for correct time-based exit calculation ---
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -220,7 +224,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT
                     );
                 """)
-                # --- FIX END ---
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS strategy_performance (
                         strategy_name TEXT PRIMARY KEY, total_trades INTEGER DEFAULT 0,
@@ -234,11 +237,9 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 
-                # --- FIX START: Ensure all necessary columns exist for backward compatibility ---
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_levels JSONB;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;") # Kept for safety, but logic is replaced
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;")
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();")
-                # --- FIX END ---
 
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
@@ -364,7 +365,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return df[['open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
-        return None
+        raise
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
@@ -415,6 +416,42 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     p = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
     df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
     return df_calc.dropna()
+
+# --- FIX START: New function to get data using cache ---
+def get_data_for_symbol(symbol: str) -> Optional[pd.DataFrame]:
+    """
+    Fetches historical data for a symbol, using a cache to avoid excessive API calls.
+    """
+    with cache_lock:
+        cache_entry = historical_data_cache.get(symbol)
+        # Check if cache entry exists and is not expired
+        if cache_entry and (time.time() - cache_entry['timestamp']) < CACHE_EXPIRATION_SECONDS:
+            logger.info(f"  -> [{symbol}] 🧠 Using cached data.")
+            return cache_entry['data']
+
+    # If not in cache or expired, fetch new data from API
+    logger.info(f"  -> [{symbol}] 🌐 Fetching new historical data from API.")
+    try:
+        df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+        if df is not None and not df.empty:
+            # Update the cache with the new data
+            with cache_lock:
+                historical_data_cache[symbol] = {
+                    'timestamp': time.time(),
+                    'data': df
+                }
+            return df
+        return None
+    except BinanceAPIException as e:
+        # Re-raise the exception to be handled by the main loop's specific ban handler
+        if e.code == -1003:
+            raise
+        logger.error(f"❌ [{symbol}] Unhandled API exception in get_data_for_symbol: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] General exception in get_data_for_symbol: {e}")
+        return None
+# --- FIX END ---
 
 # --- دوال منطق الاستراتيجيات المحسنة والجديدة ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
@@ -580,7 +617,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
 
         with conn.cursor() as cur:
-            # --- FIX START: Add opened_at to the insert statement ---
             cur.execute("""
                 INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, exit_levels, opened_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
@@ -591,7 +627,6 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 signal_data.get('order_id'), signal_data['entry_price'], json.dumps(signal_data.get('exit_levels'), cls=NpEncoder),
                 datetime.now(timezone.utc)
             ))
-            # --- FIX END ---
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
@@ -1117,9 +1152,13 @@ def determine_market_state_enhanced():
         market_trends = {}
         
         for tf, days in timeframes.items():
-            df_btc = fetch_historical_data(BTC_SYMBOL, tf, days)
-            df_with_features = calculate_all_features(df_btc)
-            market_trends[tf] = get_trend(df_with_features)
+            df_btc = get_data_for_symbol(BTC_SYMBOL) # Use caching for BTC data as well
+            if df_btc is not None:
+                df_with_features = calculate_all_features(df_btc)
+                market_trends[tf] = get_trend(df_with_features)
+            else:
+                market_trends[tf] = "N/A"
+
 
         primary_trend = market_trends.get('4h', 'RANGING')
         
@@ -1162,14 +1201,12 @@ def passes_comprehensive_market_filter() -> bool:
 
 def trade_management_loop():
     logger.info("✅ [مدير الصفقات الذكي] بدء حلقة إدارة الصفقات...")
-    # --- FIX START: Define timeframe interval in seconds for correct calculation ---
     interval_str = SIGNAL_GENERATION_TIMEFRAME
     interval_seconds = 0
     if 'm' in interval_str:
         interval_seconds = int(interval_str.replace('m', '')) * 60
     elif 'h' in interval_str:
         interval_seconds = int(interval_str.replace('h', '')) * 3600
-    # --- FIX END ---
 
     while True:
         try:
@@ -1200,11 +1237,9 @@ def trade_management_loop():
                     close_signal(signal['id'], current_price, 'stop_loss')
                     continue
                 
-                # --- FIX START: Correct time-based exit logic ---
                 if time_based_exit_candles > 0 and interval_seconds > 0:
                     opened_at_time = signal.get('opened_at')
                     if opened_at_time:
-                        # Ensure opened_at_time is timezone-aware
                         if opened_at_time.tzinfo is None:
                             opened_at_time = opened_at_time.replace(tzinfo=timezone.utc)
                         
@@ -1212,13 +1247,11 @@ def trade_management_loop():
                         candles_passed = time_since_open / interval_seconds
                         
                         if candles_passed > time_based_exit_candles:
-                            # Check if first TP is not hit
                             first_tp_hit = signal.get('exit_levels', {}).get('1', {}).get('is_hit', False)
                             if not first_tp_hit:
                                 logger.info(f"⏳ [{symbol}] خروج زمني بعد {candles_passed:.1f} شمعة (الحد: {time_based_exit_candles}).")
                                 close_signal(signal['id'], current_price, 'time_based_exit')
                                 continue
-                # --- FIX END ---
 
                 if USE_SMART_EXIT_SYSTEM and 'exit_levels' in signal and signal['exit_levels']:
                     if signal.get('quantity') is None:
@@ -1295,9 +1328,12 @@ def main_loop_enhanced():
                 with signal_cache_lock:
                     if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
                 
-                df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                # --- FIX START: Use the new caching function ---
+                df_15m = get_data_for_symbol(symbol)
+                # --- FIX END ---
+
                 if df_15m is None or len(df_15m) < 201: 
-                    time.sleep(3)
+                    time.sleep(0.5) # Shorter sleep, as calls are less frequent now
                     continue
                 
                 df_with_indicators = calculate_all_features(df_15m)
@@ -1346,11 +1382,26 @@ def main_loop_enhanced():
                     if saved_signal:
                         with signal_cache_lock: open_signals_cache[saved_signal['symbol']] = saved_signal
                 
-                time.sleep(3) 
+                time.sleep(0.5) 
             
-            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 10 ثوانٍ..."); time.sleep(10)
-        except (KeyboardInterrupt, SystemExit): log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
-        except Exception as main_err: log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); traceback.print_exc(); time.sleep(120)
+            logger.info(f"✅ [نهاية الدورة] انتهت دورة المسح. الانتظار 5 دقائق...");
+            time.sleep(300)
+        except (KeyboardInterrupt, SystemExit):
+            log_and_notify("info", "إيقاف البوت.", "SYSTEM")
+            break
+        except BinanceAPIException as e:
+            if e.code == -1003:
+                logger.critical("🚨 [API BAN] تم حظر الـ IP! سيتوقف البوت لمدة 30 دقيقة لاحترام الحظر.")
+                send_telegram_message("🚨 *تم حظر الـ IP!* 🚨\nسيتوقف البوت مؤقتاً لمدة 30 دقيقة.")
+                time.sleep(1800) # Sleep for 30 minutes
+            else:
+                log_and_notify("error", f"خطأ غير متوقع من Binance API في الحلقة الرئيسية: {e}", "SYSTEM")
+                traceback.print_exc()
+                time.sleep(120)
+        except Exception as main_err:
+            log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM")
+            traceback.print_exc()
+            time.sleep(120)
 
 # --- دوال WebSocket الجديدة والمعدلة ---
 def handle_socket_message(msg: Dict[str, Any]):
