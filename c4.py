@@ -158,14 +158,17 @@ def rate_limiter(weight=1):
                     api_used_weight = 0
                     last_api_weight_reset = time.time()
                 
-                if api_used_weight + weight > 1100:
+                if api_used_weight + weight > 5800: # Adjusted limit
                     logger.warning(f"⚠️ [API Limiter] الاقتراب من حد الوزن (المستخدم: {api_used_weight}). الانتظار...")
-                    time.sleep(10)
-                    api_used_weight = 0
+                    time.sleep(5)
                 
                 try:
                     response = func(*args, **kwargs)
-                    api_used_weight += weight
+                    # For functions that return API weight in headers
+                    if hasattr(response, 'headers') and 'x-mbx-used-weight-1m' in response.headers:
+                        api_used_weight = int(response.headers['x-mbx-used-weight-1m'])
+                    else: # Fallback for functions without headers
+                        api_used_weight += weight
                     return response
                 except (BinanceAPIException, BinanceRequestException) as e:
                     if e.status_code == 429 or e.status_code == 418:
@@ -202,6 +205,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # Create tables if they don't exist
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -209,8 +213,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                         current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT,
-                        exit_levels JSONB, candles_since_entry INTEGER DEFAULT 0
+                        quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT
                     );
                 """)
                 cur.execute("""
@@ -220,16 +223,18 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS banned_ips (
-                        ip_address TEXT PRIMARY KEY, reason TEXT, banned_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                    );
-                """)
-                cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
+                
+                # --- DB SCHEMA UPDATE FIX ---
+                # Check and add missing columns to the signals table for backward compatibility
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_levels JSONB;")
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;")
+                # --- END DB FIX ---
+
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
             return
@@ -343,7 +348,6 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
     try:
-        limit = (days * 24 * 60) // int(interval[:-1]) if interval.endswith('m') else (days * 24) // int(interval[:-1])
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         if not klines: return None
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
@@ -433,7 +437,6 @@ def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     with FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["value"]
     
-    # Simple resistance: highest high of last 10 candles (excluding current)
     resistance_level = df['high'].iloc[-11:-1].max()
     breakout = last['close'] > resistance_level and prev['close'] <= resistance_level
     if not breakout: return False
@@ -864,7 +867,7 @@ function updateStatus() {
         tradeText.textContent = data.is_trading_enabled ? 'مُفعَّل' : 'غير مُفعَّل';
         tradeText.className = `font-bold text-lg ${data.is_trading_enabled ? 'text-accent-green' : 'text-accent-red'}`;
         document.getElementById('usdt-balance').textContent = data.usdt_balance ? parseFloat(data.usdt_balance).toFixed(2) : 'N/A';
-        const weightPercent = (data.api_weight / 1200) * 100;
+        const weightPercent = (data.api_weight / 6000) * 100;
         document.getElementById('api-weight-bar').style.width = `${weightPercent}%`;
         
         const lightsContainer = document.getElementById('market-trend-lights');
@@ -1053,24 +1056,20 @@ def update_settings():
     try:
         data = request.get_json()
         
-        # Update risk percentage
         with risk_per_trade_lock: 
             global RISK_PER_TRADE_PERCENT
             RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
         
-        # Update strategy toggles
         strategies_data = data.get('strategies', {})
         for key, is_enabled in strategies_data.items():
             if key in STRATEGY_CONFIG:
                 with STRATEGY_CONFIG[key]['lock']: 
                     STRATEGY_CONFIG[key]['enabled'] = bool(is_enabled)
         
-        # Update filter settings
         filters_data = data.get('filters', {})
         for key, value in filters_data.items():
             if key in FILTER_CONFIG:
                 with FILTER_CONFIG[key]['lock']:
-                    # Ensure correct type casting
                     if isinstance(FILTER_CONFIG[key]['value'], (int, float)):
                         FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(value)
                     else:
@@ -1304,16 +1303,35 @@ def main_loop_enhanced():
         except (KeyboardInterrupt, SystemExit): log_and_notify("info", "إيقاف البوت.", "SYSTEM"); break
         except Exception as main_err: log_and_notify("error", f"خطأ حرج في الحلقة الرئيسية: {main_err}", "SYSTEM"); traceback.print_exc(); time.sleep(120)
 
+# --- API RATE LIMIT FIX ---
+@rate_limiter(weight=40) # get_symbol_ticker for all symbols has a weight of 40
+def get_all_tickers():
+    return client.get_symbol_ticker()
+
 def price_update_loop():
     if not redis_client: return
+    logger.info("✅ [محدث الأسعار] بدء حلقة تحديث الأسعار...")
     while True:
         try:
             if validated_symbols_to_scan:
-                tickers = client.get_symbol_ticker()
-                prices_to_set = {t['symbol']: t['price'] for t in tickers if t['symbol'] in validated_symbols_to_scan or t['symbol'] == BTC_SYMBOL}
-                if prices_to_set: redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
-            time.sleep(1)
-        except Exception as e: logger.error(f"خطأ في حلقة تحديث الأسعار: {e}"); time.sleep(10)
+                all_tickers = get_all_tickers()
+                
+                # Create a set for faster lookups
+                symbols_needed = set(validated_symbols_to_scan)
+                symbols_needed.add(BTC_SYMBOL)
+                
+                # Filter in memory
+                prices_to_set = {t['symbol']: t['price'] for t in all_tickers if t['symbol'] in symbols_needed}
+                
+                if prices_to_set:
+                    redis_client.hset("crypto_bot_prices", mapping=prices_to_set)
+            
+            # Sleep longer to respect API limits even more
+            time.sleep(2) 
+        except Exception as e: 
+            logger.error(f"❌ خطأ في حلقة تحديث الأسعار: {e}")
+            time.sleep(10)
+# --- END API RATE LIMIT FIX ---
 
 def load_initial_data():
     global validated_symbols_to_scan
