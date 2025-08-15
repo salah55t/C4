@@ -1,7 +1,7 @@
-# ملف c4_enhanced_v10.1_dashboard_complete.py - نسخة V10.1 "Phoenix"
-# --- نسخة معدلة مع إصلاح جذري لمشكلة حدود الـ API ---
-# هذا الملف يدمج جميع الدوال والوظائف في هيكل واحد متكامل،
-# ويحتوي على كل التحسينات المطلوبة بما في ذلك لوحة التحكم المطورة.
+# ملف c4_enhanced_v10.2_db_cache.py - نسخة V10.2 "Guardian"
+# --- نسخة معدلة مع تخزين البيانات التاريخية في قاعدة البيانات ---
+# هذا الإصدار ينقل الكاش من الذاكرة إلى قاعدة البيانات لتقليل استهلاك الموارد
+# وتحسين الاستقرار، مع استثناء بيانات اتجاه السوق السريعة (5 دقائق).
 
 import time
 import os
@@ -37,11 +37,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10.1_phoenix.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10.2_guardian.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10.1-Phoenix')
+logger = logging.getLogger('CryptoBotV10.2-Guardian')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -106,6 +106,7 @@ BTC_SYMBOL: str = 'BTCUSDT'
 MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
 ADX_PERIOD: int = 14
+CACHE_EXPIRATION_MINUTES: int = 15 # مدة صلاحية الكاش في قاعدة البيانات
 
 # --- إعدادات إدارة المخاطر والخروج ---
 USE_SMART_EXIT_SYSTEM: bool = True
@@ -131,14 +132,6 @@ notifications_cache = []
 notifications_lock = Lock()
 current_market_state: Dict[str, Any] = {"status": "INITIALIZING"}
 market_state_lock = Lock()
-
-# --- [بداية الإصلاح] ---
-# 1. تعريف متغيرات الذاكرة المؤقتة (الكاش)
-# سيتم استخدام هذا القاموس لتخزين البيانات التاريخية التي يتم جلبها من المنصة
-historical_data_cache = {}
-cache_lock = Lock() # قفل لضمان عدم حدوث تضارب عند الوصول للكاش من عدة عمليات
-CACHE_EXPIRATION_SECONDS = 15 * 60 # مدة صلاحية البيانات في الكاش (15 دقيقة)
-# --- [نهاية الإصلاح] ---
 
 # --- قاموس أسباب الرفض باللغة العربية (موسع) ---
 REJECTION_REASONS_AR = {
@@ -215,6 +208,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # ... (باقي جداولك كما هي)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -224,7 +218,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                         current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT
+                        quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT,
+                        exit_levels JSONB, candles_since_entry INTEGER DEFAULT 0
                     );
                 """)
                 cur.execute("""
@@ -240,9 +235,20 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_levels JSONB;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();")
+                # --- [بداية التعديل] ---
+                # 1. إنشاء جدول جديد لتخزين البيانات التاريخية
+                logger.info("[قاعدة البيانات] التحقق من وجود جدول الكاش للبيانات التاريخية...")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS historical_data_cache (
+                        symbol_timeframe TEXT PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        timeframe TEXT NOT NULL,
+                        data JSONB NOT NULL,
+                        last_updated TIMESTAMP WITH TIME ZONE NOT NULL
+                    );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_symbol_timeframe ON historical_data_cache (symbol, timeframe);")
+                # --- [نهاية التعديل] ---
 
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
@@ -271,6 +277,8 @@ def check_db_connection() -> bool:
         except Exception as retry_e:
             logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
             return False
+
+# ... (باقي الدوال المساعدة كما هي)
 
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
@@ -370,6 +378,87 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
         raise
 
+# --- [بداية التعديل] ---
+# 2. دوال مساعدة لتحويل DataFrame من وإلى JSON لتخزينها في قاعدة البيانات
+def _df_to_json(df: pd.DataFrame) -> str:
+    """يحول DataFrame إلى صيغة JSON قابلة للتخزين."""
+    return df.to_json(orient='split', date_format='iso')
+
+def _json_to_df(json_str: str) -> pd.DataFrame:
+    """يعيد تحويل JSON من قاعدة البيانات إلى DataFrame."""
+    df = pd.read_json(json_str, orient='split')
+    df.index = pd.to_datetime(df.index, utc=True)
+    return df
+
+# 3. دالة جديدة ومحورية لجلب البيانات مع نظام كاش متكامل مع قاعدة البيانات
+def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
+    """
+    يجلب البيانات التاريخية لعملة معينة.
+    يستخدم قاعدة البيانات كذاكرة مؤقتة (كاش) لتجنب استدعاءات API المفرطة.
+    يتم استثناء إطار 5 دقائق من الكاش لجلب بيانات حية دائماً لتحليل السوق.
+    """
+    # استثناء خاص: لا تستخدم الكاش لإطار الخمس دقائق
+    if timeframe == '5m':
+        logger.info(f"  -> [{symbol}-{timeframe}] ⚡ جلب بيانات حية (بدون كاش).")
+        return fetch_historical_data(symbol, timeframe, days=2) # أيام أقل تكفي لفريم صغير
+
+    if not check_db_connection() or not conn:
+        logger.warning("[DB Cache] لا يوجد اتصال بقاعدة البيانات، سيتم الجلب مباشرة من API.")
+        return fetch_historical_data(symbol, timeframe, days)
+
+    try:
+        # الخطوة 1: محاولة جلب البيانات من كاش قاعدة البيانات
+        with conn.cursor() as cur:
+            pk = f"{symbol}_{timeframe}"
+            cur.execute(
+                "SELECT data, last_updated FROM historical_data_cache WHERE symbol_timeframe = %s",
+                (pk,)
+            )
+            cache_result = cur.fetchone()
+
+        # الخطوة 2: التحقق من صلاحية البيانات الموجودة في الكاش
+        if cache_result:
+            last_updated_time = cache_result['last_updated']
+            if (datetime.now(timezone.utc) - last_updated_time) < timedelta(minutes=CACHE_EXPIRATION_MINUTES):
+                logger.info(f"  -> [{symbol}-{timeframe}] 💾 استخدام البيانات من كاش قاعدة البيانات.")
+                return _json_to_df(cache_result['data'])
+            else:
+                logger.info(f"  -> [{symbol}-{timeframe}] ⏳ بيانات الكاش منتهية الصلاحية.")
+
+    except Exception as e:
+        logger.error(f"❌ [DB Cache] خطأ أثناء قراءة الكاش لـ {symbol}-{timeframe}: {e}")
+        if conn: conn.rollback()
+
+    # الخطوة 3: إذا لم تكن البيانات في الكاش أو منتهية الصلاحية، يتم جلبها من المنصة
+    logger.info(f"  -> [{symbol}-{timeframe}] 🌐 جلب بيانات جديدة من المنصة.")
+    try:
+        df = fetch_historical_data(symbol, timeframe, days)
+        if df is not None and not df.empty:
+            # الخطوة 4: تخزين البيانات الجديدة في كاش قاعدة البيانات
+            json_data = _df_to_json(df)
+            with conn.cursor() as cur:
+                pk = f"{symbol}_{timeframe}"
+                cur.execute("""
+                    INSERT INTO historical_data_cache (symbol_timeframe, symbol, timeframe, data, last_updated)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (symbol_timeframe) DO UPDATE SET
+                        data = EXCLUDED.data,
+                        last_updated = EXCLUDED.last_updated;
+                """, (pk, symbol, timeframe, json_data, datetime.now(timezone.utc)))
+            conn.commit()
+            logger.info(f"  -> [{symbol}-{timeframe}] ✅ تم تحديث الكاش في قاعدة البيانات.")
+            return df
+        return None
+    except Exception as e:
+        logger.error(f"❌ [DB Cache] فشل جلب وتخزين البيانات لـ {symbol}-{timeframe}: {e}")
+        if conn: conn.rollback()
+        # في حالة الفشل، نحاول إعادة رفع الخطأ ليتم التعامل معه
+        if isinstance(e, BinanceAPIException) and e.code == -1003:
+            raise
+        return None
+# --- [نهاية التعديل] ---
+
+
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
     df_calc = df.copy()
@@ -420,44 +509,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
     return df_calc.dropna()
 
-# --- [بداية الإصلاح] ---
-# 2. إنشاء دالة جديدة لجلب البيانات باستخدام الكاش
-def get_data_for_symbol(symbol: str) -> Optional[pd.DataFrame]:
-    """
-    تجلب البيانات التاريخية لعملة معينة، مع استخدام الكاش لتجنب استدعاءات API المفرطة.
-    """
-    with cache_lock:
-        cache_entry = historical_data_cache.get(symbol)
-        # التحقق مما إذا كانت البيانات موجودة في الكاش ولم تنتهِ صلاحيتها
-        if cache_entry and (time.time() - cache_entry['timestamp']) < CACHE_EXPIRATION_SECONDS:
-            logger.info(f"  -> [{symbol}] 🧠 استخدام البيانات من الذاكرة المؤقتة (الكاش).")
-            return cache_entry['data']
-
-    # إذا لم تكن في الكاش أو انتهت صلاحيتها، يتم جلب بيانات جديدة من المنصة
-    logger.info(f"  -> [{symbol}] 🌐 جلب بيانات تاريخية جديدة من المنصة.")
-    try:
-        df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-        if df is not None and not df.empty:
-            # تحديث الكاش بالبيانات الجديدة
-            with cache_lock:
-                historical_data_cache[symbol] = {
-                    'timestamp': time.time(),
-                    'data': df
-                }
-            return df
-        return None
-    except BinanceAPIException as e:
-        # إعادة إرسال الخطأ ليتم التعامل معه في الحلقة الرئيسية
-        if e.code == -1003:
-            raise
-        logger.error(f"❌ [{symbol}] خطأ API غير معالج في get_data_for_symbol: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"❌ [{symbol}] خطأ عام في get_data_for_symbol: {e}")
-        return None
-# --- [نهاية الإصلاح] ---
-
-# --- دوال منطق الاستراتيجيات المحسنة والجديدة ---
+# --- دوال منطق الاستراتيجيات (بدون تغيير) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 26: return False
     last = df.iloc[-1]
@@ -540,7 +592,7 @@ def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
     log_rejection(df.name, "VWAP_Reversal: Conditions Not Met", {"reversal": vwap_reversal, "candle": candle_confirmed, "volume": volume_confirmed, "mode": mode})
     return False
 
-# --- دوال إدارة المخاطر والصفقات ---
+# --- دوال إدارة المخاطر والصفقات (بدون تغيير) ---
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -741,10 +793,11 @@ def update_strategy_performance(strategy_name: str, pnl_percent: float):
         if conn: conn.rollback()
 
 
-# --- واجهة الويب (Flask) المطورة ---
+# --- واجهة الويب (Flask) (بدون تغيير) ---
 app = Flask(__name__)
 CORS(app)
 
+# ... (كل مسارات API و HTML الخاصة بـ Flask تبقى كما هي)
 @app.before_request
 def block_method():
     pass
@@ -755,7 +808,7 @@ def get_dashboard_html_v10_1():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Phoenix V10.1 - لوحة تحكم التداول</title>
+    <title>Phoenix V10.2 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -774,8 +827,8 @@ def get_dashboard_html_v10_1():
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
-                <span class="text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-yellow-500">Phoenix</span>
-                <span class="text-text-secondary font-medium">V10.1</span>
+                <span class="text-transparent bg-clip-text bg-gradient-to-r from-teal-400 to-blue-500">Guardian</span>
+                <span class="text-text-secondary font-medium">V10.2</span>
             </h1>
             <div class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="w-32">
@@ -916,7 +969,7 @@ function updateStatus() {
         lightsContainer.innerHTML = '';
         const trends = data.market_state?.market_trends;
         if (trends) {
-            const timeframes = ['15m', '1h', '4h'];
+            const timeframes = ['5m', '15m', '1h', '4h'];
             timeframes.forEach(tf => {
                 const trend = trends[tf] || 'RANGING';
                 let lightClass = 'bg-accent-yellow';
@@ -1136,6 +1189,7 @@ def manual_close_trade_endpoint(signal_id):
     if close_signal(signal_id, current_price, 'manual'): return jsonify({"success": True, "message": "Signal closed."})
     else: return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
+
 # --- حلقات النظام الأساسية ---
 def determine_market_state_enhanced():
     global current_market_state
@@ -1152,20 +1206,20 @@ def determine_market_state_enhanced():
         return "RANGING"
 
     try:
-        timeframes = {'15m': 10, '1h': 10, '4h': 20}
+        # --- [بداية التعديل] ---
+        # 4. تحديث الأطر الزمنية لتشمل 5 دقائق للتحليل السريع
+        timeframes = {'5m': 2, '15m': 10, '1h': 10, '4h': 20}
         market_trends = {}
         
         for tf, days in timeframes.items():
-            # --- [بداية الإصلاح] ---
-            # 3. استخدام الدالة الجديدة لجلب بيانات البيتكوين من الكاش
-            df_btc = get_data_for_symbol(BTC_SYMBOL)
-            # --- [نهاية الإصلاح] ---
+            # 5. استدعاء الدالة الجديدة للحصول على البيانات (ستستخدم الكاش أو API حسب الحاجة)
+            df_btc = get_data_for_symbol(BTC_SYMBOL, tf, days)
             if df_btc is not None:
                 df_with_features = calculate_all_features(df_btc)
                 market_trends[tf] = get_trend(df_with_features)
             else:
                 market_trends[tf] = "N/A"
-
+        # --- [نهاية التعديل] ---
 
         primary_trend = market_trends.get('4h', 'RANGING')
         
@@ -1185,7 +1239,7 @@ def determine_market_state_enhanced():
                 "session_status": {"name": session_name, "liquidity": liquidity},
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
-        logger.info(f"✅ [حالة السوق] 15m: {market_trends.get('15m', 'N/A')}, 1h: {market_trends.get('1h', 'N/A')}, 4h: {market_trends.get('4h', 'N/A')}")
+        logger.info(f"✅ [حالة السوق] 5m: {market_trends.get('5m', 'N/A')}, 15m: {market_trends.get('15m', 'N/A')}, 1h: {market_trends.get('1h', 'N/A')}, 4h: {market_trends.get('4h', 'N/A')}")
     except Exception as e:
         logger.error(f"❌ [حالة السوق] خطأ في التحديث: {e}", exc_info=True)
 
@@ -1193,9 +1247,15 @@ def passes_comprehensive_market_filter() -> bool:
     with market_state_lock: state = current_market_state
     if state.get("status") != "OK": return False
     
+    # استخدام الاتجاه على المدى القصير (5 دقائق) كفلتر إضافي
+    short_term_trend = state.get('market_trends', {}).get('5m', 'RANGING')
+    if "DOWNTREND" in short_term_trend:
+        log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend (5m)", {"btc_trend_5m": short_term_trend})
+        return False
+
     primary_trend = state.get('primary_trend', 'RANGING')
     if "DOWNTREND" in primary_trend: 
-        log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend", {"btc_trend_4h": primary_trend})
+        log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend (4h)", {"btc_trend_4h": primary_trend})
         return False
         
     liquidity = state.get('session_status', {}).get('liquidity', 'LOW')
@@ -1335,16 +1395,16 @@ def main_loop_enhanced():
                 with signal_cache_lock:
                     if symbol in open_signals_cache or len(open_signals_cache) >= MAX_OPEN_TRADES: continue
                 
-                # --- [بداية الإصلاح] ---
-                # 4. استبدال الاستدعاء المباشر بالاستدعاء عبر دالة الكاش
-                df_15m = get_data_for_symbol(symbol)
-                # --- [نهاية الإصلاح] ---
+                # --- [بداية التعديل] ---
+                # 6. استدعاء دالة جلب البيانات مع الإطار الزمني المحدد للإشارات
+                df_signal = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                # --- [نهاية التعديل] ---
 
-                if df_15m is None or len(df_15m) < 201: 
+                if df_signal is None or len(df_signal) < 201: 
                     time.sleep(0.5)
                     continue
                 
-                df_with_indicators = calculate_all_features(df_15m)
+                df_with_indicators = calculate_all_features(df_signal)
                 df_with_indicators.name = symbol
                 
                 signal_found, strategy_used = False, None
@@ -1411,7 +1471,7 @@ def main_loop_enhanced():
             traceback.print_exc()
             time.sleep(120)
 
-# --- دوال WebSocket الجديدة والمعدلة ---
+# --- دوال WebSocket (بدون تغيير) ---
 def handle_socket_message(msg: Dict[str, Any]):
     try:
         if msg.get('e') == 'error':
@@ -1495,13 +1555,13 @@ def initialize_bot_services():
         start_websocket_streams()
 
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.1 - Phoenix)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.2 - Guardian)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # --- نقطة الدخول الرئيسية ---
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول V10.1 'Phoenix' مع لوحة التحكم 🚀")
+    logger.info("🚀 إطلاق بوت التداول V10.2 'Guardian' مع لوحة التحكم 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
