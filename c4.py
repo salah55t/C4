@@ -1129,7 +1129,9 @@ def determine_market_state_enhanced():
                 "session_status": {"name": session_name, "liquidity": liquidity},
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
-        logger.info(f"✅ [حالة السوق] 15m: {market_trends['15m']}, 1h: {market_trends['1h']}, 4h: {market_trends['4h']}")
+        # --- FIX START: Made logging more robust to prevent crashes ---
+        logger.info(f"✅ [حالة السوق] 15m: {market_trends.get('15m', 'N/A')}, 1h: {market_trends.get('1h', 'N/A')}, 4h: {market_trends.get('4h', 'N/A')}")
+        # --- FIX END ---
     except Exception as e:
         logger.error(f"❌ [حالة السوق] خطأ في التحديث: {e}", exc_info=True)
 
