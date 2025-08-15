@@ -207,16 +207,20 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
+                # --- FIX START: Add opened_at column for correct time-based exit calculation ---
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
                         target_price DOUBLE PRECISION, stop_loss DOUBLE PRECISION NOT NULL,
-                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
+                        status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, 
+                        opened_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
                         current_peak_price DOUBLE PRECISION, is_real_trade BOOLEAN DEFAULT FALSE,
                         quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT
                     );
                 """)
+                # --- FIX END ---
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS strategy_performance (
                         strategy_name TEXT PRIMARY KEY, total_trades INTEGER DEFAULT 0,
@@ -230,8 +234,11 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 
+                # --- FIX START: Ensure all necessary columns exist for backward compatibility ---
                 cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS exit_levels JSONB;")
-                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;")
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS candles_since_entry INTEGER DEFAULT 0;") # Kept for safety, but logic is replaced
+                cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS opened_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();")
+                # --- FIX END ---
 
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
@@ -573,15 +580,18 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
                 signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
 
         with conn.cursor() as cur:
+            # --- FIX START: Add opened_at to the insert statement ---
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, exit_levels)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
+                INSERT INTO signals (symbol, entry_price, target_price, stop_loss, strategy_name, signal_details, is_real_trade, quantity, original_quantity, order_id, current_peak_price, exit_levels, opened_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *;
             """, (
                 signal_data['symbol'], signal_data['entry_price'], signal_data.get('target_price'), signal_data['stop_loss'],
                 signal_data['strategy_name'], json.dumps(signal_data['signal_details'], cls=NpEncoder),
                 signal_data.get('is_real_trade', False), signal_data.get('quantity'), signal_data.get('quantity'),
-                signal_data.get('order_id'), signal_data['entry_price'], json.dumps(signal_data.get('exit_levels'), cls=NpEncoder)
+                signal_data.get('order_id'), signal_data['entry_price'], json.dumps(signal_data.get('exit_levels'), cls=NpEncoder),
+                datetime.now(timezone.utc)
             ))
+            # --- FIX END ---
             saved_signal = cur.fetchone()
             conn.commit()
             logger.info(f"💾 [{signal_data['symbol']}] تم حفظ الإشارة الجديدة في قاعدة البيانات.")
@@ -1129,9 +1139,7 @@ def determine_market_state_enhanced():
                 "session_status": {"name": session_name, "liquidity": liquidity},
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
-        # --- FIX START: Made logging more robust to prevent crashes ---
         logger.info(f"✅ [حالة السوق] 15m: {market_trends.get('15m', 'N/A')}, 1h: {market_trends.get('1h', 'N/A')}, 4h: {market_trends.get('4h', 'N/A')}")
-        # --- FIX END ---
     except Exception as e:
         logger.error(f"❌ [حالة السوق] خطأ في التحديث: {e}", exc_info=True)
 
@@ -1154,6 +1162,15 @@ def passes_comprehensive_market_filter() -> bool:
 
 def trade_management_loop():
     logger.info("✅ [مدير الصفقات الذكي] بدء حلقة إدارة الصفقات...")
+    # --- FIX START: Define timeframe interval in seconds for correct calculation ---
+    interval_str = SIGNAL_GENERATION_TIMEFRAME
+    interval_seconds = 0
+    if 'm' in interval_str:
+        interval_seconds = int(interval_str.replace('m', '')) * 60
+    elif 'h' in interval_str:
+        interval_seconds = int(interval_str.replace('h', '')) * 3600
+    # --- FIX END ---
+
     while True:
         try:
             with signal_cache_lock:
@@ -1178,16 +1195,30 @@ def trade_management_loop():
                 
                 current_price = float(current_price_str)
                 symbol = signal['symbol']
-                signal['candles_since_entry'] = signal.get('candles_since_entry', 0) + 1
-
+                
                 if current_price <= float(signal['stop_loss']):
                     close_signal(signal['id'], current_price, 'stop_loss')
                     continue
                 
-                if time_based_exit_candles > 0 and signal['candles_since_entry'] > time_based_exit_candles and not signal.get('exit_levels', {}).get('1', {}).get('is_hit', True):
-                    logger.info(f"⏳ [{symbol}] خروج زمني بعد {time_based_exit_candles} شمعة.")
-                    close_signal(signal['id'], current_price, 'time_based_exit')
-                    continue
+                # --- FIX START: Correct time-based exit logic ---
+                if time_based_exit_candles > 0 and interval_seconds > 0:
+                    opened_at_time = signal.get('opened_at')
+                    if opened_at_time:
+                        # Ensure opened_at_time is timezone-aware
+                        if opened_at_time.tzinfo is None:
+                            opened_at_time = opened_at_time.replace(tzinfo=timezone.utc)
+                        
+                        time_since_open = (datetime.now(timezone.utc) - opened_at_time).total_seconds()
+                        candles_passed = time_since_open / interval_seconds
+                        
+                        if candles_passed > time_based_exit_candles:
+                            # Check if first TP is not hit
+                            first_tp_hit = signal.get('exit_levels', {}).get('1', {}).get('is_hit', False)
+                            if not first_tp_hit:
+                                logger.info(f"⏳ [{symbol}] خروج زمني بعد {candles_passed:.1f} شمعة (الحد: {time_based_exit_candles}).")
+                                close_signal(signal['id'], current_price, 'time_based_exit')
+                                continue
+                # --- FIX END ---
 
                 if USE_SMART_EXIT_SYSTEM and 'exit_levels' in signal and signal['exit_levels']:
                     if signal.get('quantity') is None:
@@ -1222,7 +1253,7 @@ def trade_management_loop():
                             send_telegram_message(message)
 
                     signal['exit_levels'] = exit_levels
-                    update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity), 'candles_since_entry': signal['candles_since_entry']})
+                    update_signal_in_db(signal['id'], {'exit_levels': exit_levels, 'quantity': float(remaining_quantity)})
                     if remaining_quantity <= Decimal('0.00000001'):
                         close_signal(signal['id'], current_price, 'all_tp_hit')
                         continue
@@ -1266,8 +1297,6 @@ def main_loop_enhanced():
                 
                 df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df_15m is None or len(df_15m) < 201: 
-                    # --- إصلاح: زيادة فترة الانتظار لتجنب استهلاك حدود الـ API ---
-                    # هذا التأخير ضروري جداً لتوزيع طلبات البيانات التاريخية على فترة أطول
                     time.sleep(3)
                     continue
                 
