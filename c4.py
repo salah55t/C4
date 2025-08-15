@@ -80,15 +80,22 @@ risk_per_trade_lock = Lock()
 STRATEGY_CONFIG = {
     "BB_Stoch": {"enabled": True, "lock": Lock(), "display_name": "BB+Stoch (Enhanced)"},
     "MACD_EMA": {"enabled": True, "lock": Lock(), "display_name": "MACD+EMA (Enhanced)"},
-    "EMA_RSI": {"enabled": True, "lock": Lock(), "display_name": "EMA+RSI Cross"},
-    "Pullback": {"enabled": True, "lock": Lock(), "display_name": "Pullback MACD"},
-    "BB_Squeeze": {"enabled": True, "lock": Lock(), "display_name": "BB Squeeze Breakout"},
-    "Bullish_Momentum": {"enabled": True, "lock": Lock(), "display_name": "Bullish Momentum"},
     "SR_Breakout": {"enabled": True, "lock": Lock(), "display_name": "S/R Breakout (Enhanced)"},
     "Triple_Confirmation": {"enabled": True, "lock": Lock(), "display_name": "Triple Confirmation (New)"},
     "VWAP_Reversal": {"enabled": True, "lock": Lock(), "display_name": "VWAP Reversal (New)"},
-    "Order_Flow_Imbalance": {"enabled": False, "lock": Lock(), "display_name": "Order Flow (Advanced)"}
 }
+
+# --- إعدادات الفلاتر القابلة للتعديل ---
+FILTER_CONFIG = {
+    "ADX_THRESHOLD": {"value": 20, "lock": Lock(), "display_name": "حد مؤشر ADX"},
+    "BB_STOCH_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (BB Stoch)"},
+    "SR_BREAKOUT_VOLUME_MULT": {"value": 1.3, "lock": Lock(), "display_name": "مضاعف فوليوم (SR Breakout)"},
+    "TRIPLE_CONF_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (Triple Conf)"},
+    "VWAP_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (VWAP Reversal)"},
+    "TRIPLE_CONF_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (Triple Conf)"}, # 'strict' or 'relaxed'
+    "VWAP_REVERSAL_MODE": {"value": "relaxed", "lock": Lock(), "display_name": "وضع (VWAP Reversal)"} # 'strict' or 'relaxed'
+}
+
 
 # --- إعدادات المؤشرات الفنية والإطارات الزمنية ---
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -128,22 +135,16 @@ market_state_lock = Lock()
 REJECTION_REASONS_AR = {
     "Market Status Filter: BTC Downtrend": "فلتر السوق: اتجاه البيتكوين هابط",
     "Market Status Filter: Low Liquidity": "فلتر السوق: سيولة منخفضة",
-    "Market Status Filter: Extreme Volatility": "فلتر السوق: تقلبات مفرطة",
-    "Market Status Filter: Weak Trend": "فلتر السوق: اتجاه عام ضعيف (ADX < 20)",
-    "BB_Stoch: ADX Filter Failed": "BB_Stoch: فلتر قوة الاتجاه ADX < 20",
-    "BB_Stoch: BBW Filter Failed": "BB_Stoch: فلتر توسع البولينجر BBW < 0.02",
+    "BB_Stoch: ADX Filter Failed": "BB_Stoch: فلتر قوة الاتجاه ADX",
+    "BB_Stoch: BBW Filter Failed": "BB_Stoch: فلتر توسع البولينجر BBW",
     "BB_Stoch: Volume Filter Failed": "BB_Stoch: فلتر تأكيد حجم التداول",
-    "MACD_EMA: RSI Filter Failed": "MACD_EMA: فلتر RSI < 55",
-    "MACD_EMA: Zero Cross Filter Failed": "MACD_EMA: فلتر عبور خط الصفر",
-    "MACD_EMA: Trend Filter Failed": "MACD_EMA: فلتر تأكيد الاتجاه (EMA 50 < 200)",
-    "SR_Breakout: Retest Failed": "SR_Breakout: فشل إعادة اختبار المستوى المخترق",
-    "Triple_Confirmation: Conditions Not Met": "Triple Confirmation: لم تتحقق شروط التأكيد الثلاثي",
-    "VWAP_Reversal: Conditions Not Met": "VWAP Reversal: لم تتحقق شروط الانعكاس",
-    "Order_Flow: Imbalance Too Low": "Order Flow: نسبة عدم التوازن غير كافية",
+    "MACD_EMA: RSI Filter Failed": "MACD_EMA: فلتر RSI",
+    "MACD_EMA: Trend Filter Failed": "MACD_EMA: فلتر تأكيد الاتجاه",
+    "SR_Breakout: Retest Failed": "SR_Breakout: فشل إعادة اختبار المستوى",
+    "Triple_Confirmation: Conditions Not Met": "Triple Confirmation: لم تتحقق الشروط",
+    "VWAP_Reversal: Conditions Not Met": "VWAP Reversal: لم تتحقق الشروط",
     "Insufficient Balance": "الرصيد غير كافٍ",
     "Min Notional Filter": "قيمة الصفقة أقل من الحد الأدنى",
-    "Invalid Position Size": "حجم الصفقة غير صالح",
-    "API Rate Limit Approaching": "الاقتراب من حدود استخدام API",
 }
 
 # --- نظام الحماية من تجاوز حدود API ---
@@ -356,32 +357,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
         return None
 
-def calculate_vwap(df: pd.DataFrame) -> pd.DataFrame:
-    q = df['volume']
-    p = (df['high'] + df['low'] + df['close']) / 3
-    df['vwap'] = (p * q).cumsum() / q.cumsum()
-    return df
-
-def calculate_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
-    last_candle = df.iloc[-1]
-    pivot = (last_candle['high'] + last_candle['low'] + last_candle['close']) / 3
-    s1 = (2 * pivot) - last_candle['high']
-    r1 = (2 * pivot) - last_candle['low']
-    s2 = pivot - (last_candle['high'] - last_candle['low'])
-    r2 = pivot + (last_candle['high'] - last_candle['low'])
-    df['pivot'], df['r1'], df['s1'], df['r2'], df['s2'] = pivot, r1, s1, r2, s2
-    return df
-
-def calculate_fibonacci_levels(df: pd.DataFrame) -> pd.DataFrame:
-    lookback_period = 50
-    highest_high = df['high'].iloc[-lookback_period:].max()
-    lowest_low = df['low'].iloc[-lookback_period:].min()
-    diff = highest_high - lowest_low
-    df['fib_236'] = highest_high - (diff * 0.236)
-    df['fib_382'] = highest_high - (diff * 0.382)
-    df['fib_618'] = highest_high - (diff * 0.618)
-    return df
-
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty: return pd.DataFrame()
     df_calc = df.copy()
@@ -426,102 +401,94 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    # New Indicators
-    df_calc = calculate_vwap(df_calc)
-    df_calc = calculate_pivot_points(df_calc)
-    df_calc = calculate_fibonacci_levels(df_calc)
+    # VWAP
+    q = df_calc['volume']
+    p = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
+    df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
     return df_calc.dropna()
 
 # --- دوال منطق الاستراتيجيات المحسنة والجديدة ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 26: return False
     last = df.iloc[-1]
+    
+    with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
+    with FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["value"]
+    
     price_touch_bb = last['low'] <= last['bb_lower']
     stoch_oversold = last['stoch_rsi_k'] < 30 and last['stoch_rsi_d'] < 30
-    adx_strong = last['adx'] > 20 # RELAXED from 25
-    if not adx_strong: log_rejection(df.name, "BB_Stoch: ADX Filter Failed", {"adx": f"{last['adx']:.2f}"}); return False
-    bb_width_expanding = last['bb_width'] > 0.02
-    if not bb_width_expanding: log_rejection(df.name, "BB_Stoch: BBW Filter Failed", {"bb_width": f"{last['bb_width']:.4f}"}); return False
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.1) # RELAXED from 1.2
-    if not volume_confirmed: log_rejection(df.name, "BB_Stoch: Volume Filter Failed", {"volume_ratio": f"{last['volume'] / last['volume_sma_20']:.2f}"}); return False
-    if price_touch_bb and stoch_oversold: logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch (معززة)."); return True
-    return False
-
-def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 201: return False
-    last, prev = df.iloc[-1], df.iloc[-2]
-    long_term_trend_ok = last['ema_50'] > last['ema_200']
-    if not long_term_trend_ok: log_rejection(df.name, "MACD_EMA: Trend Filter Failed"); return False
-    macd_cross_zero = prev['macd'] < 0 and last['macd'] > 0
-    if not macd_cross_zero: log_rejection(df.name, "MACD_EMA: Zero Cross Filter Failed"); return False
-    rsi_strong = last['rsi'] > 55
-    if not rsi_strong: log_rejection(df.name, "MACD_EMA: RSI Filter Failed", {"rsi": f"{last['rsi']:.2f}"}); return False
-    macd_cross_up_signal = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
-    if macd_cross_up_signal: logger.info(f"  -> [{df.name}] ✅ إشارة MACD+EMA (معززة)."); return True
+    adx_strong = last['adx'] > adx_thresh
+    if not adx_strong: log_rejection(df.name, "BB_Stoch: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh}); return False
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
+    if not volume_confirmed: log_rejection(df.name, "BB_Stoch: Volume Filter Failed", {"vol_multiplier": vol_mult}); return False
+    
+    if price_touch_bb and stoch_oversold: 
+        logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch.")
+        return True
     return False
 
 def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 12: return False
+    if len(df) < 20: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    resistance_level = last['r1']
+    
+    with FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["value"]
+    
+    # Simple resistance: highest high of last 10 candles (excluding current)
+    resistance_level = df['high'].iloc[-11:-1].max()
     breakout = last['close'] > resistance_level and prev['close'] <= resistance_level
     if not breakout: return False
-    retest_found = any(abs(df.iloc[-i]['high'] - resistance_level) / resistance_level < 0.002 for i in range(2, 12))
-    if not retest_found: log_rejection(df.name, "SR_Breakout: Retest Failed", {"level": f"{resistance_level:.4f}"}); return False
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.3) # RELAXED from 1.5
-    if volume_confirmed: logger.info(f"  -> [{df.name}] ✅ إشارة اختراق دعم/مقاومة (معززة)."); return True
-    return False
+    
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
+    if not volume_confirmed: log_rejection(df.name, "SR_Breakout: Volume Filter Failed", {"vol_multiplier": vol_mult}); return False
+    
+    logger.info(f"  -> [{df.name}] ✅ إشارة اختراق دعم/مقاومة.")
+    return True
 
 def check_triple_confirmation_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 201: return False
     last = df.iloc[-1]
+
+    with FILTER_CONFIG["TRIPLE_CONF_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["TRIPLE_CONF_VOLUME_MULT"]["value"]
+    with FILTER_CONFIG["TRIPLE_CONF_MODE"]["lock"]: mode = FILTER_CONFIG["TRIPLE_CONF_MODE"]["value"]
+
     trend_confirmed = last['ema_50'] > last['ema_200']
     momentum_confirmed = last['macd'] > last['macd_signal'] and last['rsi'] > 55
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * 1.1) # RELAXED from 1.3
+    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
     
-    # RELAXED: Require at least 2 out of 3 conditions
-    if sum([trend_confirmed, momentum_confirmed, volume_confirmed]) >= 2:
-        logger.info(f"  -> [{df.name}] ✅ إشارة التأكيد الثلاثي (المخفف).")
+    conditions_met = sum([trend_confirmed, momentum_confirmed, volume_confirmed])
+    required_conditions = 3 if mode == 'strict' else 2
+
+    if conditions_met >= required_conditions:
+        logger.info(f"  -> [{df.name}] ✅ إشارة التأكيد الثلاثي (الوضع: {mode}).")
         return True
         
-    log_rejection(df.name, "Triple_Confirmation: Conditions Not Met", {"trend": trend_confirmed, "momentum": momentum_confirmed, "volume": volume_confirmed})
+    log_rejection(df.name, "Triple_Confirmation: Conditions Not Met", {"trend": trend_confirmed, "momentum": momentum_confirmed, "volume": volume_confirmed, "mode": mode})
     return False
 
 def check_vwap_reversal_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 21: return False
     last, prev = df.iloc[-1], df.iloc[-2]
+
+    with FILTER_CONFIG["VWAP_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["VWAP_VOLUME_MULT"]["value"]
+    with FILTER_CONFIG["VWAP_REVERSAL_MODE"]["lock"]: mode = FILTER_CONFIG["VWAP_REVERSAL_MODE"]["value"]
+
     vwap_reversal = prev['close'] < prev['vwap'] and last['close'] > last['vwap']
     is_bullish_engulfing = prev['close'] < prev['open'] and last['close'] > last['open'] and last['close'] > prev['open']
     is_hammer = (last['close'] > last['open']) and (last['open'] - last['low']) > 2 * (last['close'] - last['open'])
-    volume_confirmed = last['volume'] > (df['volume'].iloc[-11:-1].mean() * 1.2) # RELAXED from 1.5
+    candle_confirmed = is_bullish_engulfing or is_hammer
+    volume_confirmed = last['volume'] > (df['volume'].iloc[-11:-1].mean() * vol_mult)
     
-    # RELAXED: Require reversal and (candle confirmation OR volume confirmation)
-    if vwap_reversal and ((is_bullish_engulfing or is_hammer) or volume_confirmed):
-        logger.info(f"  -> [{df.name}] ✅ إشارة انعكاس VWAP (المخفف).")
+    passes = False
+    if mode == 'strict':
+        passes = vwap_reversal and candle_confirmed and volume_confirmed
+    else: # relaxed
+        passes = vwap_reversal and (candle_confirmed or volume_confirmed)
+
+    if passes:
+        logger.info(f"  -> [{df.name}] ✅ إشارة انعكاس VWAP (الوضع: {mode}).")
         return True
         
-    log_rejection(df.name, "VWAP_Reversal: Conditions Not Met", {"reversal": vwap_reversal, "candle": (is_bullish_engulfing or is_hammer), "volume": volume_confirmed})
-    return False
-
-@rate_limiter(weight=5)
-def analyze_order_flow_imbalance(symbol: str) -> Optional[float]:
-    try:
-        order_book = client.get_order_book(symbol=symbol, limit=10)
-        bids_volume = sum(Decimal(bid[1]) for bid in order_book['bids'])
-        asks_volume = sum(Decimal(ask[1]) for ask in order_book['asks'])
-        if asks_volume == 0: return None
-        return float(bids_volume / asks_volume)
-    except Exception as e:
-        logger.error(f"❌ [{symbol}] فشل تحليل Order Flow: {e}")
-        return None
-
-def check_order_flow_imbalance_strategy(symbol: str) -> bool:
-    imbalance_ratio = analyze_order_flow_imbalance(symbol)
-    if imbalance_ratio is None: return False
-    if imbalance_ratio > 1.5:
-        logger.info(f"  -> [{symbol}] ✅ إشارة عدم توازن تدفق الطلبات (Ratio: {imbalance_ratio:.2f}).")
-        return True
-    log_rejection(symbol, "Order_Flow: Imbalance Too Low", {"ratio": f"{imbalance_ratio:.2f}"})
+    log_rejection(df.name, "VWAP_Reversal: Conditions Not Met", {"reversal": vwap_reversal, "candle": candle_confirmed, "volume": volume_confirmed, "mode": mode})
     return False
 
 # --- دوال إدارة المخاطر والصفقات ---
@@ -755,6 +722,8 @@ def get_dashboard_html_v10_1():
         input:checked + .toggle-bg { background-color: var(--accent-green); }
         .progress-bar { background-color: #30363d; border-radius: 9999px; overflow: hidden; }
         .progress-bar-inner { background-color: var(--accent-blue); height: 100%; transition: width 0.5s ease-in-out; }
+        .input-field { background-color: var(--bg-main); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: var(--text-primary); }
+        select.input-field { -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23848D97%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22/%3E%3C/svg%3E'); background-repeat: no-repeat; background-position: left 0.75rem center; background-size: 0.65em auto; padding-left: 2rem; }
     </style>
 </head>
 <body class="p-4 md:p-6">
@@ -784,7 +753,7 @@ def get_dashboard_html_v10_1():
                 </div>
                 <div class="mt-2 text-xs text-text-secondary">رصيد USDT: <span id="usdt-balance" class="font-mono">...</span></div>
             </div>
-            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">حالة السوق (BTC)</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
+            <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الاتجاه العام (4h)</h3><div id="overall-regime" class="text-2xl font-bold text-center">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الجلسات النشطة</h3><div id="active-sessions-list" class="flex flex-wrap gap-2 items-center justify-center pt-2">...</div></div>
             <div class="card p-4"><h3 class="font-bold mb-3 text-lg text-text-secondary">الصفقات المفتوحة</h3><div id="open-trades-count" class="text-2xl font-bold text-center">...</div></div>
         </section>
@@ -802,22 +771,26 @@ def get_dashboard_html_v10_1():
             <div id="signals-tab" class="tab-content grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4"></div>
             <div id="performance-tab" class="tab-content hidden"><div class="overflow-x-auto card p-0"><table class="min-w-full text-sm text-right"><thead class="border-b border-border-color bg-black/20"><tr><th class="p-4 font-semibold">الاستراتيجية</th><th class="p-4 font-semibold">إجمالي الصفقات</th><th class="p-4 font-semibold">معدل الربح</th><th class="p-4 font-semibold">إجمالي PNL</th></tr></thead><tbody id="performance-table"></tbody></table></div></div>
             <div id="settings-tab" class="tab-content hidden card p-6">
-                 <h4 class="text-xl font-bold mb-6 text-text-primary">إعدادات الاستراتيجيات والمخاطر</h4>
-                 <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                 <h4 class="text-xl font-bold mb-6 text-text-primary">الإعدادات العامة</h4>
+                 <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
                     <div>
-                        <h5 class="text-lg font-bold mb-4 text-text-secondary">الإعدادات العامة</h5>
+                        <h5 class="text-lg font-bold mb-4 text-text-secondary">إدارة المخاطر</h5>
                         <div class="space-y-4">
                            <div>
                                 <label for="risk-percent" class="block text-sm font-medium text-text-secondary mb-1">نسبة المخاطرة للصفقة (%)</label>
-                                <input type="number" id="risk-percent" step="0.1" class="input-field w-full bg-bg-main border-border-color rounded p-2">
+                                <input type="number" id="risk-percent" step="0.1" class="input-field w-full">
                            </div>
                         </div>
                     </div>
-                    <div>
+                    <div class="md:col-span-2">
                         <h5 class="text-lg font-bold mb-4 text-text-secondary">تفعيل الاستراتيجيات</h5>
-                        <div id="strategy-toggles-container" class="space-y-3"></div>
+                        <div id="strategy-toggles-container" class="grid grid-cols-2 gap-x-8 gap-y-3"></div>
                     </div>
                  </div>
+                 <div class="border-t border-border-color my-8"></div>
+                 <h4 class="text-xl font-bold mb-6 text-text-primary">إعدادات الفلاتر</h4>
+                 <div id="filter-settings-container" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-8"></div>
+
                  <div class="mt-8 text-left border-t border-border-color pt-6">
                     <button onclick="saveSettings()" class="bg-accent-blue hover:bg-blue-500 text-white font-bold py-2 px-6 rounded-lg">حفظ الإعدادات</button>
                     <span id="settings-feedback" class="mr-4"></span>
@@ -915,6 +888,21 @@ function updateStatus() {
             Object.entries(data.settings.strategies).forEach(([key, config]) => {
                 togglesContainer.innerHTML += `<div class="flex items-center justify-between"><span class="text-sm">${config.display_name}</span><label class="flex items-center cursor-pointer"><div class="relative"><input type="checkbox" id="strategy-${key}" data-strategy-key="${key}" class="sr-only strategy-toggle-input" ${config.enabled ? 'checked' : ''}><div class="toggle-bg block bg-gray-600 w-10 h-6 rounded-full"></div></div></label></div>`;
             });
+            
+            const filtersContainer = document.getElementById('filter-settings-container');
+            filtersContainer.innerHTML = '';
+            Object.entries(data.settings.filters).forEach(([key, config]) => {
+                let inputHTML = '';
+                if (typeof config.value === 'number') {
+                    inputHTML = `<input type="number" id="filter-${key}" data-filter-key="${key}" value="${config.value}" step="0.1" class="input-field w-full filter-input">`;
+                } else {
+                    inputHTML = `<select id="filter-${key}" data-filter-key="${key}" class="input-field w-full filter-input">
+                        <option value="strict" ${config.value === 'strict' ? 'selected' : ''}>صارم</option>
+                        <option value="relaxed" ${config.value === 'relaxed' ? 'selected' : ''}>مخفف</option>
+                    </select>`;
+                }
+                filtersContainer.innerHTML += `<div><label for="filter-${key}" class="block text-sm font-medium text-text-secondary mb-1">${config.display_name}</label>${inputHTML}</div>`;
+            });
         }
     });
 }
@@ -948,10 +936,24 @@ function toggleTrading() { fetchData('/api/trading/toggle', { method: 'POST' }).
 function saveSettings() {
     const strategies = {};
     document.querySelectorAll('.strategy-toggle-input').forEach(input => { strategies[input.dataset.strategyKey] = input.checked; });
-    const settings = { risk_percent: parseFloat(document.getElementById('risk-percent').value), strategies: strategies };
+    
+    const filters = {};
+    document.querySelectorAll('.filter-input').forEach(input => {
+        const key = input.dataset.filterKey;
+        const value = input.type === 'number' ? parseFloat(input.value) : input.value;
+        filters[key] = value;
+    });
+
+    const settings = { 
+        risk_percent: parseFloat(document.getElementById('risk-percent').value), 
+        strategies: strategies,
+        filters: filters
+    };
+
     const feedbackEl = document.getElementById('settings-feedback');
     feedbackEl.textContent = 'جاري الحفظ...';
     feedbackEl.className = 'mr-4 text-accent-yellow';
+
     fetchData('/api/settings/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }).then(data => {
         if (data && data.success) { feedbackEl.textContent = '✅ تم الحفظ بنجاح!'; feedbackEl.className = 'mr-4 text-accent-green'; }
         else { feedbackEl.textContent = `❌ فشل الحفظ: ${data ? data.message : 'خطأ'}`; feedbackEl.className = 'mr-4 text-accent-red'; }
@@ -981,12 +983,27 @@ def get_status():
     if client:
         try: usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
         except: usdt_balance = 'N/A'
+    
     with risk_per_trade_lock: risk = RISK_PER_TRADE_PERCENT
     strategy_settings = {key: {"enabled": config['enabled'], "display_name": config['display_name']} for key, config in STRATEGY_CONFIG.items()}
+    
+    filter_settings = {}
+    for key, config in FILTER_CONFIG.items():
+        with config['lock']:
+            filter_settings[key] = {"value": config['value'], "display_name": config['display_name']}
+
     return jsonify({
-        "market_state": state_copy, "is_trading_enabled": is_enabled, "usdt_balance": usdt_balance,
-        "api_weight": weight, "open_trades_count": open_trades, "max_open_trades": MAX_OPEN_TRADES,
-        "settings": {"risk_percent": risk, "strategies": strategy_settings}
+        "market_state": state_copy, 
+        "is_trading_enabled": is_enabled, 
+        "usdt_balance": usdt_balance,
+        "api_weight": weight, 
+        "open_trades_count": open_trades, 
+        "max_open_trades": MAX_OPEN_TRADES,
+        "settings": {
+            "risk_percent": risk, 
+            "strategies": strategy_settings,
+            "filters": filter_settings
+        }
     })
 
 @app.route('/api/signals')
@@ -1033,14 +1050,32 @@ def toggle_trading_status():
 
 @app.route('/api/settings/update', methods=['POST'])
 def update_settings():
-    global RISK_PER_TRADE_PERCENT
     try:
         data = request.get_json()
-        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
+        
+        # Update risk percentage
+        with risk_per_trade_lock: 
+            global RISK_PER_TRADE_PERCENT
+            RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
+        
+        # Update strategy toggles
         strategies_data = data.get('strategies', {})
         for key, is_enabled in strategies_data.items():
             if key in STRATEGY_CONFIG:
-                with STRATEGY_CONFIG[key]['lock']: STRATEGY_CONFIG[key]['enabled'] = bool(is_enabled)
+                with STRATEGY_CONFIG[key]['lock']: 
+                    STRATEGY_CONFIG[key]['enabled'] = bool(is_enabled)
+        
+        # Update filter settings
+        filters_data = data.get('filters', {})
+        for key, value in filters_data.items():
+            if key in FILTER_CONFIG:
+                with FILTER_CONFIG[key]['lock']:
+                    # Ensure correct type casting
+                    if isinstance(FILTER_CONFIG[key]['value'], (int, float)):
+                        FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(value)
+                    else:
+                        FILTER_CONFIG[key]['value'] = str(value)
+
         log_and_notify('info', "⚙️ تم تحديث الإعدادات من لوحة التحكم.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "Settings updated successfully"})
     except Exception as e:
@@ -1110,7 +1145,6 @@ def passes_comprehensive_market_filter() -> bool:
     with market_state_lock: state = current_market_state
     if state.get("status") != "OK": return False
     
-    # The main filter will now rely on the 4h trend
     primary_trend = state.get('primary_trend', 'RANGING')
     if "DOWNTREND" in primary_trend: 
         log_rejection("GLOBAL", "Market Status Filter: BTC Downtrend", {"btc_trend_4h": primary_trend})
@@ -1232,8 +1266,9 @@ def main_loop_enhanced():
                 
                 signal_found, strategy_used = False, None
                 strategies_to_check = [
-                    ('BB_Stoch', check_bb_stoch_strategy_enhanced), ('MACD_EMA', check_macd_ema_strategy_enhanced),
-                    ('SR_Breakout', check_sr_breakout_strategy_enhanced), ('Triple_Confirmation', check_triple_confirmation_strategy),
+                    ('BB_Stoch', check_bb_stoch_strategy_enhanced),
+                    ('SR_Breakout', check_sr_breakout_strategy_enhanced), 
+                    ('Triple_Confirmation', check_triple_confirmation_strategy),
                     ('VWAP_Reversal', check_vwap_reversal_strategy)
                 ]
                 for key, func in strategies_to_check:
