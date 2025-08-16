@@ -16,6 +16,7 @@ import psycopg2
 import redis
 import traceback
 import gc
+import random
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -185,7 +186,9 @@ def fetch_and_validate_symbols():
     # الخطوة 2: قراءة الملف المحلي والتحقق من الرموز
     validated_symbols = []
     try:
-        with open('crypto_list.txt', 'r') as f:
+        # --- التعديل هنا ---
+        # استخدام ترميز 'utf-8-sig' لتجاهل الأحرف غير المرئية (BOM) في بداية الملف
+        with open('crypto_list.txt', 'r', encoding='utf-8-sig') as f:
             symbols_from_file = [line.strip().upper() for line in f if line.strip()]
         
         log_and_notify("info", f"📖 تم العثور على {len(symbols_from_file)} رمز في ملف crypto_list.txt.", "INITIALIZATION")
