@@ -1,11 +1,9 @@
-# ملف c4_v11_integrated.py - نسخة V11.0 "Integrated"
-# --- نسخة متكاملة مع جميع الدوال ولوحة تحكم كاملة ---
-# هذا الإصدار يجمع كل المكونات في سكربت واحد قابل للتشغيل.
-# 1. دوال تهيئة كاملة (Binance, DB, Redis).
-# 2. جميع استراتيجيات التداول الست مكتوبة بالكامل.
-# 3. الحلقة الرئيسية الفعلية للمسح والتداول.
-# 4. نظام إدارة الطلبات والصفقات.
-# 5. لوحة تحكم ويب تفاعلية متكاملة.
+# ملف c4_v11.1_local_list.py - نسخة V11.1 "Local List"
+# --- نسخة محدثة لتقرأ قائمة العملات من ملف محلي ---
+# التحديث الرئيسي في هذا الإصدار:
+# 1. تعديل دالة `fetch_and_validate_symbols` لتقوم بقراءة الرموز من ملف `crypto_list.txt`.
+# 2. إضافة لاحقة "USDT" تلقائيًا لكل رمز.
+# 3. التحقق من صلاحية كل رمز من الملف مقابل بيانات Binance الحية.
 
 import time
 import os
@@ -141,7 +139,6 @@ def initialize_database():
         conn = psycopg2.connect(DB_URL)
         conn.autocommit = True
         log_and_notify("info", "✅ تم الاتصال بقاعدة البيانات بنجاح.", "INITIALIZATION")
-        # ... يمكنك إضافة كود إنشاء الجداول هنا إذا لم تكن موجودة
     except OperationalError as e:
         log_and_notify("critical", f"❌ فشل الاتصال بقاعدة البيانات: {e}", "INITIALIZATION")
         conn = None
@@ -166,25 +163,55 @@ def initialize_binance_client() -> Optional[Client]:
         log_and_notify("critical", f"❌ فشل الاتصال بـ Binance API: {e}", "INITIALIZATION")
         return None
 
+# --- الدالة المعدلة ---
 def fetch_and_validate_symbols():
+    """
+    تقوم هذه الدالة بقراءة قائمة العملات من ملف `crypto_list.txt`،
+    ثم تتحقق من صلاحيتها للتداول على Binance.
+    """
     global exchange_info_map, validated_symbols_to_scan
     if not client: return
+
+    # الخطوة 1: جلب جميع معلومات الصرف مرة واحدة كمرجع
     try:
         info = client.get_exchange_info()
-        symbols = info.get('symbols', [])
-        for s in symbols:
+        for s in info.get('symbols', []):
             exchange_info_map[s['symbol']] = s
-        
-        validated_symbols_to_scan = [
-            s['symbol'] for s in symbols
-            if s['status'] == 'TRADING'
-            and s['quoteAsset'] == 'USDT'
-            and 'SPOT' in s['permissions']
-            and not any(keyword in s['baseAsset'] for keyword in ['UP', 'DOWN', 'BEAR', 'BULL'])
-        ]
-        log_and_notify("info", f"🔍 تم العثور على {len(validated_symbols_to_scan)} عملة صالحة للتداول مقابل USDT.", "INITIALIZATION")
+        log_and_notify("info", f"🔍 تم جلب معلومات الصرف لـ {len(exchange_info_map)} رمز.", "INITIALIZATION")
     except Exception as e:
-        log_and_notify("error", f"❌ فشل في جلب معلومات العملات: {e}", "INITIALIZATION")
+        log_and_notify("error", f"❌ فشل في جلب معلومات العملات من Binance: {e}", "INITIALIZATION")
+        return
+
+    # الخطوة 2: قراءة الملف المحلي والتحقق من الرموز
+    validated_symbols = []
+    try:
+        with open('crypto_list.txt', 'r') as f:
+            symbols_from_file = [line.strip().upper() for line in f if line.strip()]
+        
+        log_and_notify("info", f"📖 تم العثور على {len(symbols_from_file)} رمز في ملف crypto_list.txt.", "INITIALIZATION")
+
+        for base_asset in symbols_from_file:
+            symbol = f"{base_asset}USDT"
+            
+            # التحقق من وجود الرمز وصلاحيته
+            if symbol in exchange_info_map:
+                symbol_info = exchange_info_map[symbol]
+                if (symbol_info['status'] == 'TRADING' and 
+                    'SPOT' in symbol_info['permissions']):
+                    validated_symbols.append(symbol)
+                else:
+                    logger.warning(f"⚠️ الرمز {symbol} من الملف غير صالح للتداول (الحالة: {symbol_info['status']}).")
+            else:
+                logger.warning(f"⚠️ الرمز {symbol} من الملف غير موجود في Binance.")
+
+        validated_symbols_to_scan = validated_symbols
+        log_and_notify("info", f"✅ تم التحقق من صلاحية {len(validated_symbols_to_scan)} عملة من الملف المحلي.", "INITIALIZATION")
+
+    except FileNotFoundError:
+        log_and_notify("critical", "❌ لم يتم العثور على ملف `crypto_list.txt`. يرجى إنشاء الملف ووضع رموز العملات فيه.", "INITIALIZATION")
+    except Exception as e:
+        log_and_notify("error", f"❌ حدث خطأ أثناء قراءة ملف العملات: {e}", "INITIALIZATION")
+
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
 def get_data_for_symbol(symbol: str, timeframe: str, lookback_days: int) -> Optional[pd.DataFrame]:
@@ -212,7 +239,6 @@ def get_data_for_symbol(symbol: str, timeframe: str, lookback_days: int) -> Opti
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
         ])
         
-        # تحويل الأعمدة إلى أنواع بيانات مناسبة
         numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'quote_asset_volume', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume']
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors='coerce')
         df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
@@ -226,7 +252,6 @@ def get_data_for_symbol(symbol: str, timeframe: str, lookback_days: int) -> Opti
     return None
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (نفس دالة حساب المؤشرات من الإصدار السابق) ...
     if df is None or df.empty: return pd.DataFrame()
     df_calc = df.copy()
     
@@ -404,7 +429,6 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
             log_rejection(symbol, "Quantity less than minQty", {"quantity": quantity, "minQty": min_qty})
             return None
             
-        # تطبيق stepSize
         adjusted_quantity = (Decimal(str(quantity)) // step_size) * step_size
         return adjusted_quantity
     except Exception as e:
@@ -434,7 +458,8 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
 
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         info = exchange_info_map.get(symbol)
-        min_notional = Decimal(next((f.get('minNotional', '0') for f in info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), '0'))
+        min_notional_filter = next((f for f in info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+        min_notional = Decimal(min_notional_filter['minNotional']) if min_notional_filter else Decimal('0')
         
         if notional_value < min_notional:
             log_rejection(symbol, "Min Notional Filter failed", {"value": notional_value, "min": min_notional})
@@ -522,7 +547,7 @@ def main_loop():
                             continue
                         
                         last_atr = df_indicators.iloc[-1]['atr']
-                        stop_loss_price = entry_price - (last_atr * 2) # مثال: وقف خسارة عند 2 * ATR
+                        stop_loss_price = entry_price - (last_atr * 2)
                         
                         quantity = calculate_position_size(symbol, entry_price, stop_loss_price)
                         if not quantity: continue
@@ -562,7 +587,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة تحكم بوت التداول V11</title>
+    <title>لوحة تحكم بوت التداول V11.1</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <style>
@@ -584,7 +609,7 @@ HTML_TEMPLATE = """
 <body x-data="botDashboard()" x-init="init()">
     <div class="container mx-auto p-4 md:p-6">
         <header class="flex justify-between items-center mb-6">
-            <h1 class="text-3xl font-bold text-white">لوحة تحكم البوت V11</h1>
+            <h1 class="text-3xl font-bold text-white">لوحة تحكم البوت V11.1</h1>
             <div class="flex items-center space-x-4 space-x-reverse">
                 <span class="text-sm" x-text="`آخر تحديث: ${lastUpdated}`"></span>
                 <div :class="status.is_bot_running ? 'bg-green-500' : 'bg-red-500'" class="w-4 h-4 rounded-full animate-pulse"></div>
@@ -771,7 +796,7 @@ def update_risk():
     risk_val = request.json.get('risk')
     try:
         new_risk = float(risk_val)
-        if 0.1 <= new_risk <= 5.0: # حد منطقي للمخاطرة
+        if 0.1 <= new_risk <= 5.0:
             with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = new_risk
             log_and_notify("info", f"تم تحديث نسبة المخاطرة إلى {new_risk}%", "CONTROL")
             return jsonify({"success": True})
@@ -782,7 +807,7 @@ def update_risk():
 
 # --- نقطة الدخول الرئيسية ---
 if __name__ == "__main__":
-    log_and_notify("info", "🚀 إطلاق بوت التداول المتكامل V11.0 🚀", "SYSTEM")
+    log_and_notify("info", "🚀 إطلاق بوت التداول المتكامل V11.1 🚀", "SYSTEM")
     
     initialize_database()
     initialize_redis()
