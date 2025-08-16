@@ -1,10 +1,10 @@
-# ملف c4_enhanced_v10.6_sentinel.py - نسخة V10.6 "Sentinel"
-# --- نسخة معدلة مع منظم طلبات استباقي لمنع الحظر ---
-# هذا الإصدار يقدم آلية "Token Bucket" لتنظيم وتيرة إرسال الطلبات
-# وتوزيعها على مدار الدقيقة، مما يمنع الاندفاعات التي تؤدي للحظر.
-# --- تحديثات v10.6 ---
-# 1. تطبيق نظام الفحص بالدفعات (Batch Processing) لتحسين إدارة الذاكرة.
-# 2. إضافة جامع القمامة (Garbage Collector) لتحرير الذاكرة بعد كل دفعة.
+# ملف c4_enhanced_v10.7_bb_reversal.py - نسخة V10.7 "BB Reversal"
+# --- نسخة معدلة مع استراتيجية BB Reversal المحسنة ---
+# هذا الإصدار يستبدل استراتيجية BB+Stoch القديمة بأخرى جديدة تعتمد على
+# ظهور شمعة انعكاسية صاعدة بعد ملامسة الحد السفلي لمؤشر بولينجر باند.
+# --- تحديثات v10.7 ---
+# 1. إضافة دالة is_bullish_reversal لتحديد الشموع الانعكاسية الصاعدة.
+# 2. تعديل منطق استراتيجية BB لتطبيق الشروط الجديدة المطلوبة.
 
 import time
 import os
@@ -16,7 +16,7 @@ import pandas as pd
 import psycopg2
 import redis
 import traceback
-import gc # <-- تم استيراد مكتبة جامع القمامة
+import gc
 from decimal import Decimal, ROUND_DOWN, InvalidOperation
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -41,11 +41,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v10.6_sentinel.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v10.7_bb_reversal.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10.6-Sentinel')
+logger = logging.getLogger('CryptoBotV10.7-BB-Reversal')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -80,7 +80,7 @@ risk_per_trade_lock = Lock()
 
 # --- مفاتيح تفعيل الاستراتيجيات ---
 STRATEGY_CONFIG = {
-    "BB_Stoch": {"enabled": True, "lock": Lock(), "display_name": "BB+Stoch (Enhanced)"},
+    "BB_Reversal": {"enabled": True, "lock": Lock(), "display_name": "BB Reversal (New)"},
     "MACD_EMA": {"enabled": True, "lock": Lock(), "display_name": "MACD+EMA (Enhanced)"},
     "SR_Breakout": {"enabled": True, "lock": Lock(), "display_name": "S/R Breakout (Enhanced)"},
     "Triple_Confirmation": {"enabled": True, "lock": Lock(), "display_name": "Triple Confirmation (New)"},
@@ -90,7 +90,7 @@ STRATEGY_CONFIG = {
 # --- إعدادات الفلاتر القابلة للتعديل ---
 FILTER_CONFIG = {
     "ADX_THRESHOLD": {"value": 20, "lock": Lock(), "display_name": "حد مؤشر ADX"},
-    "BB_STOCH_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (BB Stoch)"},
+    "BB_STOCH_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (BB Reversal)"},
     "SR_BREAKOUT_VOLUME_MULT": {"value": 1.3, "lock": Lock(), "display_name": "مضاعف فوليوم (SR Breakout)"},
     "TRIPLE_CONF_VOLUME_MULT": {"value": 1.1, "lock": Lock(), "display_name": "مضاعف فوليوم (Triple Conf)"},
     "VWAP_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (VWAP Reversal)"},
@@ -107,7 +107,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
 ADX_PERIOD: int = 14
 CACHE_EXPIRATION_MINUTES: int = 15
-BATCH_SIZE: int = 50 # <-- حجم الدفعة للفحص
+BATCH_SIZE: int = 50
 
 # --- إعدادات إدارة المخاطر والخروج ---
 USE_SMART_EXIT_SYSTEM: bool = True
@@ -139,9 +139,9 @@ REJECTION_REASONS_AR = {
     "Market Status Filter: BTC Downtrend (5m)": "فلتر السوق: اتجاه البيتكوين هابط (5 دقائق)",
     "Market Status Filter: BTC Downtrend (4h)": "فلتر السوق: اتجاه البيتكوين هابط (4 ساعات)",
     "Market Status Filter: Low Liquidity": "فلتر السوق: سيولة منخفضة",
-    "BB_Stoch: ADX Filter Failed": "BB_Stoch: فلتر قوة الاتجاه ADX",
-    "BB_Stoch: BBW Filter Failed": "BB_Stoch: فلتر توسع البولينجر BBW",
-    "BB_Stoch: Volume Filter Failed": "BB_Stoch: فلتر تأكيد حجم التداول",
+    "BB Reversal: No Reversal Candle": "انعكاس BB: لم تظهر شمعة انعكاسية",
+    "BB Reversal: ADX Filter Failed": "انعكاس BB: فلتر قوة الاتجاه ADX",
+    "BB Reversal: Volume Filter Failed": "انعكاس BB: فلتر تأكيد حجم التداول",
     "MACD_EMA: RSI Filter Failed": "MACD_EMA: فلتر RSI",
     "MACD_EMA: Trend Filter Failed": "MACD_EMA: فلتر تأكيد الاتجاه",
     "SR_Breakout: Retest Failed": "SR_Breakout: فشل إعادة اختبار المستوى",
@@ -489,21 +489,74 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     return df_calc.dropna()
 
 # --- دوال الاستراتيجيات وإدارة الصفقات ---
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 26: return False
+
+def is_bullish_reversal(df: pd.DataFrame) -> bool:
+    """
+    Identifies a bullish reversal pattern.
+    Checks for a strong bullish candle or a bullish engulfing pattern on the last candle.
+    """
+    if len(df) < 2:
+        return False
     last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # A strong bullish candle is a green candle where the body is at least 50% of the total candle range.
+    is_green_candle = last['close'] > last['open']
+    candle_range = last['high'] - last['low']
+    body_size = last['close'] - last['open']
+    is_strong_body = (body_size / candle_range) >= 0.5 if candle_range > 0 else False
+
+    # A Bullish Engulfing pattern is a green candle that engulfs the previous red candle.
+    is_bullish_engulfing = (
+        is_green_candle and
+        prev['close'] < prev['open'] and  # Previous candle is red
+        last['close'] > prev['open'] and
+        last['open'] < prev['close']
+    )
+
+    # A reversal is considered true if it's either a strong bullish candle or a bullish engulfing pattern.
+    return is_strong_body or is_bullish_engulfing
+
+def check_bb_reversal_strategy(df: pd.DataFrame) -> bool:
+    """
+    New strategy based on user request.
+    1. Price touches the lower Bollinger Band on the previous candle.
+    2. A bullish reversal candle appears on the current candle.
+    3. The signal is generated at the close of the reversal candle.
+    """
+    if len(df) < 26: return False  # Ensure enough data for indicators
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # Condition 1: Price touched or went below the lower BB on the *previous* candle.
+    price_touched_bb = prev['low'] <= prev['bb_lower']
+
+    # Condition 2: The *current* (last) candle is a bullish reversal candle.
+    reversal_candle_appeared = is_bullish_reversal(df)
+
+    if not (price_touched_bb and reversal_candle_appeared):
+        if price_touched_bb and not reversal_candle_appeared:
+             log_rejection(df.name, "BB Reversal: No Reversal Candle", {"details": "Price touched BB, but no reversal candle followed."})
+        return False
+
+    # Optional but recommended filters for confirmation
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
     with FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["value"]
-    price_touch_bb = last['low'] <= last['bb_lower']
-    stoch_oversold = last['stoch_rsi_k'] < 30 and last['stoch_rsi_d'] < 30
+
     adx_strong = last['adx'] > adx_thresh
-    if not adx_strong: log_rejection(df.name, "BB_Stoch: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh}); return False
+    if not adx_strong:
+        log_rejection(df.name, "BB Reversal: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh})
+        return False
+
     volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
-    if not volume_confirmed: log_rejection(df.name, "BB_Stoch: Volume Filter Failed", {"vol_multiplier": vol_mult}); return False
-    if price_touch_bb and stoch_oversold: 
-        logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch.")
-        return True
-    return False
+    if not volume_confirmed:
+        log_rejection(df.name, "BB Reversal: Volume Filter Failed", {"vol_multiplier": vol_mult})
+        return False
+
+    # If all conditions are met, it's a valid signal.
+    logger.info(f"  -> [{df.name}] ✅ إشارة انعكاس BB (شمعة انعكاسية بعد ملامسة الحد السفلي).")
+    return True
 
 def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 20: return False
@@ -850,7 +903,7 @@ def get_dashboard_html_v10_6():
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V10.6 - لوحة تحكم التداول</title>
+    <title>Sentinel V10.7 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -870,7 +923,7 @@ def get_dashboard_html_v10_6():
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
                 <span class="text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-500">Sentinel</span>
-                <span class="text-text-secondary font-medium">V10.6</span>
+                <span class="text-text-secondary font-medium">V10.7</span>
             </h1>
             <div class="flex items-center gap-x-6 bg-black/20 px-4 py-2 rounded-lg border border-border-color">
                 <div class="w-32">
@@ -1137,7 +1190,7 @@ def main_loop_enhanced():
                     signal_found, strategy_used = False, None
                     
                     strategies_to_check = [
-                        ('BB_Stoch', check_bb_stoch_strategy_enhanced), 
+                        ('BB_Reversal', check_bb_reversal_strategy), 
                         ('SR_Breakout', check_sr_breakout_strategy_enhanced), 
                         ('Triple_Confirmation', check_triple_confirmation_strategy), 
                         ('VWAP_Reversal', check_vwap_reversal_strategy)
@@ -1284,13 +1337,13 @@ def initialize_bot_services():
         Thread(target=trade_management_loop, daemon=True).start()
         start_websocket_streams()
         logger.info("✅ [خدمات البوت] تم بدء جميع الخدمات الخلفية بنجاح.")
-        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.6 - Sentinel)*")
+        send_telegram_message("✅ *البوت قيد التشغيل الآن (نسخة V10.7 - BB Reversal)*")
     except Exception as e:
         log_and_notify("critical", f"حدث خطأ حرج أثناء التهيئة: {e}", "SYSTEM"); exit(1)
 
 # --- نقطة الدخول الرئيسية ---
 if __name__ == "__main__":
-    logger.info("🚀 إطلاق بوت التداول V10.6 'Sentinel' مع لوحة التحكم 🚀")
+    logger.info("🚀 إطلاق بوت التداول V10.7 'BB Reversal' مع لوحة التحكم 🚀")
     Thread(target=initialize_bot_services, daemon=True).start()
     port = int(os.environ.get('PORT', 10000))
     host = "0.0.0.0"
