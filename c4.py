@@ -1,9 +1,8 @@
 # ملف c4_v11.1_local_list.py - نسخة V11.1 "Local List"
 # --- نسخة محدثة لتقرأ قائمة العملات من ملف محلي ---
 # التحديث الرئيسي في هذا الإصدار:
-# 1. تعديل دالة `fetch_and_validate_symbols` لتقوم بقراءة الرموز من ملف `crypto_list.txt`.
-# 2. إضافة لاحقة "USDT" تلقائيًا لكل رمز.
-# 3. التحقق من صلاحية كل رمز من الملف مقابل بيانات Binance الحية.
+# 1. تم استبدال منطق قراءة الملف بمنطق أكثر قوة وكفاءة من نسخة سابقة (v10.6).
+# 2. الدالة الآن تحدد مسار الملف تلقائيًا وتستخدم عمليات المجموعات للتحقق.
 
 import time
 import os
@@ -164,11 +163,11 @@ def initialize_binance_client() -> Optional[Client]:
         log_and_notify("critical", f"❌ فشل الاتصال بـ Binance API: {e}", "INITIALIZATION")
         return None
 
-# --- الدالة المعدلة ---
-def fetch_and_validate_symbols():
+# --- الدالة المحدثة بمنطق النسخة القديمة ---
+def fetch_and_validate_symbols(filename: str = 'crypto_list.txt'):
     """
-    تقوم هذه الدالة بقراءة قائمة العملات من ملف `crypto_list.txt`،
-    ثم تتحقق من صلاحيتها للتداول على Binance.
+    تقوم هذه الدالة بقراءة قائمة العملات من ملف محلي والتحقق من صلاحيتها
+    باستخدام منطق محسن من نسخة سابقة (v10.6).
     """
     global exchange_info_map, validated_symbols_to_scan
     if not client: return
@@ -183,37 +182,43 @@ def fetch_and_validate_symbols():
         log_and_notify("error", f"❌ فشل في جلب معلومات العملات من Binance: {e}", "INITIALIZATION")
         return
 
-    # الخطوة 2: قراءة الملف المحلي والتحقق من الرموز
-    validated_symbols = []
+    # الخطوة 2: قراءة الملف المحلي والتحقق من الرموز باستخدام منطق محسن
     try:
-        # --- التعديل هنا ---
-        # استخدام ترميز 'utf-8-sig' لتجاهل الأحرف غير المرئية (BOM) في بداية الملف
-        with open('crypto_list.txt', 'r', encoding='utf-8-sig') as f:
-            symbols_from_file = [line.strip().upper() for line in f if line.strip()]
+        # تحديد مسار الملف بشكل ديناميكي
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(script_dir, filename)
         
-        log_and_notify("info", f"📖 تم العثور على {len(symbols_from_file)} رمز في ملف crypto_list.txt.", "INITIALIZATION")
+        if not os.path.exists(file_path):
+            log_and_notify("critical", f"❌ لم يتم العثور على ملف `{filename}`. يرجى إنشاء الملف.", "INITIALIZATION")
+            return
 
-        for base_asset in symbols_from_file:
-            symbol = f"{base_asset}USDT"
-            
-            # التحقق من وجود الرمز وصلاحيته
-            if symbol in exchange_info_map:
-                symbol_info = exchange_info_map[symbol]
-                if (symbol_info['status'] == 'TRADING' and 
-                    'SPOT' in symbol_info['permissions']):
-                    validated_symbols.append(symbol)
-                else:
-                    logger.warning(f"⚠️ الرمز {symbol} من الملف غير صالح للتداول (الحالة: {symbol_info['status']}).")
-            else:
-                logger.warning(f"⚠️ الرمز {symbol} من الملف غير موجود في Binance.")
+        # استخدام ترميز 'utf-8-sig' لتجنب مشاكل BOM
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
+            # قراءة الرموز وتجاهل الأسطر الفارغة والتعليقات
+            raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
 
-        validated_symbols_to_scan = validated_symbols
+        if not raw_symbols:
+            log_and_notify("warning", f"⚠️ ملف العملات `{filename}` فارغ.", "INITIALIZATION")
+            return
+        
+        # تنسيق الرموز لضمان وجود USDT
+        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        
+        # فلترة رموز Binance الصالحة للتداول الفوري مقابل USDT
+        active_binance_symbols = {
+            s['symbol'] for s in exchange_info_map.values()
+            if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING' and 'SPOT' in s.get('permissions', [])
+        }
+        
+        # استخدام تقاطع المجموعات (set intersection) لإيجاد الرموز المشتركة
+        validated_list = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
+        
+        validated_symbols_to_scan = validated_list
         log_and_notify("info", f"✅ تم التحقق من صلاحية {len(validated_symbols_to_scan)} عملة من الملف المحلي.", "INITIALIZATION")
 
-    except FileNotFoundError:
-        log_and_notify("critical", "❌ لم يتم العثور على ملف `crypto_list.txt`. يرجى إنشاء الملف ووضع رموز العملات فيه.", "INITIALIZATION")
     except Exception as e:
         log_and_notify("error", f"❌ حدث خطأ أثناء قراءة ملف العملات: {e}", "INITIALIZATION")
+        traceback.print_exc()
 
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
