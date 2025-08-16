@@ -1,8 +1,7 @@
 # ملف c4_v11.1_local_list.py - نسخة V11.1 "Local List"
 # --- نسخة محدثة لتقرأ قائمة العملات من ملف محلي ---
 # التحديث الرئيسي في هذا الإصدار:
-# 1. تم استبدال منطق قراءة الملف بمنطق أكثر قوة وكفاءة من نسخة سابقة (v10.6).
-# 2. الدالة الآن تحدد مسار الملف تلقائيًا وتستخدم عمليات المجموعات للتحقق.
+# 1. تم استبدال دالة `fetch_and_validate_symbols` بالكامل بالمنطق المنسوخ حرفيًا من النسخة v10.6.
 
 import time
 import os
@@ -163,62 +162,61 @@ def initialize_binance_client() -> Optional[Client]:
         log_and_notify("critical", f"❌ فشل الاتصال بـ Binance API: {e}", "INITIALIZATION")
         return None
 
-# --- الدالة المحدثة بمنطق النسخة القديمة ---
+# --- الدالة المحدثة بمنطق v10.6 الأصلي ---
 def fetch_and_validate_symbols(filename: str = 'crypto_list.txt'):
     """
     تقوم هذه الدالة بقراءة قائمة العملات من ملف محلي والتحقق من صلاحيتها
-    باستخدام منطق محسن من نسخة سابقة (v10.6).
+    باستخدام المنطق المنسوخ حرفياً من النسخة القديمة (v10.6).
     """
     global exchange_info_map, validated_symbols_to_scan
     if not client: return
 
-    # الخطوة 1: جلب جميع معلومات الصرف مرة واحدة كمرجع
+    # الخطوة 1: جلب معلومات الصرف (هذا الجزء يجب أن يسبق قراءة الملف)
     try:
-        info = client.get_exchange_info()
-        for s in info.get('symbols', []):
-            exchange_info_map[s['symbol']] = s
-        log_and_notify("info", f"🔍 تم جلب معلومات الصرف لـ {len(exchange_info_map)} رمز.", "INITIALIZATION")
+        if not exchange_info_map:
+            info = client.get_exchange_info()
+            exchange_info_map = {s['symbol']: s for s in info.get('symbols', [])}
+            log_and_notify("info", f"🔍 تم جلب معلومات الصرف لـ {len(exchange_info_map)} رمز.", "INITIALIZATION")
     except Exception as e:
         log_and_notify("error", f"❌ فشل في جلب معلومات العملات من Binance: {e}", "INITIALIZATION")
         return
 
-    # الخطوة 2: قراءة الملف المحلي والتحقق من الرموز باستخدام منطق محسن
+    # الخطوة 2: قراءة الملف والتحقق من الرموز (المنطق المنسوخ من v10.6)
     try:
-        # تحديد مسار الملف بشكل ديناميكي
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
-        
+
         if not os.path.exists(file_path):
-            log_and_notify("critical", f"❌ لم يتم العثور على ملف `{filename}`. يرجى إنشاء الملف.", "INITIALIZATION")
+            log_and_notify("critical", f"❌ ملف العملات '{filename}' غير موجود في المسار: {file_path}", "INITIALIZATION")
+            validated_symbols_to_scan = []
             return
 
-        # استخدام ترميز 'utf-8-sig' لتجنب مشاكل BOM
-        with open(file_path, 'r', encoding='utf-8-sig') as f:
-            # قراءة الرموز وتجاهل الأسطر الفارغة والتعليقات
+        # استخدام ترميز 'utf-8' كما في الكود القديم
+        with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
 
         if not raw_symbols:
-            log_and_notify("warning", f"⚠️ ملف العملات `{filename}` فارغ.", "INITIALIZATION")
+            log_and_notify("warning", f"⚠️ ملف العملات '{filename}' فارغ.", "INITIALIZATION")
+            validated_symbols_to_scan = []
             return
         
-        # تنسيق الرموز لضمان وجود USDT
-        formatted_symbols = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
+        formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         
-        # فلترة رموز Binance الصالحة للتداول الفوري مقابل USDT
-        active_binance_symbols = {
-            s['symbol'] for s in exchange_info_map.values()
-            if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING' and 'SPOT' in s.get('permissions', [])
-        }
-        
-        # استخدام تقاطع المجموعات (set intersection) لإيجاد الرموز المشتركة
-        validated_list = sorted(list(formatted_symbols.intersection(active_binance_symbols)))
-        
-        validated_symbols_to_scan = validated_list
-        log_and_notify("info", f"✅ تم التحقق من صلاحية {len(validated_symbols_to_scan)} عملة من الملف المحلي.", "INITIALIZATION")
+        active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING' and 'SPOT' in info.get('permissions', [])}
 
+        validated = sorted(list(formatted.intersection(active)))
+        
+        log_and_notify("info", f"✅ [التحقق من الرموز] تم العثور على {len(validated)} عملة صالحة للتداول.", "INITIALIZATION")
+        
+        validated_symbols_to_scan = validated
+
+    except NameError:
+        log_and_notify("critical", "❌ متغير `__file__` غير معرف. لا يمكن تحديد مسار ملف العملات. تأكد من تشغيل الكود كملف.", "INITIALIZATION")
+        validated_symbols_to_scan = []
     except Exception as e:
-        log_and_notify("error", f"❌ حدث خطأ أثناء قراءة ملف العملات: {e}", "INITIALIZATION")
+        log_and_notify("error", f"❌ [التحقق من الرموز] خطأ: {e}", "INITIALIZATION")
         traceback.print_exc()
+        validated_symbols_to_scan = []
 
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
