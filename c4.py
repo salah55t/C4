@@ -107,7 +107,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
 ADX_PERIOD: int = 14
 CACHE_EXPIRATION_MINUTES: int = 15
-BATCH_SIZE: int = 50 # <-- حجم الدفعة للفحص
+BATCH_SIZE: int = 25 # <-- حجم الدفعة للفحص
 
 # --- إعدادات إدارة المخاطر والخروج ---
 USE_SMART_EXIT_SYSTEM: bool = True
@@ -1301,3 +1301,4 @@ if __name__ == "__main__":
     except ImportError:
         app.run(host=host, port=port, debug=False)
     logger.info("👋 [إيقاف] تم إيقاف تشغيل التطبيق.")
+
