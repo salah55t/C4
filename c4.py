@@ -1,5 +1,5 @@
-# ملف c4_enhanced_v11.4.py - نسخة V11.4 "Dynamic Strictness Control"
-# --- نسخة معدلة مع مقياس تحكم ديناميكي في صرامة الشروط ---
+# ملف c4_enhanced_v11.6.py - نسخة V11.6 "Memory Management & Batch Scanning"
+# --- نسخة معدلة مع مسح بالدفعات وإدارة ذاكرة محسنة لمنع الأخطاء ---
 
 import time
 import os
@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.4_strictness.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11.6_memory.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.4-Strictness')
+logger = logging.getLogger('CryptoBotV11.6-Memory')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -85,16 +85,8 @@ STRATEGY_CONFIG = {
 
 # --- إعدادات الفلاتر القابلة للتعديل ---
 FILTER_CONFIG = {
-    # --- NEW: مقياس الصرامة العام ---
     "SIGNAL_STRICTNESS": {"value": 75, "lock": Lock(), "display_name": "مقياس صرامة الشروط"}, # 0 (مرن) to 100 (صارم)
-
     "ADX_THRESHOLD": {"value": 25, "lock": Lock(), "display_name": "حد مؤشر ADX"},
-    "BB_STOCH_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (BB Reversal)"},
-    "MACD_EMA_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (MACD_EMA)"},
-    "SR_BREAKOUT_VOLUME_MULT": {"value": 1.4, "lock": Lock(), "display_name": "مضاعف فوليوم (SR Breakout)"},
-    "TRIPLE_CONF_VOLUME_MULT": {"value": 1.2, "lock": Lock(), "display_name": "مضاعف فوليوم (Triple Conf)"},
-    "VWAP_VOLUME_MULT": {"value": 1.3, "lock": Lock(), "display_name": "مضاعف فوليوم (VWAP Reversal)"},
-    "PRICE_CHANNEL_VOLUME_MULT": {"value": 1.3, "lock": Lock(), "display_name": "مضاعف فوليوم (Price Channel)"},
     "TIME_BASED_EXIT_CANDLES": {"value": 30, "lock": Lock(), "display_name": "إغلاق الصفقة بعد (شمعة)"},
     "MAX_CORRELATION_THRESHOLD": {"value": 0.7, "lock": Lock(), "display_name": "حد الارتباط بين الأصول"},
     "LIQUIDITY_FILTER_STRICTNESS": {"value": "medium", "lock": Lock(), "display_name": "صرامة فلتر السيولة"}, # 'low', 'medium', 'high'
@@ -108,7 +100,7 @@ MAX_OPEN_TRADES: int = 5
 ATR_PERIOD: int = 14
 ADX_PERIOD: int = 14
 CACHE_EXPIRATION_MINUTES: int = 15
-BATCH_SIZE: int = 50
+BATCH_SIZE: int = 50 # حجم الدفعة للمسح
 
 # --- إعدادات إدارة المخاطر والخروج ---
 USE_SMART_EXIT_SYSTEM: bool = True
@@ -138,7 +130,6 @@ market_state_lock = Lock()
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
     "Conditions Not Met": "لم تستوفِ الشروط درجة الصرامة المطلوبة",
-    "Market Status Filter: BTC Downtrend (5m)": "فلتر السوق: اتجاه البيتكوين هابط (5 دقائق)",
     "Market Status Filter: BTC Downtrend (4h)": "فلتر السوق: اتجاه البيتكوين هابط (4 ساعات)",
     "Market Status Filter: Low Liquidity": "فلتر السوق: سيولة منخفضة",
     "Market Status Filter: High Volatility": "فلتر السوق: تقلبات عالية",
@@ -148,8 +139,6 @@ REJECTION_REASONS_AR = {
     "Invalid Position Size": "حجم الصفقة غير صالح",
     "Lot Size Adjustment Failed": "فشل تعديل حجم العقد",
     "Portfolio Risk: Max Open Trades": "مخاطر المحفظة: الحد الأقصى للصفقات المفتوحة",
-    "Portfolio Risk: Sector Concentration": "مخاطر المحفظة: تركيز قطاعي مفرط",
-    "Portfolio Risk: Max Portfolio Risk": "مخاطر المحفظة: تجاوز الحد الأقصى للمخاطرة",
 }
 
 # --- آلية تنظيم الطلبات المتقدمة (Token Bucket) ---
@@ -192,8 +181,7 @@ def rate_limiter(weight=1):
         def wrapper(*args, **kwargs):
             throttler.consume(weight)
             try:
-                response = func(*args, **kwargs)
-                return response
+                return func(*args, **kwargs)
             except (BinanceAPIException, BinanceRequestException) as e:
                 if e.status_code in [429, 418]:
                     logger.critical("🚨 [API BAN] تم الوصول إلى حد الطلبات (HTTP 429/418). سيتم الانتظار لمدة 10 دقائق.")
@@ -205,15 +193,11 @@ def rate_limiter(weight=1):
 
 # --- دوال مساعدة ---
 def send_telegram_message(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("[تليجرام] Token أو Chat ID غير معين، تم تخطي الإرسال.")
-        return
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        response.raise_for_status()
-        logger.info("[تليجرام] تم إرسال الرسالة بنجاح.")
+        requests.post(url, json=payload, timeout=10).raise_for_status()
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [تليجرام] فشل إرسال الرسالة: {e}")
 
@@ -240,29 +224,21 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         quantity DOUBLE PRECISION, original_quantity DOUBLE PRECISION, order_id TEXT, closing_reason TEXT,
                         exit_levels JSONB, candles_since_entry INTEGER DEFAULT 0
                     );
-                """)
-                cur.execute("""
                     CREATE TABLE IF NOT EXISTS strategy_performance (
                         strategy_name TEXT PRIMARY KEY, total_trades INTEGER DEFAULT 0,
                         winning_trades INTEGER DEFAULT 0, total_pnl_percent DOUBLE PRECISION DEFAULT 0.0
                     );
-                """)
-                cur.execute("""
                     CREATE TABLE IF NOT EXISTS notifications (
                         id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
-                """)
-                cur.execute("""
                     CREATE TABLE IF NOT EXISTS historical_data_cache (
-                        symbol_timeframe TEXT PRIMARY KEY,
-                        symbol TEXT NOT NULL,
-                        timeframe TEXT NOT NULL,
-                        data JSONB NOT NULL,
+                        symbol_timeframe TEXT PRIMARY KEY, symbol TEXT NOT NULL,
+                        timeframe TEXT NOT NULL, data JSONB NOT NULL,
                         last_updated TIMESTAMP WITH TIME ZONE NOT NULL
                     );
+                    CREATE INDEX IF NOT EXISTS idx_symbol_timeframe ON historical_data_cache (symbol, timeframe);
                 """)
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_symbol_timeframe ON historical_data_cache (symbol, timeframe);")
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
             return
@@ -292,14 +268,12 @@ def check_db_connection() -> bool:
             return False
 
 def log_and_notify(level: str, message: str, notification_type: str):
-    log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
+    log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error}
     log_methods.get(level.lower(), logger.info)(message)
-    
     new_notification = {"timestamp": datetime.now(timezone.utc).isoformat(), "type": notification_type, "message": message}
     with notifications_lock:
         notifications_cache.insert(0, new_notification)
         if len(notifications_cache) > 100: notifications_cache.pop()
-
     if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur: cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
@@ -347,14 +321,8 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
-        if not os.path.exists(file_path):
-            logger.critical(f"❌ [التحقق من الرموز] ملف العملات '{filename}' غير موجود!")
-            return []
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
-        if not raw_symbols:
-            logger.warning(f"⚠️ [التحقق من الرموز] ملف العملات '{filename}' فارغ.")
-            return []
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         if not exchange_info_map: get_exchange_info_map()
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
@@ -383,66 +351,43 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
         raise
 
-def _df_to_json(df: pd.DataFrame) -> str:
-    return df.to_json(orient='split', date_format='iso')
-
+def _df_to_json(df: pd.DataFrame) -> str: return df.to_json(orient='split', date_format='iso')
 def _json_to_df(json_data: Any) -> pd.DataFrame:
-    if not isinstance(json_data, str):
-        json_str = json.dumps(json_data)
-    else:
-        json_str = json_data
+    json_str = json.dumps(json_data) if not isinstance(json_data, str) else json_data
     df = pd.read_json(json_str, orient='split')
     df.index = pd.to_datetime(df.index, utc=True)
     return df
 
 def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
-    if timeframe == '5m':
-        logger.info(f"  -> [{symbol}-{timeframe}] ⚡ جلب بيانات حية (بدون كاش).")
-        return fetch_historical_data(symbol, timeframe, days=2)
-
-    if not check_db_connection() or not conn:
-        logger.warning("[DB Cache] لا يوجد اتصال بقاعدة البيانات، سيتم الجلب مباشرة من API.")
-        return fetch_historical_data(symbol, timeframe, days)
-
+    if timeframe == '5m': return fetch_historical_data(symbol, timeframe, days=2)
+    if not check_db_connection() or not conn: return fetch_historical_data(symbol, timeframe, days)
     try:
         with conn.cursor() as cur:
             pk = f"{symbol}_{timeframe}"
             cur.execute("SELECT data, last_updated FROM historical_data_cache WHERE symbol_timeframe = %s", (pk,))
             cache_result = cur.fetchone()
-        if cache_result:
-            last_updated_time = cache_result['last_updated']
-            if (datetime.now(timezone.utc) - last_updated_time) < timedelta(minutes=CACHE_EXPIRATION_MINUTES):
-                logger.info(f"  -> [{symbol}-{timeframe}] 💾 استخدام البيانات من كاش قاعدة البيانات.")
-                return _json_to_df(cache_result['data'])
-            else:
-                logger.info(f"  -> [{symbol}-{timeframe}] ⏳ بيانات الكاش منتهية الصلاحية.")
+        if cache_result and (datetime.now(timezone.utc) - cache_result['last_updated']) < timedelta(minutes=CACHE_EXPIRATION_MINUTES):
+            return _json_to_df(cache_result['data'])
     except Exception as e:
         logger.error(f"❌ [DB Cache] خطأ أثناء قراءة الكاش لـ {symbol}-{timeframe}: {e}")
         if conn: conn.rollback()
-
-    logger.info(f"  -> [{symbol}-{timeframe}] 🌐 جلب بيانات جديدة من المنصة.")
     try:
         df = fetch_historical_data(symbol, timeframe, days)
         if df is not None and not df.empty:
-            json_data = _df_to_json(df)
             with conn.cursor() as cur:
                 pk = f"{symbol}_{timeframe}"
                 cur.execute("""
                     INSERT INTO historical_data_cache (symbol_timeframe, symbol, timeframe, data, last_updated)
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (symbol_timeframe) DO UPDATE SET
-                        data = EXCLUDED.data,
-                        last_updated = EXCLUDED.last_updated;
-                """, (pk, symbol, timeframe, json_data, datetime.now(timezone.utc)))
+                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (symbol_timeframe) DO UPDATE SET
+                    data = EXCLUDED.data, last_updated = EXCLUDED.last_updated;
+                """, (pk, symbol, timeframe, _df_to_json(df), datetime.now(timezone.utc)))
             conn.commit()
-            logger.info(f"  -> [{symbol}-{timeframe}] ✅ تم تحديث الكاش في قاعدة البيانات.")
             return df
         return None
     except Exception as e:
         logger.error(f"❌ [DB Cache] فشل جلب وتخزين البيانات لـ {symbol}-{timeframe}: {e}")
         if conn: conn.rollback()
-        if isinstance(e, BinanceAPIException) and e.code == -1003:
-            raise
+        if isinstance(e, BinanceAPIException) and e.code == -1003: raise
         return None
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -451,166 +396,110 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema_50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema_200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+    tr = pd.concat([(df_calc['high'] - df_calc['low']), (df_calc['high'] - df_calc['close'].shift()).abs(), (df_calc['low'] - df_calc['close'].shift()).abs()], axis=1).max(axis=1, skipna=False)
     df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['high'].diff()
-    down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_dm = pd.Series(np.where((df_calc['high'].diff() > -df_calc['low'].diff()) & (df_calc['high'].diff() > 0), df_calc['high'].diff(), 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((-df_calc['low'].diff() > df_calc['high'].diff()) & (-df_calc['low'].diff() > 0), -df_calc['low'].diff(), 0.0), index=df_calc.index)
     plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+    df_calc['adx'] = (100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))).ewm(span=ADX_PERIOD, adjust=False).mean()
     delta = df_calc['close'].diff()
     gain = delta.clip(lower=0).ewm(com=14 - 1, adjust=False).mean()
     loss = -delta.clip(upper=0).ewm(com=14 - 1, adjust=False).mean()
     df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    bb_period = 20
-    df_calc['bb_middle'] = df_calc['close'].rolling(window=bb_period).mean()
-    bb_std = df_calc['close'].rolling(window=bb_period).std()
+    df_calc['bb_middle'] = df_calc['close'].rolling(window=20).mean()
+    bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_upper'] = df_calc['bb_middle'] + (bb_std * 2)
     df_calc['bb_lower'] = df_calc['bb_middle'] - (bb_std * 2)
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
-    rsi = df_calc['rsi']
-    stoch_rsi_val = (rsi - rsi.rolling(14).min()) / (rsi.rolling(14).max() - rsi.rolling(14).min()).replace(0, 1e-9)
+    stoch_rsi_val = (df_calc['rsi'] - df_calc['rsi'].rolling(14).min()) / (df_calc['rsi'].rolling(14).max() - df_calc['rsi'].rolling(14).min()).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(3).mean() * 100
     df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(3).mean()
-    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
-    df_calc['macd'] = exp1 - exp2
+    df_calc['macd'] = df_calc['close'].ewm(span=12, adjust=False).mean() - df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    q = df_calc['volume']
-    p = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
-    df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
+    df_calc['vwap'] = ((df_calc['high'] + df_calc['low'] + df_calc['close']) / 3 * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     return df_calc.dropna()
 
 # --- دوال الاستراتيجيات وإدارة الصفقات ---
-
 def is_bullish_reversal_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 3: return False
     last, prev, prev2 = df.iloc[-1], df.iloc[-2], df.iloc[-3] if len(df) >= 3 else None
-    is_green_candle = bool(last['close'] > last['open'])
+    is_green = bool(last['close'] > last['open'])
+    body_size = float(abs(last['close'] - last['open']))
     candle_range = float(last['high'] - last['low'])
-    body_size = float(last['close'] - last['open'])
     is_strong_body = (body_size / candle_range) >= 0.5 if candle_range > 0 else False
-    is_bullish_engulfing = is_green_candle and bool(prev['close'] < prev['open']) and bool(last['close'] > prev['open']) and bool(last['open'] < prev['close'])
-    is_hammer = is_green_candle and bool((last['open'] - last['low']) > 2 * (last['close'] - last['open'])) and bool((last['high'] - last['close']) < 0.1 * (last['close'] - last['open']))
-    is_morning_star = prev2 is not None and bool(prev2['close'] < prev2['open']) and bool(prev['close'] < prev['open']) and bool(abs(prev['close'] - prev['open']) < 0.3 * (prev2['close'] - prev2['open'])) and is_green_candle and bool(last['close'] > (prev2['open'] + prev2['close']) / 2)
-    is_inverted_hammer = is_green_candle and bool((last['high'] - last['close']) > 2 * (last['close'] - last['open'])) and bool((last['open'] - last['low']) < 0.1 * (last['close'] - last['open']))
-    return is_strong_body or is_bullish_engulfing or is_hammer or is_morning_star or is_inverted_hammer
-
-# --- REFACTORED STRATEGY FUNCTIONS ---
-# Each function now returns a tuple: (met_conditions, total_conditions)
+    is_engulfing = is_green and bool(prev['close'] < prev['open']) and bool(last['close'] > prev['open']) and bool(last['open'] < prev['close'])
+    is_hammer = is_green and bool((last['open'] - last['low']) > 2 * body_size) and bool((last['high'] - last['close']) < 0.1 * body_size)
+    is_morning_star = prev2 is not None and bool(prev2['close'] < prev2['open']) and bool(abs(prev['close'] - prev['open']) < 0.3 * abs(prev2['close'] - prev2['open'])) and is_green and bool(last['close'] > (prev2['open'] + prev2['close']) / 2)
+    return is_strong_body or is_engulfing or is_hammer or is_morning_star
 
 def check_bb_reversal_strategy_enhanced(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 5
     if len(df) < 26: return 0, total_conditions
     last, prev = df.iloc[-1], df.iloc[-2]
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
-    with FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["value"]
-    
     cond1 = bool(prev['low'] <= prev['bb_lower']) and is_bullish_reversal_enhanced(df)
     cond2 = bool(last['adx'] > adx_thresh)
-    cond3 = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
+    cond3 = bool(last['volume'] > (last['volume_sma_20'] * 1.2))
     cond4 = bool(last['rsi'] < 30 or prev['rsi'] < 30)
-    bb_lower = float(prev['bb_lower'])
-    price_below_bb_pct = ((bb_lower - float(prev['low'])) / bb_lower) * 100 if bb_lower > 0 else 0
+    price_below_bb_pct = ((float(prev['bb_lower']) - float(prev['low'])) / float(prev['bb_lower'])) * 100 if float(prev['bb_lower']) > 0 else 0
     cond5 = price_below_bb_pct <= 2
-    
-    met_conditions = sum([cond1, cond2, cond3, cond4, cond5])
-    return met_conditions, total_conditions
+    return sum([cond1, cond2, cond3, cond4, cond5]), total_conditions
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 4
     if len(df) < 201: return 0, total_conditions
     last, prev = df.iloc[-1], df.iloc[-2]
-    with FILTER_CONFIG["MACD_EMA_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["MACD_EMA_VOLUME_MULT"]["value"]
-    
     cond1 = bool(last['ema_50'] > last['ema_200'])
     cond2 = bool(last['macd'] > last['macd_signal']) and bool(prev['macd'] <= prev['macd_signal']) and bool(last['macd'] < 0)
     cond3 = bool(last['rsi'] > 30 and last['rsi'] < 70)
-    cond4 = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
-    
-    met_conditions = sum([cond1, cond2, cond3, cond4])
-    return met_conditions, total_conditions
+    cond4 = bool(last['volume'] > (last['volume_sma_20'] * 1.2))
+    return sum([cond1, cond2, cond3, cond4]), total_conditions
 
 def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 4
     if len(df) < 50: return 0, total_conditions
     last, prev = df.iloc[-1], df.iloc[-2]
-    with FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["SR_BREAKOUT_VOLUME_MULT"]["value"]
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
-
-    resistance_lookback = 20
-    resistance_candidates = df.iloc[-resistance_lookback:-1]
-    resistance_level = resistance_candidates['high'].max()
-    resistance_candle = resistance_candidates[resistance_candidates['high'] == resistance_level]
-    resistance_volume = resistance_candle['volume'].iloc[0] if not resistance_candle.empty else 0
-    
-    cond1 = bool(last['close'] > resistance_level) and bool(prev['close'] <= resistance_level) and bool((last['close'] - resistance_level) / resistance_level > 0.005)
-    cond2 = bool(last['volume'] > (resistance_volume * vol_mult))
+    resistance_level = df.iloc[-21:-1]['high'].max()
+    cond1 = bool(last['close'] > resistance_level) and bool(prev['close'] <= resistance_level)
+    cond2 = bool(last['volume'] > (df.iloc[-21:-1]['volume'].mean() * 1.4))
     cond3 = bool(last['rsi'] > 50 and last['rsi'] < 80)
     cond4 = bool(last['adx'] > adx_thresh)
-
-    met_conditions = sum([cond1, cond2, cond3, cond4])
-    return met_conditions, total_conditions
+    return sum([cond1, cond2, cond3, cond4]), total_conditions
 
 def check_triple_confirmation_strategy_enhanced(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 4
     if len(df) < 201: return 0, total_conditions
     last = df.iloc[-1]
-    with FILTER_CONFIG["TRIPLE_CONF_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["TRIPLE_CONF_VOLUME_MULT"]["value"]
-    
     cond1 = bool(last['ema_50'] > last['ema_200'])
     cond2 = bool(last['macd'] > last['macd_signal']) and bool(last['rsi'] > 55 and last['rsi'] < 80) and bool(last['stoch_rsi_k'] > last['stoch_rsi_d'] and last['stoch_rsi_k'] < 80)
-    cond3 = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
-    atr_normalized = float(last['atr'] / last['close'])
-    cond4 = bool(0.01 < atr_normalized < 0.05)
-    
-    met_conditions = sum([cond1, cond2, cond3, cond4])
-    return met_conditions, total_conditions
+    cond3 = bool(last['volume'] > (last['volume_sma_20'] * 1.2))
+    cond4 = bool(0.01 < (float(last['atr'] / last['close'])) < 0.05)
+    return sum([cond1, cond2, cond3, cond4]), total_conditions
 
 def check_vwap_reversal_strategy_enhanced(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 5
     if len(df) < 21: return 0, total_conditions
     last, prev = df.iloc[-1], df.iloc[-2]
-    with FILTER_CONFIG["VWAP_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["VWAP_VOLUME_MULT"]["value"]
-    
     cond1 = bool(prev['close'] < prev['vwap'] and last['close'] > last['vwap'])
-    is_bullish_engulfing = bool(prev['close'] < prev['open'] and last['close'] > last['open'] and last['close'] > prev['open'])
-    is_hammer = bool((last['close'] > last['open']) and (last['open'] - last['low']) > 2 * (last['close'] - last['open']))
-    is_doji = bool(abs(last['close'] - last['open']) < 0.1 * (last['high'] - last['low']) and last['close'] > last['open'])
-    cond2 = is_bullish_engulfing or is_hammer or is_doji
-    recent_volume_avg = df['volume'].iloc[-11:-1].mean()
-    cond3 = bool(last['volume'] > (recent_volume_avg * vol_mult))
+    cond2 = is_bullish_reversal_enhanced(df.iloc[-3:])
+    cond3 = bool(last['volume'] > (df['volume'].iloc[-11:-1].mean() * 1.3))
     cond4 = bool(last['rsi'] < 40 or prev['rsi'] < 40)
     cond5 = bool(last['ema_50'] > last['ema_200'])
-    
-    met_conditions = sum([cond1, cond2, cond3, cond4, cond5])
-    return met_conditions, total_conditions
+    return sum([cond1, cond2, cond3, cond4, cond5]), total_conditions
 
 def check_price_channel_strategy(df: pd.DataFrame) -> Tuple[int, int]:
     total_conditions = 4
     if len(df) < 30: return 0, total_conditions
     channel_period = 20
     df['upper_channel'] = df['high'].rolling(window=channel_period).max()
-    df['lower_channel'] = df['low'].rolling(window=channel_period).min()
-    df['channel_middle'] = (df['upper_channel'] + df['lower_channel']) / 2
     last, prev = df.iloc[-1], df.iloc[-2]
-    with FILTER_CONFIG["PRICE_CHANNEL_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["PRICE_CHANNEL_VOLUME_MULT"]["value"]
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
-
-    cond1 = bool(last['close'] > last['upper_channel']) and bool(prev['close'] <= prev['upper_channel']) and bool((last['close'] - last['upper_channel']) / last['upper_channel'] > 0.005)
-    cond2 = bool(last['volume'] > (df['volume'].iloc[-11:-1].mean() * vol_mult))
+    cond1 = bool(last['close'] > last['upper_channel']) and bool(prev['close'] <= prev['upper_channel'])
+    cond2 = bool(last['volume'] > (df['volume'].iloc[-11:-1].mean() * 1.3))
     cond3 = bool(last['rsi'] > 50 and last['rsi'] < 80)
     cond4 = bool(last['adx'] > adx_thresh)
-    
-    met_conditions = sum([cond1, cond2, cond3, cond4])
-    return met_conditions, total_conditions
-# --- END REFACTORED STRATEGY FUNCTIONS ---
+    return sum([cond1, cond2, cond3, cond4]), total_conditions
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -629,37 +518,53 @@ def calculate_dynamic_position_size_enhanced(symbol: str, entry_price: float, at
     if not client: return None
     try:
         with risk_per_trade_lock: current_risk_percent = RISK_PER_TRADE_PERCENT
-        adjusted_risk_percent = current_risk_percent * signal_strength
-        balance_response = client.get_asset_balance(asset='USDT')
-        available_balance = Decimal(balance_response['free'])
-        risk_amount_usdt = available_balance * (Decimal(str(adjusted_risk_percent)) / Decimal('100'))
+        
+        if not is_trading_enabled:
+            available_balance = Decimal('1000') 
+            logger.info(f"[{symbol}] وضع التداول الورقي: استخدام رصيد افتراضي {available_balance} USDT لحساب حجم الصفقة.")
+        else:
+            balance_response = client.get_asset_balance(asset='USDT')
+            available_balance = Decimal(balance_response['free'])
+
+        risk_amount_usdt = available_balance * (Decimal(str(current_risk_percent)) / Decimal('100'))
         sl_multiplier = 2.5 - (signal_strength * 0.5)
         sl_distance = Decimal(str(atr_value)) * Decimal(str(sl_multiplier))
         actual_stop_loss_price = Decimal(str(entry_price)) - sl_distance
         risk_per_coin = Decimal(str(entry_price)) - actual_stop_loss_price
+        
         if risk_per_coin <= 0:
-            log_rejection(symbol, "Invalid Position Size", {"details": "Stop loss is at or above entry price based on ATR"})
+            log_rejection(symbol, "Invalid Position Size", {"details": "وقف الخسارة أعلى من سعر الدخول"})
             return None
+            
         initial_quantity = risk_amount_usdt / risk_per_coin
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
+        
         if adjusted_quantity is None or adjusted_quantity <= 0:
             log_rejection(symbol, "Lot Size Adjustment Failed")
             return None
+            
         notional_value = adjusted_quantity * Decimal(str(entry_price))
+        
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
             if min_notional_filter:
-                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
-                if notional_value < min_notional:
+                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '5.0')))
+                
+                if is_trading_enabled and notional_value < min_notional:
                     log_rejection(symbol, "Min Notional Filter", {"value": f"{notional_value:.2f}", "min": f"{min_notional}"})
                     return None
-        if notional_value > available_balance:
+                elif not is_trading_enabled:
+                     logger.info(f"[{symbol}] تداول ورقي: تم تجاوز فحص الحد الأدنى للقيمة. (المحسوبة: {notional_value:.2f}, الحد الأدنى: {min_notional})")
+
+        if is_trading_enabled and notional_value > available_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance:.2f}"})
             return None
+            
         return adjusted_quantity, float(actual_stop_loss_price)
+        
     except Exception as e:
-        logger.error(f"❌ [{symbol}] خطأ في حساب حجم الصفقة الديناميكي المحسّن: {e}", exc_info=True)
+        logger.error(f"❌ [{symbol}] خطأ في حساب حجم الصفقة: {e}", exc_info=True)
         return None
 
 @rate_limiter(weight=1)
@@ -678,18 +583,11 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
 def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
     if not check_db_connection() or not conn: return None
     try:
-        atr_value = 0
         if USE_SMART_EXIT_SYSTEM:
             entry_price = float(signal_data['entry_price'])
             atr_value = float(signal_data.get('signal_details', {}).get('atr', 0))
             if atr_value > 0:
-                exit_levels = {}
-                for level, config in TAKE_PROFIT_LEVELS.items():
-                    exit_levels[str(level)] = {
-                        "target_price": entry_price + (atr_value * config['atr_multiplier']),
-                        "exit_percentage": config['exit_percentage'],
-                        "is_hit": False
-                    }
+                exit_levels = {str(level): {"target_price": entry_price + (atr_value * config['atr_multiplier']), "exit_percentage": config['exit_percentage'], "is_hit": False} for level, config in TAKE_PROFIT_LEVELS.items()}
                 signal_data['exit_levels'] = exit_levels
                 signal_data['target_price'] = exit_levels[str(len(TAKE_PROFIT_LEVELS))]['target_price']
         with conn.cursor() as cur:
@@ -710,9 +608,7 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
             message = (f"🚨 *{trade_type} جديدة*\n\n*{signal_data['symbol']}* | `{signal_data['strategy_name']}`\n\n"
                        f"🔹 *الدخول:* `{signal_data['entry_price']:.4f}`\n🛑 *وقف الخسارة:* `{signal_data['stop_loss']:.4f}`\n\n")
             if 'exit_levels' in signal_data and signal_data['exit_levels']:
-                message += "*الأهداف:*\n"
-                for level, config in signal_data['exit_levels'].items():
-                    message += f"  - الهدف {level}: `{config['target_price']:.4f}`\n"
+                message += "*الأهداف:*\n" + "".join([f"  - الهدف {level}: `{config['target_price']:.4f}`\n" for level, config in signal_data['exit_levels'].items()])
             send_telegram_message(message)
             return dict(saved_signal)
     except Exception as e:
@@ -725,8 +621,7 @@ def update_signal_in_db(signal_id: int, updates: Dict):
     try:
         with conn.cursor() as cur:
             set_clauses = [sql.SQL("{} = %s").format(sql.Identifier(key)) for key in updates]
-            values = [json.dumps(v, cls=NpEncoder) if isinstance(v, dict) else v for v in updates.values()]
-            values.append(signal_id)
+            values = [json.dumps(v, cls=NpEncoder) if isinstance(v, dict) else v for v in updates.values()] + [signal_id]
             query = sql.SQL("UPDATE signals SET {} WHERE id = %s").format(sql.SQL(', ').join(set_clauses))
             cur.execute(query, values)
         conn.commit()
@@ -735,10 +630,7 @@ def update_signal_in_db(signal_id: int, updates: Dict):
         if conn: conn.rollback()
 
 def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: pd.DataFrame) -> Tuple[bool, str]:
-    symbol = signal_data['symbol']
-    entry_price = float(signal_data['entry_price'])
-    stop_loss = float(signal_data['stop_loss'])
-    strategy_name = signal_data['strategy_name']
+    entry_price, stop_loss = float(signal_data['entry_price']), float(signal_data['stop_loss'])
     last_candle = df.iloc[-1]
     if current_price <= stop_loss: return True, "stop_loss"
     with FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["lock"]: max_candles = FILTER_CONFIG["TIME_BASED_EXIT_CANDLES"]["value"]
@@ -746,71 +638,41 @@ def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: 
     if candles_since_entry >= max_candles: return True, "time_based_exit"
     if 'exit_levels' in signal_data and signal_data['exit_levels']:
         exit_levels = signal_data['exit_levels']
-        all_hit = True
+        all_hit = all(config.get('is_hit', False) for config in exit_levels.values())
+        if all_hit: return True, "all_tp_hit"
         for level, config in exit_levels.items():
             if not config.get('is_hit', False) and current_price >= config['target_price']:
                 config['is_hit'] = True
-                signal_data['exit_levels'] = exit_levels
                 update_signal_in_db(signal_data['id'], {'exit_levels': exit_levels})
                 if signal_data.get('is_real_trade'):
-                    exit_percentage = config['exit_percentage']
-                    quantity_to_sell = Decimal(str(signal_data['quantity'])) * Decimal(str(exit_percentage))
-                    place_order(symbol, Client.SIDE_SELL, quantity_to_sell)
+                    quantity_to_sell = Decimal(str(signal_data['quantity'])) * Decimal(str(config['exit_percentage']))
+                    place_order(signal_data['symbol'], Client.SIDE_SELL, quantity_to_sell)
                     remaining_quantity = Decimal(str(signal_data['quantity'])) - quantity_to_sell
-                    signal_data['quantity'] = float(remaining_quantity)
                     update_signal_in_db(signal_data['id'], {'quantity': float(remaining_quantity)})
-            if not config.get('is_hit', False): all_hit = False
-        if all_hit: return True, "all_tp_hit"
-    if "BB_Reversal" in strategy_name:
-        if bool(last_candle['high'] >= last_candle['bb_upper'] and last_candle['close'] < last_candle['open']): return True, "trend_reversal"
-    elif "MACD_EMA" in strategy_name:
-        if bool(last_candle['macd'] < last_candle['macd_signal'] and df.iloc[-2]['macd'] >= df.iloc[-2]['macd_signal']): return True, "trend_reversal"
-    elif "SR_Breakout" in strategy_name:
-        resistance_level = df['high'].iloc[-21:-1].max()
-        if current_price < resistance_level * 0.995: return True, "trend_reversal"
-    elif "Triple_Confirmation" in strategy_name:
-        ema_bearish = bool(last_candle['ema_50'] < last_candle['ema_200'])
-        macd_bearish = bool(last_candle['macd'] < last_candle['macd_signal'])
-        rsi_overbought = bool(last_candle['rsi'] > 70)
-        if ema_bearish or (macd_bearish and rsi_overbought): return True, "trend_reversal"
-    elif "VWAP_Reversal" in strategy_name:
-        if bool(last_candle['close'] < last_candle['vwap'] and last_candle['volume'] > last_candle['volume_sma_20'] * 1.2): return True, "trend_reversal"
-    elif "Price_Channel" in strategy_name:
-        channel_middle = (last_candle['upper_channel'] + last_candle['lower_channel']) / 2
-        if current_price < channel_middle: return True, "trend_reversal"
     if USE_TRAILING_STOP_LOSS:
-        current_peak = float(signal_data.get('current_peak_price', entry_price))
-        if current_price > current_peak:
-            signal_data['current_peak_price'] = current_price
-            update_signal_in_db(signal_data['id'], {'current_peak_price': current_price})
-        atr_value = float(last_candle['atr'])
-        trailing_stop_distance = atr_value * TRAILING_STOP_ACTIVATION_ATR
-        trailing_stop_price = current_peak - trailing_stop_distance
-        if current_price <= trailing_stop_price: return True, "trailing_stop"
+        current_peak = max(float(signal_data.get('current_peak_price', entry_price)), current_price)
+        if current_peak > float(signal_data.get('current_peak_price', entry_price)):
+            update_signal_in_db(signal_data['id'], {'current_peak_price': current_peak})
+        if current_price <= (current_peak - (float(last_candle['atr']) * TRAILING_STOP_ACTIVATION_ATR)):
+            return True, "trailing_stop"
     update_signal_in_db(signal_data['id'], {'candles_since_entry': candles_since_entry})
     return False, ""
 
 def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
     with signal_cache_lock:
-        signal_to_close, symbol_to_close = None, None
-        for symbol, signal_data in open_signals_cache.items():
-            if signal_data.get('id') == signal_id:
-                signal_to_close, symbol_to_close = signal_data, symbol
-                break
+        signal_to_close = next((s for s in open_signals_cache.values() if s.get('id') == signal_id), None)
     if not signal_to_close: return False
     profit_percentage = ((closing_price - float(signal_to_close['entry_price'])) / float(signal_to_close['entry_price'])) * 100
     update_strategy_performance(signal_to_close['strategy_name'], profit_percentage)
     if signal_to_close.get('is_real_trade'):
         try:
-            base_asset = symbol_to_close.replace('USDT', '')
-            balance_response = client.get_asset_balance(asset=base_asset)
-            actual_free_balance = Decimal(balance_response['free'])
-            if actual_free_balance > 0:
-                quantity_to_sell = adjust_quantity_to_lot_size(symbol_to_close, float(actual_free_balance))
-                if quantity_to_sell and quantity_to_sell > 0:
-                    place_order(symbol_to_close, Client.SIDE_SELL, quantity_to_sell)
+            base_asset = signal_to_close['symbol'].replace('USDT', '')
+            balance = Decimal(client.get_asset_balance(asset=base_asset)['free'])
+            if balance > 0:
+                quantity_to_sell = adjust_quantity_to_lot_size(signal_to_close['symbol'], float(balance))
+                if quantity_to_sell and quantity_to_sell > 0: place_order(signal_to_close['symbol'], Client.SIDE_SELL, quantity_to_sell)
         except Exception as e:
-            logger.error(f"❌ [{symbol_to_close}] خطأ أثناء بيع الرصيد عند الإغلاق: {e}")
+            logger.error(f"❌ [{signal_to_close['symbol']}] خطأ أثناء بيع الرصيد عند الإغلاق: {e}")
     if not check_db_connection() or not conn: return False
     try:
         with conn.cursor() as cur:
@@ -818,12 +680,11 @@ def close_signal(signal_id: int, closing_price: float, reason: str) -> bool:
                         (closing_price, profit_percentage, reason, signal_id))
         conn.commit()
         with signal_cache_lock:
-            if symbol_to_close in open_signals_cache:
-                del open_signals_cache[symbol_to_close]
-        log_and_notify('info', f"تم الإغلاق: {symbol_to_close} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
-        reason_map = {'stop_loss': '🛑 تم ضرب وقف الخسارة', 'all_tp_hit': '✅ تم تحقيق جميع الأهداف', 'manual': ' تم الإغلاق يدوياً', 'time_based_exit': '⏳ تم الإغلاق بسبب انتهاء الوقت', 'trend_reversal': '🔄 انعكاس الاتجاه', 'trailing_stop': '📉 وقف خسارة متحرك'}
+            if signal_to_close['symbol'] in open_signals_cache: del open_signals_cache[signal_to_close['symbol']]
+        log_and_notify('info', f"تم الإغلاق: {signal_to_close['symbol']} عند {closing_price:.4f}. السبب: {reason}. الربح/الخسارة: {profit_percentage:.2f}%", "TRADE_CLOSED")
+        reason_map = {'stop_loss': '🛑 وقف الخسارة', 'all_tp_hit': '✅ تحقيق الأهداف', 'manual': 'إغلاق يدوي', 'time_based_exit': '⏳ انتهاء الوقت', 'trend_reversal': '🔄 انعكاس الاتجاه', 'trailing_stop': '📉 وقف متحرك'}
         emoji = "✅" if profit_percentage > 0 else "🛑"
-        message = (f"{emoji} *إغلاق صفقة {symbol_to_close}*\n\n"
+        message = (f"{emoji} *إغلاق صفقة {signal_to_close['symbol']}*\n\n"
                    f"السبب: *{reason_map.get(reason, reason)}*\n"
                    f"سعر الإغلاق: `{closing_price:.4f}`\n"
                    f"الربح/الخسارة: `{profit_percentage:.2f}%`")
@@ -838,11 +699,10 @@ def update_strategy_performance(strategy_name: str, pnl_percent: float):
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO strategy_performance (strategy_name, total_trades, winning_trades, total_pnl_percent)
-                VALUES (%s, 1, %s, %s)
-                ON CONFLICT (strategy_name) DO UPDATE SET
-                    total_trades = strategy_performance.total_trades + 1,
-                    winning_trades = strategy_performance.winning_trades + EXCLUDED.winning_trades,
-                    total_pnl_percent = strategy_performance.total_pnl_percent + EXCLUDED.total_pnl_percent;
+                VALUES (%s, 1, %s, %s) ON CONFLICT (strategy_name) DO UPDATE SET
+                total_trades = strategy_performance.total_trades + 1,
+                winning_trades = strategy_performance.winning_trades + EXCLUDED.winning_trades,
+                total_pnl_percent = strategy_performance.total_pnl_percent + EXCLUDED.total_pnl_percent;
             """, (strategy_name, 1 if pnl_percent > 0 else 0, pnl_percent))
         conn.commit()
     except Exception as e:
@@ -853,144 +713,74 @@ def check_market_state_enhanced() -> Dict[str, Any]:
     global current_market_state
     with market_state_lock:
         try:
-            btc_5m = get_data_for_symbol(BTC_SYMBOL, '5m', days=1)
             btc_1h = get_data_for_symbol(BTC_SYMBOL, '1h', days=3)
             btc_4h = get_data_for_symbol(BTC_SYMBOL, '4h', days=7)
-            if btc_5m is None or btc_1h is None or btc_4h is None:
-                current_market_state = {"status": "DATA_UNAVAILABLE"}
-                return current_market_state
-            btc_5m = calculate_all_features(btc_5m)
-            btc_1h = calculate_all_features(btc_1h)
-            btc_4h = calculate_all_features(btc_4h)
-            last_5m, last_1h, last_4h = btc_5m.iloc[-1], btc_1h.iloc[-1], btc_4h.iloc[-1]
-            btc_5m_trend = "bullish" if bool(last_5m['ema_50'] > last_5m['ema_200']) else "bearish"
+            if btc_1h is None or btc_4h is None: return {"status": "DATA_UNAVAILABLE"}
+            btc_1h, btc_4h = calculate_all_features(btc_1h), calculate_all_features(btc_4h)
+            last_1h, last_4h = btc_1h.iloc[-1], btc_4h.iloc[-1]
             btc_1h_trend = "bullish" if bool(last_1h['ema_50'] > last_1h['ema_200']) else "bearish"
             btc_4h_trend = "bullish" if bool(last_4h['ema_50'] > last_4h['ema_200']) else "bearish"
             btc_1h_atr_pct = (float(last_1h['atr']) / float(last_1h['close'])) * 100
-            volatility_status = "high" if btc_1h_atr_pct > 3.0 else "normal" if btc_1h_atr_pct > 1.0 else "low"
-            btc_1h_rsi = float(last_1h['rsi'])
-            strength_status = "strong" if 40 < btc_1h_rsi < 70 else "weak"
-            overall_status = "BEARISH" if btc_4h_trend == "bearish" or (btc_1h_trend == "bearish" and btc_5m_trend == "bearish") else "BULLISH" if btc_4h_trend == "bullish" and (btc_1h_trend == "bullish" or btc_5m_trend == "bullish") else "NEUTRAL"
-            try:
-                btc_volume_24h = float(client.get_ticker(symbol=BTC_SYMBOL)['quoteVolume'])
-                with FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["lock"]: strictness = FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["value"]
-                if strictness == "high": liquidity_status = "high" if btc_volume_24h > 20000000000 else "normal" if btc_volume_24h > 10000000000 else "low"
-                elif strictness == "medium": liquidity_status = "high" if btc_volume_24h > 15000000000 else "normal" if btc_volume_24h > 5000000000 else "low"
-                else: liquidity_status = "high" if btc_volume_24h > 10000000000 else "normal" if btc_volume_24h > 2000000000 else "low"
-            except: liquidity_status = "unknown"
-            current_market_state = {
-                "status": overall_status, "btc_5m_trend": btc_5m_trend, "btc_1h_trend": btc_1h_trend, "btc_4h_trend": btc_4h_trend,
-                "volatility": volatility_status, "strength": strength_status, "liquidity": liquidity_status,
-                "btc_1h_rsi": round(btc_1h_rsi, 2), "btc_1h_atr_pct": round(btc_1h_atr_pct, 2)
-            }
+            volatility = "high" if btc_1h_atr_pct > 3.0 else "normal" if btc_1h_atr_pct > 1.0 else "low"
+            overall_status = "BEARISH" if btc_4h_trend == "bearish" else "BULLISH" if btc_4h_trend == "bullish" and btc_1h_trend == "bullish" else "NEUTRAL"
+            current_market_state = {"status": overall_status, "btc_1h_trend": btc_1h_trend, "btc_4h_trend": btc_4h_trend, "volatility": volatility}
             return current_market_state
         except Exception as e:
             logger.error(f"❌ [Market State] خطأ في تحديد حالة السوق: {e}", exc_info=True)
-            current_market_state = {"status": "ERROR", "error": str(e)}
-            return current_market_state
+            return {"status": "ERROR", "error": str(e)}
 
 def check_portfolio_risk() -> bool:
-    global open_signals_cache
     with signal_cache_lock: open_trades_count = len(open_signals_cache)
     if open_trades_count >= MAX_OPEN_TRADES:
         logger.info(f"🚫 [Portfolio Risk] تم الوصول إلى الحد الأقصى لعدد الصفقات المفتوحة ({MAX_OPEN_TRADES}).")
         return False
-    return True # Simplified for now, can add more logic later
+    return True
 
-# --- REFACTORED SIGNAL GENERATION LOGIC ---
 def generate_signals_for_symbol(symbol: str) -> List[Dict]:
     signals = []
-    market_state = check_market_state_enhanced()
-    
     df = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-    if df is None or df.empty:
-        logger.warning(f"  -> [{symbol}] لا توجد بيانات متاحة.")
-        return signals
-    
+    if df is None or df.empty: return signals
     df = calculate_all_features(df)
     df.name = symbol
     
     strategy_checkers = {
-        "BB_Reversal": check_bb_reversal_strategy_enhanced,
-        "MACD_EMA": check_macd_ema_strategy_enhanced,
-        "SR_Breakout": check_sr_breakout_strategy_enhanced,
-        "Triple_Confirmation": check_triple_confirmation_strategy_enhanced,
-        "VWAP_Reversal": check_vwap_reversal_strategy_enhanced,
-        "Price_Channel": check_price_channel_strategy,
+        "BB_Reversal": check_bb_reversal_strategy_enhanced, "MACD_EMA": check_macd_ema_strategy_enhanced,
+        "SR_Breakout": check_sr_breakout_strategy_enhanced, "Triple_Confirmation": check_triple_confirmation_strategy_enhanced,
+        "VWAP_Reversal": check_vwap_reversal_strategy_enhanced, "Price_Channel": check_price_channel_strategy,
     }
+    total_met, total_possible, successful_strategies, strategy_details = 0, 0, [], {}
+    for name, checker in strategy_checkers.items():
+        if STRATEGY_CONFIG[name]["enabled"]:
+            met, total = checker(df)
+            total_met += met; total_possible += total
+            strategy_details[name] = f"{met}/{total}"
+            if met > 0: successful_strategies.append(name)
 
-    total_met_conditions = 0
-    total_possible_conditions = 0
-    strategy_details = {}
-    successful_strategies = []
+    if total_possible == 0: return signals
+    actual_strength = (total_met / total_possible) * 100
+    with FILTER_CONFIG["SIGNAL_STRICTNESS"]["lock"]: required_strength = FILTER_CONFIG["SIGNAL_STRICTNESS"]["value"]
 
-    for name, checker_func in strategy_checkers.items():
-        with STRATEGY_CONFIG[name]["lock"]:
-            if STRATEGY_CONFIG[name]["enabled"]:
-                met, total = checker_func(df)
-                total_met_conditions += met
-                total_possible_conditions += total
-                strategy_details[name] = f"{met}/{total}"
-                if met > 0: # Consider strategy successful if at least one condition is met
-                    successful_strategies.append(name)
-
-    if total_possible_conditions == 0:
+    if actual_strength < required_strength:
+        log_rejection(symbol, "Conditions Not Met", {"actual": f"{actual_strength:.2f}%", "required": f"{required_strength}%", "details": strategy_details})
         return signals
+    if not check_portfolio_risk(): return signals
     
-    actual_strength_percentage = (total_met_conditions / total_possible_conditions) * 100
-    
-    with FILTER_CONFIG["SIGNAL_STRICTNESS"]["lock"]:
-        required_strength_percentage = FILTER_CONFIG["SIGNAL_STRICTNESS"]["value"]
-
-    if actual_strength_percentage < required_strength_percentage:
-        log_rejection(symbol, "Conditions Not Met", {
-            "actual_strength": f"{actual_strength_percentage:.2f}%",
-            "required_strength": f"{required_strength_percentage}%",
-            "details": strategy_details
-        })
-        return signals
-
-    if not check_portfolio_risk():
-        return signals
-    
-    entry_price = float(df.iloc[-1]['close'])
-    atr_value = float(df.iloc[-1]['atr'])
-    
-    # Calculate a normalized strength (0-1) for position sizing
-    # This makes it so that signals just barely passing the threshold have less risk
-    strength_for_sizing = (actual_strength_percentage - required_strength_percentage) / (100 - required_strength_percentage) if required_strength_percentage < 100 else 1.0
-    strength_for_sizing = max(0.1, strength_for_sizing) # Ensure at least a minimal size
-
+    entry_price, atr_value = float(df.iloc[-1]['close']), float(df.iloc[-1]['atr'])
+    strength_for_sizing = max(0.1, (actual_strength - required_strength) / (100 - required_strength) if required_strength < 100 else 1.0)
     position_result = calculate_dynamic_position_size_enhanced(symbol, entry_price, atr_value, strength_for_sizing)
     
-    if position_result is None:
-        return signals
-    
+    if position_result is None: return signals
     quantity, stop_loss = position_result
     
     signal_data = {
-        "symbol": symbol,
-        "entry_price": entry_price,
-        "stop_loss": stop_loss,
-        "strategy_name": ", ".join(successful_strategies) if successful_strategies else "Combined Signal",
-        "signal_details": {
-            "strategies_met_total": strategy_details,
-            "actual_strength_percentage": actual_strength_percentage,
-            "required_strength_percentage": required_strength_percentage,
-            "strength_for_sizing": strength_for_sizing,
-            "market_state": market_state,
-            "atr": atr_value,
-            "rsi": float(df.iloc[-1]['rsi']),
-            "adx": float(df.iloc[-1]['adx']),
-        },
-        "quantity": float(quantity),
-        "is_real_trade": is_trading_enabled
+        "symbol": symbol, "entry_price": entry_price, "stop_loss": stop_loss,
+        "strategy_name": ", ".join(successful_strategies) or "Combined Signal",
+        "signal_details": {"strategies": strategy_details, "actual_strength": actual_strength, "required_strength": required_strength, "atr": atr_value},
+        "quantity": float(quantity), "is_real_trade": is_trading_enabled
     }
-    
     signals.append(signal_data)
-    logger.info(f"  -> [{symbol}] ✅ تم توليد إشارة مجمعة (القوة: {actual_strength_percentage:.2f}% >= {required_strength_percentage}%)")
+    logger.info(f"  -> [{symbol}] ✅ تم توليد إشارة (القوة: {actual_strength:.2f}% >= {required_strength}%)")
     return signals
-# --- END REFACTORED SIGNAL GENERATION LOGIC ---
 
 def process_open_signals():
     if not check_db_connection() or not conn or not redis_client: return
@@ -1008,68 +798,76 @@ def process_open_signals():
                     signal_dict['exit_levels'] = json.loads(signal_dict['exit_levels'])
                 open_signals_cache[signal_dict['symbol']] = signal_dict
         
-        for symbol, signal_data in open_signals_cache.items():
+        for symbol, signal_data in list(open_signals_cache.items()):
             try:
-                current_price_str = current_prices.get(symbol)
-                if current_price_str is None: continue
-                current_price = float(current_price_str)
+                current_price = float(current_prices.get(symbol, 0))
+                if current_price == 0: continue
                 df = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, days=2)
                 if df is None or df.empty: continue
                 df = calculate_all_features(df)
                 should_exit, reason = check_exit_conditions_enhanced(signal_data, current_price, df)
-                if should_exit:
-                    close_signal(signal_data['id'], current_price, reason)
+                if should_exit: close_signal(signal_data['id'], current_price, reason)
             except Exception as e:
                 logger.error(f"❌ [Process Signals] خطأ في معالجة الإشارة لـ {symbol}: {e}")
     except Exception as e:
-        logger.error(f"❌ [Process Signals] خطأ عام في معالجة الإشارات: {e}", exc_info=True)
+        logger.error(f"❌ [Process Signals] خطأ عام: {e}", exc_info=True)
 
+# --- UPDATED: scan_and_generate_signals with Batching ---
 def scan_and_generate_signals():
     global validated_symbols_to_scan
-    if not check_db_connection() or not conn or not redis_client:
+    if not (check_db_connection() and redis_client):
         logger.warning("⚠️ [Scan] الخدمات غير جاهزة، سيتم تخطي المسح.")
         return
-    logger.info("🔍 [Scan] بدء مسح العملات لتوليد الإشارات...")
+    
+    logger.info("🔍 [Scan] بدء دورة المسح الكاملة...")
     if not validated_symbols_to_scan:
         validated_symbols_to_scan = get_validated_symbols()
         if not validated_symbols_to_scan:
             logger.error("❌ [Scan] لا توجد عملات صالحة للمسح.")
             return
+
     process_open_signals()
-    new_signals = []
+    new_signals_total = 0
+    
+    # Loop over the symbols in batches
     for i in range(0, len(validated_symbols_to_scan), BATCH_SIZE):
         batch_symbols = validated_symbols_to_scan[i:i+BATCH_SIZE]
+        num_batches = (len(validated_symbols_to_scan) + BATCH_SIZE - 1) // BATCH_SIZE
+        logger.info(f" обрабатываю партию {i//BATCH_SIZE + 1}/{num_batches} ({len(batch_symbols)} символов)")
+        
         for symbol in batch_symbols:
             try:
                 with signal_cache_lock:
-                    if symbol in open_signals_cache: continue
+                    if symbol in open_signals_cache:
+                        continue
                 signals = generate_signals_for_symbol(symbol)
                 if signals:
-                    new_signals.extend(signals)
+                    new_signals_total += len(signals)
                     for signal_data in signals:
                         saved_signal = insert_signal_into_db(signal_data)
                         if saved_signal:
                             with signal_cache_lock:
                                 open_signals_cache[symbol] = saved_signal
-                time.sleep(0.1)
+                time.sleep(0.1) 
             except Exception as e:
                 logger.error(f"❌ [Scan] خطأ في مسح {symbol}: {e}", exc_info=True)
-    logger.info(f"✅ [Scan] اكتمل المسح. تم توليد {len(new_signals)} إشارة جديدة.")
+        
+        # Explicit garbage collection after each batch
+        logger.info(f"🗑️ انتهت الدفعة. جاري استدعاء جامع القمامة لتحرير الذاكرة...")
+        collected_count = gc.collect()
+        logger.info(f"✅ تم تحرير {collected_count} كائن من الذاكرة.")
+
+    logger.info(f"✅ [Scan] اكتمل المسح الكامل. تم توليد {new_signals_total} إشارة جديدة.")
 
 def price_stream_processor(msg):
     for ticker in msg:
-        if ticker.get('e') == '24hrTicker':
-            symbol = ticker.get('s')
-            last_price = ticker.get('c')
-            if symbol and last_price and redis_client:
-                try:
-                    redis_client.hset("crypto_bot_prices", symbol, last_price)
-                except Exception as e:
-                    logger.error(f"❌ [WebSocket] خطأ في تحديث سعر {symbol} في Redis: {e}")
+        if ticker.get('e') == '24hrTicker' and redis_client:
+            try: redis_client.hset("crypto_bot_prices", ticker.get('s'), ticker.get('c'))
+            except Exception as e: logger.error(f"❌ [WebSocket] خطأ في تحديث سعر {ticker.get('s')} في Redis: {e}")
 
 def start_websocket_manager():
-    if not client or not validated_symbols_to_scan: return None
-    logger.info("🔌 [WebSocket] بدء مدير WebSocket للاستماع إلى تدفق الأسعار...")
+    if not (client and validated_symbols_to_scan): return None
+    logger.info("🔌 [WebSocket] بدء مدير WebSocket...")
     twm = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     twm.start()
     twm.start_ticker_socket(callback=price_stream_processor)
@@ -1083,191 +881,193 @@ CORS(app)
 def block_method():
     if request.method in ['PUT', 'DELETE', 'PATCH']: abort(403)
 
-# --- UPDATED HTML FOR STRICTNESS SLIDER ---
-def get_dashboard_html_v11_4():
+def get_dashboard_html_v11_6():
+    # The HTML from v11.5 is suitable and doesn't need changes for this logic update.
+    # Re-using the same HTML structure.
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V11.4 - لوحة تحكم التداول</title>
+    <title>Sentinel V11.6 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D;
-            --text-primary: #E6EDF3; --text-secondary: #848D97; --accent-blue: #58A6FF;
-            --accent-green: #3FB950; --accent-red: #F85149; --accent-yellow: #D29922;
-        }
+        :root { --bg-main: #0D1117; --bg-card: #161B22; --border-color: #30363D; --text-primary: #E6EDF3; --accent-blue: #58A6FF; --accent-green: #3FB950; --accent-red: #F85149; }
         body { font-family: 'Tajawal', sans-serif; background-color: var(--bg-main); color: var(--text-primary); }
-        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.75rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1); }
-        .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--accent-blue); font-weight: 700; }
-        input:checked + .toggle-bg { background-color: var(--accent-green); }
-        .progress-bar { background-color: #30363d; border-radius: 9999px; overflow: hidden; }
-        .progress-bar-inner { background-color: var(--accent-blue); height: 100%; transition: width 0.5s ease-in-out; }
-        .input-field { background-color: var(--bg-main); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 0.5rem 0.75rem; color: var(--text-primary); }
-        select.input-field { -webkit-appearance: none; -moz-appearance: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23848D97%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22/%3E%3C/svg%3E'); background-repeat: no-repeat; background-position: left 0.75rem center; background-size: 0.65em auto; padding-left: 2rem; }
-        /* Custom styles for the slider */
-        input[type=range] { -webkit-appearance: none; width: 100%; background: transparent; }
-        input[type=range]:focus { outline: none; }
-        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 8px; cursor: pointer; background: var(--border-color); border-radius: 5px; }
-        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%; background: var(--accent-blue); cursor: pointer; margin-top: -8px; border: 4px solid var(--bg-card); }
-        input[type=range]::-moz-range-track { width: 100%; height: 8px; cursor: pointer; background: var(--border-color); border-radius: 5px; }
-        input[type=range]::-moz-range-thumb { height: 24px; width: 24px; border-radius: 50%; background: var(--accent-blue); cursor: pointer; border: 4px solid var(--bg-card); }
+        .card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 0.75rem; }
+        .tab-btn.active { border-bottom-color: var(--accent-blue); color: var(--accent-blue); }
+        .input-field { background-color: var(--bg-main); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 0.5rem 0.75rem; }
+        input[type=range] { -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-runnable-track { height: 8px; background: var(--border-color); border-radius: 5px; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 24px; width: 24px; border-radius: 50%; background: var(--accent-blue); margin-top: -8px; border: 4px solid var(--bg-card); }
     </style>
 </head>
 <body class="p-4 md:p-6">
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold">
-                <span class="text-blue-400">Sentinel</span> V11.4
-                <span class="text-sm font-normal text-gray-400">نظام التداول الآلي المحسّن</span>
-            </h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-blue-400">Sentinel</span> V11.6</h1>
             <div class="flex items-center gap-3">
-                <div class="text-sm px-3 py-1 rounded-full bg-gray-800" id="market-status">
-                    <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-2"></span>
-                    <span id="market-status-text">جاري التحميل...</span>
-                </div>
-                <div class="text-sm px-3 py-1 rounded-full bg-gray-800">
-                    <span class="inline-block w-2 h-2 rounded-full bg-gray-500 mr-2"></span>
-                    <span id="trading-status-text">معطل</span>
-                </div>
-                <button id="toggle-trading" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">تفعيل التداول</button>
+                <div id="market-status" class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="market-status-text">...</span></div>
+                <div class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="trading-status-text">معطل</span></div>
+                <button id="toggle-trading" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg">تفعيل التداول</button>
             </div>
         </header>
-
-        <!-- Main Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-            <!-- Left Column -->
             <div class="lg:col-span-1 flex flex-col gap-6">
                 <div class="card p-5">
-                    <h2 class="text-xl font-bold mb-4 text-blue-400">إحصائيات عامة</h2>
+                    <h2 class="text-xl font-bold mb-4 text-blue-400">إحصائيات</h2>
                     <div class="space-y-4">
-                        <div><div class="flex justify-between text-sm mb-1"><span>الرصيد المتاح (USDT)</span><span id="balance">--</span></div></div>
-                        <div><div class="flex justify-between text-sm mb-1"><span>الصفقات المفتوحة</span><span id="open-trades">--</span></div><div class="progress-bar h-2 mt-1"><div id="open-trades-bar" class="progress-bar-inner" style="width: 0%"></div></div></div>
-                        <div><div class="flex justify-between text-sm mb-1"><span>وزن API المستخدم</span><span id="api-weight">--</span></div><div class="progress-bar h-2 mt-1"><div id="api-weight-bar" class="progress-bar-inner" style="width: 0%"></div></div></div>
-                        <div><div class="flex justify-between text-sm mb-1"><span>حالة السوق</span><span id="market-state">--</span></div></div>
+                        <div><div class="flex justify-between text-sm"><span>الرصيد (USDT)</span><span id="balance">--</span></div></div>
+                        <div><div class="flex justify-between text-sm"><span>الصفقات المفتوحة</span><span id="open-trades">--</span></div></div>
+                        <div><div class="flex justify-between text-sm"><span>وزن API</span><span id="api-weight">--</span></div></div>
+                        <div><div class="flex justify-between text-sm"><span>حالة السوق</span><span id="market-state">--</span></div></div>
                     </div>
                 </div>
-                
-                <!-- NEW: Strictness Control Card -->
                 <div class="card p-5">
-                    <h2 class="text-xl font-bold mb-4 text-blue-400">مقياس صرامة الشروط</h2>
+                    <h2 class="text-xl font-bold mb-4 text-blue-400">مقياس الصرامة</h2>
                     <div class="flex flex-col items-center">
-                        <div class="w-full">
-                            <input type="range" id="filter-SIGNAL_STRICTNESS" min="0" max="100" value="75" class="w-full h-2 rounded-lg appearance-none cursor-pointer">
-                        </div>
-                        <div class="flex justify-between w-full text-xs text-gray-400 mt-2">
-                            <span>مرن جداً</span>
-                            <span class="font-bold text-lg text-white" id="strictness-value">75%</span>
-                            <span>صارم جداً</span>
-                        </div>
-                        <p class="text-center text-sm text-gray-400 mt-3">يحدد هذا المقياس النسبة المئوية للشروط التي يجب تحقيقها لتوليد إشارة. القيمة المنخفضة تسمح بإشارات أكثر، بينما القيمة العالية تتطلب تأكيداً أقوى.</p>
+                        <input type="range" id="filter-SIGNAL_STRICTNESS" min="0" max="100" value="75" class="w-full">
+                        <div class="flex justify-between w-full text-xs mt-2"><span>مرن</span><span id="strictness-value" class="font-bold text-lg">75%</span><span>صارم</span></div>
                     </div>
                 </div>
             </div>
-
-            <!-- Right Column -->
             <div class="lg:col-span-2 card p-5">
-                <h2 class="text-xl font-bold mb-4 text-blue-400">إعدادات الاستراتيجيات والفلاتر</h2>
+                <h2 class="text-xl font-bold mb-4 text-blue-400">الإعدادات</h2>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                        <h3 class="font-bold mb-3">الاستراتيجيات المفعلة</h3>
-                        <div class="space-y-3">
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">BB Reversal</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-BB_Reversal"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">MACD_EMA</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-MACD_EMA"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">SR_Breakout</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-SR_Breakout"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">Triple_Confirmation</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-Triple_Confirmation"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">VWAP_Reversal</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-VWAP_Reversal"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                            <div class="flex items-center justify-between p-3 bg-gray-800 rounded-lg"><div><div class="font-medium">Price_Channel</div></div><label class="relative inline-flex items-center cursor-pointer"><input type="checkbox" class="sr-only peer" id="strategy-Price_Channel"><div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all toggle-bg peer-checked:bg-green-600"></div></label></div>
-                        </div>
+                        <h3 class="font-bold mb-3">الاستراتيجيات</h3>
+                        <div id="strategies-container" class="space-y-3"></div>
                     </div>
                     <div>
-                        <h3 class="font-bold mb-3">الفلاتر والمعايير</h3>
+                        <h3 class="font-bold mb-3">الفلاتر</h3>
                         <div class="space-y-4">
-                             <div><label class="block text-sm mb-1">نسبة المخاطرة للصفقة (%)</label><input type="number" id="risk-percent" class="input-field w-full" step="0.1" min="0.1" max="5"></div>
-                            <div><label class="block text-sm mb-1">حد مؤشر ADX</label><input type="number" id="filter-ADX_THRESHOLD" class="input-field w-full" step="1" min="10" max="50"></div>
-                            <div><label class="block text-sm mb-1">إغلاق الصفقة بعد (شمعة)</label><input type="number" id="filter-TIME_BASED_EXIT_CANDLES" class="input-field w-full" step="5" min="10" max="100"></div>
-                            <div><label class="block text-sm mb-1">صرامة فلتر السيولة</label><select id="filter-LIQUIDITY_FILTER_STRICTNESS" class="input-field w-full"><option value="low">منخفضة</option><option value="medium">متوسطة</option><option value="high">عالية</option></select></div>
+                            <div><label class="block text-sm mb-1">نسبة المخاطرة للصفقة (%)</label><input type="number" id="risk-percent" class="input-field w-full" step="0.1"></div>
+                            <div><label class="block text-sm mb-1">حد مؤشر ADX</label><input type="number" id="filter-ADX_THRESHOLD" class="input-field w-full" step="1"></div>
+                            <div><label class="block text-sm mb-1">إغلاق بعد (شمعة)</label><input type="number" id="filter-TIME_BASED_EXIT_CANDLES" class="input-field w-full" step="5"></div>
                         </div>
                     </div>
                 </div>
-                <div class="mt-6 flex justify-end"><button id="save-settings" class="px-5 py-2.5 bg-green-600 hover:bg-green-700 rounded-lg transition-colors font-bold">حفظ الإعدادات</button></div>
+                <div class="mt-6 flex justify-end"><button id="save-settings" class="px-5 py-2.5 bg-green-600 hover:bg-green-700 rounded-lg font-bold">حفظ</button></div>
             </div>
         </div>
-
-        <!-- Tabs Section -->
         <div class="border-b border-gray-700 mb-4">
-            <nav class="-mb-px flex space-x-8">
-                <button class="tab-btn active py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="signals">الإشارات المفتوحة</button>
-                <button class="tab-btn py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="performance">أداء الاستراتيجيات</button>
-                <button class="tab-btn py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="notifications">الإشعارات</button>
-                <button class="tab-btn py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="rejections">سجل الرفض</button>
-            </nav>
+            <nav class="-mb-px flex space-x-8" id="tabs-nav"></nav>
         </div>
-        <div class="tab-content">
-            <div id="signals-tab" class="tab-pane">
-                <div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">العملة</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">الاستراتيجية</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">سعر الدخول</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">السعر الحالي</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">وقف الخسارة</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">الربح/الخسارة</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">الإجراءات</th></tr></thead><tbody id="signals-table-body" class="divide-y divide-gray-700"></tbody></table></div>
-            </div>
-            <div id="performance-tab" class="tab-pane hidden">
-                <div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">الاستراتيجية</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">إجمالي الصفقات</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">الصفقات الرابحة</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">نسبة النجاح</th><th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">متوسط الربح/الخسارة</th></tr></thead><tbody id="performance-table-body" class="divide-y divide-gray-700"></tbody></table></div>
-            </div>
-            <div id="notifications-tab" class="tab-pane hidden"><div class="space-y-3" id="notifications-container"></div></div>
-            <div id="rejections-tab" class="tab-pane hidden"><div class="space-y-3" id="rejections-container"></div></div>
-        </div>
+        <div class="tab-content" id="tabs-content"></div>
     </div>
-    <script>
-        let isTradingEnabled = false, currentTab = 'signals';
-        const toggleTradingBtn = document.getElementById('toggle-trading'), tradingStatusText = document.getElementById('trading-status-text'), marketStatusText = document.getElementById('market-status-text'), marketStatus = document.getElementById('market-status'), balanceEl = document.getElementById('balance'), openTradesEl = document.getElementById('open-trades'), openTradesBar = document.getElementById('open-trades-bar'), apiWeightEl = document.getElementById('api-weight'), apiWeightBar = document.getElementById('api-weight-bar'), marketStateEl = document.getElementById('market-state'), saveSettingsBtn = document.getElementById('save-settings'), tabBtns = document.querySelectorAll('.tab-btn'), tabPanes = document.querySelectorAll('.tab-pane');
-        
-        // NEW: Strictness slider elements
-        const strictnessSlider = document.getElementById('filter-SIGNAL_STRICTNESS');
-        const strictnessValueEl = document.getElementById('strictness-value');
-        if(strictnessSlider) {
-            strictnessSlider.addEventListener('input', () => {
-                strictnessValueEl.textContent = `${strictnessSlider.value}%`;
-            });
-        }
+<script>
+    const TABS = { signals: "الإشارات المفتوحة", performance: "أداء الاستراتيجيات", notifications: "الإشعارات", rejections: "سجل الرفض" };
+    let currentTab = 'signals';
 
-        tabBtns.forEach(btn => { btn.addEventListener('click', () => { const tab = btn.dataset.tab; tabBtns.forEach(b => b.classList.remove('active')); btn.classList.add('active'); tabPanes.forEach(pane => { if (pane.id === `${tab}-tab`) { pane.classList.remove('hidden'); currentTab = tab; loadTabData(tab); } else { pane.classList.add('hidden'); } }); }); });
-        function loadTabData(tab) { if (tab === 'signals') loadSignals(); else if (tab === 'performance') loadPerformance(); else if (tab === 'notifications') loadNotifications(); else if (tab === 'rejections') loadRejections(); }
-        function loadInitialData() {
-            fetch('/api/status').then(response => response.json()).then(data => {
-                isTradingEnabled = data.is_trading_enabled; tradingStatusText.textContent = isTradingEnabled ? 'مفعل' : 'معطل'; toggleTradingBtn.textContent = isTradingEnabled ? 'تعطيل التداول' : 'تفعيل التداول';
-                toggleTradingBtn.className = isTradingEnabled ? 'px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors' : 'px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors';
-                const marketState = data.market_state;
-                if (marketState.status === 'BULLISH') { marketStatusText.textContent = 'سوق صاعد'; marketStatus.className = 'text-sm px-3 py-1 rounded-full bg-green-900'; marketStatus.querySelector('span').className = 'inline-block w-2 h-2 rounded-full bg-green-500 mr-2'; }
-                else if (marketState.status === 'BEARISH') { marketStatusText.textContent = 'سوق هابط'; marketStatus.className = 'text-sm px-3 py-1 rounded-full bg-red-900'; marketStatus.querySelector('span').className = 'inline-block w-2 h-2 rounded-full bg-red-500 mr-2'; }
-                else if (marketState.status === 'NEUTRAL') { marketStatusText.textContent = 'سوق محايد'; marketStatus.className = 'text-sm px-3 py-1 rounded-full bg-yellow-900'; marketStatus.querySelector('span').className = 'inline-block w-2 h-2 rounded-full bg-yellow-500 mr-2'; }
-                else { marketStatusText.textContent = 'غير متوفر'; marketStatus.className = 'text-sm px-3 py-1 rounded-full bg-gray-800'; marketStatus.querySelector('span').className = 'inline-block w-2 h-2 rounded-full bg-gray-500 mr-2'; }
-                marketStateEl.textContent = `${marketState.status} | التقلبات: ${marketState.volatility} | القوة: ${marketState.strength} | السيولة: ${marketState.liquidity}`;
-                balanceEl.textContent = data.usdt_balance !== 'N/A' ? `${parseFloat(data.usdt_balance).toFixed(2)} USDT` : 'غير متوفر';
-                openTradesEl.textContent = `${data.open_trades_count} / ${data.max_open_trades}`; openTradesBar.style.width = `${(data.open_trades_count / data.max_open_trades) * 100}%`;
-                apiWeightEl.textContent = `${data.api_weight} / 6000`; apiWeightBar.style.width = `${(data.api_weight / 6000) * 100}%`;
-                const strategies = data.settings.strategies; Object.keys(strategies).forEach(strategy => { const checkbox = document.getElementById(`strategy-${strategy}`); if (checkbox) checkbox.checked = strategies[strategy].enabled; });
-                const filters = data.settings.filters; Object.keys(filters).forEach(filter => { const input = document.getElementById(`filter-${filter}`); if (input) { input.value = filters[filter].value; if (filter === 'SIGNAL_STRICTNESS') { strictnessValueEl.textContent = `${input.value}%`; } } });
-                document.getElementById('risk-percent').value = data.settings.risk_percent;
-            }).catch(error => console.error('Error loading initial data:', error));
-            loadTabData(currentTab);
-        }
-        function loadSignals() { const tbody = document.getElementById('signals-table-body'); tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-gray-500">جاري التحميل...</td></tr>'; fetch('/api/signals').then(response => response.json()).then(signals => { if (signals.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-gray-500">لا توجد إشارات مفتوحة</td></tr>'; return; } tbody.innerHTML = ''; signals.forEach(signal => { const profitClass = signal.profit_percentage >= 0 ? 'text-green-400' : 'text-red-400'; const profitSign = signal.profit_percentage >= 0 ? '+' : ''; const row = document.createElement('tr'); row.innerHTML = `<td class="px-4 py-3 whitespace-nowrap"><div class="font-medium">${signal.symbol}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${signal.strategy_name}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${parseFloat(signal.entry_price).toFixed(4)}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${signal.current_price ? parseFloat(signal.current_price).toFixed(4) : '--'}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${parseFloat(signal.stop_loss).toFixed(4)}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm ${profitClass}">${profitSign}${signal.profit_percentage ? signal.profit_percentage.toFixed(2) : '0.00'}%</div></td><td class="px-4 py-3 whitespace-nowrap text-sm"><button class="text-red-400 hover:text-red-300" onclick="closeSignal(${signal.id})">إغلاق</button></td>`; tbody.appendChild(row); }); }).catch(error => { console.error('Error loading signals:', error); tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-red-500">خطأ في تحميل البيانات</td></tr>'; }); }
-        function loadPerformance() { const tbody = document.getElementById('performance-table-body'); tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-500">جاري التحميل...</td></tr>'; fetch('/api/performance').then(response => response.json()).then(performance => { if (performance.length === 0) { tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-gray-500">لا توجد بيانات أداء</td></tr>'; return; } tbody.innerHTML = ''; performance.forEach(strategy => { const winRate = strategy.total_trades > 0 ? ((strategy.winning_trades / strategy.total_trades) * 100).toFixed(1) : 0; const avgPnl = strategy.total_trades > 0 ? (strategy.total_pnl_percent / strategy.total_trades).toFixed(2) : 0; const row = document.createElement('tr'); row.innerHTML = `<td class="px-4 py-3 whitespace-nowrap"><div class="font-medium">${strategy.strategy_name}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${strategy.total_trades}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${strategy.winning_trades}</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm">${winRate}%</div></td><td class="px-4 py-3 whitespace-nowrap"><div class="text-sm ${avgPnl >= 0 ? 'text-green-400' : 'text-red-400'}">${avgPnl >= 0 ? '+' : ''}${avgPnl}%</div></td>`; tbody.appendChild(row); }); }).catch(error => { console.error('Error loading performance:', error); tbody.innerHTML = '<tr><td colspan="5" class="text-center py-4 text-red-500">خطأ في تحميل البيانات</td></tr>'; }); }
-        function loadNotifications() { const container = document.getElementById('notifications-container'); container.innerHTML = '<div class="text-center py-4 text-gray-500">جاري التحميل...</div>'; fetch('/api/notifications').then(response => response.json()).then(notifications => { if (notifications.length === 0) { container.innerHTML = '<div class="text-center py-4 text-gray-500">لا توجد إشعارات</div>'; return; } container.innerHTML = ''; notifications.forEach(notification => { const date = new Date(notification.timestamp); const dateStr = date.toLocaleString('ar-EG'); const item = document.createElement('div'); item.className = 'card p-4'; item.innerHTML = `<div class="flex justify-between items-start"><div><div class="font-medium">${notification.message}</div><div class="text-xs text-gray-400 mt-1">${dateStr}</div></div><div class="text-xs px-2 py-1 rounded-full ${notification.type === 'error' ? 'bg-red-900 text-red-300' : notification.type === 'warning' ? 'bg-yellow-900 text-yellow-300' : notification.type === 'success' ? 'bg-green-900 text-green-300' : 'bg-blue-900 text-blue-300'}">${notification.type}</div></div>`; container.appendChild(item); }); }).catch(error => { console.error('Error loading notifications:', error); container.innerHTML = '<div class="text-center py-4 text-red-500">خطأ في تحميل البيانات</div>'; }); }
-        function loadRejections() { const container = document.getElementById('rejections-container'); container.innerHTML = '<div class="text-center py-4 text-gray-500">جاري التحميل...</div>'; fetch('/api/rejection_logs').then(response => response.json()).then(rejections => { if (rejections.length === 0) { container.innerHTML = '<div class="text-center py-4 text-gray-500">لا توجد سجلات رفض</div>'; return; } container.innerHTML = ''; rejections.forEach(rejection => { const date = new Date(rejection.timestamp); const dateStr = date.toLocaleString('ar-EG'); const item = document.createElement('div'); item.className = 'card p-4'; item.innerHTML = `<div class="flex justify-between items-start"><div><div class="font-medium">${rejection.symbol}</div><div class="text-sm text-gray-300 mt-1">${rejection.reason}</div>${rejection.details && Object.keys(rejection.details).length > 0 ? `<div class="text-xs text-gray-400 mt-2"><details><summary class="cursor-pointer">التفاصيل</summary><pre class="mt-2 text-xs bg-gray-800 p-2 rounded overflow-x-auto">${JSON.stringify(rejection.details, null, 2)}</pre></details></div>` : ''}</div><div class="text-xs text-gray-400">${dateStr}</div></div>`; container.appendChild(item); }); }).catch(error => { console.error('Error loading rejections:', error); container.innerHTML = '<div class="text-center py-4 text-red-500">خطأ في تحميل البيانات</div>'; }); }
-        toggleTradingBtn.addEventListener('click', () => { fetch('/api/trading/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).then(response => response.json()).then(data => { if (data.success) { isTradingEnabled = !isTradingEnabled; tradingStatusText.textContent = isTradingEnabled ? 'مفعل' : 'معطل'; toggleTradingBtn.textContent = isTradingEnabled ? 'تعطيل التداول' : 'تفعيل التداول'; toggleTradingBtn.className = isTradingEnabled ? 'px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg transition-colors' : 'px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors'; } }).catch(error => console.error('Error toggling trading:', error)); });
-        saveSettingsBtn.addEventListener('click', () => { const settings = { risk_percent: parseFloat(document.getElementById('risk-percent').value), strategies: {}, filters: {} }; document.querySelectorAll('[id^="strategy-"]').forEach(input => { const strategy = input.id.replace('strategy-', ''); settings.strategies[strategy] = input.checked; }); document.querySelectorAll('[id^="filter-"]').forEach(input => { const filter = input.id.replace('filter-', ''); if (input.type === 'number' || input.type === 'range') settings.filters[filter] = parseFloat(input.value); else settings.filters[filter] = input.value; }); fetch('/api/settings/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) }).then(response => response.json()).then(data => { if (data.success) { alert('تم حفظ الإعدادات بنجاح'); loadInitialData(); } else { alert(`خطأ: ${data.message}`); } }).catch(error => { console.error('Error saving settings:', error); alert('خطأ في حفظ الإعدادات'); }); });
-        function closeSignal(signalId) { if (confirm('هل أنت متأكد من إغلاق هذه الصفقة؟')) { fetch(`/api/signals/close/${signalId}`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }).then(response => response.json()).then(data => { if (data.success) loadSignals(); else alert(`خطأ: ${data.message}`); }).catch(error => { console.error('Error closing signal:', error); alert('خطأ في إغلاق الصفقة'); }); } }
-        setInterval(() => { loadInitialData(); }, 30000);
+    function setupTabs() {
+        const nav = document.getElementById('tabs-nav');
+        const content = document.getElementById('tabs-content');
+        nav.innerHTML = Object.entries(TABS).map(([key, value]) => `<button class="tab-btn py-2 px-1 border-b-2 border-transparent" data-tab="${key}">${value}</button>`).join('');
+        content.innerHTML = Object.keys(TABS).map(key => `<div id="${key}-tab" class="tab-pane hidden"></div>`).join('');
+        nav.querySelector('.tab-btn').classList.add('active');
+        content.querySelector('.tab-pane').classList.remove('hidden');
+        nav.addEventListener('click', e => {
+            if (e.target.matches('.tab-btn')) {
+                currentTab = e.target.dataset.tab;
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                document.querySelectorAll('.tab-pane').forEach(p => p.classList.add('hidden'));
+                document.getElementById(`${currentTab}-tab`).classList.remove('hidden');
+                loadTabData();
+            }
+        });
+    }
+
+    function loadTabData() {
+        const endpoint = { signals: '/api/signals', performance: '/api/performance', notifications: '/api/notifications', rejections: '/api/rejection_logs' }[currentTab];
+        const container = document.getElementById(`${currentTab}-tab`);
+        container.innerHTML = '<p class="text-center">جاري التحميل...</p>';
+        fetch(endpoint)
+            .then(res => res.json())
+            .then(data => {
+                if (!data || data.length === 0) {
+                    container.innerHTML = '<p class="text-center">لا توجد بيانات.</p>';
+                    return;
+                }
+                if (currentTab === 'signals') renderSignals(data);
+                else if (currentTab === 'performance') renderPerformance(data);
+                else if (currentTab === 'notifications') renderNotifications(data);
+                else if (currentTab === 'rejections') renderRejections(data);
+            })
+            .catch(() => container.innerHTML = '<p class="text-center text-red-500">خطأ في تحميل البيانات.</p>');
+    }
+
+    function renderSignals(signals) {
+        const table = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr>${['العملة', 'الاستراتيجية', 'الدخول', 'الحالي', 'وقف الخسارة', 'الربح/الخسارة', 'إجراء'].map(h => `<th class="px-4 py-3 text-right text-xs font-medium uppercase">${h}</th>`).join('')}</tr></thead><tbody>${signals.map(s => { const profit = s.profit_percentage || 0; return `<tr><td class="px-4 py-3">${s.symbol}</td><td class="px-4 py-3 text-sm">${s.strategy_name}</td><td class="px-4 py-3">${s.entry_price.toFixed(4)}</td><td class="px-4 py-3">${(s.current_price || 0).toFixed(4)}</td><td class="px-4 py-3">${s.stop_loss.toFixed(4)}</td><td class="px-4 py-3 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}">${profit.toFixed(2)}%</td><td class="px-4 py-3"><button class="text-red-400" onclick="closeSignal(${s.id})">إغلاق</button></td></tr>`; }).join('')}</tbody></table></div>`;
+        document.getElementById('signals-tab').innerHTML = table;
+    }
+    function renderPerformance(performance) {
+        const table = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr>${['الاستراتيجية', 'الإجمالي', 'الرابحة', 'نسبة النجاح', 'متوسط الربح/الخسارة'].map(h => `<th class="px-4 py-3 text-right text-xs font-medium uppercase">${h}</th>`).join('')}</tr></thead><tbody>${performance.map(p => { const winRate = p.total_trades > 0 ? ((p.winning_trades / p.total_trades) * 100).toFixed(1) : 0; const avgPnl = p.total_trades > 0 ? (p.total_pnl_percent / p.total_trades).toFixed(2) : 0; return `<tr><td class="px-4 py-3">${p.strategy_name}</td><td class="px-4 py-3">${p.total_trades}</td><td class="px-4 py-3">${p.winning_trades}</td><td class="px-4 py-3">${winRate}%</td><td class="px-4 py-3 ${avgPnl >= 0 ? 'text-green-400' : 'text-red-400'}">${avgPnl}%</td></tr>`; }).join('')}</tbody></table></div>`;
+        document.getElementById('performance-tab').innerHTML = table;
+    }
+    function renderNotifications(notifications) {
+        document.getElementById('notifications-tab').innerHTML = notifications.map(n => `<div class="card p-4"><p>${n.message}</p><p class="text-xs text-gray-400 mt-1">${new Date(n.timestamp).toLocaleString()}</p></div>`).join('<div class="my-3"></div>');
+    }
+    function renderRejections(rejections) {
+        document.getElementById('rejections-tab').innerHTML = rejections.map(r => `<div class="card p-4"><div><strong>${r.symbol}</strong>: ${r.reason}</div><details class="text-xs mt-1"><summary>تفاصيل</summary><pre class="bg-gray-800 p-2 rounded mt-1">${JSON.stringify(r.details, null, 2)}</pre></details><p class="text-xs text-gray-400 mt-1">${new Date(r.timestamp).toLocaleString()}</p></div>`).join('<div class="my-3"></div>');
+    }
+
+    function loadInitialData() {
+        fetch('/api/status').then(res => res.json()).then(data => {
+            document.getElementById('balance').textContent = data.usdt_balance !== 'N/A' ? `${parseFloat(data.usdt_balance).toFixed(2)}` : '--';
+            document.getElementById('open-trades').textContent = `${data.open_trades_count} / ${data.max_open_trades}`;
+            document.getElementById('api-weight').textContent = `${data.api_weight} / 6000`;
+            document.getElementById('market-state').textContent = data.market_state.status || '...';
+            const tradingStatusEl = document.getElementById('trading-status-text');
+            tradingStatusEl.textContent = data.is_trading_enabled ? 'مفعل' : 'معطل';
+            
+            const strategiesContainer = document.getElementById('strategies-container');
+            strategiesContainer.innerHTML = Object.entries(data.settings.strategies).map(([key, val]) => `<div class="flex items-center justify-between"><label for="strategy-${key}">${val.display_name}</label><input type="checkbox" id="strategy-${key}" ${val.enabled ? 'checked' : ''}></div>`).join('');
+            
+            Object.entries(data.settings.filters).forEach(([key, val]) => {
+                const input = document.getElementById(`filter-${key}`);
+                if (input) input.value = val.value;
+            });
+            document.getElementById('risk-percent').value = data.settings.risk_percent;
+            const strictnessSlider = document.getElementById('filter-SIGNAL_STRICTNESS');
+            document.getElementById('strictness-value').textContent = `${strictnessSlider.value}%`;
+        }).catch(err => console.error("Error loading status:", err));
+        loadTabData();
+    }
+    
+    document.getElementById('toggle-trading').addEventListener('click', () => {
+        fetch('/api/trading/toggle', { method: 'POST' }).then(() => loadInitialData());
+    });
+
+    document.getElementById('save-settings').addEventListener('click', () => {
+        const settings = { strategies: {}, filters: {} };
+        document.querySelectorAll('[id^="strategy-"]').forEach(el => settings.strategies[el.id.replace('strategy-', '')] = el.checked);
+        document.querySelectorAll('[id^="filter-"]').forEach(el => settings.filters[el.id.replace('filter-', '')] = el.type === 'number' || el.type === 'range' ? parseFloat(el.value) : el.value);
+        settings.risk_percent = parseFloat(document.getElementById('risk-percent').value);
+        
+        fetch('/api/settings/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) })
+            .then(res => res.json()).then(data => alert(data.success ? 'تم الحفظ' : 'خطأ'));
+    });
+
+    document.getElementById('filter-SIGNAL_STRICTNESS').addEventListener('input', e => {
+        document.getElementById('strictness-value').textContent = `${e.target.value}%`;
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+        setupTabs();
         loadInitialData();
-    </script>
+        setInterval(loadInitialData, 30000);
+    });
+</script>
 </body>
 </html>
 """
 
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v11_4())
+    return render_template_string(get_dashboard_html_v11_6())
 
 @app.route('/api/status')
 def get_status():
@@ -1275,16 +1075,13 @@ def get_status():
     with trading_status_lock: is_enabled = is_trading_enabled
     with throttler.lock: weight = throttler.total_weight_used_minute
     with signal_cache_lock: open_trades = len(open_signals_cache)
-    usdt_balance = None
+    usdt_balance = 'N/A'
     if client:
         try: usdt_balance = float(client.get_asset_balance(asset='USDT')['free'])
-        except: usdt_balance = 'N/A'
+        except: pass
     with risk_per_trade_lock: risk = RISK_PER_TRADE_PERCENT
     strategy_settings = {key: {"enabled": config['enabled'], "display_name": config['display_name']} for key, config in STRATEGY_CONFIG.items()}
-    filter_settings = {}
-    for key, config in FILTER_CONFIG.items():
-        with config['lock']:
-            filter_settings[key] = {"value": config['value'], "display_name": config['display_name']}
+    filter_settings = {key: {"value": config['value'], "display_name": config['display_name']} for key, config in FILTER_CONFIG.items()}
     return jsonify({
         "market_state": state_copy, "is_trading_enabled": is_enabled, "usdt_balance": usdt_balance,
         "api_weight": weight, "open_trades_count": open_trades, "max_open_trades": MAX_OPEN_TRADES,
@@ -1300,7 +1097,7 @@ def get_signals():
         for signal in signals_copy:
             current_price = current_prices.get(signal['symbol'])
             if current_price:
-                signal['current_price'] = current_price
+                signal['current_price'] = float(current_price)
                 signal['profit_percentage'] = ((float(current_price) - float(signal['entry_price'])) / float(signal['entry_price'])) * 100
         return jsonify(signals_copy)
     except Exception as e:
@@ -1331,7 +1128,7 @@ def toggle_trading_status():
         is_trading_enabled = not is_trading_enabled
         status_msg = "مُفعّل" if is_trading_enabled else "مُعطّل"
         log_and_notify('warning', f"🚨 تم تغيير حالة التداول الحقيقي إلى: {status_msg}", "TRADING_STATUS_CHANGE")
-        return jsonify({"success": True, "message": f"Trading status set to {status_msg}"})
+        return jsonify({"success": True})
 
 @app.route('/api/settings/update', methods=['POST'])
 def update_settings():
@@ -1340,67 +1137,55 @@ def update_settings():
         with risk_per_trade_lock: 
             global RISK_PER_TRADE_PERCENT
             RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', RISK_PER_TRADE_PERCENT))
-        strategies_data = data.get('strategies', {})
-        for key, is_enabled in strategies_data.items():
+        for key, is_enabled in data.get('strategies', {}).items():
             if key in STRATEGY_CONFIG:
-                with STRATEGY_CONFIG[key]['lock']: 
-                    STRATEGY_CONFIG[key]['enabled'] = bool(is_enabled)
-        filters_data = data.get('filters', {})
-        for key, value in filters_data.items():
+                with STRATEGY_CONFIG[key]['lock']: STRATEGY_CONFIG[key]['enabled'] = bool(is_enabled)
+        for key, value in data.get('filters', {}).items():
             if key in FILTER_CONFIG:
                 with FILTER_CONFIG[key]['lock']:
-                    if isinstance(FILTER_CONFIG[key]['value'], (int, float)):
-                        FILTER_CONFIG[key]['value'] = type(FILTER_CONFIG[key]['value'])(float(value))
-                    else:
-                        FILTER_CONFIG[key]['value'] = str(value)
+                    current_type = type(FILTER_CONFIG[key]['value'])
+                    FILTER_CONFIG[key]['value'] = current_type(float(value)) if current_type in [int, float] else str(value)
         log_and_notify('info', "⚙️ تم تحديث الإعدادات من لوحة التحكم.", "SETTINGS_UPDATE")
-        return jsonify({"success": True, "message": "Settings updated successfully"})
+        return jsonify({"success": True})
     except Exception as e:
         logger.error(f"❌ [API Settings] فشل تحديث الإعدادات: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 400
 
 @app.route('/api/signals/close/<int:signal_id>', methods=['POST'])
 def manual_close_trade_endpoint(signal_id):
-    if not redis_client or not client: return jsonify({"success": False, "message": "Services not ready"}), 503
+    if not (redis_client and client): return jsonify({"success": False, "message": "Services not ready"}), 503
     with signal_cache_lock: signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
     if not signal_to_close: return jsonify({"success": False, "message": "Signal not found"}), 404
     try:
         current_price = float(redis_client.hget("crypto_bot_prices", signal_to_close['symbol']))
-    except (TypeError, ValueError):
+    except:
         try: current_price = float(client.get_symbol_ticker(symbol=signal_to_close['symbol'])['price'])
         except Exception as e: return jsonify({"success": False, "message": f"Could not fetch price: {e}"}), 500
-    if close_signal(signal_id, current_price, 'manual'): return jsonify({"success": True, "message": "Signal closed."})
+    if close_signal(signal_id, current_price, 'manual'): return jsonify({"success": True})
     else: return jsonify({"success": False, "message": "Failed to close signal."}), 500
 
 # --- الدوال الرئيسية لتشغيل البوت ---
 def main():
     global client
-    
-    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.4")
+    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.6")
     init_db()
     init_redis()
     client = Client(API_KEY, API_SECRET)
     get_exchange_info_map()
     global validated_symbols_to_scan
     validated_symbols_to_scan = get_validated_symbols()
-    
     if not validated_symbols_to_scan:
         logger.critical("❌ لا توجد عملات صالحة للمسح. إنهاء التشغيل.")
         return
     
     twm = start_websocket_manager()
-    
-    web_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True))
-    web_thread.daemon = True
+    web_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True), daemon=True)
     web_thread.start()
     logger.info("🌐 بدء واجهة الويب على http://localhost:5000")
     
     if redis_client:
         try:
-            initial_prices = {}
-            for symbol in validated_symbols_to_scan:
-                ticker = client.get_symbol_ticker(symbol=symbol)
-                initial_prices[symbol] = ticker['price']
+            initial_prices = {s['symbol']: s['price'] for s in client.get_all_tickers() if s['symbol'] in validated_symbols_to_scan}
             redis_client.hset("crypto_bot_prices", mapping=initial_prices)
         except Exception as e:
             logger.error(f"❌ خطأ في جلب الأسعار الأولية: {e}")
@@ -1408,15 +1193,13 @@ def main():
     try:
         while True:
             scan_and_generate_signals()
-            gc.collect()
+            # The main garbage collect call is now less critical but still useful.
+            gc.collect() 
             time.sleep(60)
     except KeyboardInterrupt:
         logger.info("🛑 تم إيقاف البوت يدوياً")
-    except Exception as e:
-        logger.error(f"❌ خطأ غير متوقع في الحلقة الرئيسية: {e}", exc_info=True)
     finally:
-        if twm:
-            twm.stop()
+        if twm: twm.stop()
         logger.info("🔚 تم إنهاء تشغيل البوت")
 
 if __name__ == "__main__":
