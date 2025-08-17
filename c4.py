@@ -32,6 +32,7 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
+# إعداد اللوجر بشكل مفصل
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,12 +56,21 @@ class NpEncoder(json.JSONEncoder):
 
 # --- تحميل متغيرات البيئة ---
 try:
-    API_KEY: str = config('BINANCE_API_KEY')
-    API_SECRET: str = config('BINANCE_API_SECRET')
-    DB_URL: str = config('DATABASE_URL')
+    API_KEY: str = config('BINANCE_API_KEY', default='')
+    API_SECRET: str = config('BINANCE_API_SECRET', default='')
+    DB_URL: str = config('DATABASE_URL', default='')
     REDIS_URL: str = config('REDIS_URL', default='redis://localhost:6379/0')
     TELEGRAM_BOT_TOKEN: str = config('TELEGRAM_BOT_TOKEN', default='')
     TELEGRAM_CHAT_ID: str = config('TELEGRAM_CHAT_ID', default='')
+    
+    logger.info("✅ تم تحميل متغيرات البيئة بنجاح")
+    logger.info(f"API_KEY: {'موجود' if API_KEY else 'غير موجود'}")
+    logger.info(f"API_SECRET: {'موجود' if API_SECRET else 'غير موجود'}")
+    logger.info(f"DB_URL: {'موجود' if DB_URL else 'غير موجود'}")
+    logger.info(f"REDIS_URL: {REDIS_URL}")
+    logger.info(f"TELEGRAM_BOT_TOKEN: {'موجود' if TELEGRAM_BOT_TOKEN else 'غير موجود'}")
+    logger.info(f"TELEGRAM_CHAT_ID: {'موجود' if TELEGRAM_CHAT_ID else 'غير موجود'}")
+    
 except Exception as e:
     logger.critical(f"❌ فشل حاسم في تحميل متغيرات البيئة الأساسية: {e}")
     exit(1)
@@ -243,17 +253,27 @@ def send_telegram_message(message: str):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [تليجرام] فشل إرسال الرسالة: {e}")
 
-def init_db(retries: int = 5, delay: int = 5) -> None:
+def init_db(retries: int = 5, delay: int = 5) -> bool:
     global conn
     logger.info("[قاعدة البيانات] تهيئة الاتصال...")
+    
+    if not DB_URL:
+        logger.error("❌ [قاعدة البيانات] DB_URL غير معرف في متغيرات البيئة")
+        return False
+    
     db_url_to_use = DB_URL
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         db_url_to_use += f"{'?' if '?' not in db_url_to_use else '&'}sslmode=require"
+    
     for attempt in range(retries):
         try:
+            logger.info(f"[قاعدة البيانات] محاولة الاتصال {attempt + 1}/{retries}...")
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
+            logger.info("✅ [قاعدة البيانات] تم الاتصال بنجاح.")
+            
             with conn.cursor() as cur:
+                logger.info("[قاعدة البيانات] إنشاء الجداول إذا لم تكن موجودة...")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
@@ -290,30 +310,58 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_symbol_timeframe ON historical_data_cache (symbol, timeframe);")
-            conn.commit()
-            logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
-            return
+                
+                conn.commit()
+                logger.info("✅ [قاعدة البيانات] تم إنشاء/تحديث الجداول بنجاح.")
+                return True
+        except OperationalError as e:
+            logger.error(f"❌ [قاعدة البيانات] خطأ في الاتصال (محاولة {attempt + 1}/{retries}): {e}")
+            if conn: 
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            if attempt < retries - 1: 
+                logger.info(f"[قاعدة البيانات] الانتظار {delay} ثانية قبل المحاولة التالية...")
+                time.sleep(delay)
+            else: 
+                logger.critical("❌ [قاعدة البيانات] فشل الاتصال بعد عدة محاولات.")
+                return False
         except Exception as e:
-            logger.error(f"❌ [قاعدة البيانات] خطأ أثناء التهيئة (محاولة {attempt + 1}/{retries}): {e}")
-            if conn: conn.rollback()
-            if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [قاعدة البيانات] فشل الاتصال.")
+            logger.error(f"❌ [قاعدة البيانات] خطأ غير متوقع (محاولة {attempt + 1}/{retries}): {e}")
+            if conn: 
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            if attempt < retries - 1: 
+                logger.info(f"[قاعدة البيانات] الانتظار {delay} ثانية قبل المحاولة التالية...")
+                time.sleep(delay)
+            else: 
+                logger.critical("❌ [قاعدة البيانات] فشل الاتصال بعد عدة محاولات.")
+                return False
+    
+    return False
 
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
         logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
-        init_db()
+        if not init_db():
+            return False
     try:
         if conn and conn.closed == 0:
-            with conn.cursor() as cur: cur.execute("SELECT 1;")
+            with conn.cursor() as cur: 
+                cur.execute("SELECT 1;")
+                conn.commit()
             return True
         return False
     except (OperationalError, InterfaceError) as e:
         logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال: {e}. إعادة الاتصال...")
         try:
-            init_db()
-            return conn is not None and conn.closed == 0
+            if init_db():
+                return conn is not None and conn.closed == 0
+            return False
         except Exception as retry_e:
             logger.error(f"❌ [قاعدة البيانات] فشل إعادة الاتصال: {retry_e}")
             return False
@@ -327,10 +375,14 @@ def log_and_notify(level: str, message: str, notification_type: str):
         notifications_cache.insert(0, new_notification)
         if len(notifications_cache) > 100: notifications_cache.pop()
 
-    if not check_db_connection() or not conn: return
+    if not check_db_connection() or not conn: 
+        logger.warning("[قاعدة البيانات] لا يوجد اتصال بقاعدة البيانات، تخطي حفظ الإشعار.")
+        return
+        
     try:
-        with conn.cursor() as cur: cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
-        conn.commit()
+        with conn.cursor() as cur: 
+            cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
+            conn.commit()
     except Exception as e:
         logger.error(f"❌ [قاعدة البيانات] فشل حفظ الإشعار: {e}")
         if conn: conn.rollback()
@@ -346,46 +398,74 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
         })
         if len(rejection_logs_cache) > 200: rejection_logs_cache.pop()
 
-def init_redis() -> None:
+def init_redis() -> bool:
     global redis_client
     logger.info("[Redis] تهيئة الاتصال...")
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         logger.info("✅ [Redis] تم الاتصال بنجاح.")
+        return True
     except redis.exceptions.ConnectionError as e:
-        logger.critical(f"❌ [Redis] فشل الاتصال: {e}")
-        exit(1)
+        logger.error(f"❌ [Redis] فشل الاتصال: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ [Redis] خطأ غير متوقع: {e}")
+        return False
 
 @rate_limiter(weight=10)
-def get_exchange_info_map() -> None:
+def get_exchange_info_map() -> bool:
     global exchange_info_map
-    if not client: return
+    if not client: 
+        logger.error("[معلومات المنصة] عميل Binance غير مهيأ")
+        return False
+        
     logger.info("ℹ️ [معلومات المنصة] جاري جلب قواعد التداول...")
     try:
         info = client.get_exchange_info()
         exchange_info_map = {s['symbol']: s for s in info['symbols']}
         logger.info(f"✅ [معلومات المنصة] تم تحميل القواعد لـ {len(exchange_info_map)} عملة.")
+        return True
     except Exception as e:
         logger.error(f"❌ [معلومات المنصة] فشل جلب المعلومات: {e}")
+        return False
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
-    if not client: return []
+    if not client: 
+        logger.error("[التحقق من الرموز] عميل Binance غير مهيأ")
+        return []
+        
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
+        
         if not os.path.exists(file_path):
-            logger.critical(f"❌ [التحقق من الرموز] ملف العملات '{filename}' غير موجود!")
-            return []
+            logger.warning(f"⚠️ [التحقق من الرموز] ملف العملات '{filename}' غير موجود! سيتم إنشاء ملف افتراضي.")
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write("# قائمة العملات المراد تداولها\n")
+                f.write("BTC\n")
+                f.write("ETH\n")
+                f.write("BNB\n")
+                f.write("ADA\n")
+                f.write("SOL\n")
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
+        
         if not raw_symbols:
             logger.warning(f"⚠️ [التحقق من الرموز] ملف العملات '{filename}' فارغ.")
             return []
+            
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
-        if not exchange_info_map: get_exchange_info_map()
+        
+        if not exchange_info_map: 
+            if not get_exchange_info_map():
+                logger.error("[التحقق من الرموز] فشل جلب معلومات المنصة")
+                return []
+                
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         validated = sorted(list(formatted.intersection(active)))
+        
         logger.info(f"✅ [التحقق من الرموز] تم العثور على {len(validated)} عملة صالحة للتداول.")
         return validated
     except Exception as e:
@@ -395,10 +475,18 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 # --- دوال جلب البيانات وحساب المؤشرات ---
 @rate_limiter(weight=1)
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    if not client: return None
+    if not client: 
+        logger.error(f"[جلب البيانات] عميل Binance غير مهيأ للرمز {symbol}")
+        return None
+        
     try:
+        logger.debug(f"[جلب البيانات] جلب بيانات {symbol} ({interval}) لآخر {days} يوم")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
-        if not klines: return None
+        
+        if not klines: 
+            logger.warning(f"[جلب البيانات] لا توجد بيانات لـ {symbol} ({interval})")
+            return None
+            
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
         df = pd.DataFrame(klines, columns=cols)
         numeric_cols = {'open': 'float', 'high': 'float', 'low': 'float', 'close': 'float', 'volume': 'float'}
@@ -424,7 +512,7 @@ def _json_to_df(json_data: Any) -> pd.DataFrame:
 
 def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.DataFrame]:
     if timeframe == '5m':
-        logger.info(f"  -> [{symbol}-{timeframe}] ⚡ جلب بيانات حية (بدون كاش).")
+        logger.debug(f"  -> [{symbol}-{timeframe}] ⚡ جلب بيانات حية (بدون كاش).")
         return fetch_historical_data(symbol, timeframe, days=2)
 
     if not check_db_connection() or not conn:
@@ -436,18 +524,19 @@ def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.D
             pk = f"{symbol}_{timeframe}"
             cur.execute("SELECT data, last_updated FROM historical_data_cache WHERE symbol_timeframe = %s", (pk,))
             cache_result = cur.fetchone()
+            
         if cache_result:
             last_updated_time = cache_result['last_updated']
             if (datetime.now(timezone.utc) - last_updated_time) < timedelta(minutes=CACHE_EXPIRATION_MINUTES):
-                logger.info(f"  -> [{symbol}-{timeframe}] 💾 استخدام البيانات من كاش قاعدة البيانات.")
+                logger.debug(f"  -> [{symbol}-{timeframe}] 💾 استخدام البيانات من كاش قاعدة البيانات.")
                 return _json_to_df(cache_result['data'])
             else:
-                logger.info(f"  -> [{symbol}-{timeframe}] ⏳ بيانات الكاش منتهية الصلاحية.")
+                logger.debug(f"  -> [{symbol}-{timeframe}] ⏳ بيانات الكاش منتهية الصلاحية.")
     except Exception as e:
         logger.error(f"❌ [DB Cache] خطأ أثناء قراءة الكاش لـ {symbol}-{timeframe}: {e}")
         if conn: conn.rollback()
 
-    logger.info(f"  -> [{symbol}-{timeframe}] 🌐 جلب بيانات جديدة من المنصة.")
+    logger.debug(f"  -> [{symbol}-{timeframe}] 🌐 جلب بيانات جديدة من المنصة.")
     try:
         df = fetch_historical_data(symbol, timeframe, days)
         if df is not None and not df.empty:
@@ -462,7 +551,7 @@ def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.D
                         last_updated = EXCLUDED.last_updated;
                 """, (pk, symbol, timeframe, json_data, datetime.now(timezone.utc)))
             conn.commit()
-            logger.info(f"  -> [{symbol}-{timeframe}] ✅ تم تحديث الكاش في قاعدة البيانات.")
+            logger.debug(f"  -> [{symbol}-{timeframe}] ✅ تم تحديث الكاش في قاعدة البيانات.")
             return df
         return None
     except Exception as e:
@@ -473,46 +562,61 @@ def get_data_for_symbol(symbol: str, timeframe: str, days: int) -> Optional[pd.D
         return None
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return pd.DataFrame()
-    df_calc = df.copy()
-    df_calc['ema_50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
-    df_calc['ema_200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-    df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
-    up_move = df_calc['high'].diff()
-    down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).ewm(com=14 - 1, adjust=False).mean()
-    loss = -delta.clip(upper=0).ewm(com=14 - 1, adjust=False).mean()
-    df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
-    bb_period = 20
-    df_calc['bb_middle'] = df_calc['close'].rolling(window=bb_period).mean()
-    bb_std = df_calc['close'].rolling(window=bb_period).std()
-    df_calc['bb_upper'] = df_calc['bb_middle'] + (bb_std * 2)
-    df_calc['bb_lower'] = df_calc['bb_middle'] - (bb_std * 2)
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
-    rsi = df_calc['rsi']
-    stoch_rsi_val = (rsi - rsi.rolling(14).min()) / (rsi.rolling(14).max() - rsi.rolling(14).min()).replace(0, 1e-9)
-    df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(3).mean() * 100
-    df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(3).mean()
-    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
-    df_calc['macd'] = exp1 - exp2
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    q = df_calc['volume']
-    p = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
-    df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
-    return df_calc.dropna()
+    if df is None or df.empty: 
+        logger.warning("[حساب المؤشرات] DataFrame فارغ")
+        return pd.DataFrame()
+        
+    try:
+        df_calc = df.copy()
+        df_calc['ema_50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
+        df_calc['ema_200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+        df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
+        
+        high_low = df_calc['high'] - df_calc['low']
+        high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+        low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+        df_calc['atr'] = tr.ewm(span=ATR_PERIOD, adjust=False).mean()
+        
+        up_move = df_calc['high'].diff()
+        down_move = -df_calc['low'].diff()
+        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+        plus_di = 100 * plus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+        minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+        dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+        df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
+        
+        delta = df_calc['close'].diff()
+        gain = delta.clip(lower=0).ewm(com=14 - 1, adjust=False).mean()
+        loss = -delta.clip(upper=0).ewm(com=14 - 1, adjust=False).mean()
+        df_calc['rsi'] = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+        
+        bb_period = 20
+        df_calc['bb_middle'] = df_calc['close'].rolling(window=bb_period).mean()
+        bb_std = df_calc['close'].rolling(window=bb_period).std()
+        df_calc['bb_upper'] = df_calc['bb_middle'] + (bb_std * 2)
+        df_calc['bb_lower'] = df_calc['bb_middle'] - (bb_std * 2)
+        df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
+        
+        rsi = df_calc['rsi']
+        stoch_rsi_val = (rsi - rsi.rolling(14).min()) / (rsi.rolling(14).max() - rsi.rolling(14).min()).replace(0, 1e-9)
+        df_calc['stoch_rsi_k'] = stoch_rsi_val.rolling(3).mean() * 100
+        df_calc['stoch_rsi_d'] = df_calc['stoch_rsi_k'].rolling(3).mean()
+        
+        exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
+        exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
+        df_calc['macd'] = exp1 - exp2
+        df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+        
+        q = df_calc['volume']
+        p = (df_calc['high'] + df_calc['low'] + df_calc['close']) / 3
+        df_calc['vwap'] = (p * q).cumsum() / q.cumsum()
+        
+        return df_calc.dropna()
+    except Exception as e:
+        logger.error(f"❌ [حساب المؤشرات] خطأ في حساب المؤشرات: {e}")
+        return pd.DataFrame()
 
 # --- دوال جديدة لتحليل الاتجاه والفيبوناتشي ---
 def calculate_market_trend_enhanced(symbol: str) -> Dict[str, Any]:
@@ -1115,7 +1219,10 @@ def check_price_channel_strategy(df: pd.DataFrame) -> bool:
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info: return None
+        if not symbol_info: 
+            logger.warning(f"[تعديل الكمية] لم يتم العثور على معلومات للرمز {symbol}")
+            return None
+            
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
         if lot_size_filter:
             step_size = Decimal(lot_size_filter['stepSize'])
@@ -1130,7 +1237,10 @@ def calculate_dynamic_position_size_enhanced(symbol: str, entry_price: float, at
     حساب حجم الصفقة الديناميكي المحسن مع مراعاة قوة الإشارة
     signal_strength: قيمة بين 0.5 و 1.5 تشير إلى قوة الإشارة
     """
-    if not client: return None
+    if not client: 
+        logger.error(f"[حجم الصفقة] عميل Binance غير مهيأ للرمز {symbol}")
+        return None
+        
     try:
         with risk_per_trade_lock: current_risk_percent = RISK_PER_TRADE_PERCENT
         
@@ -1184,7 +1294,10 @@ def calculate_dynamic_position_size_enhanced(symbol: str, entry_price: float, at
 
 @rate_limiter(weight=1)
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
-    if not client: return None
+    if not client: 
+        logger.error(f"[تنفيذ الأمر] عميل Binance غير مهيأ للرمز {symbol}")
+        return None
+        
     logger.info(f"➡️ [{symbol}] محاولة تنفيذ أمر {side} حقيقي لكمية {quantity}.")
     try:
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
@@ -1196,7 +1309,10 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
-    if not check_db_connection() or not conn: return None
+    if not check_db_connection() or not conn: 
+        logger.error("[قاعدة البيانات] لا يوجد اتصال بقاعدة البيانات، تخطي حفظ الإشارة.")
+        return None
+        
     try:
         # حساب مستويات فيبوناتشي للإشارة
         df = get_data_for_symbol(signal_data['symbol'], SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
@@ -1267,7 +1383,10 @@ def insert_signal_into_db(signal_data: Dict) -> Optional[Dict]:
         return None
 
 def update_signal_in_db(signal_id: int, updates: Dict):
-    if not check_db_connection() or not conn: return
+    if not check_db_connection() or not conn: 
+        logger.error("[قاعدة البيانات] لا يوجد اتصال بقاعدة البيانات، تخطي تحديث الإشارة.")
+        return
+        
     try:
         with conn.cursor() as cur:
             set_clauses = [sql.SQL("{} = %s").format(sql.Identifier(key)) for key in updates]
@@ -1337,7 +1456,10 @@ def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: 
 
 # --- دوال إدارة الصفقات والمراقبة ---
 def get_open_signals_from_db() -> List[Dict]:
-    if not check_db_connection() or not conn: return []
+    if not check_db_connection() or not conn: 
+        logger.error("[قاعدة البيانات] لا يوجد اتصال بقاعدة البيانات، تخطي جلب الإشارات.")
+        return []
+        
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals WHERE status = 'open' ORDER BY opened_at DESC;")
@@ -1349,7 +1471,10 @@ def get_open_signals_from_db() -> List[Dict]:
         return []
 
 def close_signal_in_db(signal_id: int, closing_price: float, reason: str) -> Optional[Dict]:
-    if not check_db_connection() or not conn: return None
+    if not check_db_connection() or not conn: 
+        logger.error("[قاعدة البيانات] لا يوجد اتصال بقاعدة البيانات، تخطي إغلاق الإشارة.")
+        return None
+        
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1604,6 +1729,8 @@ def dashboard():
             .state-ranging { background-color: #fff3cd; color: #856404; }
             .btn-custom { margin: 2px; }
             .footer { margin-top: 50px; padding: 20px 0; background-color: #343a40; color: white; text-align: center; }
+            .loading { text-align: center; padding: 20px; }
+            .error-message { color: #dc3545; font-weight: bold; }
         </style>
     </head>
     <body>
@@ -1628,7 +1755,7 @@ def dashboard():
                             <i class="fas fa-chart-line"></i> حالة السوق الحالية
                         </div>
                         <div class="card-body" id="market-state-container">
-                            جاري تحميل حالة السوق...
+                            <div class="loading">جاري تحميل حالة السوق...</div>
                         </div>
                     </div>
                 </div>
@@ -1794,6 +1921,8 @@ def dashboard():
                                     </div>
                                 </div>
                             `;
+                        } else {
+                            marketStateContainer.innerHTML = '<div class="error-message">لا توجد بيانات حالة السوق</div>';
                         }
                         
                         // تحديث الإشارات المفتوحة
@@ -1849,9 +1978,11 @@ def dashboard():
                         }
                         
                         // تحديث الإعدادات
-                        document.getElementById('risk-per-trade').value = data.settings.risk_per_trade;
-                        document.getElementById('max-open-trades').value = data.settings.max_open_trades;
-                        document.getElementById('trend-sensitivity').value = data.settings.trend_sensitivity;
+                        if (data.settings) {
+                            document.getElementById('risk-per-trade').value = data.settings.risk_per_trade;
+                            document.getElementById('max-open-trades').value = data.settings.max_open_trades;
+                            document.getElementById('trend-sensitivity').value = data.settings.trend_sensitivity;
+                        }
                         
                         // تحديث زر التداول
                         const toggleButton = document.getElementById('toggle-trading');
@@ -1883,7 +2014,10 @@ def dashboard():
                             notificationsContainer.innerHTML = '<div class="text-center text-muted">لا توجد إشعارات جديدة</div>';
                         }
                     })
-                    .catch(error => console.error('Error fetching data:', error));
+                    .catch(error => {
+                        console.error('Error fetching data:', error);
+                        document.getElementById('market-state-container').innerHTML = '<div class="error-message">خطأ في جلب البيانات</div>';
+                    });
             }
             
             // إغلاق إشارة
@@ -2159,30 +2293,38 @@ def main():
     logger.info("🚀 بدء تشغيل نظام التداول الآلي V11.3...")
     
     # تهيئة قاعدة البيانات
-    init_db()
+    if not init_db():
+        logger.error("❌ فشل تهيئة قاعدة البيانات. سيتم تشغيل النظام بدون قاعدة بيانات.")
     
     # تهيئة Redis
-    init_redis()
+    if not init_redis():
+        logger.warning("⚠️ فشل تهيئة Redis. سيتم تشغيل النظام بدون Redis.")
     
     # تهيئة عميل Binance
     global client
     try:
-        client = Client(API_KEY, API_SECRET)
-        logger.info("✅ تم تهيئة عميل Binance بنجاح.")
+        if not API_KEY or not API_SECRET:
+            logger.warning("⚠️ مفاتيح API غير معرفة. سيتم تشغيل النظام في وضع المحاكاة.")
+            client = None
+        else:
+            client = Client(API_KEY, API_SECRET)
+            logger.info("✅ تم تهيئة عميل Binance بنجاح.")
     except Exception as e:
-        logger.critical(f"❌ فشل تهيئة عميل Binance: {e}")
-        return
+        logger.error(f"❌ فشل تهيئة عميل Binance: {e}")
+        client = None
     
     # جلب معلومات المنصة
-    get_exchange_info_map()
+    if client:
+        if not get_exchange_info_map():
+            logger.warning("⚠️ فشل جلب معلومات المنصة.")
     
     # الحصول على قائمة العملات
     global validated_symbols_to_scan
     validated_symbols_to_scan = get_validated_symbols()
     
     if not validated_symbols_to_scan:
-        logger.critical("❌ لا توجد عملات صالحة للتداول.")
-        return
+        logger.warning("⚠️ لا توجد عملات صالحة للتداول. سيتم استخدام قائمة افتراضية.")
+        validated_symbols_to_scan = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT', 'SOLUSDT']
     
     logger.info(f"✅ تم العثور على {len(validated_symbols_to_scan)} عملة صالحة للتداول.")
     
@@ -2193,7 +2335,10 @@ def main():
     
     # تشغيل واجهة الويب
     logger.info("🌐 بدء تشغيل واجهة الويب...")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    except Exception as e:
+        logger.error(f"❌ فشل تشغيل واجهة الويب: {e}")
 
 if __name__ == "__main__":
     main()
