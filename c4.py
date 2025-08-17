@@ -700,12 +700,19 @@ def check_vwap_reversal_strategy_enhanced(df: pd.DataFrame) -> bool:
 
 def check_price_channel_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 30: return False
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    
+    # --- START: CODE FIX ---
+    # Calculate the channel columns first before defining 'last' and 'prev'.
+    # This ensures that 'last' and 'prev' will contain these columns when accessed.
     channel_period = 20
     df['upper_channel'] = df['high'].rolling(window=channel_period).max()
     df['lower_channel'] = df['low'].rolling(window=channel_period).min()
     df['channel_middle'] = (df['upper_channel'] + df['lower_channel']) / 2
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    # --- END: CODE FIX ---
+
     upper_breakout = (
         bool(last['close'] > last['upper_channel']) and
         bool(prev['close'] <= prev['upper_channel']) and
@@ -1154,11 +1161,9 @@ def generate_signals_for_symbol(symbol: str) -> List[Dict]:
     if agreement_count == 0:
         return signals
     
-    # --- START: MODIFICATION ---
     # The signal strength is now calculated purely based on strategy agreement,
     # without influence from the overall market state, as requested.
     signal_strength = agreement_count / active_strategies if active_strategies > 0 else 0
-    # --- END: MODIFICATION ---
     
     with FILTER_CONFIG["SIGNAL_STRENGTH_THRESHOLD"]["lock"]: min_strength = FILTER_CONFIG["SIGNAL_STRENGTH_THRESHOLD"]["value"]
     if signal_strength < min_strength:
