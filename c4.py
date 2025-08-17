@@ -623,6 +623,20 @@ def calculate_market_trend_enhanced(symbol: str) -> Dict[str, Any]:
     """
     حساب اتجاه السوق المحسن باستخدام أطر زمنية متعددة ومؤشرات متنوعة
     """
+    logger.debug(f"[اتجاه السوق] حساب اتجاه السوق لـ {symbol}")
+    
+    # إذا لم يكن هناك اتصال بـ Binance، نرجع حالة افتراضية
+    if not client:
+        logger.warning(f"[اتجاه السوق] لا يوجد اتصال بـ Binance، استخدام حالة افتراضية لـ {symbol}")
+        return {
+            "symbol": symbol,
+            "overall_score": 0,
+            "market_state": "RANGING",
+            "timeframe_scores": {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": "No Binance connection"
+        }
+    
     timeframes = ['5m', '15m', '1h', '4h']
     trend_scores = {}
     
@@ -630,12 +644,15 @@ def calculate_market_trend_enhanced(symbol: str) -> Dict[str, Any]:
     
     for tf in timeframes:
         try:
+            logger.debug(f"[اتجاه السوق] جلب بيانات {symbol} للإطار الزمني {tf}")
             df = get_data_for_symbol(symbol, tf, days=2 if tf == '5m' else 5)
             if df is None or df.empty:
+                logger.warning(f"[اتجاه السوق] لا توجد بيانات لـ {symbol} ({tf})")
                 continue
                 
             df = calculate_all_features(df)
             if df.empty:
+                logger.warning(f"[اتجاه السوق] فشل حساب المؤشرات لـ {symbol} ({tf})")
                 continue
                 
             last = df.iloc[-1]
@@ -691,6 +708,9 @@ def calculate_market_trend_enhanced(symbol: str) -> Dict[str, Any]:
                 "macd_signal": last['macd_signal'],
                 "vwap": last['vwap']
             }
+            
+            logger.debug(f"[اتجاه السوق] {symbol} ({tf}): score={total_score:.2f}, ema={ema_score}, rsi={rsi_score}, adx={adx_score}, macd={macd_score}, vwap={vwap_score}")
+            
         except Exception as e:
             logger.error(f"❌ [اتجاه السوق] خطأ في حساب الاتجاه لـ {symbol} ({tf}): {e}")
             continue
@@ -720,6 +740,8 @@ def calculate_market_trend_enhanced(symbol: str) -> Dict[str, Any]:
         market_state = "DOWNTREND"
     else:
         market_state = "RANGING"
+    
+    logger.info(f"[اتجاه السوق] {symbol}: overall_score={overall_score:.2f}, market_state={market_state}")
     
     return {
         "symbol": symbol,
@@ -2150,6 +2172,25 @@ def api_status():
         # الحصول على الإشعارات الأخيرة
         with notifications_lock:
             notifications = notifications_cache[:10]
+        
+        # تحديث حالة السوق لـ BTC إذا لم تكن محدثة
+        if 'BTCUSDT' not in current_market_state:
+            logger.info("[API] تحديث حالة السوق لـ BTCUSDT")
+            try:
+                btc_trend = calculate_market_trend_enhanced('BTCUSDT')
+                with market_state_lock:
+                    current_market_state['BTCUSDT'] = btc_trend
+            except Exception as e:
+                logger.error(f"❌ [API] خطأ في تحديث حالة السوق لـ BTCUSDT: {e}")
+                with market_state_lock:
+                    current_market_state['BTCUSDT'] = {
+                        "symbol": "BTCUSDT",
+                        "overall_score": 0,
+                        "market_state": "RANGING",
+                        "timeframe_scores": {},
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "error": str(e)
+                    }
         
         return jsonify({
             'trading_enabled': is_trading_enabled,
