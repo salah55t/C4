@@ -1,7 +1,5 @@
-# ملف c4_enhanced_v11.1.py - نسخة V11.1 "Enhanced Trading System with Liquidity Filter Fix"
-# --- نسخة معدلة مع استراتيجيات محسنة وإدارة مخاطر متقدمة وتخفيف فلتر السيولة ---
-# هذا الإصدار يحتوي على تحسينات شاملة لجميع الاستراتيجيات مع إضافة استراتيجية جديدة
-# ونظام إدارة مخاطر محسّن ونظام خروج متطور وتخفيف صرامة فلتر السيولة.
+# ملف c4_enhanced_v11.2.py - نسخة V11.2 "Enhanced Trading System with Comprehensive Error Handling"
+# --- نسخة معدلة مع استراتيجيات محسنة وإدارة مخاطر متقدمة وتدقيق شامل للأخطاء ---
 
 import time
 import os
@@ -38,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.1_enhanced.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11.2_enhanced.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.1-Enhanced')
+logger = logging.getLogger('CryptoBotV11.2-Enhanced')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -523,40 +521,42 @@ def is_bullish_reversal_enhanced(df: pd.DataFrame) -> bool:
     prev2 = df.iloc[-3] if len(df) >= 3 else None
     
     # الشروط الحالية
-    is_green_candle = last['close'] > last['open']
-    candle_range = last['high'] - last['low']
-    body_size = last['close'] - last['open']
+    is_green_candle = bool(last['close'] > last['open'])
+    candle_range = float(last['high'] - last['low'])
+    body_size = float(last['close'] - last['open'])
     is_strong_body = (body_size / candle_range) >= 0.5 if candle_range > 0 else False
     
     is_bullish_engulfing = (
         is_green_candle and
-        prev['close'] < prev['open'] and  # الشمعة السابقة حمراء
-        last['close'] > prev['open'] and
-        last['open'] < prev['close']
+        bool(prev['close'] < prev['open']) and  # الشمعة السابقة حمراء
+        bool(last['close'] > prev['open']) and
+        bool(last['open'] < prev['close'])
     )
     
     # أنماط إضافية للشموع الانعكاسية
     # نموذج المطرقة (Hammer)
     is_hammer = (
         is_green_candle and
-        (last['open'] - last['low']) > 2 * (last['close'] - last['open']) and
-        (last['high'] - last['close']) < 0.1 * (last['close'] - last['open'])
+        bool((last['open'] - last['low']) > 2 * (last['close'] - last['open'])) and
+        bool((last['high'] - last['close']) < 0.1 * (last['close'] - last['open']))
     )
     
     # نموذج النجمية الصباحية (Morning Star) - مبسط
-    is_morning_star = (
-        prev2 and prev2['close'] < prev2['open'] and  # الشمعة الأولى حمراء
-        prev['close'] < prev['open'] and  # الشمعة الثانية حمراء وصغيرة
-        abs(prev['close'] - prev['open']) < 0.3 * (prev2['close'] - prev2['open']) and
-        is_green_candle and  # الشمعة الثالثة خضراء
-        last['close'] > (prev2['open'] + prev2['close']) / 2  # تغلق فوق منتصف الشمعة الأولى
-    )
+    is_morning_star = False
+    if prev2 is not None:
+        is_morning_star = (
+            bool(prev2['close'] < prev2['open']) and  # الشمعة الأولى حمراء
+            bool(prev['close'] < prev['open']) and  # الشمعة الثانية حمراء وصغيرة
+            bool(abs(prev['close'] - prev['open']) < 0.3 * (prev2['close'] - prev2['open'])) and
+            is_green_candle and  # الشمعة الثالثة خضراء
+            bool(last['close'] > (prev2['open'] + prev2['close']) / 2)  # تغلق فوق منتصف الشمعة الأولى
+        )
     
     # نموذج المطرقة المعكوسة (Inverted Hammer)
     is_inverted_hammer = (
         is_green_candle and
-        (last['high'] - last['close']) > 2 * (last['close'] - last['open']) and
-        (last['open'] - last['low']) < 0.1 * (last['close'] - last['open'])
+        bool((last['high'] - last['close']) > 2 * (last['close'] - last['open'])) and
+        bool((last['open'] - last['low']) < 0.1 * (last['close'] - last['open']))
     )
     
     return is_strong_body or is_bullish_engulfing or is_hammer or is_morning_star or is_inverted_hammer
@@ -571,7 +571,7 @@ def check_bb_reversal_strategy_enhanced(df: pd.DataFrame) -> bool:
     prev = df.iloc[-2]
     
     # الشرط الأول: لامس السعر أو هبط تحت الحد السفلي لبولينجر باند في الشمعة السابقة
-    price_touched_bb = prev['low'] <= prev['bb_lower']
+    price_touched_bb = bool(prev['low'] <= prev['bb_lower'])
     
     # الشرط الثاني: الشمعة الحالية هي شمعة انعكاسية صاعدة
     reversal_candle_appeared = is_bullish_reversal_enhanced(df)
@@ -586,26 +586,26 @@ def check_bb_reversal_strategy_enhanced(df: pd.DataFrame) -> bool:
     with FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["lock"]: vol_mult = FILTER_CONFIG["BB_STOCH_VOLUME_MULT"]["value"]
     
     # مرشح قوة الاتجاه ADX
-    adx_strong = last['adx'] > adx_thresh
+    adx_strong = bool(last['adx'] > adx_thresh)
     if not adx_strong:
         log_rejection(df.name, "BB Reversal: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh})
         return False
     
     # مرشح حجم التداول
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
+    volume_confirmed = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
     if not volume_confirmed:
         log_rejection(df.name, "BB Reversal: Volume Filter Failed", {"vol_multiplier": vol_mult})
         return False
     
     # مرشح إضافي: حالة التشبع البيعي لـ RSI
-    rsi_oversold = last['rsi'] < 30 or prev['rsi'] < 30
+    rsi_oversold = bool(last['rsi'] < 30 or prev['rsi'] < 30)
     if not rsi_oversold:
         log_rejection(df.name, "BB Reversal: RSI Not Oversold", {"rsi": f"{last['rsi']:.2f}"})
         return False
     
     # مرشح إضافي: السعر لم يهبط كثيراً تحت الحد السفلي لبولينجر باند (ضمن 2%)
-    bb_lower = prev['bb_lower']
-    price_below_bb_pct = ((bb_lower - prev['low']) / bb_lower) * 100 if bb_lower > 0 else 0
+    bb_lower = float(prev['bb_lower'])
+    price_below_bb_pct = ((bb_lower - float(prev['low'])) / bb_lower) * 100 if bb_lower > 0 else 0
     if price_below_bb_pct > 2:
         log_rejection(df.name, "BB Reversal: Price Too Far Below BB", {"percent_below": f"{price_below_bb_pct:.2f}%"})
         return False
@@ -627,20 +627,20 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     with FILTER_CONFIG["MACD_EMA_VOLUME_MULT"]["lock"]: vol_mult = 1.2  # قيمة افتراضية إذا لم يتم تعريفها
     
     # تأكيد الاتجاه (EMAs)
-    trend_bullish = last['ema_50'] > last['ema_200']
+    trend_bullish = bool(last['ema_50'] > last['ema_200'])
     
     # تأكيد MACD
     macd_bullish = (
-        last['macd'] > last['macd_signal'] and  # MACD فوق الإشارة
-        prev['macd'] <= prev['macd_signal'] and  # تقاطع صاعد
-        last['macd'] < 0  # MACD تحت الصفر (شراء في منطقة تشبع بيعي)
+        bool(last['macd'] > last['macd_signal']) and  # MACD فوق الإشارة
+        bool(prev['macd'] <= prev['macd_signal']) and  # تقاطع صاعد
+        bool(last['macd'] < 0)  # MACD تحت الصفر (شراء في منطقة تشبع بيعي)
     )
     
     # مرشح RSI
-    rsi_confirmed = last['rsi'] > 30 and last['rsi'] < 70  # ليس في منطقة تشبع极端
+    rsi_confirmed = bool(last['rsi'] > 30 and last['rsi'] < 70)  # ليس في منطقة تشبع极端
     
     # مرشح حجم التداول
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
+    volume_confirmed = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
     
     # يجب أن تتحقق جميع الشروط
     if trend_bullish and macd_bullish and rsi_confirmed and volume_confirmed:
@@ -682,29 +682,29 @@ def check_sr_breakout_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     # شروط الاختراق
     breakout = (
-        last['close'] > resistance_level and  # أغلق فوق المقاومة
-        prev['close'] <= resistance_level and  # الشمعة السابقة أغلقت عند أو تحت المقاومة
-        (last['close'] - resistance_level) / resistance_level > 0.005  # على الأقل 0.5% فوق المقاومة
+        bool(last['close'] > resistance_level) and  # أغلق فوق المقاومة
+        bool(prev['close'] <= resistance_level) and  # الشمعة السابقة أغلقت عند أو تحت المقاومة
+        bool((last['close'] - resistance_level) / resistance_level > 0.005)  # على الأقل 0.5% فوق المقاومة
     )
     
     if not breakout:
         return False
     
     # مرشح الحجم (الحجم الحالي يجب أن يكون أعلى بشكل ملحوظ من حجم المقاومة)
-    volume_confirmed = last['volume'] > (resistance_volume * vol_mult)
+    volume_confirmed = bool(last['volume'] > (resistance_volume * vol_mult))
     if not volume_confirmed:
         log_rejection(df.name, "SR_Breakout: Volume Filter Failed", {"vol_multiplier": vol_mult})
         return False
     
     # مرشح الزخم (RSI يجب أن يكون قوياً لكن ليس في منطقة شراء مفرط)
-    rsi_confirmed = last['rsi'] > 50 and last['rsi'] < 80
+    rsi_confirmed = bool(last['rsi'] > 50 and last['rsi'] < 80)
     if not rsi_confirmed:
         log_rejection(df.name, "SR_Breakout: RSI Filter Failed", {"rsi": f"{last['rsi']:.2f}"})
         return False
     
     # مرشح قوة الاتجاه ADX
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
-    adx_strong = last['adx'] > adx_thresh
+    adx_strong = bool(last['adx'] > adx_thresh)
     if not adx_strong:
         log_rejection(df.name, "SR_Breakout: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh})
         return False
@@ -725,23 +725,23 @@ def check_triple_confirmation_strategy_enhanced(df: pd.DataFrame) -> bool:
     with FILTER_CONFIG["TRIPLE_CONF_MODE"]["lock"]: mode = FILTER_CONFIG["TRIPLE_CONF_MODE"]["value"]
     
     # تأكيد الاتجاه (EMAs)
-    trend_confirmed = last['ema_50'] > last['ema_200']
+    trend_confirmed = bool(last['ema_50'] > last['ema_200'])
     
     # تأكيد الزخم (MACD و RSI)
-    macd_bullish = last['macd'] > last['macd_signal']
-    rsi_bullish = last['rsi'] > 55 and last['rsi'] < 80  # قوي لكن ليس في منطقة شراء مفرط
+    macd_bullish = bool(last['macd'] > last['macd_signal'])
+    rsi_bullish = bool(last['rsi'] > 55 and last['rsi'] < 80)  # قوي لكن ليس في منطقة شراء مفرط
     momentum_confirmed = macd_bullish and rsi_bullish
     
     # مرشح زخم إضافي (Stochastic)
-    stoch_bullish = last['stoch_rsi_k'] > last['stoch_rsi_d'] and last['stoch_rsi_k'] < 80
+    stoch_bullish = bool(last['stoch_rsi_k'] > last['stoch_rsi_d'] and last['stoch_rsi_k'] < 80)
     momentum_confirmed = momentum_confirmed and stoch_bullish
     
     # تأكيد حجم التداول
-    volume_confirmed = last['volume'] > (last['volume_sma_20'] * vol_mult)
+    volume_confirmed = bool(last['volume'] > (last['volume_sma_20'] * vol_mult))
     
     # مرشح التقلبات (ATR يجب أن يكون معقولاً)
-    atr_normalized = last['atr'] / last['close']  # ATR كنسبة من السعر
-    volatility_confirmed = 0.01 < atr_normalized < 0.05  # بين 1% و 5%
+    atr_normalized = float(last['atr'] / last['close'])  # ATR كنسبة من السعر
+    volatility_confirmed = bool(0.01 < atr_normalized < 0.05)  # بين 1% و 5%
     
     # حساب الشروط المستوفاة حسب الوضع
     conditions = [trend_confirmed, momentum_confirmed, volume_confirmed, volatility_confirmed]
@@ -784,24 +784,24 @@ def check_vwap_reversal_strategy_enhanced(df: pd.DataFrame) -> bool:
     with FILTER_CONFIG["VWAP_REVERSAL_MODE"]["lock"]: mode = FILTER_CONFIG["VWAP_REVERSAL_MODE"]["value"]
     
     # شروط انعكاس VWAP
-    vwap_reversal = prev['close'] < prev['vwap'] and last['close'] > last['vwap']
+    vwap_reversal = bool(prev['close'] < prev['vwap'] and last['close'] > last['vwap'])
     
     # أنماط الشموع المحسنة
-    is_bullish_engulfing = prev['close'] < prev['open'] and last['close'] > last['open'] and last['close'] > prev['open']
-    is_hammer = (last['close'] > last['open']) and (last['open'] - last['low']) > 2 * (last['close'] - last['open'])
-    is_doji = abs(last['close'] - last['open']) < 0.1 * (last['high'] - last['low']) and last['close'] > last['open']
+    is_bullish_engulfing = bool(prev['close'] < prev['open'] and last['close'] > last['open'] and last['close'] > prev['open'])
+    is_hammer = bool((last['close'] > last['open']) and (last['open'] - last['low']) > 2 * (last['close'] - last['open']))
+    is_doji = bool(abs(last['close'] - last['open']) < 0.1 * (last['high'] - last['low']) and last['close'] > last['open'])
     candle_confirmed = is_bullish_engulfing or is_hammer or is_doji
     
     # مرشح حجم التداول (المقارنة مع المتوسط الحديث)
     recent_volume_avg = df['volume'].iloc[-11:-1].mean()
-    volume_confirmed = last['volume'] > (recent_volume_avg * vol_mult)
+    volume_confirmed = bool(last['volume'] > (recent_volume_avg * vol_mult))
     
     # مرشح إضافي: حالة التشبع البيعي لـ RSI
-    rsi_oversold = last['rsi'] < 40 or prev['rsi'] < 40
+    rsi_oversold = bool(last['rsi'] < 40 or prev['rsi'] < 40)
     
     # مرشح إضافي: توافق الاتجاه (فريم أعلى)
     # هذا يتطلب بيانات الفريم الأعلى، لذا سنستخدم EMAs كبديل
-    trend_aligned = last['ema_50'] > last['ema_200']
+    trend_aligned = bool(last['ema_50'] > last['ema_200'])
     
     # تحديد ما إذا كانت الإشارة مستوفاة حسب الوضع
     passes = False
@@ -845,9 +845,9 @@ def check_price_channel_strategy(df: pd.DataFrame) -> bool:
     
     # شروط اختراق القناة العلوية
     upper_breakout = (
-        last['close'] > last['upper_channel'] and  # أغلق فوق القناة العلوية
-        prev['close'] <= prev['upper_channel'] and  # الشمعة السابقة أغلقت عند أو تحت القناة العلوية
-        (last['close'] - last['upper_channel']) / last['upper_channel'] > 0.005  # على الأقل 0.5% فوق القناة
+        bool(last['close'] > last['upper_channel']) and  # أغلق فوق القناة العلوية
+        bool(prev['close'] <= prev['upper_channel']) and  # الشمعة السابقة أغلقت عند أو تحت القناة العلوية
+        bool((last['close'] - last['upper_channel']) / last['upper_channel'] > 0.005)  # على الأقل 0.5% فوق القناة
     )
     
     if not upper_breakout:
@@ -855,20 +855,20 @@ def check_price_channel_strategy(df: pd.DataFrame) -> bool:
     
     # مرشح الحجم
     vol_mult = 1.3  # قيمة افتراضية
-    volume_confirmed = last['volume'] > (df['volume'].iloc[-11:-1].mean() * vol_mult)
+    volume_confirmed = bool(last['volume'] > (df['volume'].iloc[-11:-1].mean() * vol_mult))
     if not volume_confirmed:
         log_rejection(df.name, "Price Channel: Volume Filter Failed", {"vol_multiplier": vol_mult})
         return False
     
     # مرشح RSI (يجب أن يكون قوياً لكن ليس في منطقة شراء مفرط)
-    rsi_confirmed = last['rsi'] > 50 and last['rsi'] < 80
+    rsi_confirmed = bool(last['rsi'] > 50 and last['rsi'] < 80)
     if not rsi_confirmed:
         log_rejection(df.name, "Price Channel: RSI Filter Failed", {"rsi": f"{last['rsi']:.2f}"})
         return False
     
     # مرشح قوة الاتجاه ADX
     with FILTER_CONFIG["ADX_THRESHOLD"]["lock"]: adx_thresh = FILTER_CONFIG["ADX_THRESHOLD"]["value"]
-    adx_strong = last['adx'] > adx_thresh
+    adx_strong = bool(last['adx'] > adx_thresh)
     if not adx_strong:
         log_rejection(df.name, "Price Channel: ADX Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_thresh})
         return False
@@ -1072,12 +1072,12 @@ def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: 
     # 4. انعكاس الاتجاه (حسب الاستراتيجية)
     if strategy_name == "BB_Reversal":
         # الخروج إذا لمس السعر الحد العلوي لبولينجر باند وأظهر علامات انعكاس هبوطي
-        if last_candle['high'] >= last_candle['bb_upper'] and last_candle['close'] < last_candle['open']:
+        if bool(last_candle['high'] >= last_candle['bb_upper'] and last_candle['close'] < last_candle['open']):
             return True, "trend_reversal"
     
     elif strategy_name == "MACD_EMA":
         # الخروج إذا تقاطع MACD تحت خط الإشارة
-        if last_candle['macd'] < last_candle['macd_signal'] and df.iloc[-2]['macd'] >= df.iloc[-2]['macd_signal']:
+        if bool(last_candle['macd'] < last_candle['macd_signal'] and df.iloc[-2]['macd'] >= df.iloc[-2]['macd_signal']):
             return True, "trend_reversal"
     
     elif strategy_name == "SR_Breakout":
@@ -1088,16 +1088,16 @@ def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: 
     
     elif strategy_name == "Triple_Confirmation":
         # الخروج إذا انعكس أي من الشروط الرئيسية الثلاثة
-        ema_bearish = last_candle['ema_50'] < last_candle['ema_200']
-        macd_bearish = last_candle['macd'] < last_candle['macd_signal']
-        rsi_overbought = last_candle['rsi'] > 70
+        ema_bearish = bool(last_candle['ema_50'] < last_candle['ema_200'])
+        macd_bearish = bool(last_candle['macd'] < last_candle['macd_signal'])
+        rsi_overbought = bool(last_candle['rsi'] > 70)
         
         if ema_bearish or (macd_bearish and rsi_overbought):
             return True, "trend_reversal"
     
     elif strategy_name == "VWAP_Reversal":
         # الخروج إذا عاد السعر تحت VWAP مع حجم تداول
-        if last_candle['close'] < last_candle['vwap'] and last_candle['volume'] > last_candle['volume_sma_20'] * 1.2:
+        if bool(last_candle['close'] < last_candle['vwap'] and last_candle['volume'] > last_candle['volume_sma_20'] * 1.2):
             return True, "trend_reversal"
     
     elif strategy_name == "Price_Channel":
@@ -1115,7 +1115,7 @@ def check_exit_conditions_enhanced(signal_data: Dict, current_price: float, df: 
             update_signal_in_db(signal_data['id'], {'current_peak_price': current_price})
         
         # حساب مسافة وقف الخسارة المتحرك
-        atr_value = last_candle['atr']
+        atr_value = float(last_candle['atr'])
         trailing_stop_distance = atr_value * TRAILING_STOP_ACTIVATION_ATR
         trailing_stop_price = current_peak - trailing_stop_distance
         
@@ -1215,16 +1215,16 @@ def check_market_state_enhanced() -> Dict[str, Any]:
             last_4h = btc_4h.iloc[-1]
             
             # تحديد الاتجاه على كل إطار زمني
-            btc_5m_trend = "bullish" if last_5m['ema_50'] > last_5m['ema_200'] else "bearish"
-            btc_1h_trend = "bullish" if last_1h['ema_50'] > last_1h['ema_200'] else "bearish"
-            btc_4h_trend = "bullish" if last_4h['ema_50'] > last_4h['ema_200'] else "bearish"
+            btc_5m_trend = "bullish" if bool(last_5m['ema_50'] > last_5m['ema_200']) else "bearish"
+            btc_1h_trend = "bullish" if bool(last_1h['ema_50'] > last_1h['ema_200']) else "bearish"
+            btc_4h_trend = "bullish" if bool(last_4h['ema_50'] > last_4h['ema_200']) else "bearish"
             
             # فحص تقلبات السوق
-            btc_1h_atr_pct = (last_1h['atr'] / last_1h['close']) * 100
+            btc_1h_atr_pct = (float(last_1h['atr']) / float(last_1h['close'])) * 100
             volatility_status = "high" if btc_1h_atr_pct > 3.0 else "normal" if btc_1h_atr_pct > 1.0 else "low"
             
             # فحص قوة السوق
-            btc_1h_rsi = last_1h['rsi']
+            btc_1h_rsi = float(last_1h['rsi'])
             strength_status = "strong" if 40 < btc_1h_rsi < 70 else "weak"
             
             # تقييم عام لحالة السوق
@@ -1674,7 +1674,7 @@ def block_method():
     if request.method in ['PUT', 'DELETE', 'PATCH']:
         abort(403)
 
-def get_dashboard_html_v11_1():
+def get_dashboard_html_v11_2():
     """
     HTML لوحة التحكم المحسنة
     """
@@ -1684,7 +1684,7 @@ def get_dashboard_html_v11_1():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V11.1 - لوحة تحكم التداول</title>
+    <title>Sentinel V11.2 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1751,7 +1751,7 @@ def get_dashboard_html_v11_1():
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
-                <span class="text-blue-400">Sentinel</span> V11.1
+                <span class="text-blue-400">Sentinel</span> V11.2
                 <span class="text-sm font-normal text-gray-400">نظام التداول الآلي المحسّن</span>
             </h1>
             <div class="flex items-center gap-3">
@@ -2464,7 +2464,7 @@ def get_dashboard_html_v11_1():
 
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v11_1())
+    return render_template_string(get_dashboard_html_v11_2())
 
 @app.route('/api/status')
 def get_status():
@@ -2581,7 +2581,7 @@ def manual_close_trade_endpoint(signal_id):
 def main():
     global client, current_prices
     
-    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.1")
+    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.2")
     
     # تهيئة الاتصالات
     init_db()
