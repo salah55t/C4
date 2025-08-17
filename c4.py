@@ -1,5 +1,5 @@
-# ملف c4_enhanced_v11.6.py - نسخة V11.6 "Memory Management & Batch Scanning"
-# --- نسخة معدلة مع مسح بالدفعات وإدارة ذاكرة محسنة لمنع الأخطاء ---
+# ملف c4_enhanced_v11.7.py - نسخة V11.7 "UI Button Fix"
+# --- نسخة معدلة مع إصلاح زر الإغلاق اليدوي في الواجهة ---
 
 import time
 import os
@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.6_memory.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11.7_ui_fix.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.6-Memory')
+logger = logging.getLogger('CryptoBotV11.7-UIFix')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -812,7 +812,6 @@ def process_open_signals():
     except Exception as e:
         logger.error(f"❌ [Process Signals] خطأ عام: {e}", exc_info=True)
 
-# --- UPDATED: scan_and_generate_signals with Batching ---
 def scan_and_generate_signals():
     global validated_symbols_to_scan
     if not (check_db_connection() and redis_client):
@@ -829,7 +828,6 @@ def scan_and_generate_signals():
     process_open_signals()
     new_signals_total = 0
     
-    # Loop over the symbols in batches
     for i in range(0, len(validated_symbols_to_scan), BATCH_SIZE):
         batch_symbols = validated_symbols_to_scan[i:i+BATCH_SIZE]
         num_batches = (len(validated_symbols_to_scan) + BATCH_SIZE - 1) // BATCH_SIZE
@@ -852,7 +850,6 @@ def scan_and_generate_signals():
             except Exception as e:
                 logger.error(f"❌ [Scan] خطأ في مسح {symbol}: {e}", exc_info=True)
         
-        # Explicit garbage collection after each batch
         logger.info(f"🗑️ انتهت الدفعة. جاري استدعاء جامع القمامة لتحرير الذاكرة...")
         collected_count = gc.collect()
         logger.info(f"✅ تم تحرير {collected_count} كائن من الذاكرة.")
@@ -881,16 +878,15 @@ CORS(app)
 def block_method():
     if request.method in ['PUT', 'DELETE', 'PATCH']: abort(403)
 
-def get_dashboard_html_v11_6():
-    # The HTML from v11.5 is suitable and doesn't need changes for this logic update.
-    # Re-using the same HTML structure.
+# --- UPDATED HTML with JavaScript fix ---
+def get_dashboard_html_v11_7():
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V11.6 - لوحة تحكم التداول</title>
+    <title>Sentinel V11.7 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -907,7 +903,7 @@ def get_dashboard_html_v11_6():
 <body class="p-4 md:p-6">
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-blue-400">Sentinel</span> V11.6</h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-blue-400">Sentinel</span> V11.7</h1>
             <div class="flex items-center gap-3">
                 <div id="market-status" class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="market-status-text">...</span></div>
                 <div class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="trading-status-text">معطل</span></div>
@@ -961,6 +957,27 @@ def get_dashboard_html_v11_6():
     const TABS = { signals: "الإشارات المفتوحة", performance: "أداء الاستراتيجيات", notifications: "الإشعارات", rejections: "سجل الرفض" };
     let currentTab = 'signals';
 
+    // --- FIX: Define closeSignal in the global scope ---
+    function closeSignal(signalId) {
+        // Using a simple confirm dialog for now. A custom modal would be better in the future.
+        if (confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟')) {
+            fetch(`/api/signals/close/${signalId}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('تم إرسال أمر الإغلاق بنجاح.');
+                        loadTabData(); // Refresh the current tab to show the change
+                    } else {
+                        alert(`فشل إغلاق الصفقة: ${data.message || 'خطأ غير معروف'}`);
+                    }
+                })
+                .catch(err => {
+                    console.error('Error closing signal:', err);
+                    alert('حدث خطأ أثناء محاولة إغلاق الصفقة.');
+                });
+        }
+    }
+
     function setupTabs() {
         const nav = document.getElementById('tabs-nav');
         const content = document.getElementById('tabs-content');
@@ -1000,7 +1017,7 @@ def get_dashboard_html_v11_6():
     }
 
     function renderSignals(signals) {
-        const table = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr>${['العملة', 'الاستراتيجية', 'الدخول', 'الحالي', 'وقف الخسارة', 'الربح/الخسارة', 'إجراء'].map(h => `<th class="px-4 py-3 text-right text-xs font-medium uppercase">${h}</th>`).join('')}</tr></thead><tbody>${signals.map(s => { const profit = s.profit_percentage || 0; return `<tr><td class="px-4 py-3">${s.symbol}</td><td class="px-4 py-3 text-sm">${s.strategy_name}</td><td class="px-4 py-3">${s.entry_price.toFixed(4)}</td><td class="px-4 py-3">${(s.current_price || 0).toFixed(4)}</td><td class="px-4 py-3">${s.stop_loss.toFixed(4)}</td><td class="px-4 py-3 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}">${profit.toFixed(2)}%</td><td class="px-4 py-3"><button class="text-red-400" onclick="closeSignal(${s.id})">إغلاق</button></td></tr>`; }).join('')}</tbody></table></div>`;
+        const table = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-700"><thead><tr>${['العملة', 'الاستراتيجية', 'الدخول', 'الحالي', 'وقف الخسارة', 'الربح/الخسارة', 'إجراء'].map(h => `<th class="px-4 py-3 text-right text-xs font-medium uppercase">${h}</th>`).join('')}</tr></thead><tbody>${signals.map(s => { const profit = s.profit_percentage || 0; return `<tr><td class="px-4 py-3">${s.symbol}</td><td class="px-4 py-3 text-sm">${s.strategy_name}</td><td class="px-4 py-3">${(s.entry_price || 0).toFixed(4)}</td><td class="px-4 py-3">${(s.current_price || 0).toFixed(4)}</td><td class="px-4 py-3">${(s.stop_loss || 0).toFixed(4)}</td><td class="px-4 py-3 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}">${profit.toFixed(2)}%</td><td class="px-4 py-3"><button class="text-red-400 hover:text-red-300" onclick="closeSignal(${s.id})">إغلاق</button></td></tr>`; }).join('')}</tbody></table></div>`;
         document.getElementById('signals-tab').innerHTML = table;
     }
     function renderPerformance(performance) {
@@ -1008,10 +1025,10 @@ def get_dashboard_html_v11_6():
         document.getElementById('performance-tab').innerHTML = table;
     }
     function renderNotifications(notifications) {
-        document.getElementById('notifications-tab').innerHTML = notifications.map(n => `<div class="card p-4"><p>${n.message}</p><p class="text-xs text-gray-400 mt-1">${new Date(n.timestamp).toLocaleString()}</p></div>`).join('<div class="my-3"></div>');
+        document.getElementById('notifications-tab').innerHTML = notifications.map(n => `<div class="card p-4 mb-3"><p>${n.message}</p><p class="text-xs text-gray-400 mt-1">${new Date(n.timestamp).toLocaleString()}</p></div>`).join('');
     }
     function renderRejections(rejections) {
-        document.getElementById('rejections-tab').innerHTML = rejections.map(r => `<div class="card p-4"><div><strong>${r.symbol}</strong>: ${r.reason}</div><details class="text-xs mt-1"><summary>تفاصيل</summary><pre class="bg-gray-800 p-2 rounded mt-1">${JSON.stringify(r.details, null, 2)}</pre></details><p class="text-xs text-gray-400 mt-1">${new Date(r.timestamp).toLocaleString()}</p></div>`).join('<div class="my-3"></div>');
+        document.getElementById('rejections-tab').innerHTML = rejections.map(r => `<div class="card p-4 mb-3"><div><strong>${r.symbol}</strong>: ${r.reason}</div><details class="text-xs mt-1"><summary class="cursor-pointer">تفاصيل</summary><pre class="bg-gray-800 p-2 rounded mt-1 text-xs">${JSON.stringify(r.details, null, 2)}</pre></details><p class="text-xs text-gray-400 mt-1">${new Date(r.timestamp).toLocaleString()}</p></div>`).join('');
     }
 
     function loadInitialData() {
@@ -1024,7 +1041,7 @@ def get_dashboard_html_v11_6():
             tradingStatusEl.textContent = data.is_trading_enabled ? 'مفعل' : 'معطل';
             
             const strategiesContainer = document.getElementById('strategies-container');
-            strategiesContainer.innerHTML = Object.entries(data.settings.strategies).map(([key, val]) => `<div class="flex items-center justify-between"><label for="strategy-${key}">${val.display_name}</label><input type="checkbox" id="strategy-${key}" ${val.enabled ? 'checked' : ''}></div>`).join('');
+            strategiesContainer.innerHTML = Object.entries(data.settings.strategies).map(([key, val]) => `<div class="flex items-center justify-between p-2 bg-gray-900 rounded"><label for="strategy-${key}">${val.display_name}</label><input type="checkbox" id="strategy-${key}" ${val.enabled ? 'checked' : ''}></div>`).join('');
             
             Object.entries(data.settings.filters).forEach(([key, val]) => {
                 const input = document.getElementById(`filter-${key}`);
@@ -1067,7 +1084,7 @@ def get_dashboard_html_v11_6():
 
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v11_6())
+    return render_template_string(get_dashboard_html_v11_7())
 
 @app.route('/api/status')
 def get_status():
@@ -1167,7 +1184,7 @@ def manual_close_trade_endpoint(signal_id):
 # --- الدوال الرئيسية لتشغيل البوت ---
 def main():
     global client
-    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.6")
+    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.7")
     init_db()
     init_redis()
     client = Client(API_KEY, API_SECRET)
@@ -1193,7 +1210,6 @@ def main():
     try:
         while True:
             scan_and_generate_signals()
-            # The main garbage collect call is now less critical but still useful.
             gc.collect() 
             time.sleep(60)
     except KeyboardInterrupt:
