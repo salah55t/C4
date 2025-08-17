@@ -1,7 +1,7 @@
-# ملف c4_enhanced_v11.0.py - نسخة V11.0 "Enhanced Trading System"
-# --- نسخة معدلة مع استراتيجيات محسنة وإدارة مخاطر متقدمة ---
+# ملف c4_enhanced_v11.1.py - نسخة V11.1 "Enhanced Trading System with Liquidity Filter Fix"
+# --- نسخة معدلة مع استراتيجيات محسنة وإدارة مخاطر متقدمة وتخفيف فلتر السيولة ---
 # هذا الإصدار يحتوي على تحسينات شاملة لجميع الاستراتيجيات مع إضافة استراتيجية جديدة
-# ونظام إدارة مخاطر محسّن ونظام خروج متطور.
+# ونظام إدارة مخاطر محسّن ونظام خروج متطور وتخفيف صرامة فلتر السيولة.
 
 import time
 import os
@@ -38,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.0_enhanced.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11.1_enhanced.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.0-Enhanced')
+logger = logging.getLogger('CryptoBotV11.1-Enhanced')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -98,7 +98,8 @@ FILTER_CONFIG = {
     "VWAP_REVERSAL_MODE": {"value": "strict", "lock": Lock(), "display_name": "وضع (VWAP Reversal)"}, # 'strict' or 'relaxed'
     "TIME_BASED_EXIT_CANDLES": {"value": 30, "lock": Lock(), "display_name": "إغلاق الصفقة بعد (شمعة)"},
     "SIGNAL_STRENGTH_THRESHOLD": {"value": 0.7, "lock": Lock(), "display_name": "حد قوة الإشارة"},
-    "MAX_CORRELATION_THRESHOLD": {"value": 0.7, "lock": Lock(), "display_name": "حد الارتباط بين الأصول"}
+    "MAX_CORRELATION_THRESHOLD": {"value": 0.7, "lock": Lock(), "display_name": "حد الارتباط بين الأصول"},
+    "LIQUIDITY_FILTER_STRICTNESS": {"value": "medium", "lock": Lock(), "display_name": "صرامة فلتر السيولة"}, # 'low', 'medium', 'high'
 }
 
 # --- إعدادات المؤشرات الفنية والإطارات الزمنية ---
@@ -1234,10 +1235,19 @@ def check_market_state_enhanced() -> Dict[str, Any]:
             else:
                 overall_status = "NEUTRAL"
             
-            # فحص إضافي للسيولة
+            # فحص إضافي للسيولة (مع التحكم في الصرامة)
             try:
                 btc_volume_24h = float(client.get_ticker(symbol=BTC_SYMBOL)['quoteVolume'])
-                liquidity_status = "high" if btc_volume_24h > 20000000000 else "normal" if btc_volume_24h > 10000000000 else "low"
+                
+                with FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["lock"]: 
+                    strictness = FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["value"]
+                
+                if strictness == "high":
+                    liquidity_status = "high" if btc_volume_24h > 20000000000 else "normal" if btc_volume_24h > 10000000000 else "low"
+                elif strictness == "medium":
+                    liquidity_status = "high" if btc_volume_24h > 15000000000 else "normal" if btc_volume_24h > 5000000000 else "low"
+                else:  # low
+                    liquidity_status = "high" if btc_volume_24h > 10000000000 else "normal" if btc_volume_24h > 2000000000 else "low"
             except:
                 liquidity_status = "unknown"
             
@@ -1277,9 +1287,14 @@ def should_skip_signal_based_on_market(market_state: Dict) -> Tuple[bool, str]:
     if market_state.get("strength") == "weak":
         return True, "Market Status Filter: Weak Market Strength"
     
-    # فحص السيولة
-    if market_state.get("liquidity") == "low":
+    # فحص السيولة (مع التحكم في الصرامة)
+    with FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["lock"]: 
+        strictness = FILTER_CONFIG["LIQUIDITY_FILTER_STRICTNESS"]["value"]
+
+    if market_state.get("liquidity") == "low" and strictness == "high":
         return True, "Market Status Filter: Low Liquidity"
+    elif market_state.get("liquidity") == "low" and strictness == "medium":
+        logger.info(f"⚠️ [Market State] سيولة منخفضة (وضع متوسط)، السماح بالإشارات")
     
     # جميع الشروط متوافقة
     return False, ""
@@ -1659,7 +1674,7 @@ def block_method():
     if request.method in ['PUT', 'DELETE', 'PATCH']:
         abort(403)
 
-def get_dashboard_html_v11_0():
+def get_dashboard_html_v11_1():
     """
     HTML لوحة التحكم المحسنة
     """
@@ -1669,7 +1684,7 @@ def get_dashboard_html_v11_0():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V11.0 - لوحة تحكم التداول</title>
+    <title>Sentinel V11.1 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -1736,7 +1751,7 @@ def get_dashboard_html_v11_0():
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
             <h1 class="text-2xl md:text-3xl font-extrabold">
-                <span class="text-blue-400">Sentinel</span> V11.0
+                <span class="text-blue-400">Sentinel</span> V11.1
                 <span class="text-sm font-normal text-gray-400">نظام التداول الآلي المحسّن</span>
             </h1>
             <div class="flex items-center gap-3">
@@ -1897,6 +1912,14 @@ def get_dashboard_html_v11_0():
                     <input type="number" id="filter-PRICE_CHANNEL_VOLUME_MULT" class="input-field w-full" step="0.1" min="1" max="3">
                 </div>
                 <div>
+                    <label class="block text-sm mb-1">صرامة فلتر السيولة</label>
+                    <select id="filter-LIQUIDITY_FILTER_STRICTNESS" class="input-field w-full">
+                        <option value="low">منخفضة</option>
+                        <option value="medium">متوسطة</option>
+                        <option value="high">عالية</option>
+                    </select>
+                </div>
+                <div>
                     <label class="block text-sm mb-1">وضع (Triple Conf)</label>
                     <select id="filter-TRIPLE_CONF_MODE" class="input-field w-full">
                         <option value="strict">صارم</option>
@@ -1933,7 +1956,7 @@ def get_dashboard_html_v11_0():
         <!-- علامات التبويب -->
         <div class="border-b border-gray-700 mb-4">
             <nav class="-mb-px flex space-x-8">
-                <button class="tab-btn py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="signals">
+                <button class="tab-btn active py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="signals">
                     الإشارات المفتوحة
                 </button>
                 <button class="tab-btn py-2 px-1 border-b-2 border-transparent font-medium text-sm" data-tab="performance">
@@ -2097,7 +2120,7 @@ def get_dashboard_html_v11_0():
                         marketStatus.querySelector('span').className = 'inline-block w-2 h-2 rounded-full bg-gray-500 mr-2';
                     }
                     
-                    marketStateEl.textContent = `${marketState.status} | التقلبات: ${marketState.volatility} | القوة: ${marketState.strength}`;
+                    marketStateEl.textContent = `${marketState.status} | التقلبات: ${marketState.volatility} | القوة: ${marketState.strength} | السيولة: ${marketState.liquidity}`;
                     
                     // تحديث الرصيد
                     balanceEl.textContent = data.usdt_balance !== 'N/A' ? `${parseFloat(data.usdt_balance).toFixed(2)} USDT` : 'غير متوفر';
@@ -2441,7 +2464,7 @@ def get_dashboard_html_v11_0():
 
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v11_0())
+    return render_template_string(get_dashboard_html_v11_1())
 
 @app.route('/api/status')
 def get_status():
@@ -2558,7 +2581,7 @@ def manual_close_trade_endpoint(signal_id):
 def main():
     global client, current_prices
     
-    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.0")
+    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.1")
     
     # تهيئة الاتصالات
     init_db()
