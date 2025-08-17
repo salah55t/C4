@@ -1117,15 +1117,8 @@ def generate_signals_for_symbol(symbol: str) -> List[Dict]:
     signals = []
 
     # --- التعديل: الحصول على حالة السوق للمعلومات فقط ---
-    # لم يعد يتم استخدام حالة السوق كفلتر إلزامي لمنع الإشارات.
     market_state = check_market_state_enhanced()
     
-    # تم تعطيل الكود التالي الذي كان يوقف توليد الإشارات بناءً على حالة السوق
-    # should_skip, skip_reason = should_skip_signal_based_on_market(market_state)
-    # if should_skip:
-    #     log_rejection(symbol, skip_reason)
-    #     return signals
-
     # الحصول على بيانات الرمز
     df = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
     if df is None or df.empty:
@@ -1161,13 +1154,11 @@ def generate_signals_for_symbol(symbol: str) -> List[Dict]:
     if agreement_count == 0:
         return signals
     
+    # --- START: MODIFICATION ---
+    # The signal strength is now calculated purely based on strategy agreement,
+    # without influence from the overall market state, as requested.
     signal_strength = agreement_count / active_strategies if active_strategies > 0 else 0
-    if market_state.get("status") == "BULLISH": signal_strength *= 1.2
-    elif market_state.get("status") == "NEUTRAL": signal_strength *= 1.0
-    else: signal_strength *= 0.8
-    if market_state.get("volatility") == "high": signal_strength *= 0.8
-    elif market_state.get("volatility") == "low": signal_strength *= 1.1
-    signal_strength = max(0.5, min(1.5, signal_strength))
+    # --- END: MODIFICATION ---
     
     with FILTER_CONFIG["SIGNAL_STRENGTH_THRESHOLD"]["lock"]: min_strength = FILTER_CONFIG["SIGNAL_STRENGTH_THRESHOLD"]["value"]
     if signal_strength < min_strength:
@@ -1273,10 +1264,8 @@ def scan_and_generate_signals():
     logger.info(f"✅ [Scan] اكتمل المسح. تم توليد {len(new_signals)} إشارة جديدة.")
 
 def price_stream_processor(msg):
-    # --- START: CODE FIX ---
     # The message from start_ticker_socket is a list of ticker dictionaries.
     # We must iterate through each ticker in the list.
-    # The original code treated 'msg' as a single dictionary, causing the TypeError.
     for ticker in msg:
         # Using .get() is safer than direct key access to avoid KeyErrors
         if ticker.get('e') == '24hrTicker':
@@ -1287,7 +1276,6 @@ def price_stream_processor(msg):
                     redis_client.hset("crypto_bot_prices", symbol, last_price)
                 except Exception as e:
                     logger.error(f"❌ [WebSocket] خطأ في تحديث سعر {symbol} في Redis: {e}")
-    # --- END: CODE FIX ---
 
 def start_websocket_manager():
     if not client or not validated_symbols_to_scan: return None
