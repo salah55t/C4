@@ -1273,14 +1273,21 @@ def scan_and_generate_signals():
     logger.info(f"✅ [Scan] اكتمل المسح. تم توليد {len(new_signals)} إشارة جديدة.")
 
 def price_stream_processor(msg):
-    if msg['e'] == '24hrTicker':
-        symbol = msg['s']
-        last_price = msg['c']
-        if redis_client:
-            try:
-                redis_client.hset("crypto_bot_prices", symbol, last_price)
-            except Exception as e:
-                logger.error(f"❌ [WebSocket] خطأ في تحديث سعر {symbol} في Redis: {e}")
+    # --- START: CODE FIX ---
+    # The message from start_ticker_socket is a list of ticker dictionaries.
+    # We must iterate through each ticker in the list.
+    # The original code treated 'msg' as a single dictionary, causing the TypeError.
+    for ticker in msg:
+        # Using .get() is safer than direct key access to avoid KeyErrors
+        if ticker.get('e') == '24hrTicker':
+            symbol = ticker.get('s')
+            last_price = ticker.get('c')
+            if symbol and last_price and redis_client:
+                try:
+                    redis_client.hset("crypto_bot_prices", symbol, last_price)
+                except Exception as e:
+                    logger.error(f"❌ [WebSocket] خطأ في تحديث سعر {symbol} في Redis: {e}")
+    # --- END: CODE FIX ---
 
 def start_websocket_manager():
     if not client or not validated_symbols_to_scan: return None
