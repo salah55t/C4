@@ -1,8 +1,8 @@
-# ملف c4.py - نسخة V9.9.6 (تفعيل تتبع الصفقات الورقية)
-# --- التغييرات الرئيسية (V9.9.6):
-# 1. [جديد] تعديل منطق الصفقات الورقية ليتم تتبعها وإغلاقها تلقائيًا عند الهدف/الوقف.
-# 2. [تحسين] بناء منطق متكامل في حلقة إدارة الصفقات المفتوحة (manage_open_trades_loop).
-# 3. [جديد] إضافة دالة مخصصة (close_signal) للتعامل مع عملية إغلاق الصفقات وتحديث قاعدة البيانات.
+# ملف c4.py - نسخة V9.9.7 (إضافة أشرطة تقدم للصفقات)
+# --- التغييرات الرئيسية (V9.9.7):
+# 1. [جديد] إضافة شريط تقدم مرئي في لوحة التحكم لكل صفقة مفتوحة.
+# 2. [تحسين] حساب نسبة التقدم نحو الهدف/الوقف بشكل مستمر في حلقة إدارة الصفقات.
+# 3. [تحسين] تحديث ذاكرة الكاش لتضمين السعر الحالي ونسبة التقدم للعرض الفوري.
 
 import time
 import os
@@ -45,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.5')
+logger = logging.getLogger('CryptoBotV9.9.7')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1007,7 +1007,7 @@ def dashboard():
     start_time = time.time()
     with market_state_lock: market_state = current_market_state.copy()
     with trading_status_lock: trading_enabled = is_trading_enabled
-    with signal_cache_lock: open_signals = dict(list(open_signals_cache.items())[:5])
+    with signal_cache_lock: open_signals = dict(sorted(open_signals_cache.items()))
     with notifications_lock: notifications = list(notifications_cache)[:10]
     with rejection_logs_lock: rejections = list(rejection_logs_cache)[:10]
     load_time = round((time.time() - start_time) * 1000, 2)
@@ -1177,6 +1177,8 @@ DASHBOARD_TEMPLATE = """
         .item-title { font-weight: bold; }
         .item-time { font-size: 12px; color: #777; }
         .item-content { font-size: 14px; }
+        .progress-bar-container { background-color: #e0e0e0; border-radius: 10px; height: 20px; overflow: hidden; margin-top: 8px; direction: ltr; }
+        .progress-bar { height: 100%; color: white; text-align: center; font-size: 12px; line-height: 20px; transition: width 0.4s ease-in-out; }
         .footer { text-align: center; margin-top: 20px; padding: 10px; color: #777; font-size: 14px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } header { flex-direction: column; gap: 10px; } }
     </style>
@@ -1184,7 +1186,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V9.9.6</div>
+            <div class="header-title">بوت التداول V9.9.7</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -1215,8 +1217,17 @@ DASHBOARD_TEMPLATE = """
                 <div class="card-header"><div class="card-title">الإشارات المفتوحة</div></div>
                 {% if open_signals %}{% for symbol, signal in open_signals.items() %}
                 <div class="signal-item {{ 'paper' if not signal.is_real_trade else '' }}">
-                    <div class="item-header"><div class="item-title">{{ symbol }}</div><div class="item-time">{{ signal.get('timestamp', '')[:16] if signal.get('timestamp') else '' }}</div></div>
-                    <div class="item-content">دخول: {{ "%.4f"|format(signal.entry_price) }} | هدف: {{ "%.4f"|format(signal.target_price) }} | وقف: {{ "%.4f"|format(signal.stop_loss) }}</div>
+                    <div class="item-header"><div class="item-title">{{ symbol }}</div><div class="item-time">{{ signal.get('strategy_name', '') }}</div></div>
+                    <div class="item-content">
+                        دخول: {{ "%.4f"|format(signal.entry_price) }} | حالي: {{ "%.4f"|format(signal.get('current_price', 0)) }}<br>
+                        هدف: {{ "%.4f"|format(signal.target_price) }} | وقف: {{ "%.4f"|format(signal.stop_loss) }}
+                    </div>
+                    <div class="progress-bar-container">
+                        {% set progress = signal.get('progress', 0) %}
+                        <div class="progress-bar" style="width: {{ [progress, 0]|max }}%; background-color: var(--success-color);">
+                            {% if progress >= 0 %}{{ "%.1f"|format(progress) }}%{% endif %}
+                        </div>
+                    </div>
                 </div>
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا توجد إشارات مفتوحة</div>{% endif %}
             </div>
@@ -1239,7 +1250,7 @@ DASHBOARD_TEMPLATE = """
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا يوجد رفض</div>{% endif %}
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V9.9.6 - فريم 15 دقيقة</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V9.9.7 - فريم 15 دقيقة</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -1256,7 +1267,7 @@ DASHBOARD_TEMPLATE = """
                 if(data.success) setTimeout(() => location.reload(), 1000);
             }).catch(error => showAlert('خطأ في الاتصال بالخادم: ' + error, 'error'));
         }
-        setTimeout(() => location.reload(), 60000);
+        setTimeout(() => location.reload(), 30000); // تحديث كل 30 ثانية
     </script>
 </body>
 </html>
@@ -1442,7 +1453,6 @@ def main_bot_loop():
                     if strategy_found:
                         logger.info(f"  -> 🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
                         if is_bullish_reversal_pattern(df_featured):
-                            # حاليا، الوضع الورقي فقط هو المفعل
                             create_paper_trade_signal(symbol, df_featured, strategy_found)
                         else:
                             log_rejection(symbol, "Bullish Reversal Candle Pattern Failed")
@@ -1457,15 +1467,10 @@ def main_bot_loop():
             time.sleep(60)
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
-    """
-    إغلاق الصفقة (ورقية أو حقيقية) عبر تحديث قاعدة البيانات والكاش.
-    """
     symbol = signal['symbol']
     entry_price = signal['entry_price']
-    
     profit_percentage = ((closing_price - entry_price) / entry_price) * 100
     
-    # في الصفقات الحقيقية، يجب خصم العمولات
     if signal.get('is_real_trade', False):
         profit_percentage -= 2 * TRADING_FEE_PERCENT
 
@@ -1482,7 +1487,11 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                 """, (closing_price, datetime.now(timezone.utc), profit_percentage, reason, signal['id']))
             conn.commit()
             log_and_notify("info", f"تم إغلاق صفقة {symbol} بربح {profit_percentage:.2f}%", "TRADE_CLOSED")
-            send_telegram_message(f"✅ *إغلاق صفقة ورقية*\n💱 *العملة:* {symbol}\n*السبب:* {reason}\n*الربح:* {profit_percentage:.2f}%")
+            
+            result_emoji = "✅" if profit_percentage >= 0 else "🔻"
+            reason_text = "تحقيق الهدف" if reason == "TP_HIT" else "وقف الخسارة"
+            
+            send_telegram_message(f"{result_emoji} *إغلاق صفقة ورقية*\n💱 *العملة:* {symbol}\n*السبب:* {reason_text}\n*الربح:* {profit_percentage:.2f}%")
         except Exception as e:
             logger.error(f"❌ [قاعدة البيانات] فشل تحديث إغلاق الصفقة لـ {symbol}: {e}")
             if conn: conn.rollback()
@@ -1517,9 +1526,23 @@ def manage_open_trades_loop():
                     logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
                     continue
 
+                entry_price = signal['entry_price']
                 target_price = signal['target_price']
                 stop_loss = signal['stop_loss']
 
+                # حساب نسبة التقدم وتحديث الكاش
+                total_distance = target_price - entry_price
+                current_distance = current_price - entry_price
+                progress = 0
+                if total_distance != 0:
+                    progress = (current_distance / total_distance) * 100
+                
+                with signal_cache_lock:
+                    if symbol in open_signals_cache:
+                        open_signals_cache[symbol]['current_price'] = current_price
+                        open_signals_cache[symbol]['progress'] = progress
+
+                # التحقق من الهدف والوقف
                 if current_price >= target_price:
                     close_signal(signal, target_price, "TP_HIT")
                     continue 
@@ -1528,7 +1551,7 @@ def manage_open_trades_loop():
                     close_signal(signal, stop_loss, "SL_HIT")
                     continue
             
-            time.sleep(30)
+            time.sleep(20) # تقليل مدة الانتظار لتحديث أكثر سرعة
 
         except BinanceRequestException as e:
             logger.error(f"❌ [إدارة الصفقات] خطأ في طلب Binance: {e}", exc_info=False)
@@ -1593,7 +1616,7 @@ def update_market_state_loop():
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
     logger.info("="*50)
-    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.6 ======")
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.7 ======")
     logger.info("="*50)
 
     init_db()
