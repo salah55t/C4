@@ -1,8 +1,7 @@
-# ملف c4.py - نسخة V9.9.8 (إصلاح عرض الإشارات وتحسين الواجهة)
-# --- التغييرات الرئيسية (V9.9.8):
-# 1. [إصلاح] جعل قالب لوحة التحكم أكثر قوة باستخدام .get() لمنع أخطاء العرض.
-# 2. [تحسين] تطوير شريط التقدم ليعرض الربح (أخضر) والخسارة (أحمر).
-# 3. [تشخيص] إضافة تسجيل لمحتويات ذاكرة الصفقات عند تحميل لوحة التحكم للمساعدة في تصحيح الأخطاء.
+# ملف c4.py - نسخة V9.9.9 (إصلاح خطأ نوع البيانات عند الحفظ)
+# --- التغييرات الرئيسية (V9.9.9):
+# 1. [إصلاح] تحويل أنواع بيانات NumPy (مثل float32) إلى float قياسي قبل حفظها في قاعدة البيانات.
+# 2. [استقرار] هذا التعديل يمنع خطأ "can't adapt type" ويضمن حفظ الصفقات بنجاح.
 
 import time
 import os
@@ -45,7 +44,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.8')
+logger = logging.getLogger('CryptoBotV9.9.9')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -126,18 +125,15 @@ MODEL_FOLDER: str = 'V9'
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '1h' # الإطار الزمني الأعلى المستخدم في فلتر التأكيد
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15  # تقليل من 90 إلى 15 يوم
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 REDIS_PRICES_HASH_NAME: str = "crypto_bot_current_prices_v10"
 TRADING_FEE_PERCENT: float = 0.1
 STATS_TRADE_SIZE_USDT: float = 4.0
 BTC_SYMBOL: str = 'BTCUSDT'
-MAX_OPEN_TRADES: int = 3  # تقليل من 5 إلى 3
-SYMBOL_PROCESSING_BATCH_SIZE: int = 5  # تقليل من 10 إلى 5
+MAX_OPEN_TRADES: int = 3
+SYMBOL_PROCESSING_BATCH_SIZE: int = 5
 
-# --- إعدادات رحلة التداول الديناميكية ---
-USE_DYNAMIC_JOURNEY = True
-
-# --- إعدادات المؤشرات الفنية (تم تعديلها للسكالبينج على فريم 15 دقيقة) ---
+# --- إعدادات المؤشرات الفنية ---
 EMA_FAST_PERIOD: int = 12
 EMA_SLOW_PERIOD: int = 26
 ADX_PERIOD: int = 10
@@ -975,8 +971,8 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id;
                     """, (
-                        symbol, entry_price, target_price, stop_loss, 'open',
-                        strategy_name, False, quantity, json.dumps({
+                        symbol, float(entry_price), float(target_price), float(stop_loss), 'open',
+                        strategy_name, False, float(quantity), json.dumps({
                             "atr": float(atr), "rsi": float(last['rsi']), "macd": float(last['macd']),
                             "volume": float(last['volume']), "timestamp": datetime.now(timezone.utc).isoformat()
                         }, cls=NpEncoder)
@@ -987,24 +983,23 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                 with signal_cache_lock:
                     open_signals_cache[symbol] = {
                         'id': new_signal_id,
-                        'symbol': symbol, 'entry_price': entry_price, 'target_price': target_price,
-                        'stop_loss': stop_loss, 'status': 'open', 'strategy_name': strategy_name,
-                        'is_real_trade': False, 'quantity': quantity,
+                        'symbol': symbol, 'entry_price': float(entry_price), 'target_price': float(target_price),
+                        'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name,
+                        'is_real_trade': False, 'quantity': float(quantity),
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     }
                 logger.info(f"✅ تم حفظ الصفقة الورقية لـ {symbol} في قاعدة البيانات كصفقة مفتوحة.")
             except Exception as e:
-                logger.error(f"❌ خطأ في حفظ الصفقة الورقية لـ {symbol}: {e}")
+                logger.error(f"❌ خطأ في حفظ الصفقة الورقية لـ {symbol}: {e}", exc_info=True)
                 if conn: conn.rollback()
                 
     except Exception as e:
-        logger.error(f"❌ خطأ في إنشاء الصفقة الورقية لـ {symbol}: {e}")
+        logger.error(f"❌ خطأ في إنشاء الصفقة الورقية لـ {symbol}: {e}", exc_info=True)
 
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard():
     with signal_cache_lock:
-        # إضافة تسجيل لمحتويات الكاش للمساعدة في التشخيص
         logger.info(f"[Dashboard] Loading dashboard. Cache content: {open_signals_cache}")
         open_signals = dict(sorted(open_signals_cache.items()))
     
@@ -1271,7 +1266,7 @@ DASHBOARD_TEMPLATE = """
                 if(data.success) setTimeout(() => location.reload(), 1000);
             }).catch(error => showAlert('خطأ في الاتصال بالخادم: ' + error, 'error'));
         }
-        setTimeout(() => location.reload(), 30000); // تحديث كل 30 ثانية
+        setTimeout(() => location.reload(), 30000);
     </script>
 </body>
 </html>
@@ -1523,9 +1518,10 @@ def manage_open_trades_loop():
             current_prices = {ticker['symbol']: float(ticker['price']) for ticker in client.get_all_tickers() if ticker['symbol'] in symbols_to_check}
 
             for signal in open_signals_copy:
-                symbol = signal['symbol']
-                current_price = current_prices.get(symbol)
+                symbol = signal.get('symbol')
+                if not symbol: continue
 
+                current_price = current_prices.get(symbol)
                 if not current_price:
                     logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
                     continue
@@ -1628,7 +1624,7 @@ def update_market_state_loop():
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
     logger.info("="*50)
-    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.8 ======")
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.9 ======")
     logger.info("="*50)
 
     init_db()
