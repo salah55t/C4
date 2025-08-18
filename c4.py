@@ -1,9 +1,6 @@
-# ملف c4.py - نسخة V9.9 (محسّنة لفريم 15 دقيقة وتحسين الذاكرة)
-# --- التغييرات الرئيسية (V9.9):
-# 1. [تحسين] تعديل فترات المؤشرات لتناسب فريم 15 دقيقة.
-# 2. [تحسين] إضافة آليات لتحسين الذاكرة للخوادم الضعيفة (512MB RAM).
-# 3. [جديد] تحسين لوحة التحكم مع إضافة صفحة إعدادات متقدمة.
-# 4. [تحسين] تحسين أداء قاعدة البيانات و Redis.
+# ملف c4.py - نسخة V9.9.1 (محسّنة لفريم 15 دقيقة وتحسين الذاكرة مع حل مشكلة Redis)
+# --- التغييرات الرئيسية (V9.9.1):
+# 1. [إصلاح] حل مشكلة صلاحيات Redis في Render.
 
 import time
 import os
@@ -46,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9')
+logger = logging.getLogger('CryptoBotV9.9.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -164,11 +161,13 @@ ATR_TS_MULTIPLIER: float = 2.2
 TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 2  # تقليل مدة التخزين المؤقت
 REDIS_MAX_MEMORY: str = "256mb"  # تحديد أقصى استخدام للذاكرة
 REDIS_POLICY: str = "allkeys-lru"  # سياسة حذف المفاتيح عند امتلاء الذاكرة
+REDIS_CONFIG_ENABLED: bool = False  # تعطيل إعدادات Redis لحل مشكلة الصلاحيات
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 redis_client: Optional[redis.Redis] = None
+redis_config_available: bool = False  # متغير لتتبع ما إذا كانت إعدادات Redis متاحة
 ml_models_cache: Dict[str, Any] = {}
 exchange_info_map: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
@@ -312,18 +311,33 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
         })
 
 def init_redis() -> None:
-    global redis_client
+    global redis_client, redis_config_available
     logger.info("[Redis] تهيئة الاتصال...")
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
-        # إعدادات تحسين الذاكرة
-        redis_client.config_set('maxmemory', REDIS_MAX_MEMORY)
-        redis_client.config_set('maxmemory-policy', REDIS_POLICY)
-        logger.info("✅ [Redis] تم الاتصال بنجاح.")
+        
+        # محاولة تعيين إعدادات Redis إذا كانت مفعلة
+        if REDIS_CONFIG_ENABLED:
+            try:
+                redis_client.config_set('maxmemory', REDIS_MAX_MEMORY)
+                redis_client.config_set('maxmemory-policy', REDIS_POLICY)
+                redis_config_available = True
+                logger.info("✅ [Redis] تم الاتصال وتعيين الإعدادات بنجاح.")
+            except redis.exceptions.NoPermissionError:
+                logger.warning("⚠️ [Redis] لا توجد صلاحية لتعيين إعدادات Redis. سيتم استخدام Redis بدون إعدادات مخصصة.")
+                redis_config_available = False
+            except Exception as e:
+                logger.warning(f"⚠️ [Redis] خطأ في تعيين إعدادات Redis: {e}. سيتم استخدام Redis بدون إعدادات مخصصة.")
+                redis_config_available = False
+        else:
+            logger.info("✅ [Redis] تم الاتصال بنجاح (بدون إعدادات مخصصة).")
+            redis_config_available = False
+            
     except redis.exceptions.ConnectionError as e:
-        logger.critical(f"❌ [Redis] فشل الاتصال: {e}")
-        exit(1)
+        logger.warning(f"⚠️ [Redis] فشل الاتصال بـ Redis: {e}. سيتم العمل بدون Redis.")
+        redis_client = None
+        redis_config_available = False
 
 def get_exchange_info_map() -> None:
     global exchange_info_map
@@ -644,6 +658,15 @@ def optimize_memory_usage():
             if len(rejection_logs_cache) > 30:  # الحفاظ على أحدث 30 رفض فقط
                 while len(rejection_logs_cache) > 30:
                     rejection_logs_cache.pop()
+        
+        # محاولة تحسين Redis إذا كانت الإعدادات متاحة
+        if redis_client and redis_config_available:
+            try:
+                redis_client.config_set('maxmemory', REDIS_MAX_MEMORY)
+                redis_client.config_set('maxmemory-policy', REDIS_POLICY)
+            except Exception as e:
+                logger.warning(f"⚠️ [Redis] خطأ في تحديث إعدادات Redis: {e}")
+                redis_config_available = False
         
         logger.info("✅ تم تحسين استخدام الذاكرة")
     except Exception as e:
@@ -1158,12 +1181,14 @@ def dashboard():
                                 open_signals=open_signals,
                                 notifications=notifications,
                                 rejections=rejections,
-                                load_time=load_time)
+                                load_time=load_time,
+                                redis_config_available=redis_config_available)
 
 @app.route('/settings')
 def settings():
     """صفحة الإعدادات المتقدمة"""
-    return render_template_string(SETTINGS_TEMPLATE)
+    return render_template_string(SETTINGS_TEMPLATE, 
+                                redis_config_available=redis_config_available)
 
 @app.route('/toggle_trading', methods=['POST'])
 def toggle_trading():
@@ -1198,7 +1223,7 @@ def update_settings():
         MAX_OPEN_TRADES = int(data.get('max_trades', MAX_OPEN_TRADES))
         MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
         
-        # حفظ الإعدادات في Redis
+        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             settings = {
                 'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
@@ -1235,7 +1260,7 @@ def update_strategies():
         with pullback_strategy_lock:
             USE_PULLBACK_STRATEGY = data.get('use_pullback', USE_PULLBACK_STRATEGY)
         
-        # حفظ الإعدادات في Redis
+        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             strategies = {
                 'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
@@ -1282,7 +1307,7 @@ def reset_settings():
         with pullback_strategy_lock:
             USE_PULLBACK_STRATEGY = True
         
-        # حفظ الإعدادات في Redis
+        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             settings = {
                 'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
@@ -1508,6 +1533,25 @@ DASHBOARD_TEMPLATE = """
             font-size: 14px;
         }
         
+        .redis-status {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        
+        .redis-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--danger-color);
+        }
+        
+        .redis-status-dot.available {
+            background-color: var(--success-color);
+        }
+        
         .footer {
             text-align: center;
             margin-top: 20px;
@@ -1539,7 +1583,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول الإلكتروني V9.9</div>
+            <div class="header-title">بوت التداول الإلكتروني V9.9.1</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -1563,6 +1607,10 @@ DASHBOARD_TEMPLATE = """
                     <div class="state-item">
                         <span class="state-label">آخر تحديث:</span>
                         <span class="state-value">{{ market_state.last_updated }}</span>
+                    </div>
+                    <div class="redis-status">
+                        <div class="redis-status-dot {{ 'available' if redis_config_available else '' }}"></div>
+                        <span>Redis: {{ 'مُحسَّن' if redis_config_available else 'أساسي' }}</span>
                     </div>
                 </div>
             </div>
@@ -1639,7 +1687,7 @@ DASHBOARD_TEMPLATE = """
         </div>
         
         <div class="footer">
-            <div>بوت التداول الإلكتروني V9.9 - فريم 15 دقيقة</div>
+            <div>بوت التداول الإلكتروني V9.9.1 - فريم 15 دقيقة</div>
             <div class="performance">تم تحميل الصفحة في {{ load_time }} مللي ثانية</div>
         </div>
     </div>
@@ -1812,6 +1860,31 @@ SETTINGS_TEMPLATE = """
             transition: width 0.5s;
         }
         
+        .redis-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+        }
+        
+        .redis-status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: var(--danger-color);
+        }
+        
+        .redis-status-dot.available {
+            background-color: var(--success-color);
+        }
+        
+        .redis-status-text {
+            font-weight: bold;
+        }
+        
         @media (max-width: 768px) {
             header {
                 flex-direction: column;
@@ -1826,6 +1899,13 @@ SETTINGS_TEMPLATE = """
             <div class="header-title">إعدادات البوت</div>
             <a href="/" class="toggle-btn">العودة للرئيسية</a>
         </header>
+        
+        <div class="redis-status">
+            <div class="redis-status-dot {{ 'available' if redis_config_available else '' }}"></div>
+            <div class="redis-status-text">
+                حالة Redis: {{ 'مُحسَّنة (إعدادات متاحة)' if redis_config_available else 'أساسية (إعدادات غير متاحة)' }}
+            </div>
+        </div>
         
         <div class="memory-info">
             <h3>حالة الذاكرة</h3>
@@ -2085,7 +2165,7 @@ def main_loop():
     app_thread.start()
     
     logger.info("✅ بدء تشغيل البوت بنجاح")
-    send_telegram_message("✅ تم بدء تشغيل بوت التداول V9.9 بنجاح")
+    send_telegram_message("✅ تم بدء تشغيل بوت التداول V9.9.1 بنجاح")
     
     # الحلقة الرئيسية
     while True:
