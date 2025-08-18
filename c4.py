@@ -1,6 +1,7 @@
-# ملف c4.py - نسخة V9.9.1 (محسّنة لفريم 15 دقيقة وتحسين الذاكرة مع حل مشكلة Redis)
-# --- التغييرات الرئيسية (V9.9.1):
-# 1. [إصلاح] حل مشكلة صلاحيات Redis في Render.
+# ملف c4.py - نسخة V9.9.2 (محسّنة لفريم 15 دقيقة وتحسين الذاكرة مع حل مشاكل Redis و Binance)
+# --- التغييرات الرئيسية (V9.9.2):
+# 1. [إصلاح] حل مشكلة الوصول إلى المتغير العام redis_config_available
+# 2. [إصلاح] إضافة معالجة لمشكلة معدل الطلبات في Binance
 
 import time
 import os
@@ -20,7 +21,7 @@ from urllib.parse import urlparse
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
+from binance.exceptions import BinanceAPIException, BinanceOrderException, BinanceRequestException
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 from threading import Thread, Lock
@@ -43,7 +44,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.1')
+logger = logging.getLogger('CryptoBotV9.9.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -163,6 +164,12 @@ REDIS_MAX_MEMORY: str = "256mb"  # تحديد أقصى استخدام للذاك
 REDIS_POLICY: str = "allkeys-lru"  # سياسة حذف المفاتيح عند امتلاء الذاكرة
 REDIS_CONFIG_ENABLED: bool = False  # تعطيل إعدادات Redis لحل مشكلة الصلاحيات
 
+# --- إعدادات التحكم في معدل الطلبات ---
+API_REQUEST_DELAY: float = 0.2  # تأخير بين الطلبات بالثواني
+API_RETRY_COUNT: int = 3  # عدد مرات إعادة المحاولة
+API_RETRY_DELAY: float = 5.0  # تأخير إعادة المحاولة بالثواني
+RATE_LIMIT_BAN_TIME: int = 3600  # وقت الحظر بالثواني (ساعة واحدة)
+
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
@@ -181,6 +188,7 @@ current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend
 market_state_lock = Lock()
 last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
+api_ban_until: float = 0.0  # وقت انتهاء حظر API
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
@@ -207,6 +215,8 @@ REJECTION_REASONS_AR = {
     "Pullback Strategy Conditions Not Met": "شروط استراتيجية Pullback لم تتحقق",
     "BB Squeeze Strategy Conditions Not Met": "شروط استراتيجية BB Squeeze لم تتحقق",
     "SR Breakout Strategy Conditions Not Met": "شروط استراتيجية اختراق الدعم/المقاومة لم تتحقق",
+    "API Rate Limit Exceeded": "تم تجاوز الحد الأقصى لمعدل الطلبات",
+    "API Temporarily Banned": "تم حظر IP مؤقتاً بسبب كثرة الطلبات",
 }
 
 # --- إعداد تطبيق Flask ---
@@ -387,26 +397,56 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
+    global api_ban_until
     if not client: return None
-    try:
-        lookback_str = f"{days} day" if 'd' in interval.lower() else f"{days * 24} hour"
-        
-        klines = client.get_historical_klines(symbol, interval, lookback_str)
-        if not klines: return None
-        
-        cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df = pd.DataFrame(klines, columns=cols)[:len(klines)-1]  # تجاهل آخر شمعة غير مكتملة
-        
-        # تحسين أنواع البيانات لتوفير الذاكرة
-        numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
-        df = df.astype(numeric_cols)
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        df.set_index('timestamp', inplace=True)
-        
-        return df.dropna()
-    except Exception as e:
-        logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
+    
+    # التحقق من حالة الحظر
+    current_time = time.time()
+    if current_time < api_ban_until:
+        remaining_time = int(api_ban_until - current_time)
+        logger.warning(f"⚠️ [جلب البيانات] IP محظور حتى {datetime.fromtimestamp(api_ban_until)}. المتبقي: {remaining_time} ثانية")
         return None
+    
+    # إضافة تأخير بين الطلبات
+    time.sleep(API_REQUEST_DELAY)
+    
+    for attempt in range(API_RETRY_COUNT):
+        try:
+            lookback_str = f"{days} day" if 'd' in interval.lower() else f"{days * 24} hour"
+            
+            klines = client.get_historical_klines(symbol, interval, lookback_str)
+            if not klines: return None
+            
+            cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            df = pd.DataFrame(klines, columns=cols)[:len(klines)-1]  # تجاهل آخر شمعة غير مكتملة
+            
+            # تحسين أنواع البيانات لتوفير الذاكرة
+            numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
+            df = df.astype(numeric_cols)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+            df.set_index('timestamp', inplace=True)
+            
+            return df.dropna()
+        except BinanceAPIException as e:
+            if e.code == -1003:  # Rate limit exceeded
+                logger.warning(f"⚠️ [جلب البيانات] تم تجاوز الحد الأقصى لمعدل الطلبات لـ {symbol}. محاولة {attempt + 1}/{API_RETRY_COUNT}")
+                if attempt < API_RETRY_COUNT - 1:
+                    time.sleep(API_RETRY_DELAY * (attempt + 1))  # تأخير متزايد
+                else:
+                    logger.error(f"❌ [جلب البيانات] تم حظر IP مؤقتاً لـ {symbol} بسبب كثرة الطلبات")
+                    api_ban_until = current_time + RATE_LIMIT_BAN_TIME
+                    send_telegram_message(f"⚠️ تم حظر IP مؤقتاً بسبب كثرة الطلبات. سيتم إعادة المحاولة بعد {RATE_LIMIT_BAN_TIME//60} دقيقة")
+                    return None
+            else:
+                logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ [جلب البيانات] خطأ في جلب البيانات التاريخية لـ {symbol} ({interval}): {e}")
+            if attempt < API_RETRY_COUNT - 1:
+                time.sleep(API_RETRY_DELAY)
+            else:
+                return None
+    return None
 
 def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     highest_high = df['high'].rolling(window=14).max()
@@ -638,6 +678,7 @@ def load_notifications_to_cache():
 # --- دوال تحسين الذاكرة ---
 def optimize_memory_usage():
     """وظيفة لتحسين استخدام الذاكرة"""
+    global redis_config_available
     try:
         # جمع القمامة بشكل دوري
         gc.collect()
@@ -1583,7 +1624,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول الإلكتروني V9.9.1</div>
+            <div class="header-title">بوت التداول الإلكتروني V9.9.2</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -1687,7 +1728,7 @@ DASHBOARD_TEMPLATE = """
         </div>
         
         <div class="footer">
-            <div>بوت التداول الإلكتروني V9.9.1 - فريم 15 دقيقة</div>
+            <div>بوت التداول الإلكتروني V9.9.2 - فريم 15 دقيقة</div>
             <div class="performance">تم تحميل الصفحة في {{ load_time }} مللي ثانية</div>
         </div>
     </div>
@@ -2165,7 +2206,7 @@ def main_loop():
     app_thread.start()
     
     logger.info("✅ بدء تشغيل البوت بنجاح")
-    send_telegram_message("✅ تم بدء تشغيل بوت التداول V9.9.1 بنجاح")
+    send_telegram_message("✅ تم بدء تشغيل بوت التداول V9.9.2 بنجاح")
     
     # الحلقة الرئيسية
     while True:
