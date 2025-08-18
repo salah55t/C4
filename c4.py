@@ -762,7 +762,10 @@ def check_bb_stoch_strategy_revised(df: pd.DataFrame) -> bool:
     current_candle_is_bullish = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.6
     stoch_turning_up = (last['stoch_rsi_k'] < 35 and last['stoch_rsi_k'] > prev['stoch_rsi_k'] and prev['stoch_rsi_k'] < 20)
     rsi_not_extreme = last['rsi'] > 25
-    volume_ok = last['volume'] > last['volume'].rolling(10).mean() * 1.2
+    # --- FIX START ---
+    # Calculate rolling mean on the DataFrame series, not the single 'last' value
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
+    # --- FIX END ---
     if all([prev_candle_touch_bb, current_candle_is_bullish, stoch_turning_up, rsi_not_extreme, volume_ok]):
         return True
     return False
@@ -1410,10 +1413,7 @@ def main_bot_loop():
                     logger.info(f"  -> [1/5] تم جلب البيانات التاريخية بنجاح ({len(df)} شمعة).")
                     
                     df_featured = calculate_all_features(df, btc_df_cache)
-                    # --- FIX START ---
-                    # Assign the symbol name to the new featured dataframe
                     df_featured.name = symbol
-                    # --- FIX END ---
                     logger.info(f"  -> [2/5] تم حساب المؤشرات الفنية.")
 
                     if not check_market_volatility_filter(df_featured): continue
