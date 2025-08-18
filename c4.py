@@ -1409,8 +1409,11 @@ def main_bot_loop():
                         continue
                     logger.info(f"  -> [1/5] تم جلب البيانات التاريخية بنجاح ({len(df)} شمعة).")
                     
-                    df.name = symbol
                     df_featured = calculate_all_features(df, btc_df_cache)
+                    # --- FIX START ---
+                    # Assign the symbol name to the new featured dataframe
+                    df_featured.name = symbol
+                    # --- FIX END ---
                     logger.info(f"  -> [2/5] تم حساب المؤشرات الفنية.")
 
                     if not check_market_volatility_filter(df_featured): continue
