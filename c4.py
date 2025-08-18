@@ -1,8 +1,8 @@
-# ملف c4.py - نسخة V9.9.5 (إضافة سجلات مفصلة وإصلاح عرض حالة السوق)
-# --- التغييرات الرئيسية (V9.9.5):
-# 1. [جديد] إضافة سجلات مفصلة لكل خطوة في عملية فحص العملات.
-# 2. [إصلاح] إصلاح منطق عرض حالة السوق وتشغيله في حلقة خلفية مخصصة.
-# 3. [تحسين] تحديث قالب HTML لعرض تفاصيل اتجاه السوق لكل إطار زمني.
+# ملف c4.py - نسخة V9.9.6 (تفعيل تتبع الصفقات الورقية)
+# --- التغييرات الرئيسية (V9.9.6):
+# 1. [جديد] تعديل منطق الصفقات الورقية ليتم تتبعها وإغلاقها تلقائيًا عند الهدف/الوقف.
+# 2. [تحسين] بناء منطق متكامل في حلقة إدارة الصفقات المفتوحة (manage_open_trades_loop).
+# 3. [جديد] إضافة دالة مخصصة (close_signal) للتعامل مع عملية إغلاق الصفقات وتحديث قاعدة البيانات.
 
 import time
 import os
@@ -762,10 +762,7 @@ def check_bb_stoch_strategy_revised(df: pd.DataFrame) -> bool:
     current_candle_is_bullish = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.6
     stoch_turning_up = (last['stoch_rsi_k'] < 35 and last['stoch_rsi_k'] > prev['stoch_rsi_k'] and prev['stoch_rsi_k'] < 20)
     rsi_not_extreme = last['rsi'] > 25
-    # --- FIX START ---
-    # Calculate rolling mean on the DataFrame series, not the single 'last' value
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
-    # --- FIX END ---
     if all([prev_candle_touch_bb, current_candle_is_bullish, stoch_turning_up, rsi_not_extreme, volume_ok]):
         return True
     return False
@@ -946,13 +943,11 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         with risk_per_trade_lock:
             risk_val = RISK_PER_TRADE_PERCENT
         
-        # Ensure stop_loss is not zero or negative to avoid division by zero
         if entry_price <= stop_loss:
             logger.error(f"❌ [{symbol}] لا يمكن حساب حجم الصفقة، وقف الخسارة ({stop_loss}) أعلى من أو يساوي سعر الدخول ({entry_price}).")
             return
 
         risk_per_unit = entry_price - stop_loss
-        # A common R:R is 1.5, let's use that as a base for profit target
         target_price = entry_price + (risk_per_unit * 1.5) 
         
         account_balance = 1000
@@ -960,19 +955,16 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         quantity = risk_amount / risk_per_unit
         
         message = f"""
-📊 *توصية تداول ورقية*
+📊 *فتح صفقة ورقية جديدة*
 💱 *العملة:* {symbol}
 📈 *الاستراتيجية:* {strategy_name}
 🕒 *الفريم الزمني:* {SIGNAL_GENERATION_TIMEFRAME}
 📌 *نقطة الدخول:* {entry_price:.4f}
 🎯 *هدف الربح:* {target_price:.4f}
 🛑 *وقف الخسارة:* {stop_loss:.4f}
-📊 *نسبة المخاطرة:* {risk_val}%
-💰 *الحجم المقترح:* {quantity:.4f}
-⚠️ *هذه توصية ورقية للتدريب والتعليم فقط*
 """
         send_telegram_message(message)
-        log_and_notify("info", f"تم إنشاء توصية ورقية لـ {symbol} باستخدام استراتيجية {strategy_name}", "PAPER_TRADE")
+        log_and_notify("info", f"تم فتح صفقة ورقية لـ {symbol} باستخدام استراتيجية {strategy_name}", "PAPER_TRADE_OPEN")
         
         if check_db_connection() and conn:
             try:
@@ -982,29 +974,32 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                             symbol, entry_price, target_price, stop_loss, status, 
                             strategy_name, is_real_trade, quantity, signal_details
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id;
                     """, (
-                        symbol, entry_price, target_price, stop_loss, 'paper',
+                        symbol, entry_price, target_price, stop_loss, 'open',
                         strategy_name, False, quantity, json.dumps({
                             "atr": float(atr), "rsi": float(last['rsi']), "macd": float(last['macd']),
                             "volume": float(last['volume']), "timestamp": datetime.now(timezone.utc).isoformat()
                         }, cls=NpEncoder)
                     ))
+                    new_signal_id = cur.fetchone()['id']
                 conn.commit()
                 
                 with signal_cache_lock:
                     open_signals_cache[symbol] = {
+                        'id': new_signal_id,
                         'symbol': symbol, 'entry_price': entry_price, 'target_price': target_price,
-                        'stop_loss': stop_loss, 'status': 'paper', 'strategy_name': strategy_name,
+                        'stop_loss': stop_loss, 'status': 'open', 'strategy_name': strategy_name,
                         'is_real_trade': False, 'quantity': quantity,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     }
-                logger.info(f"✅ تم حفظ التوصية الورقية لـ {symbol} في قاعدة البيانات")
+                logger.info(f"✅ تم حفظ الصفقة الورقية لـ {symbol} في قاعدة البيانات كصفقة مفتوحة.")
             except Exception as e:
-                logger.error(f"❌ خطأ في حفظ التوصية الورقية لـ {symbol}: {e}")
+                logger.error(f"❌ خطأ في حفظ الصفقة الورقية لـ {symbol}: {e}")
                 if conn: conn.rollback()
                 
     except Exception as e:
-        logger.error(f"❌ خطأ في إنشاء التوصية الورقية لـ {symbol}: {e}")
+        logger.error(f"❌ خطأ في إنشاء الصفقة الورقية لـ {symbol}: {e}")
 
 # --- مسارات Flask ---
 @app.route('/')
@@ -1189,7 +1184,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V9.9.5</div>
+            <div class="header-title">بوت التداول V9.9.6</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -1219,7 +1214,7 @@ DASHBOARD_TEMPLATE = """
             <div class="card">
                 <div class="card-header"><div class="card-title">الإشارات المفتوحة</div></div>
                 {% if open_signals %}{% for symbol, signal in open_signals.items() %}
-                <div class="signal-item {{ 'paper' if signal.get('status') == 'paper' else '' }}">
+                <div class="signal-item {{ 'paper' if not signal.is_real_trade else '' }}">
                     <div class="item-header"><div class="item-title">{{ symbol }}</div><div class="item-time">{{ signal.get('timestamp', '')[:16] if signal.get('timestamp') else '' }}</div></div>
                     <div class="item-content">دخول: {{ "%.4f"|format(signal.entry_price) }} | هدف: {{ "%.4f"|format(signal.target_price) }} | وقف: {{ "%.4f"|format(signal.stop_loss) }}</div>
                 </div>
@@ -1244,7 +1239,7 @@ DASHBOARD_TEMPLATE = """
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا يوجد رفض</div>{% endif %}
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V9.9.5 - فريم 15 دقيقة</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V9.9.6 - فريم 15 دقيقة</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -1447,6 +1442,7 @@ def main_bot_loop():
                     if strategy_found:
                         logger.info(f"  -> 🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
                         if is_bullish_reversal_pattern(df_featured):
+                            # حاليا، الوضع الورقي فقط هو المفعل
                             create_paper_trade_signal(symbol, df_featured, strategy_found)
                         else:
                             log_rejection(symbol, "Bullish Reversal Candle Pattern Failed")
@@ -1460,28 +1456,87 @@ def main_bot_loop():
             logger.error(f"❌ [الحلقة الرئيسية] حدث خطأ فادح: {e}", exc_info=True)
             time.sleep(60)
 
+def close_signal(signal: Dict, closing_price: float, reason: str):
+    """
+    إغلاق الصفقة (ورقية أو حقيقية) عبر تحديث قاعدة البيانات والكاش.
+    """
+    symbol = signal['symbol']
+    entry_price = signal['entry_price']
+    
+    profit_percentage = ((closing_price - entry_price) / entry_price) * 100
+    
+    # في الصفقات الحقيقية، يجب خصم العمولات
+    if signal.get('is_real_trade', False):
+        profit_percentage -= 2 * TRADING_FEE_PERCENT
+
+    logger.info(f"🔔 [إغلاق صفقة] {symbol} | السبب: {reason} | سعر الإغلاق: {closing_price:.4f} | الربح: {profit_percentage:.2f}%")
+    
+    if check_db_connection() and conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE signals 
+                    SET status = 'closed', closing_price = %s, closed_at = %s, 
+                        profit_percentage = %s, closing_reason = %s
+                    WHERE id = %s
+                """, (closing_price, datetime.now(timezone.utc), profit_percentage, reason, signal['id']))
+            conn.commit()
+            log_and_notify("info", f"تم إغلاق صفقة {symbol} بربح {profit_percentage:.2f}%", "TRADE_CLOSED")
+            send_telegram_message(f"✅ *إغلاق صفقة ورقية*\n💱 *العملة:* {symbol}\n*السبب:* {reason}\n*الربح:* {profit_percentage:.2f}%")
+        except Exception as e:
+            logger.error(f"❌ [قاعدة البيانات] فشل تحديث إغلاق الصفقة لـ {symbol}: {e}")
+            if conn: conn.rollback()
+
+    with signal_cache_lock:
+        if symbol in open_signals_cache:
+            del open_signals_cache[symbol]
+
 def manage_open_trades_loop():
     logger.info("🚀 [إدارة الصفقات] بدء حلقة إدارة الصفقات المفتوحة...")
     while True:
         try:
             with signal_cache_lock:
-                open_signals_copy = dict(open_signals_cache)
+                open_signals_copy = list(open_signals_cache.values())
 
             if not open_signals_copy:
                 time.sleep(15)
                 continue
 
-            symbols_to_check = list(open_signals_copy.keys())
-            if client:
-                current_prices = {ticker['symbol']: float(ticker['price']) for ticker in client.get_all_tickers() if ticker['symbol'] in symbols_to_check}
-                for symbol, signal in open_signals_copy.items():
-                    current_price = current_prices.get(symbol)
-                    if not current_price: continue
-                    # Placeholder for actual trade management logic (TP/SL checks)
+            symbols_to_check = [s['symbol'] for s in open_signals_copy]
+            if not client or not symbols_to_check:
+                time.sleep(15)
+                continue
+            
+            current_prices = {ticker['symbol']: float(ticker['price']) for ticker in client.get_all_tickers() if ticker['symbol'] in symbols_to_check}
+
+            for signal in open_signals_copy:
+                symbol = signal['symbol']
+                current_price = current_prices.get(symbol)
+
+                if not current_price:
+                    logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
+                    continue
+
+                target_price = signal['target_price']
+                stop_loss = signal['stop_loss']
+
+                if current_price >= target_price:
+                    close_signal(signal, target_price, "TP_HIT")
+                    continue 
+
+                if current_price <= stop_loss:
+                    close_signal(signal, stop_loss, "SL_HIT")
+                    continue
+            
             time.sleep(30)
+
+        except BinanceRequestException as e:
+            logger.error(f"❌ [إدارة الصفقات] خطأ في طلب Binance: {e}", exc_info=False)
+            time.sleep(60)
         except Exception as e:
             logger.error(f"❌ [إدارة الصفقات] حدث خطأ: {e}", exc_info=True)
             time.sleep(60)
+
 
 def update_market_state_loop():
     """حلقة مخصصة لتحديث حالة السوق بشكل دوري."""
@@ -1538,7 +1593,7 @@ def update_market_state_loop():
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
     logger.info("="*50)
-    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.5 ======")
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.6 ======")
     logger.info("="*50)
 
     init_db()
