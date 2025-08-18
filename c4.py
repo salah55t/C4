@@ -1,7 +1,10 @@
-# ملف c4.py - نسخة V9.9.3 (محسّنة لفريم 15 دقيقة وتحسين الذاكرة مع حل مشاكل Redis و Binance)
-# --- التغييرات الرئيسية (V9.9.3):
-# 1. [إصلاح] حل مشكلة جلب البيانات التاريخية (عدد الأعمدة)
-# 2. [جديد] إضافة ميزة إرسال التوصيات الورقية عند عدم تفعيل التداول الحقيقي
+# ملف c4.py - نسخة V9.9.4 (تم إصلاح الأخطاء وإضافة الحلقة الرئيسية)
+# --- التغييرات الرئيسية (V9.9.4):
+# 1. [إصلاح] حل مشكلة SyntaxError: unterminated triple-quoted string literal.
+# 2. [إصلاح] إكمال كود JavaScript الناقص في قوالب HTML.
+# 3. [جديد] إضافة نقطة بداية للبرنامج (__name__ == '__main__').
+# 4. [جديد] إضافة حلقة التداول الرئيسية (main_bot_loop) وحلقة إدارة الصفقات.
+# 5. [تحسين] تحسينات عامة على بنية الكود لجعله قابلاً للتشغيل.
 
 import time
 import os
@@ -44,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.3')
+logger = logging.getLogger('CryptoBotV9.9.4')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -615,7 +618,7 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
         df_calc['btc_correlation'] = 0.0
     df_calc = calculate_advanced_momentum_features(df_calc)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
-    df_calc = calculate_market_microstructure_features(df_calc)
+    # df_calc = calculate_market_microstructure_features(df_calc) # This function requires additional data not available in klines
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
     df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
@@ -881,7 +884,7 @@ def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
     is_squeeze = last['bb_width'] < squeeze_threshold
     
     breakout = last['close'] > last['bb_upper']
-    volume_confirmed = last['relative_volume'] > 1.25
+    volume_confirmed = last.get('relative_volume', 0) > 1.25
     
     if is_squeeze and breakout and volume_confirmed:
         logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
@@ -1204,7 +1207,9 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         stop_loss = entry_price - (atr * ATR_TS_MULTIPLIER)
         
         # حساب هدف الربح
-        risk_percent = RISK_PER_TRADE_PERCENT / 100
+        with risk_per_trade_lock:
+            risk_val = RISK_PER_TRADE_PERCENT
+        risk_percent = risk_val / 100
         target_price = entry_price + (entry_price - stop_loss) * (1 / risk_percent)
         
         # حساب حجم الصفقة
@@ -1224,7 +1229,7 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
 🎯 *هدف الربح:* {target_price:.4f}
 🛑 *وقف الخسارة:* {stop_loss:.4f}
 
-📊 *نسبة المخاطرة:* {RISK_PER_TRADE_PERCENT}%
+📊 *نسبة المخاطرة:* {risk_val}%
 💰 *الحجم المقترح:* {quantity:.4f}
 
 ⚠️ *هذه توصية ورقية للتدريب والتعليم فقط*
@@ -1244,7 +1249,7 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                         INSERT INTO signals (
                             symbol, entry_price, target_price, stop_loss, status, 
                             strategy_name, is_real_trade, quantity, signal_details
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         symbol, entry_price, target_price, stop_loss, 'paper',
                         strategy_name, False, quantity, json.dumps({
@@ -1322,9 +1327,30 @@ def dashboard():
 @app.route('/settings')
 def settings():
     """صفحة الإعدادات المتقدمة"""
+    with risk_per_trade_lock:
+        risk_val = RISK_PER_TRADE_PERCENT
+    with buy_confidence_lock:
+        buy_conf = BUY_CONFIDENCE_THRESHOLD
+    with bb_stoch_strategy_lock:
+        use_bb = USE_BB_STOCH_STRATEGY
+    with macd_ema_strategy_lock:
+        use_macd = USE_MACD_EMA_STRATEGY
+    with ema_rsi_strategy_lock:
+        use_ema = USE_EMA_RSI_STRATEGY
+    with pullback_strategy_lock:
+        use_pullback = USE_PULLBACK_STRATEGY
+
     return render_template_string(SETTINGS_TEMPLATE, 
                                 redis_config_available=redis_config_available,
-                                paper_trading_mode=paper_trading_mode)
+                                paper_trading_mode=paper_trading_mode,
+                                RISK_PER_TRADE_PERCENT=risk_val,
+                                BUY_CONFIDENCE_THRESHOLD=buy_conf,
+                                MAX_OPEN_TRADES=MAX_OPEN_TRADES,
+                                MIN_PROFIT_PERCENT=MIN_PROFIT_PERCENT,
+                                USE_BB_STOCH_STRATEGY=use_bb,
+                                USE_MACD_EMA_STRATEGY=use_macd,
+                                USE_EMA_RSI_STRATEGY=use_ema,
+                                USE_PULLBACK_STRATEGY=use_pullback)
 
 @app.route('/toggle_trading', methods=['POST'])
 def toggle_trading():
@@ -1347,7 +1373,8 @@ def toggle_paper_trading():
     """تبديل وضع التداول الورقي"""
     global paper_trading_mode
     try:
-        paper_trading_mode = not paper_trading_mode
+        data = request.json
+        paper_trading_mode = data.get('paper_trading_mode', True)
         mode = "ورقي" if paper_trading_mode else "حقيقي"
         status = "مفعل" if is_trading_enabled else "معطل"
         log_and_notify("info", f"تم تغيير وضع التداول إلى: {mode}", "TRADING_MODE")
@@ -1363,7 +1390,6 @@ def update_settings():
     try:
         data = request.json
         
-        # تحديث الإعدادات العامة
         global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
         
         with risk_per_trade_lock:
@@ -1375,7 +1401,6 @@ def update_settings():
         MAX_OPEN_TRADES = int(data.get('max_trades', MAX_OPEN_TRADES))
         MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
         
-        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             settings = {
                 'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
@@ -1397,7 +1422,6 @@ def update_strategies():
     try:
         data = request.json
         
-        # تحديث إعدادات الاستراتيجيات
         global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY
         
         with bb_stoch_strategy_lock:
@@ -1412,7 +1436,6 @@ def update_strategies():
         with pullback_strategy_lock:
             USE_PULLBACK_STRATEGY = data.get('use_pullback', USE_PULLBACK_STRATEGY)
         
-        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             strategies = {
                 'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
@@ -1432,7 +1455,6 @@ def update_strategies():
 def reset_settings():
     """إعادة الإعدادات إلى القيم الافتراضية"""
     try:
-        # إعادة الإعدادات العامة
         global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
         
         with risk_per_trade_lock:
@@ -1444,7 +1466,6 @@ def reset_settings():
         MAX_OPEN_TRADES = 3
         MIN_PROFIT_PERCENT = 0.8
         
-        # إعادة إعدادات الاستراتيجيات
         global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY
         
         with bb_stoch_strategy_lock:
@@ -1459,7 +1480,6 @@ def reset_settings():
         with pullback_strategy_lock:
             USE_PULLBACK_STRATEGY = True
         
-        # حفظ الإعدادات في Redis إذا كان متاحًا
         if redis_client:
             settings = {
                 'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
@@ -1765,13 +1785,14 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول الإلكتروني V9.9.3</div>
+            <div class="header-title">بوت التداول الإلكتروني V9.9.4</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
                 <button class="toggle-btn {{ 'stop' if trading_enabled else '' }}" onclick="toggleTrading()">
                     {{ 'إيقاف' if trading_enabled else 'تشغيل' }}
                 </button>
+                <a href="/settings" class="toggle-btn">الإعدادات</a>
             </div>
         </header>
         
@@ -1834,7 +1855,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
                 {% if notifications %}
                     {% for notif in notifications %}
-                    <div class="notification-item {{ notif.type }}">
+                    <div class="notification-item {{ notif.type.lower() }}">
                         <div class="item-header">
                             <div class="item-title">{{ notif.type }}</div>
                             <div class="item-time">{{ notif.timestamp[:16] if notif.timestamp else '' }}</div>
@@ -1851,7 +1872,7 @@ DASHBOARD_TEMPLATE = """
             
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">سجل الرفوض</div>
+                    <div class="card-title">سجل الرفض</div>
                     <div class="card-icon">🚫</div>
                 </div>
                 {% if rejections %}
@@ -1866,65 +1887,60 @@ DASHBOARD_TEMPLATE = """
                     {% endfor %}
                 {% else %}
                     <div style="text-align: center; padding: 20px; color: #777;">
-                        لا توجد رفضو
+                        لا يوجد رفض
                     </div>
                 {% endif %}
             </div>
         </div>
         
         <div class="footer">
-            <div>بوت التداول الإلكتروني V9.9.3 - فريم 15 دقيقة</div>
+            <div>بوت التداول الإلكتروني V9.9.4 - فريم 15 دقيقة</div>
             <div class="performance">تم تحميل الصفحة في {{ load_time }} مللي ثانية</div>
         </div>
     </div>
     
     <script>
+        function showAlert(message, type = 'info') {
+            // A simple, non-blocking alert. In a real app, you might use a library like SweetAlert.
+            const alertBox = document.createElement('div');
+            alertBox.style.position = 'fixed';
+            alertBox.style.top = '20px';
+            alertBox.style.right = '20px';
+            alertBox.style.padding = '15px';
+            alertBox.style.borderRadius = '5px';
+            alertBox.style.color = 'white';
+            alertBox.style.zIndex = '1000';
+            alertBox.style.backgroundColor = type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db';
+            alertBox.innerText = message;
+            document.body.appendChild(alertBox);
+            setTimeout(() => {
+                alertBox.remove();
+            }, 3000);
+        }
+
         function toggleTrading() {
             fetch('/toggle_trading', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
+                headers: { 'Content-Type': 'application/json' }
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    alert(data.message);
-                    location.reload();
+                    showAlert(data.message, 'success');
+                    setTimeout(() => location.reload(), 1000);
                 } else {
-                    alert('فشل تغيير حالة التداول: ' + data.message);
+                    showAlert('فشل تغيير حالة التداول: ' + data.message, 'error');
                 }
             })
             .catch(error => {
-                alert('خطأ في الاتصال بالخادم: ' + error);
+                showAlert('خطأ في الاتصال بالخادم: ' + error, 'error');
             });
         }
         
-        function togglePaperTrading() {
-            fetch('/toggle_paper_trading', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    alert(data.message);
-                    location.reload();
-                } else {
-                    alert('فشل تغيير وضع التداول: ' + data.message);
-                }
-            })
-            .catch(error => {
-                alert('خطأ في الاتصال بالخادم: ' + error);
-            });
-        }
-        
-        // تحديث الصفحة تلقائياً كل 30 ثانية
+        // تحديث الصفحة تلقائياً كل 60 ثانية
         setTimeout(() => {
             location.reload();
-        }, 30000);
+        }, 60000);
     </script>
 </body>
 </html>
@@ -1961,7 +1977,7 @@ SETTINGS_TEMPLATE = """
         }
         
         .container {
-            max-width: 1200px;
+            max-width: 800px;
             margin: 0 auto;
             padding: 20px;
         }
@@ -1982,7 +1998,7 @@ SETTINGS_TEMPLATE = """
             font-weight: bold;
         }
         
-        .toggle-btn {
+        .nav-btn {
             background-color: var(--primary-color);
             color: white;
             border: none;
@@ -1990,9 +2006,10 @@ SETTINGS_TEMPLATE = """
             border-radius: 4px;
             cursor: pointer;
             transition: background-color 0.3s;
+            text-decoration: none;
         }
         
-        .toggle-btn:hover {
+        .nav-btn:hover {
             background-color: #2980b9;
         }
         
@@ -2014,11 +2031,15 @@ SETTINGS_TEMPLATE = """
             font-weight: bold;
         }
         
-        .form-group input, .form-group select {
+        .form-group input[type="number"], .form-group select {
             width: 100%;
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
+        }
+
+        .form-group input[type="checkbox"] {
+            margin-left: 10px;
         }
         
         .form-actions {
@@ -2045,33 +2066,11 @@ SETTINGS_TEMPLATE = """
             color: var(--dark-color);
         }
         
-        .memory-info {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-        
-        .memory-bar {
-            height: 20px;
-            background-color: #e9ecef;
-            border-radius: 10px;
-            overflow: hidden;
-            margin-top: 10px;
-        }
-        
-        .memory-used {
-            height: 100%;
-            background-color: var(--primary-color);
-            width: 0%;
-            transition: width 0.5s;
-        }
-        
         .redis-status {
             display: flex;
             align-items: center;
             gap: 10px;
-            margin-top: 10px;
+            margin-bottom: 20px;
             padding: 10px;
             border-radius: 5px;
             background-color: #f8f9fa;
@@ -2127,7 +2126,7 @@ SETTINGS_TEMPLATE = """
             left: 0;
             right: 0;
             bottom: 0;
-            background-color: #ccc;
+            background-color: var(--primary-color);
             transition: .4s;
             border-radius: 30px;
         }
@@ -2164,7 +2163,7 @@ SETTINGS_TEMPLATE = """
     <div class="container">
         <header>
             <div class="header-title">إعدادات البوت</div>
-            <a href="/" class="toggle-btn">العودة للرئيسية</a>
+            <a href="/" class="nav-btn">العودة للرئيسية</a>
         </header>
         
         <div class="trading-mode-section">
@@ -2183,14 +2182,6 @@ SETTINGS_TEMPLATE = """
             <div class="redis-status-dot {{ 'available' if redis_config_available else '' }}"></div>
             <div class="redis-status-text">
                 حالة Redis: {{ 'مُحسَّنة (إعدادات متاحة)' if redis_config_available else 'أساسية (إعدادات غير متاحة)' }}
-            </div>
-        </div>
-        
-        <div class="memory-info">
-            <h3>حالة الذاكرة</h3>
-            <div>الاستخدام الحالي: <span id="memory-percent">0%</span></div>
-            <div class="memory-bar">
-                <div class="memory-used" id="memory-bar"></div>
             </div>
         </div>
         
@@ -2263,13 +2254,244 @@ SETTINGS_TEMPLATE = """
     </div>
     
     <script>
-        // محاكاة حالة الذاكرة
-        document.addEventListener('DOMContentLoaded', function() {
-            // في التطبيق الحقيقي، سيتم جلب هذه البيانات من الخادم
-            const memoryPercent = 65; // مثال للاستخدام
-            document.getElementById('memory-percent').textContent = memoryPercent + '%';
-            document.getElementById('memory-bar').style.width = memoryPercent + '%';
+        function showAlert(message, type = 'info') {
+            const alertBox = document.createElement('div');
+            alertBox.style.position = 'fixed';
+            alertBox.style.top = '20px';
+            alertBox.style.right = '20px';
+            alertBox.style.padding = '15px';
+            alertBox.style.borderRadius = '5px';
+            alertBox.style.color = 'white';
+            alertBox.style.zIndex = '1000';
+            alertBox.style.backgroundColor = type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db';
+            alertBox.innerText = message;
+            document.body.appendChild(alertBox);
+            setTimeout(() => {
+                alertBox.remove();
+            }, 3000);
+        }
+
+        document.getElementById('paper-trading-toggle').addEventListener('change', function() {
+            const isPaper = this.checked;
+            fetch('/toggle_paper_trading', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paper_trading_mode: isPaper })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    showAlert(data.message, 'success');
+                } else {
+                    showAlert(data.message, 'error');
+                }
+            });
         });
-        
-        // معالجة نموذج الإعدادات
-        document.getElementById('settings-form').addEventListener('submit',
+
+        document.getElementById('settings-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const data = {
+                risk_per_trade: document.getElementById('risk-per-trade').value,
+                buy_confidence: document.getElementById('buy-confidence').value,
+                max_trades: document.getElementById('max-trades').value,
+                min_profit: document.getElementById('min-profit').value,
+            };
+            fetch('/update_settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+            .then(res => res.json())
+            .then(data => showAlert(data.message, data.success ? 'success' : 'error'));
+        });
+
+        document.getElementById('strategies-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const data = {
+                use_bb_stoch: document.querySelector('[name=use_bb_stoch]').checked,
+                use_macd_ema: document.querySelector('[name=use_macd_ema]').checked,
+                use_ema_rsi: document.querySelector('[name=use_ema_rsi]').checked,
+                use_pullback: document.querySelector('[name=use_pullback]').checked,
+            };
+            fetch('/update_strategies', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+            .then(res => res.json())
+            .then(data => showAlert(data.message, data.success ? 'success' : 'error'));
+        });
+
+        function resetSettings() {
+            if (confirm('هل أنت متأكد من أنك تريد إعادة تعيين كافة الإعدادات إلى الوضع الافتراضي؟')) {
+                fetch('/reset_settings', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    showAlert(data.message, data.success ? 'success' : 'error');
+                    if(data.success) {
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+# --- حلقة التداول الرئيسية ---
+def main_bot_loop():
+    """الحلقة الرئيسية التي تبحث عن إشارات تداول جديدة."""
+    logger.info("🚀 [الحلقة الرئيسية] بدء حلقة البحث عن الإشارات...")
+    btc_df_cache = None
+    last_btc_fetch = 0
+
+    while True:
+        try:
+            with trading_status_lock:
+                if not is_trading_enabled:
+                    time.sleep(10)  # انتظر 10 ثوانٍ إذا كان التداول معطلاً
+                    continue
+
+            logger.info("🔍 [الحلقة الرئيسية] بدء دورة فحص جديدة...")
+
+            # تحديث بيانات BTC كل 5 دقائق
+            if time.time() - last_btc_fetch > 300:
+                btc_df_cache = get_btc_data_for_bot()
+                last_btc_fetch = time.time()
+                if btc_df_cache is None:
+                    logger.warning("⚠️ [الحلقة الرئيسية] لا يمكن جلب بيانات BTC، سيتم تخطي دورة الفحص هذه.")
+                    time.sleep(60)
+                    continue
+
+            # فحص العملات على دفعات
+            for i in range(0, len(validated_symbols_to_scan), SYMBOL_PROCESSING_BATCH_SIZE):
+                batch = validated_symbols_to_scan[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
+                for symbol in batch:
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache:
+                            logger.info(f"  -> [{symbol}] تخطي، توجد صفقة مفتوحة بالفعل.")
+                            continue
+                    
+                    logger.info(f"  -> [{symbol}] جاري تحليل العملة...")
+                    df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                    if df is None or df.empty:
+                        log_rejection(symbol, "Insufficient Historical Data")
+                        continue
+                    
+                    df.name = symbol # لسهولة الوصول في دوال الرفض
+                    df_featured = calculate_all_features(df, btc_df_cache)
+
+                    # تطبيق الاستراتيجيات المفعلة
+                    strategy_found = None
+                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_revised(df_featured):
+                        strategy_found = "BB+Stoch"
+                    elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy(df_featured):
+                        strategy_found = "MACD+EMA"
+                    elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy(df_featured):
+                        strategy_found = "EMA+RSI"
+                    elif USE_PULLBACK_STRATEGY and check_pullback_strategy(df_featured):
+                        strategy_found = "Pullback"
+                    elif USE_BB_SQUEEZE_STRATEGY and check_bb_squeeze_strategy(df_featured):
+                        strategy_found = "BB Squeeze"
+                    elif USE_BULLISH_MOMENTUM_STRATEGY and check_bullish_momentum_strategy(df_featured):
+                        strategy_found = "Bullish Momentum"
+                    elif USE_SR_BREAKOUT_STRATEGY and check_support_resistance_strategy_enhanced(df_featured):
+                        strategy_found = "SR Breakout"
+
+                    if strategy_found:
+                        logger.info(f"✅ [{symbol}] تم العثور على إشارة محتملة باستخدام استراتيجية: {strategy_found}")
+                        # هنا يمكنك إضافة المزيد من الفلاتر قبل فتح الصفقة
+                        # ...
+                        # حاليًا، سنقوم بإنشاء توصية ورقية مباشرة
+                        create_paper_trade_signal(symbol, df_featured, strategy_found)
+
+            logger.info("✅ [الحلقة الرئيسية] اكتملت دورة الفحص. الانتظار للدورة التالية...")
+            time.sleep(60 * 5)  # انتظر 5 دقائق قبل بدء الدورة التالية
+
+        except Exception as e:
+            logger.error(f"❌ [الحلقة الرئيسية] حدث خطأ فادح: {e}", exc_info=True)
+            time.sleep(60) # انتظر دقيقة بعد الخطأ
+
+def manage_open_trades_loop():
+    """الحلقة التي تدير الصفقات المفتوحة (تحديث الأسعار، التحقق من TP/SL)."""
+    logger.info("🚀 [إدارة الصفقات] بدء حلقة إدارة الصفقات المفتوحة...")
+    while True:
+        try:
+            with signal_cache_lock:
+                # إنشاء نسخة من القاموس لتجنب مشاكل التزامن أثناء التكرار
+                open_signals_copy = dict(open_signals_cache)
+
+            if not open_signals_copy:
+                time.sleep(15) # لا توجد صفقات، تحقق مرة أخرى بعد 15 ثانية
+                continue
+
+            symbols_to_check = list(open_signals_copy.keys())
+            logger.info(f"ℹ️ [إدارة الصفقات] جاري التحقق من {len(symbols_to_check)} صفقة مفتوحة: {symbols_to_check}")
+
+            # جلب الأسعار الحالية دفعة واحدة
+            if client:
+                current_prices = {ticker['symbol']: float(ticker['price']) for ticker in client.get_all_tickers() if ticker['symbol'] in symbols_to_check}
+
+                for symbol, signal in open_signals_copy.items():
+                    current_price = current_prices.get(symbol)
+                    if not current_price:
+                        logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
+                        continue
+                    
+                    # هنا يمكنك إضافة منطق التحقق من TP/SL وإغلاق الصفقات
+                    # مثال:
+                    # if current_price >= signal['target_price']:
+                    #     close_trade(signal, current_price, "Take Profit Hit")
+                    # elif current_price <= signal['stop_loss']:
+                    #     close_trade(signal, current_price, "Stop Loss Hit")
+                    # else:
+                    #     update_trade_status(signal, current_price)
+                    pass # Placeholder for actual trade management logic
+
+            time.sleep(30) # تحديث كل 30 ثانية
+
+        except Exception as e:
+            logger.error(f"❌ [إدارة الصفقات] حدث خطأ: {e}", exc_info=True)
+            time.sleep(60)
+
+# --- نقطة بداية البرنامج ---
+if __name__ == '__main__':
+    logger.info("==================================================")
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.4 ======")
+    logger.info("==================================================")
+
+    # 1. تهيئة الخدمات
+    init_db()
+    init_redis()
+    try:
+        client = Client(API_KEY, API_SECRET)
+        client.ping()
+        logger.info("✅ [Binance] الاتصال بالمنصة ناجح.")
+    except Exception as e:
+        logger.critical(f"❌ [Binance] فشل الاتصال بالمنصة: {e}")
+        exit(1)
+
+    # 2. تحميل الإعدادات والبيانات الأولية
+    get_exchange_info_map()
+    validated_symbols_to_scan = get_validated_symbols()
+    if not validated_symbols_to_scan:
+        logger.critical("❌ لا توجد عملات صالحة للمسح. سيتم إيقاف البوت.")
+        exit(1)
+    
+    load_open_signals_to_cache()
+    load_notifications_to_cache()
+    if redis_client:
+        load_settings_from_redis()
+
+    # 3. بدء العمليات الخلفية (Threads)
+    main_loop_thread = Thread(target=main_bot_loop, daemon=True)
+    manage_trades_thread = Thread(target=manage_open_trades_loop, daemon=True)
+    
+    main_loop_thread.start()
+    manage_trades_thread.start()
+
+    # 4. تشغيل واجهة المستخدم (Flask)
+    logger.info("🌐 [Flask] بدء تشغيل واجهة المستخدم على http://127.0.0.1:5000")
+    # استخدم '0.0.0.0' لجعل الخادم متاحًا على الشبكة
+    app.run(host='0.0.0.0', port=5000, debug=False)
