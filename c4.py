@@ -1,8 +1,8 @@
-# ملف c4.py - نسخة V9.9.7 (إضافة أشرطة تقدم للصفقات)
-# --- التغييرات الرئيسية (V9.9.7):
-# 1. [جديد] إضافة شريط تقدم مرئي في لوحة التحكم لكل صفقة مفتوحة.
-# 2. [تحسين] حساب نسبة التقدم نحو الهدف/الوقف بشكل مستمر في حلقة إدارة الصفقات.
-# 3. [تحسين] تحديث ذاكرة الكاش لتضمين السعر الحالي ونسبة التقدم للعرض الفوري.
+# ملف c4.py - نسخة V9.9.8 (إصلاح عرض الإشارات وتحسين الواجهة)
+# --- التغييرات الرئيسية (V9.9.8):
+# 1. [إصلاح] جعل قالب لوحة التحكم أكثر قوة باستخدام .get() لمنع أخطاء العرض.
+# 2. [تحسين] تطوير شريط التقدم ليعرض الربح (أخضر) والخسارة (أحمر).
+# 3. [تشخيص] إضافة تسجيل لمحتويات ذاكرة الصفقات عند تحميل لوحة التحكم للمساعدة في تصحيح الأخطاء.
 
 import time
 import os
@@ -45,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.7')
+logger = logging.getLogger('CryptoBotV9.9.8')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -138,19 +138,19 @@ SYMBOL_PROCESSING_BATCH_SIZE: int = 5  # تقليل من 10 إلى 5
 USE_DYNAMIC_JOURNEY = True
 
 # --- إعدادات المؤشرات الفنية (تم تعديلها للسكالبينج على فريم 15 دقيقة) ---
-EMA_FAST_PERIOD: int = 12  # تقليل من 21 إلى 12
-EMA_SLOW_PERIOD: int = 26  # تقليل من 50 إلى 26
-ADX_PERIOD: int = 10       # تقليل من 14 إلى 10
-RSI_PERIOD: int = 10       # تقليل من 14 إلى 10
-ATR_PERIOD: int = 10       # تقليل من 14 إلى 10
+EMA_FAST_PERIOD: int = 12
+EMA_SLOW_PERIOD: int = 26
+ADX_PERIOD: int = 10
+RSI_PERIOD: int = 10
+ATR_PERIOD: int = 10
 BTC_CORR_PERIOD: int = 30
 REL_VOL_PERIOD: int = 30
-MOMENTUM_PERIOD: int = 5   # تقليل من 10 إلى 5
+MOMENTUM_PERIOD: int = 5
 EMA_SLOPE_PERIOD: int = 5
-SUPERTREND_ATR_PERIOD: int = 7  # تقليل من 10 إلى 7
+SUPERTREND_ATR_PERIOD: int = 7
 SUPERTREND_MULTIPLIER: float = 3.0
-CANDLE_AVG_VOLUME_PERIOD: int = 10  # تقليل من 15 إلى 10
-SR_LOOKBACK_CANDLES: int = 40       # تقليل من 60 إلى 40
+CANDLE_AVG_VOLUME_PERIOD: int = 10
+SR_LOOKBACK_CANDLES: int = 40
 SR_MIN_BOUNCES: int = 2
 
 # --- إعدادات الفلاتر المتقدمة وإدارة الصفقات ---
@@ -161,36 +161,36 @@ ATR_TS_PERIOD: int = 14
 ATR_TS_MULTIPLIER: float = 2.2
 
 # --- إعدادات تحسين الذاكرة ---
-TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 2  # تقليل مدة التخزين المؤقت
-REDIS_MAX_MEMORY: str = "256mb"  # تحديد أقصى استخدام للذاكرة
-REDIS_POLICY: str = "allkeys-lru"  # سياسة حذف المفاتيح عند امتلاء الذاكرة
-REDIS_CONFIG_ENABLED: bool = False  # تعطيل إعدادات Redis لحل مشكلة الصلاحيات
+TECHNICAL_SIGNAL_CACHE_DURATION: int = 60 * 2
+REDIS_MAX_MEMORY: str = "256mb"
+REDIS_POLICY: str = "allkeys-lru"
+REDIS_CONFIG_ENABLED: bool = False
 
 # --- إعدادات التحكم في معدل الطلبات ---
-API_REQUEST_DELAY: float = 0.2  # تأخير بين الطلبات بالثواني
-API_RETRY_COUNT: int = 3  # عدد مرات إعادة المحاولة
-API_RETRY_DELAY: float = 5.0  # تأخير إعادة المحاولة بالثواني
-RATE_LIMIT_BAN_TIME: int = 3600  # وقت الحظر بالثواني (ساعة واحدة)
+API_REQUEST_DELAY: float = 0.2
+API_RETRY_COUNT: int = 3
+API_RETRY_DELAY: float = 5.0
+RATE_LIMIT_BAN_TIME: int = 3600
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
 client: Optional[Client] = None
 redis_client: Optional[redis.Redis] = None
-redis_config_available: bool = False  # متغير لتتبع ما إذا كانت إعدادات Redis متاحة
+redis_config_available: bool = False
 ml_models_cache: Dict[str, Any] = {}
 exchange_info_map: Dict[str, Any] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
-notifications_cache = deque(maxlen=20)  # تقليل من 50 إلى 20
+notifications_cache = deque(maxlen=20)
 notifications_lock = Lock()
-rejection_logs_cache = deque(maxlen=30)  # تقليل من 100 إلى 30
+rejection_logs_cache = deque(maxlen=30)
 rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": "N/A"}
 market_state_lock = Lock()
 last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
-api_ban_until: float = 0.0  # وقت انتهاء حظر API
+api_ban_until: float = 0.0
 
 # --- قاموس أسباب الرفض باللغة العربية ---
 REJECTION_REASONS_AR = {
@@ -927,7 +927,6 @@ def is_morning_star(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool:
             c3['close'] > (c1['open'] + c1['close']) / 2)
 
 def is_three_white_soldiers(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool:
-    # This requires checking previous candles which is complex here. Simplified check:
     return (c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] > c3['open'] and
             c2['open'] > c1['open'] and c2['close'] > c1['close'] and
             c3['open'] > c2['open'] and c3['close'] > c2['close'])
@@ -1004,13 +1003,16 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard():
-    start_time = time.time()
+    with signal_cache_lock:
+        # إضافة تسجيل لمحتويات الكاش للمساعدة في التشخيص
+        logger.info(f"[Dashboard] Loading dashboard. Cache content: {open_signals_cache}")
+        open_signals = dict(sorted(open_signals_cache.items()))
+    
     with market_state_lock: market_state = current_market_state.copy()
     with trading_status_lock: trading_enabled = is_trading_enabled
-    with signal_cache_lock: open_signals = dict(sorted(open_signals_cache.items()))
     with notifications_lock: notifications = list(notifications_cache)[:10]
     with rejection_logs_lock: rejections = list(rejection_logs_cache)[:10]
-    load_time = round((time.time() - start_time) * 1000, 2)
+
     return render_template_string(DASHBOARD_TEMPLATE, 
                                 market_state=market_state,
                                 trading_enabled=trading_enabled,
@@ -1018,8 +1020,8 @@ def dashboard():
                                 open_signals=open_signals,
                                 notifications=notifications,
                                 rejections=rejections,
-                                load_time=load_time,
                                 redis_config_available=redis_config_available)
+
 
 @app.route('/settings')
 def settings():
@@ -1156,7 +1158,7 @@ DASHBOARD_TEMPLATE = """
         .toggle-btn:hover { background-color: #2980b9; }
         .toggle-btn.stop { background-color: var(--danger-color); }
         .toggle-btn.stop:hover { background-color: #c0392b; }
-        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-bottom: 20px; }
         .card { background-color: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 20px; transition: transform 0.3s; }
         .card:hover { transform: translateY(-5px); }
         .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
@@ -1178,7 +1180,7 @@ DASHBOARD_TEMPLATE = """
         .item-time { font-size: 12px; color: #777; }
         .item-content { font-size: 14px; }
         .progress-bar-container { background-color: #e0e0e0; border-radius: 10px; height: 20px; overflow: hidden; margin-top: 8px; direction: ltr; }
-        .progress-bar { height: 100%; color: white; text-align: center; font-size: 12px; line-height: 20px; transition: width 0.4s ease-in-out; }
+        .progress-bar { height: 100%; color: white; text-align: center; font-size: 12px; line-height: 20px; transition: width 0.4s ease-in-out; white-space: nowrap; }
         .footer { text-align: center; margin-top: 20px; padding: 10px; color: #777; font-size: 14px; }
         @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } header { flex-direction: column; gap: 10px; } }
     </style>
@@ -1186,7 +1188,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V9.9.7</div>
+            <div class="header-title">بوت التداول V9.9.8</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -1200,33 +1202,35 @@ DASHBOARD_TEMPLATE = """
                 <div class="market-state">
                     <div class="state-item">
                         <span class="state-label">النظام العام:</span>
-                        <span class="state-value {{ market_state.overall_regime }}">{{ market_state.overall_regime }}</span>
+                        <span class="state-value {{ market_state.get('overall_regime', 'N/A') }}">{{ market_state.get('overall_regime', 'N/A') }}</span>
                     </div>
-                    {% for tf, details in market_state.trend_details_by_tf.items() %}
+                    {% for tf, details in market_state.get('trend_details_by_tf', {}).items() %}
                     <div class="state-item">
                         <span class="state-label">اتجاه {{ tf }}:</span>
-                        <span class="state-value {{ details.trend }}">{{ details.trend }} (RSI: {{ "%.1f"|format(details.rsi) }})</span>
+                        <span class="state-value {{ details.get('trend', 'N/A') }}">{{ details.get('trend', 'N/A') }} (RSI: {{ "%.1f"|format(details.get('rsi', 0)) }})</span>
                     </div>
                     {% endfor %}
                     <div class="state-item" style="margin-top:10px; font-size: 12px; color: #777;">
-                        <span>آخر تحديث:</span><span>{{ market_state.last_updated }}</span>
+                        <span>آخر تحديث:</span><span>{{ market_state.get('last_updated', 'N/A') }}</span>
                     </div>
                 </div>
             </div>
             <div class="card">
                 <div class="card-header"><div class="card-title">الإشارات المفتوحة</div></div>
                 {% if open_signals %}{% for symbol, signal in open_signals.items() %}
-                <div class="signal-item {{ 'paper' if not signal.is_real_trade else '' }}">
+                <div class="signal-item {{ 'paper' if not signal.get('is_real_trade') else '' }}">
                     <div class="item-header"><div class="item-title">{{ symbol }}</div><div class="item-time">{{ signal.get('strategy_name', '') }}</div></div>
                     <div class="item-content">
-                        دخول: {{ "%.4f"|format(signal.entry_price) }} | حالي: {{ "%.4f"|format(signal.get('current_price', 0)) }}<br>
-                        هدف: {{ "%.4f"|format(signal.target_price) }} | وقف: {{ "%.4f"|format(signal.stop_loss) }}
+                        دخول: {{ "%.4f"|format(signal.get('entry_price', 0)) }} | حالي: {{ "%.4f"|format(signal.get('current_price', 0)) }}<br>
+                        هدف: {{ "%.4f"|format(signal.get('target_price', 0)) }} | وقف: {{ "%.4f"|format(signal.get('stop_loss', 0)) }}
                     </div>
                     <div class="progress-bar-container">
                         {% set progress = signal.get('progress', 0) %}
-                        <div class="progress-bar" style="width: {{ [progress, 0]|max }}%; background-color: var(--success-color);">
-                            {% if progress >= 0 %}{{ "%.1f"|format(progress) }}%{% endif %}
-                        </div>
+                        {% if progress >= 0 %}
+                            <div class="progress-bar" style="width: {{ [progress, 100]|min }}%; background-color: var(--success-color);">{{ "%.1f"|format(progress) }}%</div>
+                        {% else %}
+                            <div class="progress-bar" style="width: {{ [progress|abs, 100]|min }}%; background-color: var(--danger-color); float: right;">{{ "%.1f"|format(progress|abs) }}%</div>
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا توجد إشارات مفتوحة</div>{% endif %}
@@ -1234,9 +1238,9 @@ DASHBOARD_TEMPLATE = """
             <div class="card">
                 <div class="card-header"><div class="card-title">الإشعارات الأخيرة</div></div>
                 {% if notifications %}{% for notif in notifications %}
-                <div class="notification-item {{ notif.type.lower() }}">
-                    <div class="item-header"><div class="item-title">{{ notif.type }}</div><div class="item-time">{{ notif.timestamp[:16] if notif.timestamp else '' }}</div></div>
-                    <div class="item-content">{{ notif.message }}</div>
+                <div class="notification-item {{ notif.get('type', 'info').lower() }}">
+                    <div class="item-header"><div class="item-title">{{ notif.get('type', 'INFO') }}</div><div class="item-time">{{ notif.get('timestamp', '')[:16] }}</div></div>
+                    <div class="item-content">{{ notif.get('message', '') }}</div>
                 </div>
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا توجد إشعارات</div>{% endif %}
             </div>
@@ -1244,13 +1248,13 @@ DASHBOARD_TEMPLATE = """
                 <div class="card-header"><div class="card-title">سجل الرفض</div></div>
                 {% if rejections %}{% for rej in rejections %}
                 <div class="rejection-item">
-                    <div class="item-header"><div class="item-title">{{ rej.symbol }}</div><div class="item-time">{{ rej.timestamp[:16] if rej.timestamp else '' }}</div></div>
-                    <div class="item-content">{{ rej.reason }}</div>
+                    <div class="item-header"><div class="item-title">{{ rej.get('symbol', 'N/A') }}</div><div class="item-time">{{ rej.get('timestamp', '')[:16] }}</div></div>
+                    <div class="item-content">{{ rej.get('reason', 'N/A') }}</div>
                 </div>
                 {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا يوجد رفض</div>{% endif %}
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V9.9.7 - فريم 15 دقيقة</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V9.9.8 - فريم 15 دقيقة</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -1526,17 +1530,25 @@ def manage_open_trades_loop():
                     logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
                     continue
 
-                entry_price = signal['entry_price']
-                target_price = signal['target_price']
-                stop_loss = signal['stop_loss']
+                entry_price = signal.get('entry_price', 0)
+                target_price = signal.get('target_price', 0)
+                stop_loss = signal.get('stop_loss', 0)
+
+                if not all([entry_price, target_price, stop_loss]):
+                    logger.error(f"Signal for {symbol} is missing critical price data.")
+                    continue
 
                 # حساب نسبة التقدم وتحديث الكاش
-                total_distance = target_price - entry_price
+                total_tp_distance = target_price - entry_price
+                total_sl_distance = entry_price - stop_loss
                 current_distance = current_price - entry_price
-                progress = 0
-                if total_distance != 0:
-                    progress = (current_distance / total_distance) * 100
                 
+                progress = 0
+                if current_distance >= 0 and total_tp_distance > 0: # In profit
+                    progress = (current_distance / total_tp_distance) * 100
+                elif current_distance < 0 and total_sl_distance > 0: # In loss
+                    progress = (current_distance / total_sl_distance) * 100 # Will be negative
+
                 with signal_cache_lock:
                     if symbol in open_signals_cache:
                         open_signals_cache[symbol]['current_price'] = current_price
@@ -1551,7 +1563,7 @@ def manage_open_trades_loop():
                     close_signal(signal, stop_loss, "SL_HIT")
                     continue
             
-            time.sleep(20) # تقليل مدة الانتظار لتحديث أكثر سرعة
+            time.sleep(20)
 
         except BinanceRequestException as e:
             logger.error(f"❌ [إدارة الصفقات] خطأ في طلب Binance: {e}", exc_info=False)
@@ -1608,7 +1620,7 @@ def update_market_state_loop():
                 current_market_state['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
             
             logger.info(f"✅ [حالة السوق] تم التحديث. النظام العام: {overall_regime}")
-            time.sleep(60 * 5) # تحديث كل 5 دقائق
+            time.sleep(60 * 5)
         except Exception as e:
             logger.error(f"❌ [حالة السوق] حدث خطأ: {e}", exc_info=True)
             time.sleep(60)
@@ -1616,7 +1628,7 @@ def update_market_state_loop():
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
     logger.info("="*50)
-    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.7 ======")
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.8 ======")
     logger.info("="*50)
 
     init_db()
