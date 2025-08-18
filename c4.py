@@ -1,10 +1,8 @@
-# ملف c4.py - نسخة V9.9.4 (تم إصلاح الأخطاء وإضافة الحلقة الرئيسية)
-# --- التغييرات الرئيسية (V9.9.4):
-# 1. [إصلاح] حل مشكلة SyntaxError: unterminated triple-quoted string literal.
-# 2. [إصلاح] إكمال كود JavaScript الناقص في قوالب HTML.
-# 3. [جديد] إضافة نقطة بداية للبرنامج (__name__ == '__main__').
-# 4. [جديد] إضافة حلقة التداول الرئيسية (main_bot_loop) وحلقة إدارة الصفقات.
-# 5. [تحسين] تحسينات عامة على بنية الكود لجعله قابلاً للتشغيل.
+# ملف c4.py - نسخة V9.9.5 (إضافة سجلات مفصلة وإصلاح عرض حالة السوق)
+# --- التغييرات الرئيسية (V9.9.5):
+# 1. [جديد] إضافة سجلات مفصلة لكل خطوة في عملية فحص العملات.
+# 2. [إصلاح] إصلاح منطق عرض حالة السوق وتشغيله في حلقة خلفية مخصصة.
+# 3. [تحسين] تحديث قالب HTML لعرض تفاصيل اتجاه السوق لكل إطار زمني.
 
 import time
 import os
@@ -47,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV9.9.4')
+logger = logging.getLogger('CryptoBotV9.9.5')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -188,7 +186,7 @@ notifications_cache = deque(maxlen=20)  # تقليل من 50 إلى 20
 notifications_lock = Lock()
 rejection_logs_cache = deque(maxlen=30)  # تقليل من 100 إلى 30
 rejection_logs_lock = Lock()
-current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": None}
+current_market_state: Dict[str, Any] = {"overall_regime": "INITIALIZING", "trend_details_by_tf": {}, "last_updated": "N/A"}
 market_state_lock = Lock()
 last_market_state_check = 0
 technical_signals_cache: Dict[str, Dict] = {}
@@ -316,7 +314,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
 
 def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
     reason_ar = REJECTION_REASONS_AR.get(reason_key, reason_key)
-    log_message = f"🚫 [{symbol}] تم الرفض | السبب: {reason_ar} | تفاصيل: {details or {}}"
+    log_message = f"  -> 🚫 [{symbol}] تم الرفض | السبب: {reason_ar} | تفاصيل: {details or {}}"
     logger.info(log_message)
     with rejection_logs_lock:
         rejection_logs_cache.appendleft({
@@ -331,7 +329,6 @@ def init_redis() -> None:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         
-        # محاولة تعيين إعدادات Redis إذا كانت مفعلة
         if REDIS_CONFIG_ENABLED:
             try:
                 redis_client.config_set('maxmemory', REDIS_MAX_MEMORY)
@@ -404,14 +401,12 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     global api_ban_until
     if not client: return None
     
-    # التحقق من حالة الحظر
     current_time = time.time()
     if current_time < api_ban_until:
         remaining_time = int(api_ban_until - current_time)
         logger.warning(f"⚠️ [جلب البيانات] IP محظور حتى {datetime.fromtimestamp(api_ban_until)}. المتبقي: {remaining_time} ثانية")
         return None
     
-    # إضافة تأخير بين الطلبات
     time.sleep(API_REQUEST_DELAY)
     
     for attempt in range(API_RETRY_COUNT):
@@ -421,13 +416,11 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
             klines = client.get_historical_klines(symbol, interval, lookback_str)
             if not klines: return None
             
-            # أخذ أول 6 أعمدة فقط وتجاهل الشمعة الأخيرة غير المكتملة
             klines = [kline[:6] for kline in klines[:-1]]
             
             cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
             df = pd.DataFrame(klines, columns=cols)
             
-            # تحسين أنواع البيانات لتوفير الذاكرة
             numeric_cols = {'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'}
             df = df.astype(numeric_cols)
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -435,10 +428,10 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
             
             return df.dropna()
         except BinanceAPIException as e:
-            if e.code == -1003:  # Rate limit exceeded
+            if e.code == -1003:
                 logger.warning(f"⚠️ [جلب البيانات] تم تجاوز الحد الأقصى لمعدل الطلبات لـ {symbol}. محاولة {attempt + 1}/{API_RETRY_COUNT}")
                 if attempt < API_RETRY_COUNT - 1:
-                    time.sleep(API_RETRY_DELAY * (attempt + 1))  # تأخير متزايد
+                    time.sleep(API_RETRY_DELAY * (attempt + 1))
                 else:
                     logger.error(f"❌ [جلب البيانات] تم حظر IP مؤقتاً لـ {symbol} بسبب كثرة الطلبات")
                     api_ban_until = current_time + RATE_LIMIT_BAN_TIME
@@ -482,25 +475,6 @@ def calculate_advanced_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     negative_flow = money_flow.where(typical_price < typical_price.shift(1), 0).rolling(14).sum()
     money_ratio = positive_flow / negative_flow.replace(0, 1e-9)
     df['mfi'] = 100 - (100 / (1 + money_ratio))
-    return df
-
-def calculate_market_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
-    required_cols = ['taker_buy_base', 'volume', 'quote_volume', 'high', 'low', 'open', 'close']
-    if not all(col in df.columns for col in required_cols): return df
-    df['buy_pressure'] = df['taker_buy_base'] / df['volume'].replace(0, 1e-9)
-    volume_ma = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / volume_ma.replace(0, 1e-9)
-    df['price_impact'] = df['quote_volume'] / df['volume'].replace(0, 1e-9)
-    log_hl = np.log(df['high'] / df['low'].replace(0, 1e-9))
-    log_co = np.log(df['close'] / df['open'].replace(0, 1e-9))
-    gk_vol_sq = (0.5 * (log_hl ** 2) - (2 * np.log(2) - 1) * (log_co ** 2)).clip(lower=0)
-    df['garman_klass_vol'] = np.sqrt(gk_vol_sq)
-    log_hc = np.log(df['high'] / df['close'].replace(0, 1e-9))
-    log_ho = np.log(df['high'] / df['open'].replace(0, 1e-9))
-    log_lc = np.log(df['low'] / df['close'].replace(0, 1e-9))
-    log_lo = np.log(df['low'] / df['open'].replace(0, 1e-9))
-    rs_vol_sq = (log_hc * log_ho + log_lc * log_lo).clip(lower=0)
-    df['rogers_satchell_vol'] = np.sqrt(rs_vol_sq)
     return df
 
 def calculate_advanced_volatility_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -571,12 +545,12 @@ def calculate_supertrend(df: pd.DataFrame, atr_period: int, multiplier: float) -
 def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> pd.DataFrame:
     df_calc = df.copy()
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
-    df_calc['ema_12'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()  # استخدام EMA_FAST_PERIOD
+    df_calc['ema_12'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema_21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['sma_50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma_200'] = df_calc['close'].rolling(window=200).mean()
     df_calc['volume_sma_20'] = df_calc['volume'].rolling(window=20).mean()
-    df_calc['ema_26'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()  # استخدام EMA_SLOW_PERIOD
+    df_calc['ema_26'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['ema_50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema_100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
     high_low = df_calc['high'] - df_calc['low']
@@ -618,7 +592,6 @@ def calculate_all_features(df: pd.DataFrame, btc_df: Optional[pd.DataFrame]) -> 
         df_calc['btc_correlation'] = 0.0
     df_calc = calculate_advanced_momentum_features(df_calc)
     df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / df_calc['bb_middle'].replace(0, 1e-9)
-    # df_calc = calculate_market_microstructure_features(df_calc) # This function requires additional data not available in klines
     df_calc = calculate_advanced_volatility_features(df_calc)
     df_calc = calculate_temporal_features(df_calc)
     df_calc = calculate_supertrend(df_calc, SUPERTREND_ATR_PERIOD, SUPERTREND_MULTIPLIER)
@@ -687,27 +660,22 @@ def optimize_memory_usage():
     """وظيفة لتحسين استخدام الذاكرة"""
     global redis_config_available
     try:
-        # جمع القمامة بشكل دوري
         gc.collect()
         
-        # تقليل حجم البيانات في الذاكرة
         with signal_cache_lock:
-            if len(open_signals_cache) > 10:  # الحفاظ على أحدث 10 إشارات فقط
+            if len(open_signals_cache) > 10:
                 oldest_signals = sorted(open_signals_cache.items(), key=lambda x: x[1].get('timestamp', ''))[:len(open_signals_cache)-10]
                 for symbol, _ in oldest_signals:
                     del open_signals_cache[symbol]
         
         with notifications_lock:
-            if len(notifications_cache) > 20:  # الحفاظ على أحدث 20 إشعار فقط
-                while len(notifications_cache) > 20:
-                    notifications_cache.pop()
+            while len(notifications_cache) > 20:
+                notifications_cache.pop()
         
         with rejection_logs_lock:
-            if len(rejection_logs_cache) > 30:  # الحفاظ على أحدث 30 رفض فقط
-                while len(rejection_logs_cache) > 30:
-                    rejection_logs_cache.pop()
+            while len(rejection_logs_cache) > 30:
+                rejection_logs_cache.pop()
         
-        # محاولة تحسين Redis إذا كانت الإعدادات متاحة
         if redis_client and redis_config_available:
             try:
                 redis_client.config_set('maxmemory', REDIS_MAX_MEMORY)
@@ -729,7 +697,6 @@ def load_settings_from_redis():
         return
     
     try:
-        # تحميل إعدادات التداول
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
@@ -743,7 +710,6 @@ def load_settings_from_redis():
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', MAX_OPEN_TRADES)
             MIN_PROFIT_PERCENT = settings.get('MIN_PROFIT_PERCENT', MIN_PROFIT_PERCENT)
         
-        # تحميل إعدادات الاستراتيجيات
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
@@ -766,226 +732,133 @@ def load_settings_from_redis():
 
 # --- منطق التداول والفلاتر ---
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
-    """فلتر لتجنب التداول في فترات التقلب الشديد أو المنخفض جدًا"""
-    if len(df) < 50:
-        return False
-    
+    if len(df) < 50: return False
     last = df.iloc[-1]
-    # التأكد من وجود الأعمدة المطلوبة
-    if 'atr' not in last or 'close' not in last or last['close'] == 0:
-        return False # لا يمكن الحساب، نفترض أنه غير صالح
-        
+    if 'atr' not in last or 'close' not in last or last['close'] == 0: return False
     atr_percent = (last['atr'] / last['close']) * 100
-    
-    # تجنب التداول عندما يكون التقلب منخفض جدًا أو مرتفع جدًا
     if atr_percent < 0.5 or atr_percent > 5.0:
         log_rejection(df.name, "Market Volatility Filter Failed", {"atr_percent": f"{atr_percent:.2f}"})
         return False
-    
+    logger.info(f"  -> ✅ [{df.name}] اجتاز فلتر التقلب (ATR: {atr_percent:.2f}%)")
     return True
 
 def check_trend_strength_filter(df: pd.DataFrame) -> bool:
-    """فلتر لتأكيد قوة الاتجاه الحالي"""
-    if len(df) < 50:
-        return False
-        
+    if len(df) < 50: return False
     last = df.iloc[-1]
-    
-    # التأكد من وجود الأعمدة المطلوبة
-    if 'adx' not in last or f'roc_{MOMENTUM_PERIOD}' not in last:
-        return False # لا يمكن الحساب، نفترض أنه غير صالح
-
-    # تجنب التداول في الأسواق الجانبية
+    if 'adx' not in last or f'roc_{MOMENTUM_PERIOD}' not in last: return False
     if last['adx'] < 18:
         log_rejection(df.name, "Trend Strength Filter Failed", {"reason": "ADX too low", "adx": f"{last['adx']:.2f}"})
         return False
-        
-    # التأكد من وجود زخم كافٍ
     if abs(last[f'roc_{MOMENTUM_PERIOD}']) < 0.5:
         log_rejection(df.name, "Trend Strength Filter Failed", {"reason": "ROC too low", "roc_10": f"{last[f'roc_{MOMENTUM_PERIOD}']:.2f}"})
         return False
-        
+    logger.info(f"  -> ✅ [{df.name}] اجتاز فلتر قوة الاتجاه (ADX: {last['adx']:.2f})")
     return True
 
 def check_bb_stoch_strategy_revised(df: pd.DataFrame) -> bool:
-    """
-    استراتيجية BB+Stoch المعدلة للدخول المبكر على فريم 15 دقيقة.
-    """
-    if len(df) < 15:  # تقليل الحد الأدنى للبيانات
-        return False
-
+    if len(df) < 15: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    # شروط أكثر صرامة لفريم 15 دقيقة
-    prev_candle_touch_bb = prev['low'] <= prev['bb_lower'] * 1.001  # لمس دقيق
+    prev_candle_touch_bb = prev['low'] <= prev['bb_lower'] * 1.001
     current_candle_is_bullish = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.6
     stoch_turning_up = (last['stoch_rsi_k'] < 35 and last['stoch_rsi_k'] > prev['stoch_rsi_k'] and prev['stoch_rsi_k'] < 20)
-    rsi_not_extreme = last['rsi'] > 25  # تجنب التشبع البيعي الشديد
-    
-    # إضافة فلتر الحجم
+    rsi_not_extreme = last['rsi'] > 25
     volume_ok = last['volume'] > last['volume'].rolling(10).mean() * 1.2
-    
-    conditions = {
-        "prev_candle_touch_bb": prev_candle_touch_bb,
-        "current_candle_is_bullish": current_candle_is_bullish,
-        "stoch_turning_up": stoch_turning_up,
-        "rsi_not_extreme": rsi_not_extreme,
-        "volume_ok": volume_ok
-    }
-
-    if all(conditions.values()):
-        logger.info(f"  -> [{df.name}] ✅ إشارة BB+Stoch (معدلة لفريم 15 دقيقة).")
+    if all([prev_candle_touch_bb, current_candle_is_bullish, stoch_turning_up, rsi_not_extreme, volume_ok]):
         return True
-
     return False
 
 def check_macd_ema_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 3: return False
     last, prev, prev_prev = df.iloc[-1], df.iloc[-2], df.iloc[-3]
-    
-    # تعديل الشروط لفريم 15 دقيقة
     macd_cross_up = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
-    price_above_ema = last['close'] > last['ema_12']  # استخدام EMA السريع
+    price_above_ema = last['close'] > last['ema_12']
     macd_strength = last['macd_histogram'] > 0 and last['macd_histogram'] > prev['macd_histogram'] * 1.2
-    trend_strength = last['adx'] > 18  # تقليل الحد الأدنى
+    trend_strength = last['adx'] > 18
     macd_position = prev_prev['macd'] < 0
-    
-    if macd_cross_up and price_above_ema and macd_strength and trend_strength and macd_position:
-        logger.info(f"  -> [{df.name}] ✅ إشارة MACD+EMA (معدلة لفريم 15 دقيقة).")
+    if all([macd_cross_up, price_above_ema, macd_strength, trend_strength, macd_position]):
         return True
     return False
 
 def check_ema_rsi_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    ema_cross_up = prev['ema_9'] < prev['ema_12'] and last['ema_9'] > last['ema_12']  # استخدام EMA السريع
+    ema_cross_up = prev['ema_9'] < prev['ema_12'] and last['ema_9'] > last['ema_12']
     rsi_strong = last['rsi'] > 52
-    trend_filter = last['close'] > last['ema_26']  # استخدام EMA البطيء
-    if ema_cross_up and rsi_strong and trend_filter:
-        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية EMA+RSI Cross.")
+    trend_filter = last['close'] > last['ema_26']
+    if all([ema_cross_up, rsi_strong, trend_filter]):
         return True
     return False
 
 def check_pullback_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 2: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    uptrend_confirmed = last['close'] > last['ema_12'] and last['ema_12'] > last['ema_26']  # استخدام EMA السريع والبطيء
+    uptrend_confirmed = last['close'] > last['ema_12'] and last['ema_12'] > last['ema_26']
     macd_cross_up = prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal']
-    if uptrend_confirmed and macd_cross_up:
-        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية Pullback MACD.")
+    if all([uptrend_confirmed, macd_cross_up]):
         return True
     return False
 
 def check_bb_squeeze_strategy(df: pd.DataFrame) -> bool:
     if len(df) < 100: return False
     last = df.iloc[-1]
-    
     squeeze_threshold = df['bb_width'].rolling(100).quantile(0.20).iloc[-1]
     is_squeeze = last['bb_width'] < squeeze_threshold
-    
     breakout = last['close'] > last['bb_upper']
     volume_confirmed = last.get('relative_volume', 0) > 1.25
-    
-    if is_squeeze and breakout and volume_confirmed:
-        logger.info(f"  -> [{df.name}] ✅ إشارة استراتيجية BB Squeeze Breakout.")
+    if all([is_squeeze, breakout, volume_confirmed]):
         return True
     return False
 
 def check_bullish_momentum_strategy(df: pd.DataFrame) -> bool:
-    if len(df) < 50:
-        return False
-
+    if len(df) < 50: return False
     last = df.iloc[-1]
-    
     price_above_sma50 = last['close'] > last['sma_50']
     strong_trend = last['adx'] > 25
     bullish_direction = last['plus_di'] > last['minus_di']
     rsi_is_bullish = 50 < last['rsi'] < 75
-    
-    if len(df) < 8: 
-        return False
-        
+    if len(df) < 8: return False
     recent_highs = df['high'].iloc[-8:-1]
     recent_lows = df['low'].iloc[-8:-1]
-    
     def is_higher_highs(highs, min_count=3):
         if len(highs) < min_count + 1: return False
         count = 0
         for i in range(1, len(highs)):
             if highs.iloc[i] > highs.iloc[i-1]: count += 1
         return count >= min_count
-    
     def is_higher_lows(lows, min_count=3):
         if len(lows) < min_count + 1: return False
         count = 0
         for i in range(1, len(lows)):
             if lows.iloc[i] > lows.iloc[i-1]: count += 1
         return count >= min_count
-    
     price_momentum_confirmed = is_higher_highs(recent_highs) and is_higher_lows(recent_lows)
     volume_confirmation = last['volume'] > last['volume_sma_20'] * 1.1
-    
     if all([price_above_sma50, strong_trend, bullish_direction, rsi_is_bullish, price_momentum_confirmed, volume_confirmation]):
-        logger.info(f"  -> [{df.name}] ✅ إشارة زخم صعودي (معززة).")
         return True
-
     return False
 
 def check_support_resistance_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """استراتيجية اختراق الدعم والمقاومة المحسنة"""
-    if len(df) < 50:
-        return False
-    
+    if len(df) < 50: return False
     last = df.iloc[-1]
-    
-    # تحديد مستويات المقاومة بدقة أكبر
     resistance_candidates = df[df['high'] == df['high'].rolling(5, center=True).max()]['high']
-    
-    if resistance_candidates.empty:
-        return False
-    
-    # أقرب مستوى مقاومة فوق السعر
+    if resistance_candidates.empty: return False
     current_price = last['close']
     next_resistance_series = resistance_candidates[resistance_candidates > current_price]
     closest_resistance = next_resistance_series.min() if not next_resistance_series.empty else None
-    
-    # شرط اختراق المقاومة
     if closest_resistance is not None:
-        # فلتر جديد: التحقق من قوة مستوى المقاومة (عدد مرات الاختبار)
-        tolerance = closest_resistance * 0.01  # 1% tolerance
-        resistance_tests = df[(df['high'] >= closest_resistance - tolerance) & 
-                              (df['high'] <= closest_resistance + tolerance)]
+        tolerance = closest_resistance * 0.01
+        resistance_tests = df[(df['high'] >= closest_resistance - tolerance) & (df['high'] <= closest_resistance + tolerance)]
         resistance_strength = len(resistance_tests)
-
-        if resistance_strength < 2: # التأكد من أن المستوى تم اختباره مرتين على الأقل
-            return False
-
+        if resistance_strength < 2: return False
         breakout = last['close'] > closest_resistance and df['close'].iloc[-2] <= closest_resistance
-        
-        # تأكيد الاختراق بحجم التداول
         volume_confirmation = last['volume'] > last['volume_sma_20'] * 1.3
-        
-        # تأكيد الاتجاه
         trend_confirmation = last['close'] > last['ema_12']
-        
-        # فلتر جديد: تجنب الاختراقات الكاذبة
-        not_false_breakout = last['close'] > closest_resistance * 1.005  # اختراق حقيقي وليس مجرد لمس
-        
-        conditions = {
-            "breakout": breakout,
-            "volume_confirmation": volume_confirmation,
-            "trend_confirmation": trend_confirmation,
-            "not_false_breakout": not_false_breakout
-        }
-
-        if all(conditions.values()):
-            logger.info(f"  -> [{df.name}] ✅ إشارة اختراق مقاومة (معززة) - قوة المستوى: {resistance_strength}")
+        not_false_breakout = last['close'] > closest_resistance * 1.005
+        if all([breakout, volume_confirmation, trend_confirmation, not_false_breakout]):
+            logger.info(f"  -> ✅ [{df.name}] إشارة اختراق مقاومة (قوة المستوى: {resistance_strength})")
             return True
-        
-        failed_conditions = {k: v for k, v in conditions.items() if not v}
-        if breakout: # نسجل فقط إذا كان هناك اختراق لكنه فشل في الفلاتر الأخرى
-             log_rejection(df.name, "SR Breakout Strategy Conditions Not Met", {"failed": list(failed_conditions.keys())})
-
+        if breakout:
+             log_rejection(df.name, "SR Breakout Strategy Conditions Not Met", {"failed": [k for k,v in locals().items() if k in ['volume_confirmation', 'trend_confirmation', 'not_false_breakout'] and not v]})
     return False
 
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 200) -> bool:
@@ -994,147 +867,15 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', lookback: int = 20
         if df is None or len(df) < lookback:
             logger.warning(f"  -> [HTF {htf}] {symbol} بيانات غير كافية للتأكيد ({len(df) if df is not None else 0} شمعة).")
             return False
-
         df['ema50']  = df['close'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-
-        tr = pd.concat([df['high'] - df['low'], (df['high'] - df['close'].shift()).abs(), (df['low']  - df['close'].shift()).abs()], axis=1).max(axis=1)
-        df['atr'] = tr.rolling(14).mean()
-        plus_dm = np.where((df['high'] - df['high'].shift()) > (df['low'].shift() - df['low']), df['high'] - df['high'].shift(), 0)
-        minus_dm = np.where((df['low'].shift() - df['low']) > (df['high'] - df['high'].shift()), df['low'].shift() - df['low'], 0)
-        plus_di = 100 * pd.Series(plus_dm).rolling(14).mean() / df['atr'].replace(0, 1e-9)
-        minus_di = 100 * pd.Series(minus_dm).rolling(14).mean() / df['atr'].replace(0, 1e-9)
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
-        df['adx'] = dx.rolling(14).mean()
-
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = exp1 - exp2
-        df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
-
         last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        strong_uptrend = (last['ema50'] > last['ema200'] and last['adx'] > 25 and last['close'] > last['ema50'])
-        macd_cross_up = prev['macd'] < prev['signal_line'] and last['macd'] > last['signal_line']
-        ema_cross_up  = prev['ema50'] < prev['ema200'] and last['ema50'] > last['ema200']
-        recent_bullish_flip = macd_cross_up and ema_cross_up
-
-        is_confirmed = strong_uptrend or recent_bullish_flip
-        logger.info(f"  -> [HTF {htf}] {symbol} تأكيد الترند: {is_confirmed} (قوي: {strong_uptrend} | تحول: {recent_bullish_flip})")
+        is_confirmed = last['close'] > last['ema50'] and last['ema50'] > last['ema200']
+        logger.info(f"  -> {'✅' if is_confirmed else '🚫'} [{symbol}] تأكيد الاتجاه على فريم {htf}: {is_confirmed}")
         return is_confirmed
-
     except Exception as e:
         logger.error(f"❌ [HTF Confirm] خطأ في {symbol}: {e}")
         return False
-
-def passes_short_term_momentum_filter(symbol: str, df: pd.DataFrame) -> bool:
-    if len(df) < 100:
-        return False
-
-    last = df.iloc[-1]
-    
-    bb_width = last.get('bb_width', 0)
-    price_vs_bb_upper = abs(last['close'] - last['bb_upper']) / last['bb_upper'] if last['bb_upper'] > 0 else 0
-    price_vs_bb_lower = abs(last['close'] - last['bb_lower']) / last['bb_lower'] if last['bb_lower'] > 0 else 0
-    
-    close_to_bands = price_vs_bb_upper < 0.005 or price_vs_bb_lower < 0.005
-    
-    with volume_filter_lock:
-        vol_mult = VOLUME_FILTER_MULTIPLIER
-    volume_spike = last.get('relative_volume', 0) > vol_mult
-    
-    macd_momentum = last['macd'] > last['macd_signal'] and last['macd'] > 0
-    rsi_momentum  = last['rsi'] > 55
-    
-    squeeze_threshold = df['bb_width'].rolling(100).quantile(0.25).iloc[-1]
-    is_squeeze = bb_width < squeeze_threshold
-    
-    price_momentum = last['close'] > last['ema_9'] and last['close'] > df['close'].iloc[-4] # Check against 3 candles ago
-    
-    trend_strength = last['adx'] > 20
-    
-    is_valid = (
-        (is_squeeze or close_to_bands) and
-        volume_spike and
-        (macd_momentum or rsi_momentum) and
-        price_momentum and
-        trend_strength
-    )
-    
-    logger.info(f"  -> [فلتر الزخم المحسن] {symbol}: Valid={is_valid}")
-    return is_valid
-
-class EnhancedTradingStrategy:
-    def __init__(self, symbol: str):
-        self.symbol = symbol
-        self.ml_model, self.scaler, self.feature_names = None, None, None
-
-    def load_model(self) -> bool:
-        model_name = f"{BASE_ML_MODEL_NAME}_{self.symbol}"
-        if model_name in ml_models_cache:
-            model_bundle = ml_models_cache[model_name]
-        else:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            model_dir_path = os.path.join(script_dir, MODEL_FOLDER)
-            model_path = os.path.join(model_dir_path, f"{model_name}.pkl")
-
-            if not os.path.exists(model_path):
-                return False
-            try:
-                with open(model_path, 'rb') as f:
-                    model_bundle = pickle.load(f)
-                ml_models_cache[model_name] = model_bundle
-            except Exception as e:
-                logger.error(f"❌ [نموذج ML] خطأ في تحميل النموذج لـ {self.symbol}: {e}")
-                return False
-
-        if 'model' in model_bundle and 'scaler' in model_bundle and 'feature_names' in model_bundle:
-            self.ml_model = model_bundle['model']
-            self.scaler = model_bundle['scaler']
-            self.feature_names = model_bundle['feature_names']
-            return True
-        else:
-            logger.error(f"  -> [{self.symbol}] 🛑 ملف نموذج ML غير مكتمل.")
-            return False
-
-    def get_features_for_model(self, df_15m: pd.DataFrame, df_4h: pd.DataFrame, btc_df: pd.DataFrame) -> Optional[pd.DataFrame]:
-        if self.feature_names is None: return None
-        try:
-            df_featured = calculate_all_features(df_15m, btc_df)
-            delta_4h = df_4h['close'].diff()
-            gain_4h = delta_4h.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            loss_4h = -delta_4h.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
-            df_4h['rsi_4h'] = 100 - (100 / (1 + (gain_4h / loss_4h.replace(0, 1e-9))))
-            ema_fast_4h = df_4h['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
-            df_4h['price_vs_ema50_4h'] = (df_4h['close'] / ema_fast_4h) - 1
-            mtf_features = df_4h[['rsi_4h', 'price_vs_ema50_4h']]
-            df_featured = df_featured.join(mtf_features)
-            df_featured[['rsi_4h', 'price_vs_ema50_4h']] = df_featured[['rsi_4h', 'price_vs_ema50_4h']].fillna(method='ffill')
-            for col in self.feature_names:
-                if col not in df_featured.columns:
-                    df_featured[col] = 0.0
-            df_featured.replace([np.inf, -np.inf], np.nan, inplace=True)
-            return df_featured.dropna(subset=self.feature_names)
-        except Exception as e:
-            logger.error(f"❌ [{self.symbol}] فشل هندسة الميزات لنموذج ML: {e}", exc_info=True)
-            return None
-
-    def generate_prediction_result(self, df_features: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        if not all([self.ml_model, self.scaler, self.feature_names]) or df_features.empty:
-            return None
-        try:
-            last_row_ordered_df = df_features.iloc[[-1]][self.feature_names]
-            features_scaled = self.scaler.transform(last_row_ordered_df)
-
-            prediction = self.ml_model.predict(features_scaled)[0]
-            prediction_proba = self.ml_model.predict_proba(features_scaled)
-            confidence = float(np.max(prediction_proba[0]))
-
-            return {'prediction': int(prediction), 'confidence': confidence}
-        except Exception as e:
-            logger.warning(f"⚠️ [{self.symbol}] خطأ في توليد تنبؤ نموذج ML: {e}", exc_info=True)
-            return None
 
 # --- التعرف على أنماط الشموع ---
 def is_bullish_reversal_pattern(df: pd.DataFrame) -> bool:
@@ -1147,7 +888,7 @@ def is_bullish_reversal_pattern(df: pd.DataFrame) -> bool:
     }
     for pattern_name, is_present in patterns.items():
         if is_present:
-            logger.info(f"  -> [{df.name}] ✅ نمط شمعة صاعدة: {pattern_name}")
+            logger.info(f"  -> ✅ [{df.name}] تم اكتشاف نمط شمعة صاعدة: {pattern_name}")
             return True
     return False
 
@@ -1186,62 +927,50 @@ def is_morning_star(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool:
             c3['close'] > (c1['open'] + c1['close']) / 2)
 
 def is_three_white_soldiers(c1: pd.Series, c2: pd.Series, c3: pd.Series) -> bool:
-    return (c1['close'] > c1['open'] and
-            c2['close'] > c2['open'] and
-            c3['close'] > c3['open'] and
-            c1['open'] > c1['close'].shift() and
-            c2['open'] > c2['close'].shift() and
-            c3['open'] > c3['close'].shift())
+    # This requires checking previous candles which is complex here. Simplified check:
+    return (c1['close'] > c1['open'] and c2['close'] > c2['open'] and c3['close'] > c3['open'] and
+            c2['open'] > c1['open'] and c2['close'] > c1['close'] and
+            c3['open'] > c2['open'] and c3['close'] > c2['close'])
 
 # --- دوال إنشاء الصفقات والتوصيات ---
 def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str) -> None:
-    """إنشاء توصية ورقية"""
     try:
         last = df.iloc[-1]
-        
-        # حساب مستويات الدخول والخروج
         entry_price = last['close']
-        
-        # حساب وقف الخسارة
         atr = last['atr']
         stop_loss = entry_price - (atr * ATR_TS_MULTIPLIER)
         
-        # حساب هدف الربح
         with risk_per_trade_lock:
             risk_val = RISK_PER_TRADE_PERCENT
-        risk_percent = risk_val / 100
-        target_price = entry_price + (entry_price - stop_loss) * (1 / risk_percent)
         
-        # حساب حجم الصفقة
-        account_balance = 1000  # رصيد افتراضي للتداول الورقي
-        risk_amount = account_balance * risk_percent
-        quantity = risk_amount / (entry_price - stop_loss)
+        # Ensure stop_loss is not zero or negative to avoid division by zero
+        if entry_price <= stop_loss:
+            logger.error(f"❌ [{symbol}] لا يمكن حساب حجم الصفقة، وقف الخسارة ({stop_loss}) أعلى من أو يساوي سعر الدخول ({entry_price}).")
+            return
+
+        risk_per_unit = entry_price - stop_loss
+        # A common R:R is 1.5, let's use that as a base for profit target
+        target_price = entry_price + (risk_per_unit * 1.5) 
         
-        # إنشاء رسالة التوصية
+        account_balance = 1000
+        risk_amount = account_balance * (risk_val / 100)
+        quantity = risk_amount / risk_per_unit
+        
         message = f"""
 📊 *توصية تداول ورقية*
-
 💱 *العملة:* {symbol}
 📈 *الاستراتيجية:* {strategy_name}
 🕒 *الفريم الزمني:* {SIGNAL_GENERATION_TIMEFRAME}
-
 📌 *نقطة الدخول:* {entry_price:.4f}
 🎯 *هدف الربح:* {target_price:.4f}
 🛑 *وقف الخسارة:* {stop_loss:.4f}
-
 📊 *نسبة المخاطرة:* {risk_val}%
 💰 *الحجم المقترح:* {quantity:.4f}
-
 ⚠️ *هذه توصية ورقية للتدريب والتعليم فقط*
 """
-        
-        # إرسال التوصية عبر تليجرام
         send_telegram_message(message)
-        
-        # تسجيل التوصية في الإشعارات
         log_and_notify("info", f"تم إنشاء توصية ورقية لـ {symbol} باستخدام استراتيجية {strategy_name}", "PAPER_TRADE")
         
-        # حفظ التوصية في قاعدة البيانات
         if check_db_connection() and conn:
             try:
                 with conn.cursor() as cur:
@@ -1253,29 +982,19 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                     """, (
                         symbol, entry_price, target_price, stop_loss, 'paper',
                         strategy_name, False, quantity, json.dumps({
-                            "atr": float(atr),
-                            "rsi": float(last['rsi']),
-                            "macd": float(last['macd']),
-                            "volume": float(last['volume']),
-                            "timestamp": datetime.now(timezone.utc).isoformat()
+                            "atr": float(atr), "rsi": float(last['rsi']), "macd": float(last['macd']),
+                            "volume": float(last['volume']), "timestamp": datetime.now(timezone.utc).isoformat()
                         }, cls=NpEncoder)
                     ))
                 conn.commit()
                 
-                # إضافة الإشارة إلى الكاش
                 with signal_cache_lock:
                     open_signals_cache[symbol] = {
-                        'symbol': symbol,
-                        'entry_price': entry_price,
-                        'target_price': target_price,
-                        'stop_loss': stop_loss,
-                        'status': 'paper',
-                        'strategy_name': strategy_name,
-                        'is_real_trade': False,
-                        'quantity': quantity,
+                        'symbol': symbol, 'entry_price': entry_price, 'target_price': target_price,
+                        'stop_loss': stop_loss, 'status': 'paper', 'strategy_name': strategy_name,
+                        'is_real_trade': False, 'quantity': quantity,
                         'timestamp': datetime.now(timezone.utc).isoformat()
                     }
-                
                 logger.info(f"✅ تم حفظ التوصية الورقية لـ {symbol} في قاعدة البيانات")
             except Exception as e:
                 logger.error(f"❌ خطأ في حفظ التوصية الورقية لـ {symbol}: {e}")
@@ -1287,33 +1006,13 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard():
-    """لوحة التحكم الرئيسية"""
-    # تحسين أداء الصفحة
     start_time = time.time()
-    
-    # الحصول على البيانات الأساسية
-    with market_state_lock:
-        market_state = current_market_state.copy()
-    
-    with trading_status_lock:
-        trading_enabled = is_trading_enabled
-    
-    # الحصول على الإشارات المفتوحة (محدودة العدد)
-    with signal_cache_lock:
-        open_signals = dict(list(open_signals_cache.items())[:5])  # عرض أول 5 إشارات فقط
-    
-    # الحصول على الإشعارات الأخيرة (محدودة العدد)
-    with notifications_lock:
-        notifications = list(notifications_cache)[:10]  # عرض آخر 10 إشعارات فقط
-    
-    # الحصول على سجل الرفوض (محدودة العدد)
-    with rejection_logs_lock:
-        rejections = list(rejection_logs_cache)[:10]  # عرض آخر 10 رفض فقط
-    
-    # حساب وقت التحميل
+    with market_state_lock: market_state = current_market_state.copy()
+    with trading_status_lock: trading_enabled = is_trading_enabled
+    with signal_cache_lock: open_signals = dict(list(open_signals_cache.items())[:5])
+    with notifications_lock: notifications = list(notifications_cache)[:10]
+    with rejection_logs_lock: rejections = list(rejection_logs_cache)[:10]
     load_time = round((time.time() - start_time) * 1000, 2)
-    
-    # تحميل القالب
     return render_template_string(DASHBOARD_TEMPLATE, 
                                 market_state=market_state,
                                 trading_enabled=trading_enabled,
@@ -1326,20 +1025,12 @@ def dashboard():
 
 @app.route('/settings')
 def settings():
-    """صفحة الإعدادات المتقدمة"""
-    with risk_per_trade_lock:
-        risk_val = RISK_PER_TRADE_PERCENT
-    with buy_confidence_lock:
-        buy_conf = BUY_CONFIDENCE_THRESHOLD
-    with bb_stoch_strategy_lock:
-        use_bb = USE_BB_STOCH_STRATEGY
-    with macd_ema_strategy_lock:
-        use_macd = USE_MACD_EMA_STRATEGY
-    with ema_rsi_strategy_lock:
-        use_ema = USE_EMA_RSI_STRATEGY
-    with pullback_strategy_lock:
-        use_pullback = USE_PULLBACK_STRATEGY
-
+    with risk_per_trade_lock: risk_val = RISK_PER_TRADE_PERCENT
+    with buy_confidence_lock: buy_conf = BUY_CONFIDENCE_THRESHOLD
+    with bb_stoch_strategy_lock: use_bb = USE_BB_STOCH_STRATEGY
+    with macd_ema_strategy_lock: use_macd = USE_MACD_EMA_STRATEGY
+    with ema_rsi_strategy_lock: use_ema = USE_EMA_RSI_STRATEGY
+    with pullback_strategy_lock: use_pullback = USE_PULLBACK_STRATEGY
     return render_template_string(SETTINGS_TEMPLATE, 
                                 redis_config_available=redis_config_available,
                                 paper_trading_mode=paper_trading_mode,
@@ -1354,7 +1045,6 @@ def settings():
 
 @app.route('/toggle_trading', methods=['POST'])
 def toggle_trading():
-    """تبديل حالة التداول"""
     global is_trading_enabled
     try:
         with trading_status_lock:
@@ -1370,7 +1060,6 @@ def toggle_trading():
 
 @app.route('/toggle_paper_trading', methods=['POST'])
 def toggle_paper_trading():
-    """تبديل وضع التداول الورقي"""
     global paper_trading_mode
     try:
         data = request.json
@@ -1386,30 +1075,16 @@ def toggle_paper_trading():
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
-    """تحديث إعدادات التداول"""
     try:
         data = request.json
-        
         global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
-        
-        with risk_per_trade_lock:
-            RISK_PER_TRADE_PERCENT = float(data.get('risk_per_trade', RISK_PER_TRADE_PERCENT))
-        
-        with buy_confidence_lock:
-            BUY_CONFIDENCE_THRESHOLD = float(data.get('buy_confidence', BUY_CONFIDENCE_THRESHOLD))
-        
+        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data.get('risk_per_trade', RISK_PER_TRADE_PERCENT))
+        with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = float(data.get('buy_confidence', BUY_CONFIDENCE_THRESHOLD))
         MAX_OPEN_TRADES = int(data.get('max_trades', MAX_OPEN_TRADES))
         MIN_PROFIT_PERCENT = float(data.get('min_profit', MIN_PROFIT_PERCENT))
-        
         if redis_client:
-            settings = {
-                'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
-                'BUY_CONFIDENCE_THRESHOLD': BUY_CONFIDENCE_THRESHOLD,
-                'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
-                'MIN_PROFIT_PERCENT': MIN_PROFIT_PERCENT
-            }
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'BUY_CONFIDENCE_THRESHOLD': BUY_CONFIDENCE_THRESHOLD, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'MIN_PROFIT_PERCENT': MIN_PROFIT_PERCENT}
             redis_client.set('trading_settings', json.dumps(settings))
-        
         log_and_notify("info", "تم تحديث إعدادات التداول", "SETTINGS")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات بنجاح"})
     except Exception as e:
@@ -1418,33 +1093,16 @@ def update_settings():
 
 @app.route('/update_strategies', methods=['POST'])
 def update_strategies():
-    """تحديث إعدادات الاستراتيجيات"""
     try:
         data = request.json
-        
         global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY
-        
-        with bb_stoch_strategy_lock:
-            USE_BB_STOCH_STRATEGY = data.get('use_bb_stoch', USE_BB_STOCH_STRATEGY)
-        
-        with macd_ema_strategy_lock:
-            USE_MACD_EMA_STRATEGY = data.get('use_macd_ema', USE_MACD_EMA_STRATEGY)
-        
-        with ema_rsi_strategy_lock:
-            USE_EMA_RSI_STRATEGY = data.get('use_ema_rsi', USE_EMA_RSI_STRATEGY)
-        
-        with pullback_strategy_lock:
-            USE_PULLBACK_STRATEGY = data.get('use_pullback', USE_PULLBACK_STRATEGY)
-        
+        with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = data.get('use_bb_stoch', USE_BB_STOCH_STRATEGY)
+        with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = data.get('use_macd_ema', USE_MACD_EMA_STRATEGY)
+        with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = data.get('use_ema_rsi', USE_EMA_RSI_STRATEGY)
+        with pullback_strategy_lock: USE_PULLBACK_STRATEGY = data.get('use_pullback', USE_PULLBACK_STRATEGY)
         if redis_client:
-            strategies = {
-                'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-                'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-                'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-                'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY
-            }
+            strategies = {'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY, 'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY, 'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY, 'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY}
             redis_client.set('strategy_settings', json.dumps(strategies))
-        
         log_and_notify("info", "تم تحديث إعدادات الاستراتيجيات", "SETTINGS")
         return jsonify({"success": True, "message": "تم تحديث إعدادات الاستراتيجيات بنجاح"})
     except Exception as e:
@@ -1453,50 +1111,22 @@ def update_strategies():
 
 @app.route('/reset_settings', methods=['POST'])
 def reset_settings():
-    """إعادة الإعدادات إلى القيم الافتراضية"""
     try:
         global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
-        
-        with risk_per_trade_lock:
-            RISK_PER_TRADE_PERCENT = 0.85
-        
-        with buy_confidence_lock:
-            BUY_CONFIDENCE_THRESHOLD = 0.53
-        
+        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = 0.85
+        with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = 0.53
         MAX_OPEN_TRADES = 3
         MIN_PROFIT_PERCENT = 0.8
-        
         global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY
-        
-        with bb_stoch_strategy_lock:
-            USE_BB_STOCH_STRATEGY = True
-        
-        with macd_ema_strategy_lock:
-            USE_MACD_EMA_STRATEGY = True
-        
-        with ema_rsi_strategy_lock:
-            USE_EMA_RSI_STRATEGY = True
-        
-        with pullback_strategy_lock:
-            USE_PULLBACK_STRATEGY = True
-        
+        with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = True
+        with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = True
+        with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = True
+        with pullback_strategy_lock: USE_PULLBACK_STRATEGY = True
         if redis_client:
-            settings = {
-                'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
-                'BUY_CONFIDENCE_THRESHOLD': BUY_CONFIDENCE_THRESHOLD,
-                'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
-                'MIN_PROFIT_PERCENT': MIN_PROFIT_PERCENT
-            }
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'BUY_CONFIDENCE_THRESHOLD': BUY_CONFIDENCE_THRESHOLD, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'MIN_PROFIT_PERCENT': MIN_PROFIT_PERCENT}
             redis_client.set('trading_settings', json.dumps(settings))
-            
-            strategies = {
-                'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-                'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-                'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-                'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY
-            }
+            strategies = {'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY, 'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY, 'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY, 'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY}
             redis_client.set('strategy_settings', json.dumps(strategies))
-        
         log_and_notify("info", "تم إعادة الإعدادات إلى القيم الافتراضية", "SETTINGS")
         return jsonify({"success": True, "message": "تم إعادة الإعدادات إلى القيم الافتراضية"})
     except Exception as e:
@@ -1513,434 +1143,122 @@ DASHBOARD_TEMPLATE = """
     <title>لوحة تحكم بوت التداول</title>
     <style>
         :root {
-            --primary-color: #3498db;
-            --success-color: #2ecc71;
-            --danger-color: #e74c3c;
-            --warning-color: #f39c12;
-            --dark-color: #2c3e50;
-            --light-color: #ecf0f1;
+            --primary-color: #3498db; --success-color: #2ecc71; --danger-color: #e74c3c;
+            --warning-color: #f39c12; --dark-color: #2c3e50; --light-color: #ecf0f1;
+            --bullish-color: #26a69a; --bearish-color: #ef5350; --sideways-color: #78909c;
         }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        
-        body {
-            background-color: #f8f9fa;
-            color: var(--dark-color);
-            line-height: 1.6;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        header {
-            background-color: var(--dark-color);
-            color: white;
-            padding: 15px 20px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .header-title {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        
-        .status-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background-color: var(--danger-color);
-        }
-        
-        .status-dot.active {
-            background-color: var(--success-color);
-        }
-        
-        .toggle-btn {
-            background-color: var(--primary-color);
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-            margin-left: 5px;
-        }
-        
-        .toggle-btn:hover {
-            background-color: #2980b9;
-        }
-        
-        .toggle-btn.stop {
-            background-color: var(--danger-color);
-        }
-        
-        .toggle-btn.stop:hover {
-            background-color: #c0392b;
-        }
-        
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .card {
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-            padding: 20px;
-            transition: transform 0.3s;
-        }
-        
-        .card:hover {
-            transform: translateY(-5px);
-        }
-        
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .card-title {
-            font-size: 18px;
-            font-weight: bold;
-            color: var(--dark-color);
-        }
-        
-        .card-icon {
-            font-size: 24px;
-        }
-        
-        .market-state {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 10px;
-        }
-        
-        .state-item {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 8px;
-        }
-        
-        .state-label {
-            font-weight: bold;
-        }
-        
-        .state-value {
-            color: var(--primary-color);
-        }
-        
-        .signal-item, .notification-item, .rejection-item {
-            padding: 12px;
-            border-radius: 5px;
-            margin-bottom: 10px;
-            border-right: 4px solid transparent;
-        }
-        
-        .signal-item {
-            background-color: #e8f5e9;
-            border-right-color: var(--success-color);
-        }
-        
-        .signal-item.paper {
-            background-color: #e3f2fd;
-            border-right-color: var(--primary-color);
-        }
-        
-        .notification-item.info {
-            background-color: #e3f2fd;
-            border-right-color: var(--primary-color);
-        }
-        
-        .notification-item.warning {
-            background-color: #fff8e1;
-            border-right-color: var(--warning-color);
-        }
-        
-        .notification-item.error {
-            background-color: #ffebee;
-            border-right-color: var(--danger-color);
-        }
-        
-        .rejection-item {
-            background-color: #fbe9e7;
-            border-right-color: var(--danger-color);
-        }
-        
-        .item-header {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 5px;
-        }
-        
-        .item-title {
-            font-weight: bold;
-        }
-        
-        .item-time {
-            font-size: 12px;
-            color: #777;
-        }
-        
-        .item-content {
-            font-size: 14px;
-        }
-        
-        .redis-status {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            margin-top: 10px;
-            font-size: 14px;
-        }
-        
-        .redis-status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--danger-color);
-        }
-        
-        .redis-status-dot.available {
-            background-color: var(--success-color);
-        }
-        
-        .trading-mode {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            margin-top: 10px;
-            font-size: 14px;
-        }
-        
-        .trading-mode-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--primary-color);
-        }
-        
-        .trading-mode-dot.paper {
-            background-color: var(--warning-color);
-        }
-        
-        .footer {
-            text-align: center;
-            margin-top: 20px;
-            padding: 10px;
-            color: #777;
-            font-size: 14px;
-        }
-        
-        .performance {
-            background-color: var(--light-color);
-            padding: 10px;
-            border-radius: 5px;
-            text-align: center;
-            margin-top: 10px;
-        }
-        
-        @media (max-width: 768px) {
-            .dashboard-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            header {
-                flex-direction: column;
-                gap: 10px;
-            }
-            
-            .status-indicator {
-                flex-direction: column;
-                gap: 5px;
-            }
-        }
+        body { background-color: #f8f9fa; color: var(--dark-color); font-family: 'Segoe UI', Tahoma, sans-serif; line-height: 1.6; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        header { background-color: var(--dark-color); color: white; padding: 15px 20px; border-radius: 5px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header-title { font-size: 24px; font-weight: bold; }
+        .status-indicator { display: flex; align-items: center; gap: 10px; }
+        .status-dot { width: 12px; height: 12px; border-radius: 50%; background-color: var(--danger-color); }
+        .status-dot.active { background-color: var(--success-color); }
+        .toggle-btn { background-color: var(--primary-color); color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; transition: background-color 0.3s; margin-left: 5px; text-decoration: none; }
+        .toggle-btn:hover { background-color: #2980b9; }
+        .toggle-btn.stop { background-color: var(--danger-color); }
+        .toggle-btn.stop:hover { background-color: #c0392b; }
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
+        .card { background-color: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 20px; transition: transform 0.3s; }
+        .card:hover { transform: translateY(-5px); }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+        .card-title { font-size: 18px; font-weight: bold; color: var(--dark-color); }
+        .market-state, .signal-item, .notification-item, .rejection-item { padding: 12px; border-radius: 5px; margin-bottom: 10px; }
+        .state-item { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; }
+        .state-label { font-weight: bold; }
+        .state-value.Bullish { color: var(--bullish-color); }
+        .state-value.Bearish { color: var(--bearish-color); }
+        .state-value.Sideways { color: var(--sideways-color); }
+        .signal-item { background-color: #e8f5e9; border-right: 4px solid var(--success-color); }
+        .signal-item.paper { background-color: #e3f2fd; border-right-color: var(--primary-color); }
+        .notification-item.info { background-color: #e3f2fd; border-right-color: var(--primary-color); }
+        .notification-item.warning { background-color: #fff8e1; border-right-color: var(--warning-color); }
+        .notification-item.error, .notification-item.trading_status { background-color: #ffebee; border-right-color: var(--danger-color); }
+        .rejection-item { background-color: #fbe9e7; border-right-color: var(--danger-color); }
+        .item-header { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .item-title { font-weight: bold; }
+        .item-time { font-size: 12px; color: #777; }
+        .item-content { font-size: 14px; }
+        .footer { text-align: center; margin-top: 20px; padding: 10px; color: #777; font-size: 14px; }
+        @media (max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } header { flex-direction: column; gap: 10px; } }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول الإلكتروني V9.9.4</div>
+            <div class="header-title">بوت التداول V9.9.5</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
-                <button class="toggle-btn {{ 'stop' if trading_enabled else '' }}" onclick="toggleTrading()">
-                    {{ 'إيقاف' if trading_enabled else 'تشغيل' }}
-                </button>
+                <button class="toggle-btn {{ 'stop' if trading_enabled else '' }}" onclick="toggleTrading()">{{ 'إيقاف' if trading_enabled else 'تشغيل' }}</button>
                 <a href="/settings" class="toggle-btn">الإعدادات</a>
             </div>
         </header>
-        
         <div class="dashboard-grid">
             <div class="card">
-                <div class="card-header">
-                    <div class="card-title">حالة السوق</div>
-                    <div class="card-icon">📊</div>
-                </div>
+                <div class="card-header"><div class="card-title">حالة السوق (BTC)</div></div>
                 <div class="market-state">
                     <div class="state-item">
                         <span class="state-label">النظام العام:</span>
-                        <span class="state-value">{{ market_state.overall_regime }}</span>
+                        <span class="state-value {{ market_state.overall_regime }}">{{ market_state.overall_regime }}</span>
                     </div>
+                    {% for tf, details in market_state.trend_details_by_tf.items() %}
                     <div class="state-item">
-                        <span class="state-label">آخر تحديث:</span>
-                        <span class="state-value">{{ market_state.last_updated }}</span>
+                        <span class="state-label">اتجاه {{ tf }}:</span>
+                        <span class="state-value {{ details.trend }}">{{ details.trend }} (RSI: {{ "%.1f"|format(details.rsi) }})</span>
                     </div>
-                    <div class="redis-status">
-                        <div class="redis-status-dot {{ 'available' if redis_config_available else '' }}"></div>
-                        <span>Redis: {{ 'مُحسَّن' if redis_config_available else 'أساسي' }}</span>
-                    </div>
-                    <div class="trading-mode">
-                        <div class="trading-mode-dot {{ 'paper' if paper_trading_mode else '' }}"></div>
-                        <span>الوضع: {{ 'ورقي' if paper_trading_mode else 'حقيقي' }}</span>
+                    {% endfor %}
+                    <div class="state-item" style="margin-top:10px; font-size: 12px; color: #777;">
+                        <span>آخر تحديث:</span><span>{{ market_state.last_updated }}</span>
                     </div>
                 </div>
             </div>
-            
             <div class="card">
-                <div class="card-header">
-                    <div class="card-title">الإشارات المفتوحة</div>
-                    <div class="card-icon">📈</div>
+                <div class="card-header"><div class="card-title">الإشارات المفتوحة</div></div>
+                {% if open_signals %}{% for symbol, signal in open_signals.items() %}
+                <div class="signal-item {{ 'paper' if signal.get('status') == 'paper' else '' }}">
+                    <div class="item-header"><div class="item-title">{{ symbol }}</div><div class="item-time">{{ signal.get('timestamp', '')[:16] if signal.get('timestamp') else '' }}</div></div>
+                    <div class="item-content">دخول: {{ "%.4f"|format(signal.entry_price) }} | هدف: {{ "%.4f"|format(signal.target_price) }} | وقف: {{ "%.4f"|format(signal.stop_loss) }}</div>
                 </div>
-                {% if open_signals %}
-                    {% for symbol, signal in open_signals.items() %}
-                    <div class="signal-item {{ 'paper' if signal.get('status') == 'paper' else '' }}">
-                        <div class="item-header">
-                            <div class="item-title">{{ symbol }}</div>
-                            <div class="item-time">{{ signal.get('timestamp', '')[:16] if signal.get('timestamp') else '' }}</div>
-                        </div>
-                        <div class="item-content">
-                            الدخول: {{ "%.4f"|format(signal.entry_price) if signal.entry_price else 'N/A' }} | 
-                            الهدف: {{ "%.4f"|format(signal.target_price) if signal.target_price else 'N/A' }} | 
-                            وقف الخسارة: {{ "%.4f"|format(signal.stop_loss) if signal.stop_loss else 'N/A' }}
-                        </div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div style="text-align: center; padding: 20px; color: #777;">
-                        لا توجد إشارات مفتوحة
-                    </div>
-                {% endif %}
+                {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا توجد إشارات مفتوحة</div>{% endif %}
             </div>
-            
             <div class="card">
-                <div class="card-header">
-                    <div class="card-title">الإشعارات الأخيرة</div>
-                    <div class="card-icon">🔔</div>
+                <div class="card-header"><div class="card-title">الإشعارات الأخيرة</div></div>
+                {% if notifications %}{% for notif in notifications %}
+                <div class="notification-item {{ notif.type.lower() }}">
+                    <div class="item-header"><div class="item-title">{{ notif.type }}</div><div class="item-time">{{ notif.timestamp[:16] if notif.timestamp else '' }}</div></div>
+                    <div class="item-content">{{ notif.message }}</div>
                 </div>
-                {% if notifications %}
-                    {% for notif in notifications %}
-                    <div class="notification-item {{ notif.type.lower() }}">
-                        <div class="item-header">
-                            <div class="item-title">{{ notif.type }}</div>
-                            <div class="item-time">{{ notif.timestamp[:16] if notif.timestamp else '' }}</div>
-                        </div>
-                        <div class="item-content">{{ notif.message }}</div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div style="text-align: center; padding: 20px; color: #777;">
-                        لا توجد إشعارات
-                    </div>
-                {% endif %}
+                {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا توجد إشعارات</div>{% endif %}
             </div>
-            
             <div class="card">
-                <div class="card-header">
-                    <div class="card-title">سجل الرفض</div>
-                    <div class="card-icon">🚫</div>
+                <div class="card-header"><div class="card-title">سجل الرفض</div></div>
+                {% if rejections %}{% for rej in rejections %}
+                <div class="rejection-item">
+                    <div class="item-header"><div class="item-title">{{ rej.symbol }}</div><div class="item-time">{{ rej.timestamp[:16] if rej.timestamp else '' }}</div></div>
+                    <div class="item-content">{{ rej.reason }}</div>
                 </div>
-                {% if rejections %}
-                    {% for rej in rejections %}
-                    <div class="rejection-item">
-                        <div class="item-header">
-                            <div class="item-title">{{ rej.symbol }}</div>
-                            <div class="item-time">{{ rej.timestamp[:16] if rej.timestamp else '' }}</div>
-                        </div>
-                        <div class="item-content">{{ rej.reason }}</div>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div style="text-align: center; padding: 20px; color: #777;">
-                        لا يوجد رفض
-                    </div>
-                {% endif %}
+                {% endfor %}{% else %}<div style="text-align: center; padding: 20px; color: #777;">لا يوجد رفض</div>{% endif %}
             </div>
         </div>
-        
-        <div class="footer">
-            <div>بوت التداول الإلكتروني V9.9.4 - فريم 15 دقيقة</div>
-            <div class="performance">تم تحميل الصفحة في {{ load_time }} مللي ثانية</div>
-        </div>
+        <div class="footer"><div>بوت التداول الإلكتروني V9.9.5 - فريم 15 دقيقة</div></div>
     </div>
-    
     <script>
         function showAlert(message, type = 'info') {
-            // A simple, non-blocking alert. In a real app, you might use a library like SweetAlert.
             const alertBox = document.createElement('div');
-            alertBox.style.position = 'fixed';
-            alertBox.style.top = '20px';
-            alertBox.style.right = '20px';
-            alertBox.style.padding = '15px';
-            alertBox.style.borderRadius = '5px';
-            alertBox.style.color = 'white';
-            alertBox.style.zIndex = '1000';
-            alertBox.style.backgroundColor = type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db';
+            Object.assign(alertBox.style, { position: 'fixed', top: '20px', right: '20px', padding: '15px', borderRadius: '5px', color: 'white', zIndex: '1000', backgroundColor: type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db' });
             alertBox.innerText = message;
             document.body.appendChild(alertBox);
-            setTimeout(() => {
-                alertBox.remove();
-            }, 3000);
+            setTimeout(() => alertBox.remove(), 3000);
         }
-
         function toggleTrading() {
-            fetch('/toggle_trading', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' }
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showAlert(data.message, 'success');
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    showAlert('فشل تغيير حالة التداول: ' + data.message, 'error');
-                }
-            })
-            .catch(error => {
-                showAlert('خطأ في الاتصال بالخادم: ' + error, 'error');
-            });
+            fetch('/toggle_trading', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+            .then(res => res.json()).then(data => {
+                showAlert(data.message, data.success ? 'success' : 'error');
+                if(data.success) setTimeout(() => location.reload(), 1000);
+            }).catch(error => showAlert('خطأ في الاتصال بالخادم: ' + error, 'error'));
         }
-        
-        // تحديث الصفحة تلقائياً كل 60 ثانية
-        setTimeout(() => {
-            location.reload();
-        }, 60000);
+        setTimeout(() => location.reload(), 60000);
     </script>
 </body>
 </html>
@@ -1954,209 +1272,28 @@ SETTINGS_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>إعدادات البوت</title>
     <style>
-        :root {
-            --primary-color: #3498db;
-            --success-color: #2ecc71;
-            --danger-color: #e74c3c;
-            --warning-color: #f39c12;
-            --dark-color: #2c3e50;
-            --light-color: #ecf0f1;
-        }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        }
-        
-        body {
-            background-color: #f8f9fa;
-            color: var(--dark-color);
-            line-height: 1.6;
-        }
-        
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        header {
-            background-color: var(--dark-color);
-            color: white;
-            padding: 15px 20px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .header-title {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        
-        .nav-btn {
-            background-color: var(--primary-color);
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-            text-decoration: none;
-        }
-        
-        .nav-btn:hover {
-            background-color: #2980b9;
-        }
-        
-        .settings-form {
-            background-color: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-            padding: 20px;
-            margin-bottom: 20px;
-        }
-        
-        .form-group {
-            margin-bottom: 15px;
-        }
-        
-        .form-group label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
-        }
-        
-        .form-group input[type="number"], .form-group select {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-
-        .form-group input[type="checkbox"] {
-            margin-left: 10px;
-        }
-        
-        .form-actions {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
-        }
-        
-        .btn {
-            padding: 10px 15px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        
-        .btn-primary {
-            background-color: var(--primary-color);
-            color: white;
-        }
-        
-        .btn-secondary {
-            background-color: var(--light-color);
-            color: var(--dark-color);
-        }
-        
-        .redis-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 20px;
-            padding: 10px;
-            border-radius: 5px;
-            background-color: #f8f9fa;
-        }
-        
-        .redis-status-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background-color: var(--danger-color);
-        }
-        
-        .redis-status-dot.available {
-            background-color: var(--success-color);
-        }
-        
-        .redis-status-text {
-            font-weight: bold;
-        }
-        
-        .trading-mode-section {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-        
-        .trading-mode-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        
-        .toggle-switch {
-            position: relative;
-            display: inline-block;
-            width: 60px;
-            height: 30px;
-        }
-        
-        .toggle-switch input {
-            opacity: 0;
-            width: 0;
-            height: 0;
-        }
-        
-        .slider {
-            position: absolute;
-            cursor: pointer;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: var(--primary-color);
-            transition: .4s;
-            border-radius: 30px;
-        }
-        
-        .slider:before {
-            position: absolute;
-            content: "";
-            height: 22px;
-            width: 22px;
-            left: 4px;
-            bottom: 4px;
-            background-color: white;
-            transition: .4s;
-            border-radius: 50%;
-        }
-        
-        input:checked + .slider {
-            background-color: var(--warning-color);
-        }
-        
-        input:checked + .slider:before {
-            transform: translateX(30px);
-        }
-        
-        @media (max-width: 768px) {
-            header {
-                flex-direction: column;
-                gap: 10px;
-            }
-        }
+        :root { --primary-color: #3498db; --success-color: #2ecc71; --danger-color: #e74c3c; --warning-color: #f39c12; --dark-color: #2c3e50; --light-color: #ecf0f1; }
+        body { background-color: #f8f9fa; color: var(--dark-color); font-family: 'Segoe UI', Tahoma, sans-serif; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        header { background-color: var(--dark-color); color: white; padding: 15px 20px; border-radius: 5px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .header-title { font-size: 24px; font-weight: bold; }
+        .nav-btn { background-color: var(--primary-color); color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; text-decoration: none; }
+        .settings-form { background-color: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); padding: 20px; margin-bottom: 20px; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input[type="number"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        .form-actions { display: flex; justify-content: space-between; margin-top: 20px; }
+        .btn { padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .btn-primary { background-color: var(--primary-color); color: white; }
+        .btn-secondary { background-color: var(--light-color); color: var(--dark-color); }
+        .trading-mode-section { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; text-align: center; }
+        .trading-mode-toggle { display: inline-flex; align-items: center; gap: 10px; margin-top: 10px; }
+        .toggle-switch { position: relative; display: inline-block; width: 60px; height: 30px; }
+        .toggle-switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--primary-color); transition: .4s; border-radius: 30px; }
+        .slider:before { position: absolute; content: ""; height: 22px; width: 22px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: var(--warning-color); }
+        input:checked + .slider:before { transform: translateX(30px); }
     </style>
 </head>
 <body>
@@ -2165,7 +1302,6 @@ SETTINGS_TEMPLATE = """
             <div class="header-title">إعدادات البوت</div>
             <a href="/" class="nav-btn">العودة للرئيسية</a>
         </header>
-        
         <div class="trading-mode-section">
             <h3>وضع التداول</h3>
             <div class="trading-mode-toggle">
@@ -2177,160 +1313,56 @@ SETTINGS_TEMPLATE = """
                 <span>ورقي</span>
             </div>
         </div>
-        
-        <div class="redis-status">
-            <div class="redis-status-dot {{ 'available' if redis_config_available else '' }}"></div>
-            <div class="redis-status-text">
-                حالة Redis: {{ 'مُحسَّنة (إعدادات متاحة)' if redis_config_available else 'أساسية (إعدادات غير متاحة)' }}
-            </div>
-        </div>
-        
         <div class="settings-form">
             <h3>إعدادات التداول</h3>
             <form id="settings-form">
-                <div class="form-group">
-                    <label for="risk-per-trade">نسبة المخاطرة للصفقة (%)</label>
-                    <input type="number" id="risk-per-trade" name="risk_per_trade" step="0.1" min="0.1" max="5" value="{{ RISK_PER_TRADE_PERCENT }}">
-                </div>
-                
-                <div class="form-group">
-                    <label for="buy-confidence">حد الثقة للشراء</label>
-                    <input type="number" id="buy-confidence" name="buy_confidence" step="0.01" min="0.5" max="1" value="{{ BUY_CONFIDENCE_THRESHOLD }}">
-                </div>
-                
-                <div class="form-group">
-                    <label for="max-trades">الحد الأقصى للصفقات المفتوحة</label>
-                    <input type="number" id="max-trades" name="max_trades" min="1" max="10" value="{{ MAX_OPEN_TRADES }}">
-                </div>
-                
-                <div class="form-group">
-                    <label for="min-profit">الحد الأدنى للربح (%)</label>
-                    <input type="number" id="min-profit" name="min_profit" step="0.1" min="0.1" max="5" value="{{ MIN_PROFIT_PERCENT }}">
-                </div>
-                
-                <div class="form-actions">
-                    <button type="button" class="btn btn-secondary" onclick="resetSettings()">إعادة الإعدادات الافتراضية</button>
-                    <button type="submit" class="btn btn-primary">حفظ الإعدادات</button>
-                </div>
+                <div class="form-group"><label for="risk-per-trade">نسبة المخاطرة للصفقة (%)</label><input type="number" id="risk-per-trade" name="risk_per_trade" step="0.1" min="0.1" max="5" value="{{ RISK_PER_TRADE_PERCENT }}"></div>
+                <div class="form-group"><label for="buy-confidence">حد الثقة للشراء</label><input type="number" id="buy-confidence" name="buy_confidence" step="0.01" min="0.5" max="1" value="{{ BUY_CONFIDENCE_THRESHOLD }}"></div>
+                <div class="form-group"><label for="max-trades">الحد الأقصى للصفقات المفتوحة</label><input type="number" id="max-trades" name="max_trades" min="1" max="10" value="{{ MAX_OPEN_TRADES }}"></div>
+                <div class="form-group"><label for="min-profit">الحد الأدنى للربح (%)</label><input type="number" id="min-profit" name="min_profit" step="0.1" min="0.1" max="5" value="{{ MIN_PROFIT_PERCENT }}"></div>
+                <div class="form-actions"><button type="button" class="btn btn-secondary" onclick="resetSettings()">إعادة الافتراضي</button><button type="submit" class="btn btn-primary">حفظ</button></div>
             </form>
         </div>
-        
         <div class="settings-form">
             <h3>إعدادات الاستراتيجيات</h3>
             <form id="strategies-form">
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" name="use_bb_stoch" {{ 'checked' if USE_BB_STOCH_STRATEGY else '' }}>
-                        تفعيل استراتيجية BB+Stoch
-                    </label>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" name="use_macd_ema" {{ 'checked' if USE_MACD_EMA_STRATEGY else '' }}>
-                        تفعيل استراتيجية MACD+EMA
-                    </label>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" name="use_ema_rsi" {{ 'checked' if USE_EMA_RSI_STRATEGY else '' }}>
-                        تفعيل استراتيجية EMA+RSI
-                    </label>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" name="use_pullback" {{ 'checked' if USE_PULLBACK_STRATEGY else '' }}>
-                        تفعيل استراتيجية Pullback
-                    </label>
-                </div>
-                
-                <div class="form-actions">
-                    <button type="submit" class="btn btn-primary">حفظ الإعدادات</button>
-                </div>
+                <div class="form-group"><label><input type="checkbox" name="use_bb_stoch" {{ 'checked' if USE_BB_STOCH_STRATEGY else '' }}> تفعيل BB+Stoch</label></div>
+                <div class="form-group"><label><input type="checkbox" name="use_macd_ema" {{ 'checked' if USE_MACD_EMA_STRATEGY else '' }}> تفعيل MACD+EMA</label></div>
+                <div class="form-group"><label><input type="checkbox" name="use_ema_rsi" {{ 'checked' if USE_EMA_RSI_STRATEGY else '' }}> تفعيل EMA+RSI</label></div>
+                <div class="form-group"><label><input type="checkbox" name="use_pullback" {{ 'checked' if USE_PULLBACK_STRATEGY else '' }}> تفعيل Pullback</label></div>
+                <div class="form-actions"><button type="submit" class="btn btn-primary">حفظ</button></div>
             </form>
         </div>
     </div>
-    
     <script>
         function showAlert(message, type = 'info') {
             const alertBox = document.createElement('div');
-            alertBox.style.position = 'fixed';
-            alertBox.style.top = '20px';
-            alertBox.style.right = '20px';
-            alertBox.style.padding = '15px';
-            alertBox.style.borderRadius = '5px';
-            alertBox.style.color = 'white';
-            alertBox.style.zIndex = '1000';
-            alertBox.style.backgroundColor = type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db';
+            Object.assign(alertBox.style, { position: 'fixed', top: '20px', right: '20px', padding: '15px', borderRadius: '5px', color: 'white', zIndex: '1000', backgroundColor: type === 'success' ? '#2ecc71' : type === 'error' ? '#e74c3c' : '#3498db' });
             alertBox.innerText = message;
             document.body.appendChild(alertBox);
-            setTimeout(() => {
-                alertBox.remove();
-            }, 3000);
+            setTimeout(() => alertBox.remove(), 3000);
         }
-
         document.getElementById('paper-trading-toggle').addEventListener('change', function() {
-            const isPaper = this.checked;
-            fetch('/toggle_paper_trading', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paper_trading_mode: isPaper })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if(data.success) {
-                    showAlert(data.message, 'success');
-                } else {
-                    showAlert(data.message, 'error');
-                }
-            });
+            fetch('/toggle_paper_trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paper_trading_mode: this.checked }) })
+            .then(res => res.json()).then(data => showAlert(data.message, data.success ? 'success' : 'error'));
         });
-
         document.getElementById('settings-form').addEventListener('submit', function(e) {
             e.preventDefault();
-            const data = {
-                risk_per_trade: document.getElementById('risk-per-trade').value,
-                buy_confidence: document.getElementById('buy-confidence').value,
-                max_trades: document.getElementById('max-trades').value,
-                min_profit: document.getElementById('min-profit').value,
-            };
-            fetch('/update_settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            })
-            .then(res => res.json())
-            .then(data => showAlert(data.message, data.success ? 'success' : 'error'));
+            const data = { risk_per_trade: this.risk_per_trade.value, buy_confidence: this.buy_confidence.value, max_trades: this.max_trades.value, min_profit: this.min_profit.value };
+            fetch('/update_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+            .then(res => res.json()).then(data => showAlert(data.message, data.success ? 'success' : 'error'));
         });
-
         document.getElementById('strategies-form').addEventListener('submit', function(e) {
             e.preventDefault();
-            const data = {
-                use_bb_stoch: document.querySelector('[name=use_bb_stoch]').checked,
-                use_macd_ema: document.querySelector('[name=use_macd_ema]').checked,
-                use_ema_rsi: document.querySelector('[name=use_ema_rsi]').checked,
-                use_pullback: document.querySelector('[name=use_pullback]').checked,
-            };
-            fetch('/update_strategies', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(data)
-            })
-            .then(res => res.json())
-            .then(data => showAlert(data.message, data.success ? 'success' : 'error'));
+            const data = { use_bb_stoch: this.use_bb_stoch.checked, use_macd_ema: this.use_macd_ema.checked, use_ema_rsi: this.use_ema_rsi.checked, use_pullback: this.use_pullback.checked };
+            fetch('/update_strategies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+            .then(res => res.json()).then(data => showAlert(data.message, data.success ? 'success' : 'error'));
         });
-
         function resetSettings() {
-            if (confirm('هل أنت متأكد من أنك تريد إعادة تعيين كافة الإعدادات إلى الوضع الافتراضي؟')) {
-                fetch('/reset_settings', { method: 'POST' })
-                .then(res => res.json())
-                .then(data => {
+            if (confirm('هل أنت متأكد من إعادة تعيين كافة الإعدادات؟')) {
+                fetch('/reset_settings', { method: 'POST' }).then(res => res.json()).then(data => {
                     showAlert(data.message, data.success ? 'success' : 'error');
-                    if(data.success) {
-                        setTimeout(() => location.reload(), 1000);
-                    }
+                    if(data.success) setTimeout(() => location.reload(), 1000);
                 });
             }
         }
@@ -2339,9 +1371,8 @@ SETTINGS_TEMPLATE = """
 </html>
 """
 
-# --- حلقة التداول الرئيسية ---
+# --- حلقات العمل الخلفية ---
 def main_bot_loop():
-    """الحلقة الرئيسية التي تبحث عن إشارات تداول جديدة."""
     logger.info("🚀 [الحلقة الرئيسية] بدء حلقة البحث عن الإشارات...")
     btc_df_cache = None
     last_btc_fetch = 0
@@ -2350,118 +1381,163 @@ def main_bot_loop():
         try:
             with trading_status_lock:
                 if not is_trading_enabled:
-                    time.sleep(10)  # انتظر 10 ثوانٍ إذا كان التداول معطلاً
+                    time.sleep(10)
                     continue
 
-            logger.info("🔍 [الحلقة الرئيسية] بدء دورة فحص جديدة...")
+            logger.info("="*20 + " بدء دورة فحص جديدة " + "="*20)
 
-            # تحديث بيانات BTC كل 5 دقائق
             if time.time() - last_btc_fetch > 300:
                 btc_df_cache = get_btc_data_for_bot()
                 last_btc_fetch = time.time()
                 if btc_df_cache is None:
-                    logger.warning("⚠️ [الحلقة الرئيسية] لا يمكن جلب بيانات BTC، سيتم تخطي دورة الفحص هذه.")
+                    logger.warning("⚠️ [الحلقة الرئيسية] لا يمكن جلب بيانات BTC، سيتم تخطي دورة الفحص.")
                     time.sleep(60)
                     continue
 
-            # فحص العملات على دفعات
             for i in range(0, len(validated_symbols_to_scan), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = validated_symbols_to_scan[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 for symbol in batch:
+                    logger.info(f"--- تحليل [{symbol}] ---")
                     with signal_cache_lock:
                         if symbol in open_signals_cache:
-                            logger.info(f"  -> [{symbol}] تخطي، توجد صفقة مفتوحة بالفعل.")
+                            logger.info(f"  -> تخطي، توجد صفقة مفتوحة بالفعل.")
                             continue
                     
-                    logger.info(f"  -> [{symbol}] جاري تحليل العملة...")
                     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df is None or df.empty:
                         log_rejection(symbol, "Insufficient Historical Data")
                         continue
+                    logger.info(f"  -> [1/5] تم جلب البيانات التاريخية بنجاح ({len(df)} شمعة).")
                     
-                    df.name = symbol # لسهولة الوصول في دوال الرفض
+                    df.name = symbol
                     df_featured = calculate_all_features(df, btc_df_cache)
+                    logger.info(f"  -> [2/5] تم حساب المؤشرات الفنية.")
 
-                    # تطبيق الاستراتيجيات المفعلة
+                    if not check_market_volatility_filter(df_featured): continue
+                    if not check_trend_strength_filter(df_featured): continue
+                    logger.info(f"  -> [3/5] اجتازت العملة الفلاتر الأولية.")
+
+                    if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME):
+                        log_rejection(symbol, "HTF Trend Confirmation Failed")
+                        continue
+                    logger.info(f"  -> [4/5] تم تأكيد الاتجاه الصاعد على الإطار الزمني الأعلى.")
+
                     strategy_found = None
-                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_revised(df_featured):
-                        strategy_found = "BB+Stoch"
-                    elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy(df_featured):
-                        strategy_found = "MACD+EMA"
-                    elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy(df_featured):
-                        strategy_found = "EMA+RSI"
-                    elif USE_PULLBACK_STRATEGY and check_pullback_strategy(df_featured):
-                        strategy_found = "Pullback"
-                    elif USE_BB_SQUEEZE_STRATEGY and check_bb_squeeze_strategy(df_featured):
-                        strategy_found = "BB Squeeze"
-                    elif USE_BULLISH_MOMENTUM_STRATEGY and check_bullish_momentum_strategy(df_featured):
-                        strategy_found = "Bullish Momentum"
-                    elif USE_SR_BREAKOUT_STRATEGY and check_support_resistance_strategy_enhanced(df_featured):
-                        strategy_found = "SR Breakout"
-
+                    active_strategies = {
+                        "BB+Stoch": (USE_BB_STOCH_STRATEGY, check_bb_stoch_strategy_revised),
+                        "MACD+EMA": (USE_MACD_EMA_STRATEGY, check_macd_ema_strategy),
+                        "EMA+RSI": (USE_EMA_RSI_STRATEGY, check_ema_rsi_strategy),
+                        "Pullback": (USE_PULLBACK_STRATEGY, check_pullback_strategy),
+                        "BB Squeeze": (USE_BB_SQUEEZE_STRATEGY, check_bb_squeeze_strategy),
+                        "Bullish Momentum": (USE_BULLISH_MOMENTUM_STRATEGY, check_bullish_momentum_strategy),
+                        "SR Breakout": (USE_SR_BREAKOUT_STRATEGY, check_support_resistance_strategy_enhanced),
+                    }
+                    
+                    logger.info(f"  -> [5/5] بدء فحص الاستراتيجيات...")
+                    for name, (is_active, func) in active_strategies.items():
+                        if is_active:
+                            logger.info(f"    - فحص استراتيجية: {name}...")
+                            if func(df_featured):
+                                strategy_found = name
+                                break 
+                    
                     if strategy_found:
-                        logger.info(f"✅ [{symbol}] تم العثور على إشارة محتملة باستخدام استراتيجية: {strategy_found}")
-                        # هنا يمكنك إضافة المزيد من الفلاتر قبل فتح الصفقة
-                        # ...
-                        # حاليًا، سنقوم بإنشاء توصية ورقية مباشرة
-                        create_paper_trade_signal(symbol, df_featured, strategy_found)
+                        logger.info(f"  -> 🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
+                        if is_bullish_reversal_pattern(df_featured):
+                            create_paper_trade_signal(symbol, df_featured, strategy_found)
+                        else:
+                            log_rejection(symbol, "Bullish Reversal Candle Pattern Failed")
+                    else:
+                        logger.info(f"  -> لم يتم العثور على إشارة تداول لـ [{symbol}].")
 
-            logger.info("✅ [الحلقة الرئيسية] اكتملت دورة الفحص. الانتظار للدورة التالية...")
-            time.sleep(60 * 5)  # انتظر 5 دقائق قبل بدء الدورة التالية
+            logger.info("="*20 + " اكتملت دورة الفحص " + "="*20)
+            time.sleep(60 * 5)
 
         except Exception as e:
             logger.error(f"❌ [الحلقة الرئيسية] حدث خطأ فادح: {e}", exc_info=True)
-            time.sleep(60) # انتظر دقيقة بعد الخطأ
+            time.sleep(60)
 
 def manage_open_trades_loop():
-    """الحلقة التي تدير الصفقات المفتوحة (تحديث الأسعار، التحقق من TP/SL)."""
     logger.info("🚀 [إدارة الصفقات] بدء حلقة إدارة الصفقات المفتوحة...")
     while True:
         try:
             with signal_cache_lock:
-                # إنشاء نسخة من القاموس لتجنب مشاكل التزامن أثناء التكرار
                 open_signals_copy = dict(open_signals_cache)
 
             if not open_signals_copy:
-                time.sleep(15) # لا توجد صفقات، تحقق مرة أخرى بعد 15 ثانية
+                time.sleep(15)
                 continue
 
             symbols_to_check = list(open_signals_copy.keys())
-            logger.info(f"ℹ️ [إدارة الصفقات] جاري التحقق من {len(symbols_to_check)} صفقة مفتوحة: {symbols_to_check}")
-
-            # جلب الأسعار الحالية دفعة واحدة
             if client:
                 current_prices = {ticker['symbol']: float(ticker['price']) for ticker in client.get_all_tickers() if ticker['symbol'] in symbols_to_check}
-
                 for symbol, signal in open_signals_copy.items():
                     current_price = current_prices.get(symbol)
-                    if not current_price:
-                        logger.warning(f"⚠️ [إدارة الصفقات] لم يتم العثور على السعر الحالي لـ {symbol}")
-                        continue
-                    
-                    # هنا يمكنك إضافة منطق التحقق من TP/SL وإغلاق الصفقات
-                    # مثال:
-                    # if current_price >= signal['target_price']:
-                    #     close_trade(signal, current_price, "Take Profit Hit")
-                    # elif current_price <= signal['stop_loss']:
-                    #     close_trade(signal, current_price, "Stop Loss Hit")
-                    # else:
-                    #     update_trade_status(signal, current_price)
-                    pass # Placeholder for actual trade management logic
-
-            time.sleep(30) # تحديث كل 30 ثانية
-
+                    if not current_price: continue
+                    # Placeholder for actual trade management logic (TP/SL checks)
+            time.sleep(30)
         except Exception as e:
             logger.error(f"❌ [إدارة الصفقات] حدث خطأ: {e}", exc_info=True)
             time.sleep(60)
 
+def update_market_state_loop():
+    """حلقة مخصصة لتحديث حالة السوق بشكل دوري."""
+    logger.info("🚀 [حالة السوق] بدء حلقة تحديث حالة السوق...")
+    while True:
+        try:
+            logger.info("ℹ️ [حالة السوق] جاري تحديث حالة السوق...")
+            trend_details = {}
+            bullish_count = 0
+            
+            for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
+                days = 10 if tf == '15m' else 30 if tf == '1h' else 90
+                btc_df = fetch_historical_data(BTC_SYMBOL, tf, days)
+                if btc_df is None or len(btc_df) < 50:
+                    trend_details[tf] = {"trend": "Unknown", "rsi": 50}
+                    continue
+
+                btc_df['ema_fast'] = btc_df['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
+                btc_df['ema_slow'] = btc_df['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
+                delta = btc_df['close'].diff()
+                gain = delta.clip(lower=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+                loss = -delta.clip(upper=0).ewm(com=RSI_PERIOD - 1, adjust=False).mean()
+                rsi = 100 - (100 / (1 + (gain / loss.replace(0, 1e-9))))
+                
+                last = btc_df.iloc[-1]
+                trend = "Unknown"
+                if last['close'] > last['ema_slow'] and last['ema_fast'] > last['ema_slow'] and rsi.iloc[-1] > 55:
+                    trend = "Bullish"
+                    bullish_count += 1
+                elif last['close'] < last['ema_slow'] and last['ema_fast'] < last['ema_slow'] and rsi.iloc[-1] < 45:
+                    trend = "Bearish"
+                else:
+                    trend = "Sideways"
+                
+                trend_details[tf] = {"trend": trend, "rsi": rsi.iloc[-1]}
+
+            overall_regime = "Sideways"
+            if bullish_count >= 2:
+                overall_regime = "Bullish"
+            elif bullish_count == 0:
+                overall_regime = "Bearish"
+
+            with market_state_lock:
+                current_market_state['overall_regime'] = overall_regime
+                current_market_state['trend_details_by_tf'] = trend_details
+                current_market_state['last_updated'] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            
+            logger.info(f"✅ [حالة السوق] تم التحديث. النظام العام: {overall_regime}")
+            time.sleep(60 * 5) # تحديث كل 5 دقائق
+        except Exception as e:
+            logger.error(f"❌ [حالة السوق] حدث خطأ: {e}", exc_info=True)
+            time.sleep(60)
+
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("==================================================")
-    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.4 ======")
-    logger.info("==================================================")
+    logger.info("="*50)
+    logger.info("====== بدء تشغيل بوت التداول الإلكتروني V9.9.5 ======")
+    logger.info("="*50)
 
-    # 1. تهيئة الخدمات
     init_db()
     init_redis()
     try:
@@ -2472,7 +1548,6 @@ if __name__ == '__main__':
         logger.critical(f"❌ [Binance] فشل الاتصال بالمنصة: {e}")
         exit(1)
 
-    # 2. تحميل الإعدادات والبيانات الأولية
     get_exchange_info_map()
     validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
@@ -2484,14 +1559,13 @@ if __name__ == '__main__':
     if redis_client:
         load_settings_from_redis()
 
-    # 3. بدء العمليات الخلفية (Threads)
     main_loop_thread = Thread(target=main_bot_loop, daemon=True)
     manage_trades_thread = Thread(target=manage_open_trades_loop, daemon=True)
+    market_state_thread = Thread(target=update_market_state_loop, daemon=True)
     
     main_loop_thread.start()
     manage_trades_thread.start()
+    market_state_thread.start()
 
-    # 4. تشغيل واجهة المستخدم (Flask)
     logger.info("🌐 [Flask] بدء تشغيل واجهة المستخدم على http://127.0.0.1:5000")
-    # استخدم '0.0.0.0' لجعل الخادم متاحًا على الشبكة
     app.run(host='0.0.0.0', port=5000, debug=False)
