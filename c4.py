@@ -1,5 +1,5 @@
-# ملف c4_enhanced_v11.7.py - نسخة V11.7 "UI Button Fix"
-# --- نسخة معدلة مع إصلاح زر الإغلاق اليدوي في الواجهة ---
+# ملف c4_enhanced_v11.8.py - نسخة V11.8 "Aggressive Memory Management"
+# --- نسخة معدلة مع إدارة ذاكرة قوية لمنع التسرب وحل مشكلة نفاد الذاكرة ---
 
 import time
 import os
@@ -36,11 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11.7_ui_fix.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v11.8_aggressive_gc.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.7-UIFix')
+logger = logging.getLogger('CryptoBotV11.8-AggressiveGC')
 
 # --- مشفر مخصص لأنواع بيانات NumPy والعشرية ---
 class NpEncoder(json.JSONEncoder):
@@ -736,51 +736,60 @@ def check_portfolio_risk() -> bool:
         return False
     return True
 
+# --- UPDATED: generate_signals_for_symbol with aggressive memory management ---
 def generate_signals_for_symbol(symbol: str) -> List[Dict]:
-    signals = []
-    df = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-    if df is None or df.empty: return signals
-    df = calculate_all_features(df)
-    df.name = symbol
-    
-    strategy_checkers = {
-        "BB_Reversal": check_bb_reversal_strategy_enhanced, "MACD_EMA": check_macd_ema_strategy_enhanced,
-        "SR_Breakout": check_sr_breakout_strategy_enhanced, "Triple_Confirmation": check_triple_confirmation_strategy_enhanced,
-        "VWAP_Reversal": check_vwap_reversal_strategy_enhanced, "Price_Channel": check_price_channel_strategy,
-    }
-    total_met, total_possible, successful_strategies, strategy_details = 0, 0, [], {}
-    for name, checker in strategy_checkers.items():
-        if STRATEGY_CONFIG[name]["enabled"]:
-            met, total = checker(df)
-            total_met += met; total_possible += total
-            strategy_details[name] = f"{met}/{total}"
-            if met > 0: successful_strategies.append(name)
+    df = None # Initialize df to None
+    try:
+        signals = []
+        df = get_data_for_symbol(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+        if df is None or df.empty:
+            return signals
+        
+        df = calculate_all_features(df)
+        df.name = symbol
+        
+        strategy_checkers = {
+            "BB_Reversal": check_bb_reversal_strategy_enhanced, "MACD_EMA": check_macd_ema_strategy_enhanced,
+            "SR_Breakout": check_sr_breakout_strategy_enhanced, "Triple_Confirmation": check_triple_confirmation_strategy_enhanced,
+            "VWAP_Reversal": check_vwap_reversal_strategy_enhanced, "Price_Channel": check_price_channel_strategy,
+        }
+        total_met, total_possible, successful_strategies, strategy_details = 0, 0, [], {}
+        for name, checker in strategy_checkers.items():
+            if STRATEGY_CONFIG[name]["enabled"]:
+                met, total = checker(df)
+                total_met += met; total_possible += total
+                strategy_details[name] = f"{met}/{total}"
+                if met > 0: successful_strategies.append(name)
 
-    if total_possible == 0: return signals
-    actual_strength = (total_met / total_possible) * 100
-    with FILTER_CONFIG["SIGNAL_STRICTNESS"]["lock"]: required_strength = FILTER_CONFIG["SIGNAL_STRICTNESS"]["value"]
+        if total_possible == 0: return signals
+        actual_strength = (total_met / total_possible) * 100
+        with FILTER_CONFIG["SIGNAL_STRICTNESS"]["lock"]: required_strength = FILTER_CONFIG["SIGNAL_STRICTNESS"]["value"]
 
-    if actual_strength < required_strength:
-        log_rejection(symbol, "Conditions Not Met", {"actual": f"{actual_strength:.2f}%", "required": f"{required_strength}%", "details": strategy_details})
+        if actual_strength < required_strength:
+            log_rejection(symbol, "Conditions Not Met", {"actual": f"{actual_strength:.2f}%", "required": f"{required_strength}%", "details": strategy_details})
+            return signals
+        if not check_portfolio_risk(): return signals
+        
+        entry_price, atr_value = float(df.iloc[-1]['close']), float(df.iloc[-1]['atr'])
+        strength_for_sizing = max(0.1, (actual_strength - required_strength) / (100 - required_strength) if required_strength < 100 else 1.0)
+        position_result = calculate_dynamic_position_size_enhanced(symbol, entry_price, atr_value, strength_for_sizing)
+        
+        if position_result is None: return signals
+        quantity, stop_loss = position_result
+        
+        signal_data = {
+            "symbol": symbol, "entry_price": entry_price, "stop_loss": stop_loss,
+            "strategy_name": ", ".join(successful_strategies) or "Combined Signal",
+            "signal_details": {"strategies": strategy_details, "actual_strength": actual_strength, "required_strength": required_strength, "atr": atr_value},
+            "quantity": float(quantity), "is_real_trade": is_trading_enabled
+        }
+        signals.append(signal_data)
+        logger.info(f"  -> [{symbol}] ✅ تم توليد إشارة (القوة: {actual_strength:.2f}% >= {required_strength}%)")
         return signals
-    if not check_portfolio_risk(): return signals
-    
-    entry_price, atr_value = float(df.iloc[-1]['close']), float(df.iloc[-1]['atr'])
-    strength_for_sizing = max(0.1, (actual_strength - required_strength) / (100 - required_strength) if required_strength < 100 else 1.0)
-    position_result = calculate_dynamic_position_size_enhanced(symbol, entry_price, atr_value, strength_for_sizing)
-    
-    if position_result is None: return signals
-    quantity, stop_loss = position_result
-    
-    signal_data = {
-        "symbol": symbol, "entry_price": entry_price, "stop_loss": stop_loss,
-        "strategy_name": ", ".join(successful_strategies) or "Combined Signal",
-        "signal_details": {"strategies": strategy_details, "actual_strength": actual_strength, "required_strength": required_strength, "atr": atr_value},
-        "quantity": float(quantity), "is_real_trade": is_trading_enabled
-    }
-    signals.append(signal_data)
-    logger.info(f"  -> [{symbol}] ✅ تم توليد إشارة (القوة: {actual_strength:.2f}% >= {required_strength}%)")
-    return signals
+    finally:
+        # This block ensures the DataFrame is deleted, freeing up memory,
+        # regardless of whether a signal was generated or an error occurred.
+        del df
 
 def process_open_signals():
     if not check_db_connection() or not conn or not redis_client: return
@@ -799,6 +808,7 @@ def process_open_signals():
                 open_signals_cache[signal_dict['symbol']] = signal_dict
         
         for symbol, signal_data in list(open_signals_cache.items()):
+            df = None # Initialize for the finally block
             try:
                 current_price = float(current_prices.get(symbol, 0))
                 if current_price == 0: continue
@@ -809,6 +819,8 @@ def process_open_signals():
                 if should_exit: close_signal(signal_data['id'], current_price, reason)
             except Exception as e:
                 logger.error(f"❌ [Process Signals] خطأ في معالجة الإشارة لـ {symbol}: {e}")
+            finally:
+                del df # Clean up the DataFrame for the open signal check
     except Exception as e:
         logger.error(f"❌ [Process Signals] خطأ عام: {e}", exc_info=True)
 
@@ -846,7 +858,8 @@ def scan_and_generate_signals():
                         if saved_signal:
                             with signal_cache_lock:
                                 open_signals_cache[symbol] = saved_signal
-                time.sleep(0.1) 
+                # A small sleep can help prevent overwhelming the system, though rate limiter is primary
+                time.sleep(0.05) 
             except Exception as e:
                 logger.error(f"❌ [Scan] خطأ في مسح {symbol}: {e}", exc_info=True)
         
@@ -878,15 +891,14 @@ CORS(app)
 def block_method():
     if request.method in ['PUT', 'DELETE', 'PATCH']: abort(403)
 
-# --- UPDATED HTML with JavaScript fix ---
-def get_dashboard_html_v11_7():
+def get_dashboard_html_v11_8():
     return """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel V11.7 - لوحة تحكم التداول</title>
+    <title>Sentinel V11.8 - لوحة تحكم التداول</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
     <style>
@@ -903,7 +915,7 @@ def get_dashboard_html_v11_7():
 <body class="p-4 md:p-6">
     <div class="container mx-auto max-w-screen-2xl">
         <header class="mb-6 flex flex-wrap justify-between items-center gap-4">
-            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-blue-400">Sentinel</span> V11.7</h1>
+            <h1 class="text-2xl md:text-3xl font-extrabold"><span class="text-blue-400">Sentinel</span> V11.8</h1>
             <div class="flex items-center gap-3">
                 <div id="market-status" class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="market-status-text">...</span></div>
                 <div class="text-sm px-3 py-1 rounded-full bg-gray-800"><span id="trading-status-text">معطل</span></div>
@@ -957,16 +969,14 @@ def get_dashboard_html_v11_7():
     const TABS = { signals: "الإشارات المفتوحة", performance: "أداء الاستراتيجيات", notifications: "الإشعارات", rejections: "سجل الرفض" };
     let currentTab = 'signals';
 
-    // --- FIX: Define closeSignal in the global scope ---
     function closeSignal(signalId) {
-        // Using a simple confirm dialog for now. A custom modal would be better in the future.
         if (confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدوياً؟')) {
             fetch(`/api/signals/close/${signalId}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
                     if (data.success) {
                         alert('تم إرسال أمر الإغلاق بنجاح.');
-                        loadTabData(); // Refresh the current tab to show the change
+                        loadTabData();
                     } else {
                         alert(`فشل إغلاق الصفقة: ${data.message || 'خطأ غير معروف'}`);
                     }
@@ -1084,7 +1094,7 @@ def get_dashboard_html_v11_7():
 
 @app.route('/')
 def home():
-    return render_template_string(get_dashboard_html_v11_7())
+    return render_template_string(get_dashboard_html_v11_8())
 
 @app.route('/api/status')
 def get_status():
@@ -1184,7 +1194,7 @@ def manual_close_trade_endpoint(signal_id):
 # --- الدوال الرئيسية لتشغيل البوت ---
 def main():
     global client
-    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.7")
+    logger.info("🚀 بدء تشغيل نظام التداول الآلي Sentinel V11.8")
     init_db()
     init_redis()
     client = Client(API_KEY, API_SECRET)
