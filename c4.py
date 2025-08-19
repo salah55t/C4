@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V11.0.0 (ميزات متقدمة لإدارة الصفقات)
-# --- التغييرات الرئيسية (V11.0.0):
-# 1. [ميزة] إضافة زر إغلاق يدوي لكل صفقة في واجهة التحكم.
-# 2. [ميزة] تطبيق آلية وقف خسارة متحرك (Trailing Stop-Loss) للصفقات الرابحة.
-# 3. [ميزة] تطبيق آلية أخذ ربح جزئي عند الهدف الأول مع تحليل قوة الاتجاه (RSI) لتحديد إمكانية الاستمرار للهدف الثاني.
-# 4. [تحسين] حساب كمية الصفقات الورقية بناءً على حجم ثابت (10 USDT).
-# 5. [تحسين] تحديث مخطط قاعدة البيانات لاستيعاب الحقول الجديدة (مثل الهدف الثاني ووقف الخسارة المتحرك).
+# ملف c4.py - نسخة V12.0.0 (استراتيجيات تداول مُحسَّنة)
+# --- التغييرات الرئيسية (V12.0.0):
+# 1. [ميزة] دمج 4 استراتيجيات مُحسَّنة مع شروط إضافية (فوليوم، زخم، MACD فوق الصفر).
+# 2. [ميزة] إضافة دالة متقدمة لكشف الانحراف الإيجابي (Bullish Divergence) لمؤشر RSI.
+# 3. [ميزة] إضافة دالة لتحليل ارتدادات السعر من مستويات فيبوناتشي الرئيسية.
+# 4. [تحسين] تحديث الحلقة الرئيسية لاستدعاء الدوال الجديدة وزيادة دقة الإشارات.
 
 import time
 import os
@@ -39,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v11_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v12_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV11.0.0')
+logger = logging.getLogger('CryptoBotV12.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -79,14 +78,14 @@ BUY_CONFIDENCE_THRESHOLD = 0.53
 buy_confidence_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 MIN_PROFIT_PERCENT: float = 0.8
-PAPER_TRADE_SIZE_USDT: float = 10.0 # حجم الصفقة الورقية بالـ USDT
+PAPER_TRADE_SIZE_USDT: float = 10.0
 
 # --- إعدادات إدارة الصفقات المتقدمة ---
 USE_TRAILING_STOP_LOSS: bool = True
-TRAILING_STOP_TRIGGER_PERCENT: float = 0.4 # نسبة الربح لتفعيل الوقف المتحرك
-TRAILING_STOP_DISTANCE_PERCENT: float = 0.5 # المسافة التي يتبعها الوقف المتحرك خلف السعر
+TRAILING_STOP_TRIGGER_PERCENT: float = 0.4
+TRAILING_STOP_DISTANCE_PERCENT: float = 0.5
 USE_PARTIAL_TAKE_PROFIT: bool = True
-PARTIAL_TP_RSI_THRESHOLD: float = 60 # حد الـ RSI للاستمرار للهدف الثاني
+PARTIAL_TP_RSI_THRESHOLD: float = 60
 
 # --- مفاتيح تفعيل الاستراتيجيات ---
 USE_BB_STOCH_STRATEGY: bool = True
@@ -162,14 +161,14 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
             conn.autocommit = False
             with conn.cursor() as cur:
-                # إنشاء الجداول الأساسية
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
                         target_price DOUBLE PRECISION NOT NULL, stop_loss DOUBLE PRECISION NOT NULL,
                         status TEXT DEFAULT 'open', closing_price DOUBLE PRECISION, closed_at TIMESTAMP,
                         profit_percentage DOUBLE PRECISION, strategy_name TEXT, signal_details JSONB,
-                        is_real_trade BOOLEAN DEFAULT FALSE, quantity DOUBLE PRECISION, closing_reason TEXT
+                        is_real_trade BOOLEAN DEFAULT FALSE, quantity DOUBLE PRECISION, closing_reason TEXT,
+                        target_price_2 DOUBLE PRECISION, initial_quantity DOUBLE PRECISION
                     );
                 """)
                 cur.execute("""
@@ -178,13 +177,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         type TEXT NOT NULL, message TEXT NOT NULL, is_read BOOLEAN DEFAULT FALSE
                     );
                 """)
-                # إضافة الأعمدة الجديدة للإصدار 11 (إذا لم تكن موجودة)
-                alter_commands = [
-                    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS target_price_2 DOUBLE PRECISION;",
-                    "ALTER TABLE signals ADD COLUMN IF NOT EXISTS initial_quantity DOUBLE PRECISION;",
-                ]
-                for command in alter_commands:
-                    cur.execute(command)
             conn.commit()
             logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
             return
@@ -431,44 +423,162 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h') -> bool:
         return last['close'] > last['ema50'] and last['ema50'] > last['ema200']
     except Exception: return False
 
-# --- استراتيجيات التداول ---
-def check_bb_stoch_strategy(df: pd.DataFrame) -> bool:
-    last, prev = df.iloc[-1], df.iloc[-2]
-    return (prev['low'] <= prev['bb_lower'] * 1.001 and last['close'] > last['open'] and
-            last['stoch_rsi_k'] < 35 and last['stoch_rsi_k'] > prev['stoch_rsi_k'] and
-            last['rsi'] > 25)
+# --- دوال مساعدة للاستراتيجيات المحسنة ---
+def check_rsi_bullish_divergence(df: pd.DataFrame, lookback: int = 25) -> bool:
+    """
+    Checks for bullish divergence on RSI.
+    Price makes a lower low, while RSI makes a higher low.
+    """
+    if len(df) < lookback:
+        return False
+    
+    subset = df.iloc[-lookback:]
+    
+    # Find the index of the absolute low in the price subset
+    low_price_idx = subset['low'].idxmin()
+    
+    # Find the index of the absolute low in the RSI subset
+    low_rsi_idx = subset['rsi'].idxmin()
+    
+    # Check if the lows occurred at different times
+    if low_price_idx == low_rsi_idx:
+        return False
+        
+    # Find the second lowest price point before the absolute low
+    price_before_low = subset.loc[:low_price_idx]['low'].iloc[:-1]
+    if price_before_low.empty: return False
+    second_low_price_idx = price_before_low.idxmin()
 
-def check_macd_ema_strategy(df: pd.DataFrame) -> bool:
-    last, prev = df.iloc[-1], df.iloc[-2]
-    return (prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal'] and
-            last['close'] > last['ema_12'] and last['adx'] > 18)
+    # Get values at these points
+    first_low_price = subset.loc[second_low_price_idx]['low']
+    second_low_price = subset.loc[low_price_idx]['low']
+    
+    first_low_rsi = subset.loc[second_low_price_idx]['rsi']
+    second_low_rsi = subset.loc[low_price_idx]['rsi']
 
-def check_ema_rsi_strategy(df: pd.DataFrame) -> bool:
-    last, prev = df.iloc[-1], df.iloc[-2]
-    return (prev['ema_9'] < prev['ema_12'] and last['ema_9'] > last['ema_12'] and
-            last['rsi'] > 52 and last['close'] > last['ema_26'])
+    # The condition for bullish divergence
+    if second_low_price < first_low_price and second_low_rsi > first_low_rsi:
+        logger.info(f"[{df.name}] Bullish RSI Divergence detected.")
+        return True
+        
+    return False
 
-def check_pullback_strategy(df: pd.DataFrame) -> bool:
+def check_fibonacci_pullback(df: pd.DataFrame, lookback: int = 50) -> bool:
+    """
+    Checks if the price has pulled back to a key Fibonacci level (0.5 or 0.618).
+    """
+    if len(df) < lookback:
+        return False
+    
+    subset = df.iloc[-lookback:]
+    
+    # Find the highest high and lowest low in the lookback period to define the swing
+    swing_high = subset['high'].max()
+    swing_low = subset['low'].min()
+    
+    if swing_high == swing_low:
+        return False
+
+    # Calculate Fibonacci levels
+    fib_50 = swing_high - 0.5 * (swing_high - swing_low)
+    fib_618 = swing_high - 0.618 * (swing_high - swing_low)
+    
+    last_candle = df.iloc[-1]
+    
+    # Check if the last candle's low touched one of the key fib levels
+    # and closed above it, indicating a bounce.
+    is_at_fib_50 = last_candle['low'] <= fib_50 and last_candle['close'] > fib_50
+    is_at_fib_618 = last_candle['low'] <= fib_618 and last_candle['close'] > fib_618
+
+    if is_at_fib_50 or is_at_fib_618:
+        logger.info(f"[{df.name}] Fibonacci pullback bounce detected.")
+        return True
+        
+    return False
+
+# --- استراتيجيات التداول المُحسَّنة ---
+def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
+    if len(df) < 21: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    return (last['close'] > last['ema_12'] and last['ema_12'] > last['ema_26'] and
-            prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal'])
+    
+    bb_breakout = (prev['low'] <= prev['bb_lower'] * 1.001 and 
+                   last['close'] > last['open'] and
+                   last['close'] > last['bb_lower'])
+    
+    stoch_signal = (last['stoch_rsi_k'] < 35 and 
+                    last['stoch_rsi_k'] > prev['stoch_rsi_k'] and
+                    last['rsi'] > 25 and last['rsi'] < 60)
+    
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
+    
+    momentum_ok = df[f'roc_{MOMENTUM_PERIOD}'].iloc[-1] > 0
+    
+    return bb_breakout and stoch_signal and volume_ok and momentum_ok
+
+def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
+    if len(df) < 30: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    
+    macd_cross = (prev['macd'] < prev['macd_signal'] and 
+                  last['macd'] > last['macd_signal'])
+    
+    price_above_ema = (last['close'] > last['ema_12'] and 
+                       last['close'] > last['ema_26'])
+    
+    trend_strength = last['adx'] > 18
+    
+    macd_above_zero = last['macd'] > 0
+    
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.1
+    
+    return macd_cross and price_above_ema and trend_strength and macd_above_zero and volume_ok
+
+def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
+    if len(df) < 30: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    
+    ema_cross = (prev['ema_9'] < prev['ema_12'] and 
+                 last['ema_9'] > last['ema_12'])
+    
+    rsi_signal = (last['rsi'] > 52 and last['rsi'] < 70)
+    
+    price_above_slow_ema = last['close'] > last['ema_26']
+    
+    rsi_divergence = check_rsi_bullish_divergence(df)
+    
+    volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.15
+    
+    return ema_cross and rsi_signal and price_above_slow_ema and (rsi_divergence or volume_ok)
+
+def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
+    if len(df) < 50: return False
+    last, prev = df.iloc[-1], df.iloc[-2]
+    
+    ema_trend = (last['close'] > last['ema_12'] and 
+                 last['ema_12'] > last['ema_26'])
+    
+    macd_cross = (prev['macd'] < prev['macd_signal'] and 
+                  last['macd'] > last['macd_signal'])
+    
+    fib_level_bounce = check_fibonacci_pullback(df)
+    
+    volume_decreasing_then_increasing = (prev['volume'] < df['volume'].rolling(5).mean().iloc[-2] and
+                                         last['volume'] > prev['volume'])
+    
+    return ema_trend and macd_cross and fib_level_bounce and volume_decreasing_then_increasing
 
 # --- أنماط الشموع ---
 def is_bullish_reversal_pattern(df: pd.DataFrame) -> bool:
-    c2, c3 = df.iloc[-2], df.iloc[-3] # Check last two closed candles
-    last = df.iloc[-1] # Current candle
-    
-    # Hammer on c3
+    if len(df) < 3: return False
+    c2, c3 = df.iloc[-3], df.iloc[-2]
+    last = df.iloc[-1]
     body = abs(c3['open'] - c3['close'])
     if body > 0:
         lower_wick = c3['close'] - c3['low'] if c3['open'] < c3['close'] else c3['open'] - c3['low']
         upper_wick = c3['high'] - c3['close'] if c3['open'] < c3['close'] else c3['high'] - c3['open']
         if lower_wick > 2 * body and upper_wick < body and last['close'] > c3['close']: return True
-        
-    # Bullish Engulfing on c3
     if (c2['close'] < c2['open'] and c3['close'] > c3['open'] and
         c3['close'] > c2['open'] and c3['open'] < c2['close'] and last['close'] > c3['close']): return True
-        
     return False
 
 # --- دوال إنشاء الصفقات ---
@@ -581,7 +691,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V11.0.0</div>
+            <div class="header-title">بوت التداول V12.0.0</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -639,7 +749,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V11.0.0</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V12.0.0</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -658,13 +768,23 @@ DASHBOARD_TEMPLATE = """
             });
         }
         function manualClose(signalId) {
-            if (!confirm('هل أنت متأكد من رغبتك في إغلاق هذه الصفقة يدويًا؟')) return;
-            fetch('/close_signal/' + signalId, { method: 'POST' })
+            // We use a custom modal instead of confirm()
+            const modalHTML = `<div id="confirm-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;"><div style="background: var(--bg-surface); padding: 25px; border-radius: 12px; text-align: center; border: 1px solid #333;"><p style="margin-bottom: 20px;">هل أنت متأكد من إغلاق الصفقة يدويًا؟</p><button id="confirm-yes" class="btn">نعم</button><button id="confirm-no" class="btn" style="margin-right: 10px; background-color: #555;">لا</button></div></div>`;
+            document.body.insertAdjacentHTML('beforeend', modalHTML);
+            
+            document.getElementById('confirm-yes').onclick = () => {
+                fetch('/close_signal/' + signalId, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
                     showAlert(data.message, data.success ? 'success' : 'error');
                     if(data.success) setTimeout(() => location.reload(), 1500);
                 });
+                document.getElementById('confirm-modal').remove();
+            };
+            
+            document.getElementById('confirm-no').onclick = () => {
+                document.getElementById('confirm-modal').remove();
+            };
         }
         setInterval(() => location.reload(), 60000);
     </script>
@@ -742,10 +862,10 @@ SETTINGS_TEMPLATE = """
         <div class="settings-form">
             <h3 class="form-section-title">تفعيل الاستراتيجيات</h3>
             <form id="strategies-form">
-                <div class="form-group checkbox-group"><input type="checkbox" id="use_bb_stoch" name="use_bb_stoch" {{ 'checked' if USE_BB_STOCH_STRATEGY else '' }}><label for="use_bb_stoch">استراتيجية BB+Stoch</label></div>
-                <div class="form-group checkbox-group"><input type="checkbox" id="use_macd_ema" name="use_macd_ema" {{ 'checked' if USE_MACD_EMA_STRATEGY else '' }}><label for="use_macd_ema">استراتيجية MACD+EMA</label></div>
-                <div class="form-group checkbox-group"><input type="checkbox" id="use_ema_rsi" name="use_ema_rsi" {{ 'checked' if USE_EMA_RSI_STRATEGY else '' }}><label for="use_ema_rsi">استراتيجية EMA+RSI</label></div>
-                <div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{ 'checked' if USE_PULLBACK_STRATEGY else '' }}><label for="use_pullback">استراتيجية Pullback</label></div>
+                <div class="form-group checkbox-group"><input type="checkbox" id="use_bb_stoch" name="use_bb_stoch" {{ 'checked' if USE_BB_STOCH_STRATEGY else '' }}><label for="use_bb_stoch">استراتيجية BB+Stoch (محسنة)</label></div>
+                <div class="form-group checkbox-group"><input type="checkbox" id="use_macd_ema" name="use_macd_ema" {{ 'checked' if USE_MACD_EMA_STRATEGY else '' }}><label for="use_macd_ema">استراتيجية MACD+EMA (محسنة)</label></div>
+                <div class="form-group checkbox-group"><input type="checkbox" id="use_ema_rsi" name="use_ema_rsi" {{ 'checked' if USE_EMA_RSI_STRATEGY else '' }}><label for="use_ema_rsi">استراتيجية EMA+RSI (محسنة)</label></div>
+                <div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{ 'checked' if USE_PULLBACK_STRATEGY else '' }}><label for="use_pullback">استراتيجية Pullback (محسنة)</label></div>
                 <div class="form-actions"><button type="submit" class="btn">حفظ الاستراتيجيات</button></div>
             </form>
         </div>
@@ -950,14 +1070,15 @@ def main_bot_loop():
                         log_rejection(symbol, "HTF Trend Confirmation Failed"); continue
                     
                     strategy_found = None
-                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy(df_featured): strategy_found = "BB+Stoch"
-                    elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy(df_featured): strategy_found = "MACD+EMA"
-                    elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy(df_featured): strategy_found = "EMA+RSI"
-                    elif USE_PULLBACK_STRATEGY and check_pullback_strategy(df_featured): strategy_found = "Pullback"
+                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB+Stoch (Enhanced)"
+                    elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD+EMA (Enhanced)"
+                    elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA+RSI (Enhanced)"
+                    elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback (Enhanced)"
 
-                    if strategy_found and is_bullish_reversal_pattern(df_featured):
+                    if strategy_found: # No need for separate candle pattern check if strategies are robust
                         logger.info(f"🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
                         create_paper_trade_signal(symbol, df_featured, strategy_found)
+
             logger.info("="*20 + " اكتملت دورة الفحص " + "="*20)
             time.sleep(60 * 5)
         except Exception as e:
@@ -967,9 +1088,7 @@ def main_bot_loop():
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol = signal['symbol']
     entry_price = signal['entry_price']
-    initial_quantity = signal.get('initial_quantity', signal.get('quantity', 0))
     
-    # حساب الربح بناءً على سعر الدخول الأصلي والكمية الأصلية
     profit = ((closing_price - entry_price) / entry_price) * 100
     
     if check_db_connection() and conn:
@@ -1006,7 +1125,6 @@ def manage_open_trades_loop():
 
                 entry, target1, stop = signal.get('entry_price', 0), signal.get('target_price', 0), signal.get('stop_loss', 0)
                 
-                # تحديث السعر الحالي والتقدم في الكاش
                 progress = 0
                 if current_price >= entry and target1 > entry: progress = ((current_price - entry) / (target1 - entry)) * 100
                 elif current_price < entry and entry > stop: progress = ((current_price - entry) / (entry - stop)) * 100
@@ -1015,19 +1133,17 @@ def manage_open_trades_loop():
                         open_signals_cache[symbol]['current_price'] = current_price
                         open_signals_cache[symbol]['progress'] = progress
 
-                # 1. التحقق من ضرب وقف الخسارة (له الأولوية القصوى)
                 if current_price <= stop:
                     close_signal(signal, stop, "SL_HIT")
                     continue
 
-                # 2. آلية أخذ الربح الجزئي عند الهدف الأول
                 if USE_PARTIAL_TAKE_PROFIT and signal['status'] == 'open' and current_price >= target1:
                     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 5)
                     if df is not None and not df.empty:
                         df = calculate_all_features(df)
                         last_rsi = df['rsi'].iloc[-1]
                         
-                        if last_rsi >= PARTIAL_TP_RSI_THRESHOLD: # قوة شرائية، استمر للهدف الثاني
+                        if last_rsi >= PARTIAL_TP_RSI_THRESHOLD:
                             new_quantity = signal['quantity'] / 2
                             target2 = signal['target_price_2']
                             
@@ -1045,20 +1161,18 @@ def manage_open_trades_loop():
                             msg = f"📈 *أخذ ربح جزئي لـ {symbol}*\nتم بيع نصف الكمية عند `{target1:.4f}`.\nالهدف الجديد: `{target2:.4f}`"
                             log_and_notify("info", msg, "PARTIAL_TP")
                             send_telegram_message(msg)
-                            continue # انتقل للصفقة التالية
-                        else: # لا توجد قوة، أغلق الصفقة كاملة
+                            continue
+                        else:
                             close_signal(signal, target1, "TP1_HIT_NO_MOMENTUM")
                             continue
-                    else: # فشل جلب البيانات، أغلق كإجراء وقائي
+                    else:
                         close_signal(signal, target1, "TP1_HIT_DATA_FAIL")
                         continue
 
-                # 3. التحقق من ضرب الهدف النهائي (بعد أخذ الربح الجزئي)
                 if signal['status'] == 'updated' and current_price >= signal['target_price']:
                     close_signal(signal, signal['target_price'], "TP2_HIT")
                     continue
 
-                # 4. آلية وقف الخسارة المتحرك
                 if USE_TRAILING_STOP_LOSS and entry > 0:
                     current_profit_percent = ((current_price - entry) / entry) * 100
                     if current_profit_percent > TRAILING_STOP_TRIGGER_PERCENT:
@@ -1113,7 +1227,7 @@ def update_market_state_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== بدء تشغيل بوت التداول الإلكتروني V11.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== بدء تشغيل بوت التداول الإلكتروني V12.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
