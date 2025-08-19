@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V12.0.0 (استراتيجيات تداول مُحسَّنة)
-# --- التغييرات الرئيسية (V12.0.0):
-# 1. [ميزة] دمج 4 استراتيجيات مُحسَّنة مع شروط إضافية (فوليوم، زخم، MACD فوق الصفر).
-# 2. [ميزة] إضافة دالة متقدمة لكشف الانحراف الإيجابي (Bullish Divergence) لمؤشر RSI.
-# 3. [ميزة] إضافة دالة لتحليل ارتدادات السعر من مستويات فيبوناتشي الرئيسية.
-# 4. [تحسين] تحديث الحلقة الرئيسية لاستدعاء الدوال الجديدة وزيادة دقة الإشارات.
+# ملف c4.py - نسخة V12.1.0 (تحسينات شاملة لنظام التسجيل)
+# --- التغييرات الرئيسية (V12.1.0):
+# 1. [تحسين] إضافة سجلات (logs) مفصلة لكل العمليات الحرجة (قاعدة البيانات, API, إدارة الصفقات).
+# 2. [تحسين] استخدام try-except بشكل مكثف مع معلومات سياقية (مثل الرمز أو معرف الصفقة) لتسهيل تصحيح الأخطاء.
+# 3. [تحسين] إضافة تتبع كامل للخطأ (exc_info=True) للأخطاء الفادحة في الحلقات الرئيسية.
+# 4. [تنظيم] تحديث إصدار البوت في الواجهة والرسائل المسجلة.
 
 import time
 import os
@@ -42,7 +42,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV12.0.0')
+logger = logging.getLogger('CryptoBotV12.1.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -152,7 +152,7 @@ CORS(app)
 # --- دوال تهيئة الخدمات ---
 def init_db(retries: int = 5, delay: int = 5) -> None:
     global conn
-    logger.info("[قاعدة البيانات] تهيئة الاتصال...")
+    logger.info("[DB] Initializing database connection...")
     db_url_to_use = DB_URL
     if 'postgres' in db_url_to_use and 'sslmode' not in db_url_to_use:
         db_url_to_use += f"{'?' if '?' not in db_url_to_use else '&'}sslmode=require"
@@ -178,52 +178,54 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
             conn.commit()
-            logger.info("✅ [قاعدة البيانات] الاتصال وتحديث المخطط بنجاح.")
+            logger.info("✅ [DB] Database connection and schema updated successfully.")
             return
         except Exception as e:
-            logger.error(f"❌ [قاعدة البيانات] خطأ أثناء التهيئة (محاولة {attempt + 1}/{retries}): {e}")
+            logger.error(f"❌ [DB] Error during initialization (Attempt {attempt + 1}/{retries}): {e}")
             if conn: conn.rollback()
             if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [قاعدة البيانات] فشل الاتصال.")
+            else: logger.critical("❌ [DB] Failed to connect to the database. Exiting.")
 
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
-        logger.warning("[قاعدة البيانات] الاتصال مغلق، محاولة إعادة الاتصال...")
+        logger.warning("[DB] Connection is closed. Attempting to reconnect...")
         init_db()
     try:
         if conn and conn.closed == 0:
             with conn.cursor() as cur: cur.execute("SELECT 1;")
             return True
         return False
-    except (OperationalError, InterfaceError):
-        logger.error(f"❌ [قاعدة البيانات] فقدان الاتصال. إعادة الاتصال...")
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] Connection lost: {e}. Reconnecting...")
         init_db()
         return conn is not None and conn.closed == 0
 
 def init_redis() -> None:
     global redis_client
-    logger.info("[Redis] تهيئة الاتصال...")
+    logger.info("[Redis] Initializing connection...")
     try:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
-        logger.info("✅ [Redis] تم الاتصال بنجاح.")
+        logger.info("✅ [Redis] Connected successfully.")
     except redis.exceptions.ConnectionError as e:
-        logger.warning(f"⚠️ [Redis] فشل الاتصال بـ Redis: {e}. سيتم العمل بدون Redis.")
+        logger.warning(f"⚠️ [Redis] Connection failed: {e}. The bot will run without Redis.")
         redis_client = None
 
 # --- دوال المساعدة والإشعارات ---
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error}
     log_methods.get(level.lower(), logger.info)(message)
-    if not check_db_connection() or not conn: return
+    if not check_db_connection() or not conn:
+        logger.error(f"[DB] Could not save notification due to DB connection issue: {message}")
+        return
     try:
         new_notification = {"timestamp": datetime.now(timezone.utc).isoformat(), "type": notification_type, "message": message}
         with notifications_lock: notifications_cache.appendleft(new_notification)
         with conn.cursor() as cur: cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
         conn.commit()
     except Exception as e:
-        logger.error(f"❌ [قاعدة البيانات] فشل حفظ الإشعار: {e}")
+        logger.error(f"❌ [DB] Failed to save notification: {e}")
         if conn: conn.rollback()
 
 def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
@@ -241,13 +243,13 @@ def send_telegram_message(message: str):
     try:
         requests.post(url, json=payload, timeout=10)
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [تليجرام] فشل إرسال الرسالة: {e}")
+        logger.error(f"❌ [Telegram] Failed to send message: {e}")
 
 # --- WebSocket Handler ---
 def handle_socket_message(msg):
     global live_prices
     if msg and 'e' in msg and msg['e'] == 'error':
-        logger.error(f"❌ [WebSocket] خطأ: {msg['m']}")
+        logger.error(f"❌ [WebSocket] Error: {msg['m']}")
         return
     if isinstance(msg, list):
         with live_prices_lock:
@@ -257,21 +259,25 @@ def handle_socket_message(msg):
 
 def start_websocket():
     global ws_manager
-    logger.info("🚀 [WebSocket] بدء مدير WebSocket...")
+    logger.info("🚀 [WebSocket] Starting WebSocket manager...")
     ws_manager = ThreadedWebsocketManager(api_key=API_KEY, api_secret=API_SECRET)
     ws_manager.start()
     ws_manager.start_ticker_socket(callback=handle_socket_message)
-    logger.info("✅ [WebSocket] تم الاشتراك بنجاح في بث الأسعار (!ticker@arr).")
+    logger.info("✅ [WebSocket] Successfully subscribed to ticker stream (!ticker@arr).")
 
 # --- دوال جلب البيانات وحساب المؤشرات ---
 def get_exchange_info_map() -> None:
     global exchange_info_map
     if not client: return
     try:
+        logger.info("[API] Fetching exchange info...")
         info = client.get_exchange_info()
         exchange_info_map = {s['symbol']: s for s in info['symbols']}
+        logger.info(f"[API] Exchange info map created with {len(exchange_info_map)} symbols.")
+    except BinanceAPIException as e:
+        logger.error(f"❌ [API] Binance error fetching exchange info: {e}")
     except Exception as e:
-        logger.error(f"❌ [معلومات المنصة] فشل جلب المعلومات: {e}")
+        logger.error(f"❌ [API] Generic error fetching exchange info: {e}")
 
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     if not client: return []
@@ -279,17 +285,17 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         file_path = os.path.join(script_dir, filename)
         if not os.path.exists(file_path):
-            logger.critical(f"❌ ملف العملات '{filename}' غير موجود!"); return []
+            logger.critical(f"❌ Symbol list file '{filename}' not found!"); return []
         with open(file_path, 'r', encoding='utf-8') as f:
             raw_symbols = {line.strip().upper() for line in f if line.strip() and not line.startswith('#')}
         formatted = {f"{s}USDT" if not s.endswith('USDT') else s for s in raw_symbols}
         if not exchange_info_map: get_exchange_info_map()
         active = {s for s, info in exchange_info_map.items() if info.get('quoteAsset') == 'USDT' and info.get('status') == 'TRADING'}
         validated = sorted(list(formatted.intersection(active)))
-        logger.info(f"✅ تم العثور على {len(validated)} عملة صالحة للتداول.")
+        logger.info(f"✅ Found {len(validated)} valid symbols for trading.")
         return validated
     except Exception as e:
-        logger.error(f"❌ [التحقق من الرموز] خطأ: {e}"); return []
+        logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     if not client: return None
@@ -306,10 +312,15 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         df.set_index('timestamp', inplace=True)
         return df.dropna().astype(float)
+    except BinanceAPIException as e:
+        logger.error(f"❌ [API] Binance error fetching data for {symbol}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"❌ [جلب البيانات] خطأ لـ {symbol}: {e}"); return None
+        logger.error(f"❌ [Data] Generic error fetching data for {symbol}: {e}"); return None
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
+    # This function is assumed to be stable, extensive logging is not added here
+    # to avoid clutter, but can be added if issues are suspected.
     df_calc = df.copy()
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_12'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
@@ -356,9 +367,9 @@ def load_open_signals_to_cache():
             with signal_cache_lock:
                 open_signals_cache.clear()
                 for signal in open_signals: open_signals_cache[signal['symbol']] = dict(signal)
-            logger.info(f"✅ [تحميل] تم تحميل {len(open_signals)} صفقة مفتوحة إلى الذاكرة المؤقتة.")
+            logger.info(f"✅ [Cache] Loaded {len(open_signals)} open signals into cache.")
     except Exception as e:
-        logger.error(f"❌ [تحميل] فشل تحميل الصفقات المفتوحة: {e}")
+        logger.error(f"❌ [Cache] Failed to load open signals: {e}")
 
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
@@ -372,7 +383,7 @@ def load_notifications_to_cache():
                     n['timestamp'] = n['timestamp'].isoformat()
                     notifications_cache.appendleft(dict(n))
     except Exception as e:
-        logger.error(f"❌ [تحميل] فشل تحميل الإشعارات: {e}")
+        logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
     global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
@@ -393,9 +404,9 @@ def load_settings_from_redis():
             with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = strategies.get('USE_MACD_EMA_STRATEGY', True)
             with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = strategies.get('USE_EMA_RSI_STRATEGY', True)
             with pullback_strategy_lock: USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
-        logger.info("✅ تم تحميل الإعدادات المحفوظة من Redis بنجاح.")
+        logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
-        logger.error(f"❌ خطأ في تحميل الإعدادات من Redis: {e}")
+        logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 # --- منطق التداول والفلاتر ---
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
@@ -421,150 +432,88 @@ def is_htf_bullish_confirmation(symbol: str, htf: str = '1h') -> bool:
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
         last = df.iloc[-1]
         return last['close'] > last['ema50'] and last['ema50'] > last['ema200']
-    except Exception: return False
+    except Exception as e:
+        logger.warning(f"[HTF] Could not confirm HTF trend for {symbol}: {e}")
+        return False
 
 # --- دوال مساعدة للاستراتيجيات المحسنة ---
 def check_rsi_bullish_divergence(df: pd.DataFrame, lookback: int = 25) -> bool:
-    """
-    Checks for bullish divergence on RSI.
-    Price makes a lower low, while RSI makes a higher low.
-    """
-    if len(df) < lookback:
-        return False
-    
-    subset = df.iloc[-lookback:]
-    
-    # Find the index of the absolute low in the price subset
-    low_price_idx = subset['low'].idxmin()
-    
-    # Find the index of the absolute low in the RSI subset
-    low_rsi_idx = subset['rsi'].idxmin()
-    
-    # Check if the lows occurred at different times
-    if low_price_idx == low_rsi_idx:
-        return False
-        
-    # Find the second lowest price point before the absolute low
-    price_before_low = subset.loc[:low_price_idx]['low'].iloc[:-1]
-    if price_before_low.empty: return False
-    second_low_price_idx = price_before_low.idxmin()
-
-    # Get values at these points
-    first_low_price = subset.loc[second_low_price_idx]['low']
-    second_low_price = subset.loc[low_price_idx]['low']
-    
-    first_low_rsi = subset.loc[second_low_price_idx]['rsi']
-    second_low_rsi = subset.loc[low_price_idx]['rsi']
-
-    # The condition for bullish divergence
-    if second_low_price < first_low_price and second_low_rsi > first_low_rsi:
-        logger.info(f"[{df.name}] Bullish RSI Divergence detected.")
-        return True
-        
+    if len(df) < lookback: return False
+    try:
+        subset = df.iloc[-lookback:]
+        low_price_idx = subset['low'].idxmin()
+        low_rsi_idx = subset['rsi'].idxmin()
+        if low_price_idx == low_rsi_idx: return False
+        price_before_low = subset.loc[:low_price_idx]['low'].iloc[:-1]
+        if price_before_low.empty: return False
+        second_low_price_idx = price_before_low.idxmin()
+        first_low_price = subset.loc[second_low_price_idx]['low']
+        second_low_price = subset.loc[low_price_idx]['low']
+        first_low_rsi = subset.loc[second_low_price_idx]['rsi']
+        second_low_rsi = subset.loc[low_price_idx]['rsi']
+        if second_low_price < first_low_price and second_low_rsi > first_low_rsi:
+            logger.info(f"[{df.name}] Bullish RSI Divergence detected.")
+            return True
+    except Exception as e:
+        logger.debug(f"[Divergence] Error checking RSI divergence for {df.name}: {e}")
     return False
 
 def check_fibonacci_pullback(df: pd.DataFrame, lookback: int = 50) -> bool:
-    """
-    Checks if the price has pulled back to a key Fibonacci level (0.5 or 0.618).
-    """
-    if len(df) < lookback:
-        return False
-    
-    subset = df.iloc[-lookback:]
-    
-    # Find the highest high and lowest low in the lookback period to define the swing
-    swing_high = subset['high'].max()
-    swing_low = subset['low'].min()
-    
-    if swing_high == swing_low:
-        return False
-
-    # Calculate Fibonacci levels
-    fib_50 = swing_high - 0.5 * (swing_high - swing_low)
-    fib_618 = swing_high - 0.618 * (swing_high - swing_low)
-    
-    last_candle = df.iloc[-1]
-    
-    # Check if the last candle's low touched one of the key fib levels
-    # and closed above it, indicating a bounce.
-    is_at_fib_50 = last_candle['low'] <= fib_50 and last_candle['close'] > fib_50
-    is_at_fib_618 = last_candle['low'] <= fib_618 and last_candle['close'] > fib_618
-
-    if is_at_fib_50 or is_at_fib_618:
-        logger.info(f"[{df.name}] Fibonacci pullback bounce detected.")
-        return True
-        
+    if len(df) < lookback: return False
+    try:
+        subset = df.iloc[-lookback:]
+        swing_high = subset['high'].max()
+        swing_low = subset['low'].min()
+        if swing_high == swing_low: return False
+        fib_50 = swing_high - 0.5 * (swing_high - swing_low)
+        fib_618 = swing_high - 0.618 * (swing_high - swing_low)
+        last_candle = df.iloc[-1]
+        is_at_fib_50 = last_candle['low'] <= fib_50 and last_candle['close'] > fib_50
+        is_at_fib_618 = last_candle['low'] <= fib_618 and last_candle['close'] > fib_618
+        if is_at_fib_50 or is_at_fib_618:
+            logger.info(f"[{df.name}] Fibonacci pullback bounce detected.")
+            return True
+    except Exception as e:
+        logger.debug(f"[Fibonacci] Error checking fib pullback for {df.name}: {e}")
     return False
 
 # --- استراتيجيات التداول المُحسَّنة ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 21: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    bb_breakout = (prev['low'] <= prev['bb_lower'] * 1.001 and 
-                   last['close'] > last['open'] and
-                   last['close'] > last['bb_lower'])
-    
-    stoch_signal = (last['stoch_rsi_k'] < 35 and 
-                    last['stoch_rsi_k'] > prev['stoch_rsi_k'] and
-                    last['rsi'] > 25 and last['rsi'] < 60)
-    
+    bb_breakout = (prev['low'] <= prev['bb_lower'] * 1.001 and last['close'] > last['open'] and last['close'] > last['bb_lower'])
+    stoch_signal = (last['stoch_rsi_k'] < 35 and last['stoch_rsi_k'] > prev['stoch_rsi_k'] and last['rsi'] > 25 and last['rsi'] < 60)
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
-    
     momentum_ok = df[f'roc_{MOMENTUM_PERIOD}'].iloc[-1] > 0
-    
     return bb_breakout and stoch_signal and volume_ok and momentum_ok
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 30: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    macd_cross = (prev['macd'] < prev['macd_signal'] and 
-                  last['macd'] > last['macd_signal'])
-    
-    price_above_ema = (last['close'] > last['ema_12'] and 
-                       last['close'] > last['ema_26'])
-    
+    macd_cross = (prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal'])
+    price_above_ema = (last['close'] > last['ema_12'] and last['close'] > last['ema_26'])
     trend_strength = last['adx'] > 18
-    
     macd_above_zero = last['macd'] > 0
-    
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.1
-    
     return macd_cross and price_above_ema and trend_strength and macd_above_zero and volume_ok
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 30: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    ema_cross = (prev['ema_9'] < prev['ema_12'] and 
-                 last['ema_9'] > last['ema_12'])
-    
+    ema_cross = (prev['ema_9'] < prev['ema_12'] and last['ema_9'] > last['ema_12'])
     rsi_signal = (last['rsi'] > 52 and last['rsi'] < 70)
-    
     price_above_slow_ema = last['close'] > last['ema_26']
-    
     rsi_divergence = check_rsi_bullish_divergence(df)
-    
     volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.15
-    
     return ema_cross and rsi_signal and price_above_slow_ema and (rsi_divergence or volume_ok)
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 50: return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    ema_trend = (last['close'] > last['ema_12'] and 
-                 last['ema_12'] > last['ema_26'])
-    
-    macd_cross = (prev['macd'] < prev['macd_signal'] and 
-                  last['macd'] > last['macd_signal'])
-    
+    ema_trend = (last['close'] > last['ema_12'] and last['ema_12'] > last['ema_26'])
+    macd_cross = (prev['macd'] < prev['macd_signal'] and last['macd'] > last['macd_signal'])
     fib_level_bounce = check_fibonacci_pullback(df)
-    
-    volume_decreasing_then_increasing = (prev['volume'] < df['volume'].rolling(5).mean().iloc[-2] and
-                                         last['volume'] > prev['volume'])
-    
+    volume_decreasing_then_increasing = (prev['volume'] < df['volume'].rolling(5).mean().iloc[-2] and last['volume'] > prev['volume'])
     return ema_trend and macd_cross and fib_level_bounce and volume_decreasing_then_increasing
 
 # --- أنماط الشموع ---
@@ -588,12 +537,13 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         entry_price = last['close']
         atr = last['atr']
         stop_loss = entry_price - (atr * ATR_TS_MULTIPLIER)
-        if entry_price <= stop_loss: return
+        if entry_price <= stop_loss:
+            logger.warning(f"[Signal] Could not create signal for {symbol}: Stop loss ({stop_loss}) would be above entry price ({entry_price}).")
+            return
         
         risk_per_unit = entry_price - stop_loss
         target_price_1 = entry_price + (risk_per_unit * 1.5) 
         target_price_2 = entry_price + (risk_per_unit * 3.0)
-        
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
 
         message = (f"📊 *فتح صفقة ورقية جديدة*\n"
@@ -604,28 +554,36 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                    f"🎯 *الهدف 1:* `{target_price_1:.4f}`\n"
                    f"🎯 *الهدف 2:* `{target_price_2:.4f}`\n"
                    f"🛑 *الوقف:* `{stop_loss:.4f}`")
-        send_telegram_message(message)
-        log_and_notify("info", f"تم فتح صفقة ورقية لـ {symbol}", "PAPER_TRADE_OPEN")
         
-        if check_db_connection() and conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO signals (symbol, entry_price, target_price, target_price_2, stop_loss, status, 
-                                       strategy_name, is_real_trade, quantity, initial_quantity, signal_details) 
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
-                """, (symbol, float(entry_price), float(target_price_1), float(target_price_2), float(stop_loss), 'open',
-                      strategy_name, False, float(quantity), float(quantity), json.dumps({"atr": float(atr)}, cls=NpEncoder)))
-                new_id = cur.fetchone()['id']
-            conn.commit()
-            with signal_cache_lock:
-                open_signals_cache[symbol] = {
-                    'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
-                    'target_price': float(target_price_1), 'target_price_2': float(target_price_2),
-                    'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name, 
-                    'is_real_trade': False, 'quantity': float(quantity), 'initial_quantity': float(quantity)
-                }
+        if not (check_db_connection() and conn):
+            logger.error(f"[DB] Cannot create signal for {symbol}, no database connection.")
+            return
+
+        logger.info(f"[DB] Attempting to insert new signal for {symbol}...")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO signals (symbol, entry_price, target_price, target_price_2, stop_loss, status, 
+                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            """, (symbol, float(entry_price), float(target_price_1), float(target_price_2), float(stop_loss), 'open',
+                  strategy_name, False, float(quantity), float(quantity), json.dumps({"atr": float(atr)}, cls=NpEncoder)))
+            new_id = cur.fetchone()['id']
+        conn.commit()
+        logger.info(f"[DB] Successfully inserted signal for {symbol} with ID: {new_id}.")
+
+        with signal_cache_lock:
+            open_signals_cache[symbol] = {
+                'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
+                'target_price': float(target_price_1), 'target_price_2': float(target_price_2),
+                'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name, 
+                'is_real_trade': False, 'quantity': float(quantity), 'initial_quantity': float(quantity)
+            }
+        
+        send_telegram_message(message)
+        log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
+
     except Exception as e:
-        logger.error(f"❌ خطأ في إنشاء الصفقة الورقية لـ {symbol}: {e}")
+        logger.error(f"❌ [Signal] CRITICAL ERROR creating paper trade for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
 
 # --- قوالب HTML ---
@@ -691,7 +649,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V12.0.0</div>
+            <div class="header-title">بوت التداول V12.1.0</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -749,7 +707,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V12.0.0</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V12.1.0</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -768,7 +726,6 @@ DASHBOARD_TEMPLATE = """
             });
         }
         function manualClose(signalId) {
-            // We use a custom modal instead of confirm()
             const modalHTML = `<div id="confirm-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;"><div style="background: var(--bg-surface); padding: 25px; border-radius: 12px; text-align: center; border: 1px solid #333;"><p style="margin-bottom: 20px;">هل أنت متأكد من إغلاق الصفقة يدويًا؟</p><button id="confirm-yes" class="btn">نعم</button><button id="confirm-no" class="btn" style="margin-right: 10px; background-color: #555;">لا</button></div></div>`;
             document.body.insertAdjacentHTML('beforeend', modalHTML);
             
@@ -946,16 +903,18 @@ def toggle_trading():
     with trading_status_lock:
         is_trading_enabled = not is_trading_enabled
         status = "مفعل" if is_trading_enabled else "معطل"
-        log_and_notify("info", f"تم {status} التداول", "TRADING_STATUS")
+        log_and_notify("info", f"Trading has been {'enabled' if is_trading_enabled else 'disabled'}.", "TRADING_STATUS")
         send_telegram_message(f"⚙️ تم {status} التداول")
         return jsonify({"success": True, "message": f"تم {status} التداول"})
 
 @app.route('/close_signal/<int:signal_id>', methods=['POST'])
 def manual_close_signal_route(signal_id):
+    logger.info(f"[Manual Close] Received request to close signal ID: {signal_id}")
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
     
     if not signal_to_close:
+        logger.warning(f"[Manual Close] Signal ID {signal_id} not found in open signals cache.")
         return jsonify({"success": False, "message": "لم يتم العثور على الصفقة"}), 404
 
     symbol = signal_to_close['symbol']
@@ -963,6 +922,7 @@ def manual_close_signal_route(signal_id):
         current_price = live_prices.get(symbol)
 
     if not current_price:
+        logger.error(f"[Manual Close] No live price available for {symbol} to close signal {signal_id}.")
         return jsonify({"success": False, "message": "لا يوجد سعر حالي متاح للإغلاق"}), 500
 
     close_signal(signal_to_close, current_price, "MANUAL_CLOSE")
@@ -976,9 +936,10 @@ def toggle_paper_trading():
         data = request.json
         paper_trading_mode = data.get('paper_trading_mode', True)
         mode = "ورقي" if paper_trading_mode else "حقيقي"
-        log_and_notify("info", f"تم تغيير وضع التداول إلى: {mode}", "TRADING_MODE")
+        log_and_notify("info", f"Trading mode changed to: {'Paper' if paper_trading_mode else 'Real'}", "TRADING_MODE")
         return jsonify({"success": True, "message": f"تم تغيير وضع التداول إلى: {mode}"})
     except Exception as e:
+        logger.error(f"[Settings] Error toggling paper trading mode: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/update_settings', methods=['POST'])
@@ -995,9 +956,10 @@ def update_settings():
                 'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'BUY_CONFIDENCE_THRESHOLD': BUY_CONFIDENCE_THRESHOLD,
                 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'MIN_PROFIT_PERCENT': MIN_PROFIT_PERCENT
             }))
-        log_and_notify("info", "تم تحديث إعدادات التداول", "SETTINGS_UPDATE")
+        log_and_notify("info", "Trading settings have been updated.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات بنجاح"})
     except Exception as e:
+        logger.error(f"[Settings] Error updating settings: {e}")
         return jsonify({"success": False, "message": "خطأ في تحديث الإعدادات"}), 500
 
 @app.route('/update_strategies', methods=['POST'])
@@ -1014,9 +976,10 @@ def update_strategies():
                 'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY, 'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
                 'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY, 'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY
             }))
-        log_and_notify("info", "تم تحديث تفعيل الاستراتيجيات", "STRATEGY_UPDATE")
+        log_and_notify("info", "Strategy activation settings have been updated.", "STRATEGY_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الاستراتيجيات بنجاح"})
     except Exception as e:
+        logger.error(f"[Settings] Error updating strategies: {e}")
         return jsonify({"success": False, "message": "خطأ في تحديث الاستراتيجيات"}), 500
 
 @app.route('/reset_settings', methods=['POST'])
@@ -1034,14 +997,15 @@ def reset_settings():
         with pullback_strategy_lock: USE_PULLBACK_STRATEGY = True
         if redis_client:
             redis_client.delete('trading_settings', 'strategy_settings')
-        log_and_notify("info", "تمت إعادة تعيين الإعدادات إلى القيم الافتراضية", "SETTINGS_RESET")
+        log_and_notify("info", "All settings have been reset to their default values.", "SETTINGS_RESET")
         return jsonify({"success": True, "message": "تمت إعادة تعيين الإعدادات"})
     except Exception as e:
+        logger.error(f"[Settings] Error resetting settings: {e}")
         return jsonify({"success": False, "message": "خطأ في إعادة تعيين الإعدادات"}), 500
 
 # --- حلقات العمل الخلفية ---
 def main_bot_loop():
-    logger.info("🚀 [الحلقة الرئيسية] بدء حلقة البحث عن الإشارات...")
+    logger.info("🚀 [Main Loop] Starting signal scanning loop...")
     while True:
         try:
             with trading_status_lock:
@@ -1050,20 +1014,23 @@ def main_bot_loop():
             
             with signal_cache_lock:
                 if len(open_signals_cache) >= MAX_OPEN_TRADES:
-                    logger.info(f"وصل الحد الأقصى للصفقات ({MAX_OPEN_TRADES}). إيقاف البحث مؤقتًا.")
+                    logger.info(f"[Main Loop] Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan.")
                     time.sleep(60 * 2)
                     continue
 
-            logger.info("="*20 + " بدء دورة فحص جديدة " + "="*20)
+            logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for i in range(0, len(validated_symbols_to_scan), SYMBOL_PROCESSING_BATCH_SIZE):
                 batch = validated_symbols_to_scan[i:i + SYMBOL_PROCESSING_BATCH_SIZE]
                 for symbol in batch:
                     with signal_cache_lock:
                         if symbol in open_signals_cache: continue
+                    
                     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                     if df is None or df.empty or len(df) < 50:
                         log_rejection(symbol, "Insufficient Historical Data"); continue
+                    
                     df_featured = calculate_all_features(df); df_featured.name = symbol
+                    
                     if not check_market_volatility_filter(df_featured): continue
                     if not check_trend_strength_filter(df_featured): continue
                     if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME):
@@ -1075,40 +1042,50 @@ def main_bot_loop():
                     elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA+RSI (Enhanced)"
                     elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback (Enhanced)"
 
-                    if strategy_found: # No need for separate candle pattern check if strategies are robust
-                        logger.info(f"🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
+                    if strategy_found:
+                        logger.info(f"🌟 [Signal Found] Confirmed signal for {symbol}! Strategy: {strategy_found}")
                         create_paper_trade_signal(symbol, df_featured, strategy_found)
 
-            logger.info("="*20 + " اكتملت دورة الفحص " + "="*20)
+            logger.info("="*20 + " Scan Cycle Completed " + "="*20)
             time.sleep(60 * 5)
         except Exception as e:
-            logger.error(f"❌ [الحلقة الرئيسية] حدث خطأ فادح: {e}", exc_info=True)
+            logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol = signal['symbol']
+    signal_id = signal['id']
     entry_price = signal['entry_price']
     
     profit = ((closing_price - entry_price) / entry_price) * 100
     
-    if check_db_connection() and conn:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE signals SET status = 'closed', closing_price = %s, closed_at = %s, profit_percentage = %s, closing_reason = %s WHERE id = %s",
-                            (closing_price, datetime.now(timezone.utc), profit, reason, signal['id']))
-            conn.commit()
-            log_and_notify("info", f"تم إغلاق صفقة {symbol} بسبب: {reason}. الربح: {profit:.2f}%", "TRADE_CLOSED")
-            send_telegram_message(f"✅ *إغلاق صفقة {symbol}*\n*السبب:* {reason}\n*الربح:* `{profit:.2f}%`")
-        except Exception as e:
-            logger.error(f"❌ [قاعدة البيانات] فشل تحديث إغلاق الصفقة لـ {symbol}: {e}")
-            if conn: conn.rollback()
+    if not (check_db_connection() and conn):
+        logger.error(f"❌ [DB] Cannot close signal {signal_id} for {symbol}, no database connection.")
+        return
+
+    try:
+        logger.info(f"[DB] Attempting to close signal {signal_id} for {symbol} in database. Reason: {reason}")
+        with conn.cursor() as cur:
+            cur.execute("UPDATE signals SET status = 'closed', closing_price = %s, closed_at = %s, profit_percentage = %s, closing_reason = %s WHERE id = %s",
+                        (closing_price, datetime.now(timezone.utc), profit, reason, signal_id))
+        conn.commit()
+        logger.info(f"[DB] Successfully closed signal {signal_id} for {symbol}.")
+        
+        log_and_notify("info", f"Closed trade for {symbol} due to: {reason}. Profit: {profit:.2f}%", "TRADE_CLOSED")
+        send_telegram_message(f"✅ *إغلاق صفقة {symbol}*\n*السبب:* {reason}\n*الربح:* `{profit:.2f}%`")
             
-    with signal_cache_lock:
-        if symbol in open_signals_cache:
-            del open_signals_cache[symbol]
+    except Exception as e:
+        logger.error(f"❌ [DB] Failed to update signal {signal_id} for {symbol} to closed status: {e}", exc_info=True)
+        if conn: conn.rollback()
+            
+    finally:
+        with signal_cache_lock:
+            if symbol in open_signals_cache:
+                del open_signals_cache[symbol]
+                logger.info(f"[Cache] Removed closed signal {signal_id} ({symbol}) from cache.")
 
 def manage_open_trades_loop():
-    logger.info("🚀 [إدارة الصفقات] بدء حلقة إدارة الصفقات المفتوحة...")
+    logger.info("🚀 [Trade Manager] Starting open trades management loop...")
     while True:
         try:
             with signal_cache_lock: open_signals_copy = list(open_signals_cache.values())
@@ -1147,6 +1124,7 @@ def manage_open_trades_loop():
                             new_quantity = signal['quantity'] / 2
                             target2 = signal['target_price_2']
                             
+                            logger.info(f"[Trade Manager] Partial TP for {symbol}. RSI ({last_rsi:.2f}) is strong. Updating target to TP2.")
                             if check_db_connection() and conn:
                                 with conn.cursor() as cur:
                                     cur.execute("UPDATE signals SET status = 'updated', target_price = %s, quantity = %s WHERE id = %s",
@@ -1163,9 +1141,11 @@ def manage_open_trades_loop():
                             send_telegram_message(msg)
                             continue
                         else:
+                            logger.info(f"[Trade Manager] Closing full position for {symbol} at TP1. RSI ({last_rsi:.2f}) is weak.")
                             close_signal(signal, target1, "TP1_HIT_NO_MOMENTUM")
                             continue
                     else:
+                        logger.warning(f"[Trade Manager] Could not fetch data for {symbol} at TP1. Closing as a precaution.")
                         close_signal(signal, target1, "TP1_HIT_DATA_FAIL")
                         continue
 
@@ -1185,15 +1165,15 @@ def manage_open_trades_loop():
                             with signal_cache_lock:
                                 if symbol in open_signals_cache:
                                     open_signals_cache[symbol]['stop_loss'] = new_stop_loss
-                            log_and_notify("info", f"تم تحديث وقف الخسارة لـ {symbol} إلى {new_stop_loss:.4f}", "TSL_UPDATE")
+                            log_and_notify("info", f"Trailing stop loss for {symbol} updated to {new_stop_loss:.4f}", "TSL_UPDATE")
 
             time.sleep(1)
         except Exception as e:
-            logger.error(f"❌ [إدارة الصفقات] حدث خطأ: {e}", exc_info=True)
+            logger.error(f"❌ [Trade Manager] A critical error occurred: {e}", exc_info=True)
             time.sleep(10)
 
 def update_market_state_loop():
-    logger.info("🚀 [حالة السوق] بدء حلقة تحديث حالة السوق...")
+    logger.info("🚀 [Market State] Starting market state update loop...")
     while True:
         try:
             trend_details, bullish_count = {}, 0
@@ -1222,23 +1202,23 @@ def update_market_state_loop():
                 current_market_state.update({'overall_regime': overall_regime, 'trend_details_by_tf': trend_details, 'last_updated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')})
             time.sleep(60 * 5)
         except Exception as e:
-            logger.error(f"❌ [حالة السوق] حدث خطأ: {e}", exc_info=True)
+            logger.error(f"❌ [Market State] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== بدء تشغيل بوت التداول الإلكتروني V12.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V12.1.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
         client = Client(API_KEY, API_SECRET); client.ping()
-        logger.info("✅ [Binance] الاتصال بالمنصة ناجح.")
+        logger.info("✅ [Binance] API connection successful.")
     except Exception as e:
-        logger.critical(f"❌ [Binance] فشل الاتصال بالمنصة: {e}"); exit(1)
+        logger.critical(f"❌ [Binance] API connection failed: {e}"); exit(1)
     get_exchange_info_map()
     validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
-        logger.critical("❌ لا توجد عملات صالحة للمسح. سيتم إيقاف البوت."); exit(1)
+        logger.critical("❌ No valid symbols to scan. The bot will exit."); exit(1)
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
@@ -1246,5 +1226,5 @@ if __name__ == '__main__':
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=manage_open_trades_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
-    logger.info("🌐 [Flask] بدء تشغيل واجهة المستخدم على http://127.0.0.1:5000")
+    logger.info("🌐 [Flask] Starting user interface on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
