@@ -1,9 +1,7 @@
-# ملف c4.py - نسخة V10.1.0 (إصلاح وإعادة تفعيل صفحة الإعدادات)
-# --- التغييرات الرئيسية (V10.1.0):
-# 1. [إصلاح] إعادة إضافة صفحة الإعدادات (/settings) التي تم حذفها عن طريق الخطأ.
-# 2. [تصميم] تصميم صفحة الإعدادات لتتوافق مع الوضع الليلي الجديد.
-# 3. [ميزة] تفعيل إمكانية تعديل إعدادات التداول والاستراتيجيات وحفظها.
-# 4. [ميزة] إضافة إمكانية حفظ الإعدادات في Redis واسترجاعها عند إعادة التشغيل.
+# ملف c4.py - نسخة V10.1.1 (إصلاح خطأ أعمدة البيانات)
+# --- التغييرات الرئيسية (V10.1.1):
+# 1. [إصلاح] معالجة خطأ "6 columns passed, passed data had 12 columns".
+# 2. [تحسين] التأكد من أن دالة جلب البيانات التاريخية تقوم بقص البيانات القادمة من Binance بشكل صحيح إلى 6 أعمدة فقط (OHLCV + Timestamp).
 
 import time
 import os
@@ -42,7 +40,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV10.1.0')
+logger = logging.getLogger('CryptoBotV10.1.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -289,8 +287,15 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         lookback_str = f"{days} day ago UTC"
         klines = client.get_historical_klines(symbol, interval, lookback_str)
         if not klines: return None
+        
+        # --- FIX START ---
+        # The API returns 12 columns, we only need the first 6 for OHLCV and timestamp.
+        processed_klines = [kline[:6] for kline in klines]
+        # --- FIX END ---
+        
         cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df = pd.DataFrame(klines, columns=cols).iloc[:, :6]
+        df = pd.DataFrame(processed_klines, columns=cols) # Use the processed data
+        
         numeric_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -540,7 +545,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V10.1</div>
+            <div class="header-title">بوت التداول V10.1.1</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -586,7 +591,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V10.1</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V10.1.1</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -861,16 +866,13 @@ def main_bot_loop():
                     if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME):
                         log_rejection(symbol, "HTF Trend Confirmation Failed"); continue
                     strategy_found = None
-                    active_strategies = [
-                        ("BB+Stoch", USE_BB_STOCH_STRATEGY, check_bb_stoch_strategy),
-                        ("MACD+EMA", USE_MACD_EMA_STRATEGY, check_macd_ema_strategy),
-                        ("EMA+RSI", USE_EMA_RSI_STRATEGY, check_ema_rsi_strategy),
-                        ("Pullback", USE_PULLBACK_STRATEGY, check_pullback_strategy),
-                    ]
-                    for name, is_active_lock, func in active_strategies:
-                        with is_active_lock: is_active = globals()[is_active_lock.variable_name]
-                        if is_active and func(df_featured):
-                            strategy_found = name; break
+                    
+                    # Check strategies
+                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy(df_featured): strategy_found = "BB+Stoch"
+                    elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy(df_featured): strategy_found = "MACD+EMA"
+                    elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy(df_featured): strategy_found = "EMA+RSI"
+                    elif USE_PULLBACK_STRATEGY and check_pullback_strategy(df_featured): strategy_found = "Pullback"
+
                     if strategy_found and is_bullish_reversal_pattern(df_featured):
                         logger.info(f"🌟 [{symbol}] إشارة مؤكدة! الاستراتيجية: {strategy_found}")
                         create_paper_trade_signal(symbol, df_featured, strategy_found)
@@ -957,7 +959,7 @@ def update_market_state_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== بدء تشغيل بوت التداول الإلكتروني V10.1 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== بدء تشغيل بوت التداول الإلكتروني V10.1.1 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
