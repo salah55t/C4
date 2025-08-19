@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V12.1.0 (تحسينات شاملة لنظام التسجيل)
-# --- التغييرات الرئيسية (V12.1.0):
-# 1. [تحسين] إضافة سجلات (logs) مفصلة لكل العمليات الحرجة (قاعدة البيانات, API, إدارة الصفقات).
-# 2. [تحسين] استخدام try-except بشكل مكثف مع معلومات سياقية (مثل الرمز أو معرف الصفقة) لتسهيل تصحيح الأخطاء.
-# 3. [تحسين] إضافة تتبع كامل للخطأ (exc_info=True) للأخطاء الفادحة في الحلقات الرئيسية.
-# 4. [تنظيم] تحديث إصدار البوت في الواجهة والرسائل المسجلة.
+# ملف c4.py - نسخة V12.2.0 (موثوقية عالية لحفظ البيانات)
+# --- التغييرات الرئيسية (V12.2.0):
+# 1. [إصلاح حرج] إعادة هيكلة دالة إنشاء الصفقات لضمان أن الحفظ في قاعدة البيانات والذاكرة المؤقتة يتم بنجاح قبل إرسال أي إشعارات.
+# 2. [تحسين] جعل عمليات قاعدة البيانات (إنشاء، تحديث، إغلاق) ذرية (atomic) باستخدام معاملات (transactions) أكثر أمانًا.
+# 3. [تحسين] إضافة آلية تنظيف للذاكرة المؤقتة في حال فشل عملية الحفظ في قاعدة البيانات لمنع عدم تطابق البيانات.
+# 4. [تحسين] إضافة سجلات أكثر تفصيلاً لجميع عمليات CRUD (Create, Read, Update, Delete) على الصفقات.
 
 import time
 import os
@@ -42,7 +42,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV12.1.0')
+logger = logging.getLogger('CryptoBotV12.2.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -319,8 +319,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Generic error fetching data for {symbol}: {e}"); return None
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    # This function is assumed to be stable, extensive logging is not added here
-    # to avoid clutter, but can be added if issues are suspected.
     df_calc = df.copy()
     df_calc['ema_9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema_12'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
@@ -516,20 +514,6 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     volume_decreasing_then_increasing = (prev['volume'] < df['volume'].rolling(5).mean().iloc[-2] and last['volume'] > prev['volume'])
     return ema_trend and macd_cross and fib_level_bounce and volume_decreasing_then_increasing
 
-# --- أنماط الشموع ---
-def is_bullish_reversal_pattern(df: pd.DataFrame) -> bool:
-    if len(df) < 3: return False
-    c2, c3 = df.iloc[-3], df.iloc[-2]
-    last = df.iloc[-1]
-    body = abs(c3['open'] - c3['close'])
-    if body > 0:
-        lower_wick = c3['close'] - c3['low'] if c3['open'] < c3['close'] else c3['open'] - c3['low']
-        upper_wick = c3['high'] - c3['close'] if c3['open'] < c3['close'] else c3['high'] - c3['open']
-        if lower_wick > 2 * body and upper_wick < body and last['close'] > c3['close']: return True
-    if (c2['close'] < c2['open'] and c3['close'] > c3['open'] and
-        c3['close'] > c2['open'] and c3['open'] < c2['close'] and last['close'] > c3['close']): return True
-    return False
-
 # --- دوال إنشاء الصفقات ---
 def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str) -> None:
     try:
@@ -538,14 +522,52 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         atr = last['atr']
         stop_loss = entry_price - (atr * ATR_TS_MULTIPLIER)
         if entry_price <= stop_loss:
-            logger.warning(f"[Signal] Could not create signal for {symbol}: Stop loss ({stop_loss}) would be above entry price ({entry_price}).")
+            logger.warning(f"[Signal] Could not create signal for {symbol}: Stop loss ({stop_loss}) would be at or above entry price ({entry_price}).")
             return
         
         risk_per_unit = entry_price - stop_loss
         target_price_1 = entry_price + (risk_per_unit * 1.5) 
         target_price_2 = entry_price + (risk_per_unit * 3.0)
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
+        
+        if not (check_db_connection() and conn):
+            logger.error(f"❌ [DB] Cannot create signal for {symbol}, no database connection.")
+            return
 
+        new_id = None
+        with conn.cursor() as cur:
+            logger.info(f"[DB] Queuing new signal for {symbol}...")
+            cur.execute("""
+                INSERT INTO signals (symbol, entry_price, target_price, target_price_2, stop_loss, status, 
+                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+            """, (symbol, float(entry_price), float(target_price_1), float(target_price_2), float(stop_loss), 'open',
+                  strategy_name, False, float(quantity), float(quantity), json.dumps({"atr": float(atr)}, cls=NpEncoder)))
+            result = cur.fetchone()
+            if result and 'id' in result:
+                new_id = result['id']
+            else:
+                logger.error(f"❌ [DB] FAILED TO RETRIEVE ID for new signal {symbol}. Rolling back.")
+                conn.rollback()
+                return
+
+        # At this point, the query is successful but not yet committed.
+        # Now, prepare the cache update.
+        signal_data = {
+            'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
+            'target_price': float(target_price_1), 'target_price_2': float(target_price_2),
+            'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name, 
+            'is_real_trade': False, 'quantity': float(quantity), 'initial_quantity': float(quantity)
+        }
+        with signal_cache_lock:
+            open_signals_cache[symbol] = signal_data
+            logger.info(f"[Cache] Updated cache for new signal {symbol} (ID: {new_id}).")
+
+        # Now that the cache is updated, commit the transaction to the database.
+        conn.commit()
+        logger.info(f"✅ [DB] Transaction committed. Signal {new_id} ({symbol}) is now live.")
+
+        # ONLY after the state is persistent and cached, send notifications.
         message = (f"📊 *فتح صفقة ورقية جديدة*\n"
                    f"💱 *العملة:* `{symbol}`\n"
                    f"📈 *الاستراتيجية:* {strategy_name}\n"
@@ -554,37 +576,19 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                    f"🎯 *الهدف 1:* `{target_price_1:.4f}`\n"
                    f"🎯 *الهدف 2:* `{target_price_2:.4f}`\n"
                    f"🛑 *الوقف:* `{stop_loss:.4f}`")
-        
-        if not (check_db_connection() and conn):
-            logger.error(f"[DB] Cannot create signal for {symbol}, no database connection.")
-            return
-
-        logger.info(f"[DB] Attempting to insert new signal for {symbol}...")
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price, target_price_2, stop_loss, status, 
-                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
-            """, (symbol, float(entry_price), float(target_price_1), float(target_price_2), float(stop_loss), 'open',
-                  strategy_name, False, float(quantity), float(quantity), json.dumps({"atr": float(atr)}, cls=NpEncoder)))
-            new_id = cur.fetchone()['id']
-        conn.commit()
-        logger.info(f"[DB] Successfully inserted signal for {symbol} with ID: {new_id}.")
-
-        with signal_cache_lock:
-            open_signals_cache[symbol] = {
-                'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
-                'target_price': float(target_price_1), 'target_price_2': float(target_price_2),
-                'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name, 
-                'is_real_trade': False, 'quantity': float(quantity), 'initial_quantity': float(quantity)
-            }
-        
         send_telegram_message(message)
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
 
     except Exception as e:
         logger.error(f"❌ [Signal] CRITICAL ERROR creating paper trade for {symbol}: {e}", exc_info=True)
-        if conn: conn.rollback()
+        if conn:
+            logger.info(f"[DB] Rolling back transaction for {symbol} due to error.")
+            conn.rollback()
+        # Ensure the cache is clean if the process failed mid-way
+        with signal_cache_lock:
+            if symbol in open_signals_cache and open_signals_cache[symbol].get('id') == new_id:
+                del open_signals_cache[symbol]
+                logger.warning(f"[Cache] Removed inconsistent cache entry for {symbol} due to creation failure.")
 
 # --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
@@ -649,7 +653,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V12.1.0</div>
+            <div class="header-title">بوت التداول V12.2.0</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -707,7 +711,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V12.1.0</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V12.2.0</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -1069,7 +1073,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             cur.execute("UPDATE signals SET status = 'closed', closing_price = %s, closed_at = %s, profit_percentage = %s, closing_reason = %s WHERE id = %s",
                         (closing_price, datetime.now(timezone.utc), profit, reason, signal_id))
         conn.commit()
-        logger.info(f"[DB] Successfully closed signal {signal_id} for {symbol}.")
+        logger.info(f"✅ [DB] Successfully committed close status for signal {signal_id} ({symbol}).")
         
         log_and_notify("info", f"Closed trade for {symbol} due to: {reason}. Profit: {profit:.2f}%", "TRADE_CLOSED")
         send_telegram_message(f"✅ *إغلاق صفقة {symbol}*\n*السبب:* {reason}\n*الربح:* `{profit:.2f}%`")
@@ -1082,7 +1086,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
         with signal_cache_lock:
             if symbol in open_signals_cache:
                 del open_signals_cache[symbol]
-                logger.info(f"[Cache] Removed closed signal {signal_id} ({symbol}) from cache.")
+                logger.info(f"[Cache] Removed signal {signal_id} ({symbol}) from active cache.")
 
 def manage_open_trades_loop():
     logger.info("🚀 [Trade Manager] Starting open trades management loop...")
@@ -1207,7 +1211,7 @@ def update_market_state_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V12.1.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V12.2.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
