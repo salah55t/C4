@@ -1,13 +1,14 @@
-# ملف c4.py - نسخة V15.1.0 (النسخة الكاملة والمستقرة)
+# ملف c4.py - نسخة V15.3.0 (إضافة شريط تقدم للصفقات)
 # --- وصف الإصدار:
-# هذا الإصدار هو تجميع نهائي لجميع الميزات والإصلاحات التي تم تطويرها.
-# يحتوي على جميع الدوال اللازمة للتشغيل في ملف واحد.
+# هذا الإصدار يضيف شريط تقدم مرئي للصفقات المفتوحة في لوحة التحكم.
 # 1.  [مكتمل] نظام فلاتر متقدم وقابل للتخصيص لكل استراتيجية.
 # 2.  [مكتمل] نظام إدارة صفقات متقدم يشمل الربح الجزئي والوقف المتحرك.
 # 3.  [مكتمل] إصلاح تلقائي لجدول قاعدة البيانات عند بدء التشغيل.
 # 4.  [مكتمل] لوحة تحكم كاملة بجميع الإعدادات (عامة، استراتيجيات، فلاتر).
 # 5.  [مكتمل] نظام تسجيل رفض فعال للفلاتر الأولية والمخصصة.
 # 6.  [مكتمل] جميع الدوال المساعدة والإشعارات وحلقات العمل الخلفية.
+# 7.  [مكتمل] قسم "اتجاه السوق" في لوحة التحكم للفريمات 15د, 1س, 4س.
+# 8.  [جديد] شريط تقدم مرئي (أخضر/أحمر) لكل صفقة مفتوحة يوضح مدى قرب السعر من الهدف أو الوقف.
 
 import time
 import os
@@ -45,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV15.1.0')
+logger = logging.getLogger('CryptoBotV15.3.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -503,8 +504,8 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
 
 # --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
-<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:1400px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.btn.stop{background-color:var(--danger);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid #333;}.card-title{font-size:18px;font-weight:700;}.scrollable-content{overflow-y:auto;max-height:400px;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item-header{display:flex;justify-content:space-between;}.item-title{font-weight:700;}.item-time{font-size:12px;color:var(--text-medium);}.item-content{font-size:13px;margin-top:5px;}.rejection-item{border-left-color:var(--warning);}.footer{text-align:center;margin-top:30px;padding:15px;color:var(--text-medium);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V15.1.0</div><div class="status-indicator"><div class="status-dot {{'active' if trading_enabled else ''}}"></div><span>{{'نشط' if trading_enabled else 'متوقف'}}</span><button class="btn {{'stop' if trading_enabled else ''}}" onclick="toggleTrading()">{{'إيقاف' if trading_enabled else 'تشغيل'}}</button><a href="/settings" class="btn">الإعدادات</a></div></header><div class="dashboard-grid"><div class="card"><div class="card-header"><div class="card-title">الإشارات المفتوحة ({{open_signals|length}})</div><div class="scrollable-content">{%for symbol, signal in open_signals.items()%}<div class="item"><div class="item-header"><div class="item-title">{{symbol}}</div><div class="item-time" style="color: {{'var(--warning)' if signal.get('status') == 'updated' else 'var(--text-medium)'}};">{{signal.get('status')}}</div></div><div class="item-content">الكمية: {{ "%.4f"|format(signal.get('quantity',0)) }} | الوقف: {{ "%.4f"|format(signal.get('stop_loss',0)) }}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشعارات</div><div class="scrollable-content">{%for notif in notifications%}<div class="item"><div class="item-content">{{notif.get('message','')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">سجل الرفض</div><div class="scrollable-content">{%for rej in rejections%}<div class="item rejection-item"><div class="item-header"><div class="item-title">{{rej.get('symbol','N/A')}}</div></div><div class="item-content">{{rej.get('reason','N/A')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div>{%endfor%}</div></div></div><div class="footer">بوت التداول V15.1.0</div></div><script>function toggleTrading(){fetch('/toggle_trading',{method:'POST'}).then(()=>location.reload());}
-setInterval(()=>location.reload(),60000);</script></body></html>
+<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:1400px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.btn.stop{background-color:var(--danger);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid #333;}.card-title{font-size:18px;font-weight:700;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item-header{display:flex;justify-content:space-between;}.item-title{font-weight:700;}.item-time{font-size:12px;color:var(--text-medium);}.item-content{font-size:13px;margin-top:5px;}.rejection-item{border-left-color:var(--warning);}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;padding:5px 15px;border-radius:20px;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--danger);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.footer{text-align:center;margin-top:30px;padding:15px;color:var(--text-medium);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V15.3.0</div><div class="status-indicator"><div class="status-dot {{'active' if trading_enabled else ''}}"></div><span>{{'نشط' if trading_enabled else 'متوقف'}}</span><button class="btn {{'stop' if trading_enabled else ''}}" onclick="toggleTrading()">{{'إيقاف' if trading_enabled else 'تشغيل'}}</button><a href="/settings" class="btn">الإعدادات</a></div></header><div class="dashboard-grid"><div class="card"><div class="card-header"><div class="card-title">اتجاه السوق (BTC)</div></div><div class="trend-container">{% for tf, data in market_state.trend_details_by_tf.items() %}<div class="trend-item"><div class="trend-label">{{tf}}</div><div class="trend-status {{ 'trend-up' if data.trend == 'Bullish' else 'trend-down' if data.trend == 'Bearish' else 'trend-sideways' }}">{{ 'صاعد' if data.trend == 'Bullish' else 'هابط' if data.trend == 'Bearish' else 'متذبذب' }}</div></div>{% else %}<div style="text-align:center;color:var(--text-medium);">جاري تحميل بيانات السوق...</div>{% endfor %}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشارات المفتوحة ({{open_signals|length}})</div></div><div class="scrollable-content">{%for symbol, signal in open_signals.items()%}<div class="item"><div class="item-header"><div class="item-title">{{symbol}}</div><div class="item-time" style="color: {{'var(--warning)' if signal.get('status') == 'updated' else 'var(--text-medium)'}};">{{signal.get('status')}}</div></div><div class="item-content"><span>الدخول: {{ "%.4f"|format(signal.get('entry_price',0)) }}</span> | <span>الحالي: {{ "%.4f"|format(signal.get('current_price',0)) if signal.get('current_price') else '...' }}</span></div><div class="progress-bar-container">{% if signal.progress_to_tp > 0 %}<div class="progress-bar profit" style="width: {{ signal.progress_to_tp }}%;"></div>{% elif signal.progress_to_sl > 0 %}<div class="progress-bar loss" style="width: {{ signal.progress_to_sl }}%;"></div>{% endif %}</div><div class="item-footer"><span>الوقف: {{ "%.4f"|format(signal.get('stop_loss',0)) }}</span><span>الهدف: {{ "%.4f"|format(signal.get('target_price_1',0)) }}</span></div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشعارات</div></div><div class="scrollable-content">{%for notif in notifications%}<div class="item"><div class="item-content">{{notif.get('message','')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">سجل الرفض</div></div><div class="scrollable-content">{%for rej in rejections%}<div class="item rejection-item"><div class="item-header"><div class="item-title">{{rej.get('symbol','N/A')}}</div></div><div class="item-content">{{rej.get('reason','N/A')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div>{%endfor%}</div></div></div><div class="footer">بوت التداول V15.3.0</div></div><script>function toggleTrading(){fetch('/toggle_trading',{method:'POST'}).then(()=>location.reload());}
+setInterval(()=>location.reload(),30000);</script></body></html>
 """
 SETTINGS_TEMPLATE = """
 <!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>إعدادات البوت</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:900px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.settings-form{background-color:var(--bg-surface);border-radius:12px;padding:25px;margin-bottom:20px;}.form-section-title{font-size:20px;font-weight:700;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid #333;}.form-group{margin-bottom:20px;}.form-group label{display:block;margin-bottom:8px;font-weight:bold;color:var(--text-medium);}.form-group input[type="number"],.form-group select{width:100%;padding:12px;border:1px solid #333;border-radius:8px;background-color:#252525;color:var(--text-light);}.checkbox-group{display:flex;align-items:center;gap:10px;padding:10px;}.filter-table{width:100%;border-collapse:collapse;}.filter-table th,.filter-table td{padding:12px;text-align:right;border-bottom:1px solid #333;}.filter-table select,.filter-table input{width:100%;padding:8px;}</style></head><body><div class="container"><header><div class="header-title">إعدادات البوت</div><a href="/" class="btn">العودة للرئيسية</a></header><div class="settings-form"><h3 class="form-section-title">إعدادات التداول العامة</h3><form id="settings-form"><div class="form-group"><label>نسبة المخاطرة للصفقة (%)</label><input type="number" name="risk_per_trade" step="0.1" value="{{RISK_PER_TRADE_PERCENT}}"></div><div class="form-group"><label>الحد الأقصى للصفقات المفتوحة</label><input type="number" name="max_trades" value="{{MAX_OPEN_TRADES}}"></div><button type="submit" class="btn">حفظ الإعدادات</button></form></div><div class="settings-form"><h3 class="form-section-title">تفعيل الاستراتيجيات</h3><form id="strategies-form"><div class="form-group checkbox-group"><input type="checkbox" id="use_bb_stoch" name="use_bb_stoch" {{'checked' if USE_BB_STOCH_STRATEGY else ''}}><label for="use_bb_stoch">BB+Stoch</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_macd_ema" name="use_macd_ema" {{'checked' if USE_MACD_EMA_STRATEGY else ''}}><label for="use_macd_ema">MACD+EMA</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_ema_rsi" name="use_ema_rsi" {{'checked' if USE_EMA_RSI_STRATEGY else ''}}><label for="use_ema_rsi">EMA+RSI</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{'checked' if USE_PULLBACK_STRATEGY else ''}}><label for="use_pullback">Pullback</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_momentum_volatility" name="use_momentum_volatility" {{'checked' if USE_MOMENTUM_VOLATILITY_STRATEGY else ''}}><label for="use_momentum_volatility">Momentum</label></div><button type="submit" class="btn">حفظ الاستراتيجيات</button></form></div><div class="settings-form"><h3 class="form-section-title">إعدادات فلاتر الاستراتيجيات</h3><form id="filters-form"><table class="filter-table"><thead><tr><th>الاستراتيجية</th><th>ملف تعريف الفلتر</th><th>حد ADX</th><th>تأكيد HTF</th></tr></thead><tbody>{%for key, config in STRATEGY_FILTER_CONFIG.items()%}<tr><td>{{STRATEGY_NAMES.get(key,key)}}</td><td><select name="{{key}}_profile"><option value="Strict" {{'selected' if config.profile=='Strict'}}>صارم</option><option value="Moderate" {{'selected' if config.profile=='Moderate'}}>متوسط</option><option value="Reversal" {{'selected' if config.profile=='Reversal'}}>انعكاسي</option><option value="Disabled" {{'selected' if config.profile=='Disabled'}}>معطل</option></select></td><td><input type="number" name="{{key}}_adx_threshold" value="{{config.adx_threshold}}"></td><td><select name="{{key}}_htf_confirmation_mode"><option value="Strict" {{'selected' if config.htf_confirmation_mode=='Strict'}}>صارم</option><option value="Relaxed" {{'selected' if config.htf_confirmation_mode=='Relaxed'}}>مخفف</option><option value="Disabled" {{'selected' if config.htf_confirmation_mode=='Disabled'}}>معطل</option></select></td></tr>{%endfor%}</tbody></table><button type="submit" class="btn">حفظ إعدادات الفلاتر</button></form></div></div><script>function setupForm(formId,url){document.getElementById(formId).addEventListener('submit',function(e){e.preventDefault();const formData=new FormData(this);const data=formId==='strategies-form'?Object.fromEntries([...formData.keys()].map(key=>[key,this.querySelector(`[name=${key}]`).checked])):Object.fromEntries(formData.entries());fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(res=>res.json()).then(data=>alert(data.message));});}
@@ -514,11 +515,45 @@ setupForm('settings-form','/update_settings');setupForm('strategies-form','/upda
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard():
-    with signal_cache_lock: open_signals = dict(sorted(open_signals_cache.items()))
     with trading_status_lock: trading_enabled = is_trading_enabled
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
-    return render_template_string(DASHBOARD_TEMPLATE, trading_enabled=trading_enabled, open_signals=open_signals, notifications=notifications, rejections=rejections)
+    with market_state_lock: market_state = dict(current_market_state)
+    with live_prices_lock: live_prices_copy = dict(live_prices)
+
+    open_signals_with_progress = {}
+    with signal_cache_lock:
+        # Sort signals by symbol for consistent ordering
+        sorted_symbols = sorted(open_signals_cache.keys())
+        for symbol in sorted_symbols:
+            signal = open_signals_cache[symbol]
+            signal_data = signal.copy()
+            current_price = live_prices_copy.get(symbol)
+            
+            signal_data['current_price'] = current_price
+            signal_data['progress_to_tp'] = 0
+            signal_data['progress_to_sl'] = 0
+
+            if current_price:
+                entry_price = signal.get('entry_price', 0)
+                stop_loss = signal.get('stop_loss', 0)
+                target_price_1 = signal.get('target_price_1', 0)
+
+                if current_price > entry_price and target_price_1 > entry_price:
+                    progress = ((current_price - entry_price) / (target_price_1 - entry_price)) * 100
+                    signal_data['progress_to_tp'] = min(progress, 100)
+                elif current_price < entry_price and entry_price > stop_loss:
+                    progress = ((entry_price - current_price) / (entry_price - stop_loss)) * 100
+                    signal_data['progress_to_sl'] = min(progress, 100)
+            
+            open_signals_with_progress[symbol] = signal_data
+
+    return render_template_string(DASHBOARD_TEMPLATE, 
+                                  trading_enabled=trading_enabled, 
+                                  open_signals=open_signals_with_progress, 
+                                  notifications=notifications, 
+                                  rejections=rejections,
+                                  market_state=market_state)
 
 @app.route('/settings')
 def settings():
@@ -709,15 +744,27 @@ def update_market_state_loop():
             trend_details = {}
             for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
                 btc_df = fetch_historical_data(BTC_SYMBOL, tf, 30)
-                if btc_df is None or btc_df.empty: continue
-                btc_df['rsi'] = calculate_all_features(btc_df)['rsi']
-                last = btc_df.iloc[-1]
+                if btc_df is None or btc_df.empty: 
+                    trend_details[tf] = {"trend": "Unknown", "rsi": "N/A"}
+                    continue
+                
+                btc_df_featured = calculate_all_features(btc_df)
+                if 'rsi' not in btc_df_featured.columns:
+                    trend_details[tf] = {"trend": "Unknown", "rsi": "N/A"}
+                    continue
+
+                last = btc_df_featured.iloc[-1]
+                rsi_value = last['rsi']
+                
                 trend = "Sideways"
-                if last['rsi'] > 55: trend = "Bullish"
-                elif last['rsi'] < 45: trend = "Bearish"
-                trend_details[tf] = {"trend": trend, "rsi": last['rsi']}
+                if rsi_value > 55: trend = "Bullish"
+                elif rsi_value < 45: trend = "Bearish"
+                
+                trend_details[tf] = {"trend": trend, "rsi": round(rsi_value, 2)}
+
             with market_state_lock:
                 current_market_state.update({'trend_details_by_tf': trend_details, 'last_updated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')})
+            
             time.sleep(60 * 5)
         except Exception as e:
             logger.error(f"❌ [Market State] Error: {e}", exc_info=True)
@@ -725,7 +772,7 @@ def update_market_state_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V15.1.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V15.3.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
