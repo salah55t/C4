@@ -1,10 +1,13 @@
-# ملف c4.py - نسخة V13.2.0 (إصلاح أخطاء المؤشرات وتحسين الأداء)
-# --- التغييرات الرئيسية (V13.2.0):
-# 1. [إصلاح حرج] تم حل خطأ `KeyError` الذي كان يحدث بسبب عدم حساب بعض المؤشرات الفنية (مثل `atr_sma`) في الدالة الرئيسية.
-# 2. [تحسين] تم نقل جميع عمليات حساب المؤشرات الفنية (VWAP, MFI, Force Index, Williams %R, Donchian Channels, Keltner Channels, etc.) إلى الدالة المركزية `calculate_all_features`.
-# 3. [تحسين] تم تبسيط دوال الاستراتيجيات الفردية لإزالة عمليات حساب المؤشرات المكررة، مما يحسن من أداء البوت وسرعة الفحص.
-# 4. [إعادة هيكلة] تم دمج منطق مراقبة وإدارة الصفقات في حلقة واحدة متكاملة (`trade_management_loop`) لزيادة الكفاءة وتجنب التكرار.
-# 5. [تحسين] تم إضافة معالجة للأخطاء في دوال حساب المؤشرات لمنع القسمة على صفر في حال عدم وجود بيانات كافية.
+# ملف c4.py - نسخة V14.0.0 (تحسين الفلاتر وإضافة لوحة تحكم متقدمة)
+# --- التغييرات الرئيسية (V14.0.0):
+# 1. [ميزة جديدة] تم إضافة نظام "ملفات تعريف الفلترة" (Filter Profiles) للتحكم في صرامة البوت.
+#    - الملفات المتاحة: صارم (Strict), متوسط (Moderate), انعكاسي (Reversal), معطل (Disabled).
+# 2. [ميزة جديدة] تم إضافة قسم جديد في لوحة التحكم (صفحة الإعدادات) لإدارة فلاتر كل استراتيجية على حدة.
+#    - يمكن للمستخدم الآن اختيار ملف تعريف الفلترة وتحديد قيمة ADX لكل استراتيجية.
+# 3. [تحسين] تم إعادة هيكلة منطق الفحص في الحلقة الرئيسية (`main_bot_loop`) لاستخدام الإعدادات الديناميكية للفلاتر.
+# 4. [تحسين] تم تعديل دالة تأكيد الاتجاه على الفريم الأعلى (`is_htf_bullish_confirmation`) لتقبل أوضاع مختلفة (Strict, Relaxed).
+# 5. [هيكلة] تم إضافة قاموس جديد `STRATEGY_FILTER_CONFIG` لإدارة إعدادات الفلاتر بشكل مركزي.
+# 6. [تحسين] تم تحديث واجهة المستخدم وقوالب HTML لتعكس الإضافات الجديدة.
 
 import time
 import os
@@ -39,11 +42,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v13_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v14_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV13.2.0')
+logger = logging.getLogger('CryptoBotV14.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -92,6 +95,25 @@ USE_PULLBACK_STRATEGY: bool = True
 pullback_strategy_lock = Lock()
 USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
 momentum_volatility_strategy_lock = Lock()
+
+# --- [جديد] إعدادات الفلاتر الديناميكية للاستراتيجيات ---
+STRATEGY_NAMES = {
+    "BB_Stoch_Strategy": "BB+Stoch (انعكاسية)",
+    "MACD_EMA_Strategy": "MACD+EMA (اتجاهية)",
+    "EMA_RSI_Strategy": "EMA+RSI (مختلطة)",
+    "Pullback_Strategy": "Pullback (انعكاسية)",
+    "Momentum_Volatility_Strategy": "Momentum (زخم)"
+}
+
+STRATEGY_FILTER_CONFIG = {
+    "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
+    "MACD_EMA_Strategy": {"profile": "Strict", "adx_threshold": 22, "htf_confirmation_mode": "Strict"},
+    "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 20, "htf_confirmation_mode": "Relaxed"},
+    "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
+    "Momentum_Volatility_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"},
+}
+strategy_filters_lock = Lock()
+
 
 # --- إعدادات عامة ---
 SIGNAL_GENERATION_TIMEFRAME: str = '15m'
@@ -260,7 +282,7 @@ def start_websocket():
     ws_manager.start_ticker_socket(callback=handle_socket_message)
     logger.info("✅ [WebSocket] Successfully subscribed to ticker stream (!ticker@arr).")
 
-# --- دوال جلب البيانات وحساب المؤشرات (مع إضافات) ---
+# --- دوال جلب البيانات وحساب المؤشرات (بدون تغيير) ---
 def get_exchange_info_map() -> None:
     global exchange_info_map
     if not client: return
@@ -313,7 +335,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Generic error fetching data for {symbol}: {e}"); return None
 
-# --- دالة حساب المؤشرات المركزية (محسنة وشاملة) ---
 def compute_rsi(close_prices: pd.Series, period: int = 14) -> pd.Series:
     delta = close_prices.diff()
     gain = delta.where(delta > 0, 0)
@@ -347,16 +368,12 @@ def compute_williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    
-    # EMAs
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema12'] = df_calc['close'].ewm(span=EMA_FAST_PERIOD, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema26'] = df_calc['close'].ewm(span=EMA_SLOW_PERIOD, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-
-    # ATR and ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -370,8 +387,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=ADX_PERIOD, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=ADX_PERIOD, adjust=False).mean()
-    
-    # RSI and Stochastic RSI
     df_calc['rsi'] = compute_rsi(df_calc['close'], RSI_PERIOD)
     df_calc['rsi9'] = compute_rsi(df_calc['close'], 9)
     df_calc['rsi14'] = compute_rsi(df_calc['close'], 14)
@@ -381,21 +396,15 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     rsi_val = df_calc['rsi']
     stoch_rsi = (rsi_val - rsi_val.rolling(14).min()) / (rsi_val.rolling(14).max() - rsi_val.rolling(14).min()).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi.rolling(3).mean() * 100
-    
-    # Bollinger Bands
     bb_period = 20
     df_calc['bb_middle'] = df_calc['close'].rolling(window=bb_period).mean()
     bb_std = df_calc['close'].rolling(window=bb_period).std()
     df_calc['bb_upper'] = df_calc['bb_middle'] + (bb_std * 2)
     df_calc['bb_lower'] = df_calc['bb_middle'] - (bb_std * 2)
-    
-    # MACD
     exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
     exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    
-    # Other Indicators
     df_calc[f'roc_{MOMENTUM_PERIOD}'] = (df_calc['close'] / df_calc['close'].shift(MOMENTUM_PERIOD) - 1) * 100
     df_calc['atr_sma'] = df_calc['atr'].rolling(window=14).mean()
     df_calc['force_index'] = compute_force_index(df_calc, 13)
@@ -409,10 +418,9 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['vwap'] = compute_vwap(df_calc, 20)
     df_calc['dc_upper'] = df_calc['high'].rolling(window=20).max()
     df_calc['dc_lower'] = df_calc['low'].rolling(window=20).min()
-
     return df_calc
 
-# --- دوال تحميل البيانات الأولية (بدون تغيير) ---
+# --- دوال تحميل البيانات الأولية ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -443,6 +451,7 @@ def load_notifications_to_cache():
 def load_settings_from_redis():
     global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
     global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY
+    global STRATEGY_FILTER_CONFIG
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -452,6 +461,7 @@ def load_settings_from_redis():
             with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = settings.get('BUY_CONFIDENCE_THRESHOLD', 0.53)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             MIN_PROFIT_PERCENT = settings.get('MIN_PROFIT_PERCENT', 0.8)
+        
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
@@ -460,39 +470,94 @@ def load_settings_from_redis():
             with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = strategies.get('USE_EMA_RSI_STRATEGY', True)
             with pullback_strategy_lock: USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
             with momentum_volatility_strategy_lock: USE_MOMENTUM_VOLATILITY_STRATEGY = strategies.get('USE_MOMENTUM_VOLATILITY_STRATEGY', True)
-        logger.info("✅ [Redis] Successfully loaded settings from Redis.")
+
+        # [جديد] تحميل إعدادات الفلاتر
+        filters_data = redis_client.get('strategy_filter_config')
+        if filters_data:
+            with strategy_filters_lock:
+                STRATEGY_FILTER_CONFIG = json.loads(filters_data)
+                logger.info("✅ [Redis] Successfully loaded strategy filter settings from Redis.")
+        else:
+            logger.info("⚠️ [Redis] No strategy filter settings found in Redis, using defaults.")
+
     except Exception as e:
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
-# --- منطق التداول والفلاتر (بدون تغيير) ---
+# --- [مُحَدَّث] منطق التداول والفلاتر الديناميكية ---
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     atr_percent = (last['atr'] / last['close']) * 100
+    # يمكن جعل هذه القيم قابلة للتعديل في المستقبل
     if atr_percent < 0.5 or atr_percent > 5.0:
         log_rejection(df.name, "Market Volatility Filter Failed", {"atr_percent": f"{atr_percent:.2f}"})
         return False
     return True
 
-def check_trend_strength_filter(df: pd.DataFrame) -> bool:
+def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
     last = df.iloc[-1]
-    if last['adx'] < 22:
-        log_rejection(df.name, "Trend Strength Filter Failed", {"adx": f"{last['adx']:.2f}"})
+    if last['adx'] < adx_threshold:
+        log_rejection(df.name, "Trend Strength Filter Failed", {"adx": f"{last['adx']:.2f}", "threshold": adx_threshold})
         return False
     return True
 
-def is_htf_bullish_confirmation(symbol: str, htf: str = '1h') -> bool:
+def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', mode: str = 'Strict') -> bool:
+    if mode == 'Disabled':
+        return True
     try:
         df = fetch_historical_data(symbol, htf, days=40) 
         if df is None or len(df) < 200: return False
         df['ema50']  = df['close'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
         last = df.iloc[-1]
-        return last['close'] > last['ema50'] and last['ema50'] > last['ema200']
+        
+        if mode == 'Strict':
+            return last['close'] > last['ema50'] and last['ema50'] > last['ema200']
+        elif mode == 'Relaxed':
+            # يكفي أن يكون السعر فوق المتوسط 50 (ليس في ترند هابط واضح)
+            return last['close'] > last['ema50']
+        
+        return False # Default case
     except Exception as e:
-        logger.warning(f"[HTF] Could not confirm HTF trend for {symbol}: {e}")
+        logger.warning(f"[HTF] Could not confirm HTF trend for {symbol} (Mode: {mode}): {e}")
         return False
 
-# --- دوال مساعدة للاستراتيجيات المحسنة (بدون تغيير) ---
+# --- [جديد] دالة تطبيق الفلاتر الديناميكية ---
+def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) -> bool:
+    """
+    تطبق هذه الدالة الفلاتر بناءً على الإعدادات المخصصة لكل استراتيجية.
+    """
+    with strategy_filters_lock:
+        config = STRATEGY_FILTER_CONFIG.get(strategy_name)
+    
+    if not config:
+        logger.warning(f"[Filters] No filter configuration found for strategy '{strategy_name}'. Skipping filters.")
+        return True
+
+    profile = config.get("profile", "Strict")
+    
+    # إذا كان ملف التعريف معطلاً، نتجاوز كل الفلاتر
+    if profile == "Disabled":
+        return True
+
+    # 1. فلتر التقلب (دائماً نشط إلا إذا كان الملف معطلاً)
+    if not check_market_volatility_filter(df):
+        return False
+
+    # 2. فلتر قوة الاتجاه (ADX)
+    adx_threshold = config.get("adx_threshold", 22)
+    if not check_trend_strength_filter(df, adx_threshold):
+        return False
+
+    # 3. فلتر تأكيد الاتجاه على الفريم الأعلى (HTF)
+    htf_mode = config.get("htf_confirmation_mode", "Strict")
+    if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME, htf_mode):
+        log_rejection(symbol, "HTF Trend Confirmation Failed", {"mode": htf_mode})
+        return False
+        
+    return True
+
+
+# --- دوال مساعدة للاستراتيجيات (بدون تغيير) ---
 def check_rsi_bullish_divergence(df: pd.DataFrame, lookback: int = 25) -> bool:
     if len(df) < lookback: return False
     try:
@@ -533,7 +598,7 @@ def check_fibonacci_pullback(df: pd.DataFrame, lookback: int = 50) -> bool:
         logger.debug(f"[Fibonacci] Error checking fib pullback for {df.name}: {e}")
     return False
 
-# --- استراتيجيات التداول (مبسطة بعد نقل حساب المؤشرات) ---
+# --- استراتيجيات التداول (بدون تغيير) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     if len(df) < 21: return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -588,7 +653,7 @@ def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
     confirmation_condition = ((last['close'] - last['low']) > (last['high'] - last['low']) * 0.66)
     return (rsi_condition and volatility_condition and trend_condition and volume_condition and breakout_condition and confirmation_condition)
 
-# --- نظام إدارة الصفقات المتقدم (بدون تغيير) ---
+# --- نظام إدارة الصفقات (بدون تغيير) ---
 def calculate_trade_levels(df: pd.DataFrame, strategy_name: str) -> Dict[str, Any]:
     last = df.iloc[-1]
     atr = last['atr']
@@ -618,23 +683,18 @@ def calculate_trade_levels(df: pd.DataFrame, strategy_name: str) -> Dict[str, An
     ]
     return {"entry_price": entry_price, "stop_loss": stop_loss, "target_price_1": target_price_1, "target_price_2": target_price_2, "partial_exit_levels": partial_exit_levels, "trailing_activation": trailing_activation, "atr": atr}
 
-# --- دالة إنشاء الصفقات (مُحَدَّثة) ---
 def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str) -> None:
     try:
         trade_levels = calculate_trade_levels(df, strategy_name)
         entry_price, stop_loss = trade_levels['entry_price'], trade_levels['stop_loss']
         target_price_1, target_price_2 = trade_levels['target_price_1'], trade_levels['target_price_2']
-        
         if entry_price <= stop_loss:
             logger.warning(f"[Signal] Could not create signal for {symbol}: Stop loss ({stop_loss}) would be at or above entry price ({entry_price}).")
             return
-        
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
-        
         if not (check_db_connection() and conn):
             logger.error(f"❌ [DB] Cannot create signal for {symbol}, no database connection.")
             return
-
         signal_details = {
             "atr": trade_levels['atr'], "initial_atr": trade_levels['atr'],
             "partial_exit_levels": trade_levels['partial_exit_levels'],
@@ -642,7 +702,6 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
             "current_trailing_stop": stop_loss, "is_trailing_active": False,
             "last_target_update": time.time()
         }
-
         new_id = None
         with conn.cursor() as cur:
             logger.info(f"[DB] Queuing new signal for {symbol}...")
@@ -658,7 +717,6 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                 logger.error(f"❌ [DB] FAILED TO RETRIEVE ID for new signal {symbol}. Rolling back.")
                 conn.rollback()
                 return
-
         signal_data = {
             'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
             'target_price_1': float(target_price_1), 'target_price_2': float(target_price_2),
@@ -669,10 +727,8 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
         with signal_cache_lock:
             open_signals_cache[symbol] = signal_data
             logger.info(f"[Cache] Updated cache for new signal {symbol} (ID: {new_id}).")
-
         conn.commit()
         logger.info(f"✅ [DB] Transaction committed. Signal {new_id} ({symbol}) is now live.")
-
         message = (f"📊 *فتح صفقة ورقية جديدة*\n"
                    f"💱 *العملة:* `{symbol}`\n"
                    f"📈 *الاستراتيجية:* {strategy_name}\n"
@@ -683,7 +739,6 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                    f"🛑 *الوقف:* `{stop_loss:.4f}`")
         send_telegram_message(message)
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
-
     except Exception as e:
         logger.error(f"❌ [Signal] CRITICAL ERROR creating paper trade for {symbol}: {e}", exc_info=True)
         if conn:
@@ -694,7 +749,7 @@ def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str)
                 del open_signals_cache[symbol]
                 logger.warning(f"[Cache] Removed inconsistent cache entry for {symbol} due to creation failure.")
 
-# --- قوالب HTML (بدون تغيير) ---
+# --- قوالب HTML (بدون تغيير في القالب الرئيسي) ---
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
@@ -757,7 +812,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <header>
-            <div class="header-title">بوت التداول V13.2.0</div>
+            <div class="header-title">بوت التداول V14.0.0</div>
             <div class="status-indicator">
                 <div class="status-dot {{ 'active' if trading_enabled else '' }}"></div>
                 <span>{{ 'نشط' if trading_enabled else 'متوقف' }}</span>
@@ -815,7 +870,7 @@ DASHBOARD_TEMPLATE = """
                 </div>
             </div>
         </div>
-        <div class="footer"><div>بوت التداول الإلكتروني V13.2.0</div></div>
+        <div class="footer"><div>بوت التداول الإلكتروني V14.0.0</div></div>
     </div>
     <script>
         function showAlert(message, type = 'info') {
@@ -836,7 +891,6 @@ DASHBOARD_TEMPLATE = """
         function manualClose(signalId) {
             const modalHTML = `<div id="confirm-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;"><div style="background: var(--bg-surface); padding: 25px; border-radius: 12px; text-align: center; border: 1px solid #333;"><p style="margin-bottom: 20px;">هل أنت متأكد من إغلاق الصفقة يدويًا؟</p><button id="confirm-yes" class="btn">نعم</button><button id="confirm-no" class="btn" style="margin-right: 10px; background-color: #555;">لا</button></div></div>`;
             document.body.insertAdjacentHTML('beforeend', modalHTML);
-            
             document.getElementById('confirm-yes').onclick = () => {
                 fetch('/close_signal/' + signalId, { method: 'POST' })
                 .then(res => res.json())
@@ -846,7 +900,6 @@ DASHBOARD_TEMPLATE = """
                 });
                 document.getElementById('confirm-modal').remove();
             };
-            
             document.getElementById('confirm-no').onclick = () => {
                 document.getElementById('confirm-modal').remove();
             };
@@ -857,6 +910,7 @@ DASHBOARD_TEMPLATE = """
 </html>
 """
 
+# --- [مُحَدَّث] قالب صفحة الإعدادات ---
 SETTINGS_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
@@ -873,7 +927,7 @@ SETTINGS_TEMPLATE = """
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background-color: var(--bg-dark); color: var(--text-light); font-family: 'Tajawal', sans-serif; }
-        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; padding: 20px; }
         header { background-color: var(--bg-surface); padding: 15px 25px; border-radius: 12px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #2a2a2a; }
         .header-title { font-size: 24px; font-weight: 700; color: var(--primary); }
         .btn { background-color: var(--primary-variant); color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; transition: all 0.3s; font-weight: 700; text-decoration: none; }
@@ -882,7 +936,7 @@ SETTINGS_TEMPLATE = """
         .form-section-title { font-size: 20px; font-weight: 700; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid #333; }
         .form-group { margin-bottom: 20px; }
         .form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: var(--text-medium); }
-        .form-group input[type="number"] { width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background-color: #252525; color: var(--text-light); font-size: 16px; }
+        .form-group input[type="number"], .form-group select { width: 100%; padding: 12px; border: 1px solid #333; border-radius: 8px; background-color: #252525; color: var(--text-light); font-size: 16px; }
         .form-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 25px; gap: 15px; }
         .btn-secondary { background-color: #333; }
         .btn-secondary:hover { background-color: #444; }
@@ -896,6 +950,11 @@ SETTINGS_TEMPLATE = """
         #paper-trading-toggle:checked ~ .labels .paper { background-color: var(--primary); color: white; }
         #paper-trading-toggle:not(:checked) ~ .labels .real { background-color: var(--secondary); color: var(--bg-dark); }
         #paper-trading-toggle { display: none; }
+        .filter-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .filter-table th, .filter-table td { padding: 12px; text-align: right; border-bottom: 1px solid #333; }
+        .filter-table th { color: var(--text-medium); font-size: 14px; }
+        .filter-table td { vertical-align: middle; }
+        .filter-table select, .filter-table input { padding: 8px; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -915,7 +974,7 @@ SETTINGS_TEMPLATE = """
             </label>
         </div>
         <div class="settings-form">
-            <h3 class="form-section-title">إعدادات التداول</h3>
+            <h3 class="form-section-title">إعدادات التداول العامة</h3>
             <form id="settings-form">
                 <div class="form-group"><label for="risk-per-trade">نسبة المخاطرة للصفقة (%)</label><input type="number" id="risk-per-trade" name="risk_per_trade" step="0.1" value="{{ RISK_PER_TRADE_PERCENT }}"></div>
                 <div class="form-group"><label for="buy-confidence">حد الثقة للشراء</label><input type="number" id="buy-confidence" name="buy_confidence" step="0.01" value="{{ BUY_CONFIDENCE_THRESHOLD }}"></div>
@@ -933,6 +992,48 @@ SETTINGS_TEMPLATE = """
                 <div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{ 'checked' if USE_PULLBACK_STRATEGY else '' }}><label for="use_pullback">استراتيجية Pullback</label></div>
                 <div class="form-group checkbox-group"><input type="checkbox" id="use_momentum_volatility" name="use_momentum_volatility" {{ 'checked' if USE_MOMENTUM_VOLATILITY_STRATEGY else '' }}><label for="use_momentum_volatility">استراتيجية التقارب الزخمي-التقلبي</label></div>
                 <div class="form-actions"><button type="submit" class="btn">حفظ الاستراتيجيات</button></div>
+            </form>
+        </div>
+        <!-- [جديد] قسم إعدادات الفلاتر -->
+        <div class="settings-form">
+            <h3 class="form-section-title">إعدادات فلاتر الاستراتيجيات</h3>
+            <form id="filters-form">
+                <table class="filter-table">
+                    <thead>
+                        <tr>
+                            <th>الاستراتيجية</th>
+                            <th>ملف تعريف الفلتر</th>
+                            <th>حد قوة الاتجاه (ADX)</th>
+                            <th>تأكيد الفريم الأعلى (HTF)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for key, config in STRATEGY_FILTER_CONFIG.items() %}
+                        <tr>
+                            <td>{{ STRATEGY_NAMES.get(key, key) }}</td>
+                            <td>
+                                <select name="{{ key }}_profile">
+                                    <option value="Strict" {{ 'selected' if config.profile == 'Strict' }}>صارم</option>
+                                    <option value="Moderate" {{ 'selected' if config.profile == 'Moderate' }}>متوسط</option>
+                                    <option value="Reversal" {{ 'selected' if config.profile == 'Reversal' }}>انعكاسي</option>
+                                    <option value="Disabled" {{ 'selected' if config.profile == 'Disabled' }}>معطل</option>
+                                </select>
+                            </td>
+                            <td><input type="number" name="{{ key }}_adx_threshold" value="{{ config.adx_threshold }}" min="10" max="50"></td>
+                            <td>
+                                <select name="{{ key }}_htf_confirmation_mode">
+                                    <option value="Strict" {{ 'selected' if config.htf_confirmation_mode == 'Strict' }}>صارم</option>
+                                    <option value="Relaxed" {{ 'selected' if config.htf_confirmation_mode == 'Relaxed' }}>مخفف</option>
+                                    <option value="Disabled" {{ 'selected' if config.htf_confirmation_mode == 'Disabled' }}>معطل</option>
+                                </select>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                <div class="form-actions">
+                    <button type="submit" class="btn">حفظ إعدادات الفلاتر</button>
+                </div>
             </form>
         </div>
     </div>
@@ -956,13 +1057,21 @@ SETTINGS_TEMPLATE = """
         document.getElementById('strategies-form').addEventListener('submit', function(e) {
             e.preventDefault();
             const data = { 
-                use_bb_stoch: this.use_bb_stoch.checked, 
-                use_macd_ema: this.use_macd_ema.checked, 
-                use_ema_rsi: this.use_ema_rsi.checked, 
-                use_pullback: this.use_pullback.checked,
+                use_bb_stoch: this.use_bb_stoch.checked, use_macd_ema: this.use_macd_ema.checked, 
+                use_ema_rsi: this.use_ema_rsi.checked, use_pullback: this.use_pullback.checked,
                 use_momentum_volatility: this.use_momentum_volatility.checked
             };
             fetch('/update_strategies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(res => res.json()).then(data => showAlert(data.message, data.success ? 'success' : 'error'));
+        });
+        // [جديد] إرسال إعدادات الفلاتر
+        document.getElementById('filters-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+            const data = {};
+            for (let [key, value] of formData.entries()) {
+                data[key] = value;
+            }
+            fetch('/update_filter_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).then(res => res.json()).then(data => showAlert(data.message, data.success ? 'success' : 'error'));
         });
         function resetSettings() {
             const modalHTML = `<div id="confirm-modal" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;"><div style="background: var(--bg-surface); padding: 25px; border-radius: 12px; text-align: center; border: 1px solid #333;"><p style="margin-bottom: 20px;">هل أنت متأكد من إعادة تعيين كافة الإعدادات؟</p><button id="confirm-yes" class="btn">نعم</button><button id="confirm-no" class="btn btn-secondary" style="margin-right: 10px;">لا</button></div></div>`;
@@ -978,7 +1087,7 @@ SETTINGS_TEMPLATE = """
 </html>
 """
 
-# --- مسارات Flask (بدون تغيير) ---
+# --- [مُحَدَّث] مسارات Flask ---
 @app.route('/')
 def dashboard():
     with signal_cache_lock: open_signals = dict(sorted(open_signals_cache.items()))
@@ -1007,7 +1116,14 @@ def settings():
     with ema_rsi_strategy_lock: use_ema = USE_EMA_RSI_STRATEGY
     with pullback_strategy_lock: use_pullback = USE_PULLBACK_STRATEGY
     with momentum_volatility_strategy_lock: use_momentum = USE_MOMENTUM_VOLATILITY_STRATEGY
-    return render_template_string(SETTINGS_TEMPLATE, paper_trading_mode=paper_trading_mode, RISK_PER_TRADE_PERCENT=risk_val, BUY_CONFIDENCE_THRESHOLD=buy_conf, MAX_OPEN_TRADES=MAX_OPEN_TRADES, MIN_PROFIT_PERCENT=MIN_PROFIT_PERCENT, USE_BB_STOCH_STRATEGY=use_bb, USE_MACD_EMA_STRATEGY=use_macd, USE_EMA_RSI_STRATEGY=use_ema, USE_PULLBACK_STRATEGY=use_pullback, USE_MOMENTUM_VOLATILITY_STRATEGY=use_momentum)
+    with strategy_filters_lock: filters_config = STRATEGY_FILTER_CONFIG.copy()
+    return render_template_string(SETTINGS_TEMPLATE, paper_trading_mode=paper_trading_mode, 
+                                RISK_PER_TRADE_PERCENT=risk_val, BUY_CONFIDENCE_THRESHOLD=buy_conf, 
+                                MAX_OPEN_TRADES=MAX_OPEN_TRADES, MIN_PROFIT_PERCENT=MIN_PROFIT_PERCENT, 
+                                USE_BB_STOCH_STRATEGY=use_bb, USE_MACD_EMA_STRATEGY=use_macd, 
+                                USE_EMA_RSI_STRATEGY=use_ema, USE_PULLBACK_STRATEGY=use_pullback, 
+                                USE_MOMENTUM_VOLATILITY_STRATEGY=use_momentum,
+                                STRATEGY_FILTER_CONFIG=filters_config, STRATEGY_NAMES=STRATEGY_NAMES)
 
 @app.route('/toggle_trading', methods=['POST'])
 def toggle_trading():
@@ -1081,27 +1197,66 @@ def update_strategies():
         logger.error(f"[Settings] Error updating strategies: {e}")
         return jsonify({"success": False, "message": "خطأ في تحديث الاستراتيجيات"}), 500
 
+# [جديد] مسار تحديث إعدادات الفلاتر
+@app.route('/update_filter_settings', methods=['POST'])
+def update_filter_settings():
+    global STRATEGY_FILTER_CONFIG
+    try:
+        data = request.json
+        new_config = {}
+        for key in STRATEGY_FILTER_CONFIG.keys():
+            new_config[key] = {
+                "profile": data.get(f"{key}_profile"),
+                "adx_threshold": int(data.get(f"{key}_adx_threshold")),
+                "htf_confirmation_mode": data.get(f"{key}_htf_confirmation_mode")
+            }
+        
+        with strategy_filters_lock:
+            STRATEGY_FILTER_CONFIG = new_config
+        
+        if redis_client:
+            redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
+            
+        log_and_notify("info", "Strategy filter settings have been updated.", "FILTER_SETTINGS_UPDATE")
+        return jsonify({"success": True, "message": "تم تحديث إعدادات الفلاتر بنجاح"})
+    except Exception as e:
+        logger.error(f"[Settings] Error updating filter settings: {e}")
+        return jsonify({"success": False, "message": "خطأ في تحديث إعدادات الفلاتر"}), 500
+
 @app.route('/reset_settings', methods=['POST'])
 def reset_settings():
     global RISK_PER_TRADE_PERCENT, BUY_CONFIDENCE_THRESHOLD, MAX_OPEN_TRADES, MIN_PROFIT_PERCENT
     global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY
+    global STRATEGY_FILTER_CONFIG
     try:
+        # إعادة الإعدادات العامة
         with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = 0.85
         with buy_confidence_lock: BUY_CONFIDENCE_THRESHOLD = 0.53
         MAX_OPEN_TRADES, MIN_PROFIT_PERCENT = 3, 0.8
+        # إعادة تفعيل الاستراتيجيات
         with bb_stoch_strategy_lock: USE_BB_STOCH_STRATEGY = True
         with macd_ema_strategy_lock: USE_MACD_EMA_STRATEGY = True
         with ema_rsi_strategy_lock: USE_EMA_RSI_STRATEGY = True
         with pullback_strategy_lock: USE_PULLBACK_STRATEGY = True
         with momentum_volatility_strategy_lock: USE_MOMENTUM_VOLATILITY_STRATEGY = True
-        if redis_client: redis_client.delete('trading_settings', 'strategy_settings')
+        # [جديد] إعادة إعدادات الفلاتر
+        with strategy_filters_lock:
+            STRATEGY_FILTER_CONFIG = {
+                "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
+                "MACD_EMA_Strategy": {"profile": "Strict", "adx_threshold": 22, "htf_confirmation_mode": "Strict"},
+                "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 20, "htf_confirmation_mode": "Relaxed"},
+                "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
+                "Momentum_Volatility_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"},
+            }
+        
+        if redis_client: redis_client.delete('trading_settings', 'strategy_settings', 'strategy_filter_config')
         log_and_notify("info", "All settings have been reset to their default values.", "SETTINGS_RESET")
         return jsonify({"success": True, "message": "تمت إعادة تعيين الإعدادات"})
     except Exception as e:
         logger.error(f"[Settings] Error resetting settings: {e}")
         return jsonify({"success": False, "message": "خطأ في إعادة تعيين الإعدادات"}), 500
 
-# --- حلقات العمل الخلفية (مع تحديثات) ---
+# --- [مُحَدَّث] حلقة العمل الرئيسية ---
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop...")
     while True:
@@ -1129,11 +1284,6 @@ def main_bot_loop():
                     
                     df_featured = calculate_all_features(df); df_featured.name = symbol
                     
-                    if not check_market_volatility_filter(df_featured): continue
-                    if not check_trend_strength_filter(df_featured): continue
-                    if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME):
-                        log_rejection(symbol, "HTF Trend Confirmation Failed"); continue
-                    
                     strategy_found = None
                     if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                     elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
@@ -1142,8 +1292,14 @@ def main_bot_loop():
                     elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
 
                     if strategy_found:
-                        logger.info(f"🌟 [Signal Found] Confirmed signal for {symbol}! Strategy: {strategy_found}")
-                        create_paper_trade_signal(symbol, df_featured, strategy_found)
+                        # --- [المنطق الجديد] ---
+                        # بدلاً من الفلاتر الثابتة، نستخدم الدالة الديناميكية
+                        if apply_strategy_filters(symbol, df_featured, strategy_found):
+                            logger.info(f"🌟 [Signal Passed Filters] Confirmed signal for {symbol}! Strategy: {strategy_found}")
+                            create_paper_trade_signal(symbol, df_featured, strategy_found)
+                        else:
+                            # سيتم تسجيل سبب الرفض داخل دالة apply_strategy_filters
+                            logger.info(f"Filtered out signal for {symbol} based on dynamic strategy filters.")
 
             logger.info("="*20 + " Scan Cycle Completed " + "="*20)
             time.sleep(60 * 5)
@@ -1151,16 +1307,15 @@ def main_bot_loop():
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
 
+# --- دوال وحلقات أخرى (بدون تغيير) ---
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol = signal['symbol']
     signal_id = signal['id']
     entry_price = signal['entry_price']
     profit = ((closing_price - entry_price) / entry_price) * 100
-    
     if not (check_db_connection() and conn):
         logger.error(f"❌ [DB] Cannot close signal {signal_id} for {symbol}, no database connection.")
         return
-
     try:
         logger.info(f"[DB] Attempting to close signal {signal_id} for {symbol} in database. Reason: {reason}")
         with conn.cursor() as cur:
@@ -1179,7 +1334,6 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                 del open_signals_cache[symbol]
                 logger.info(f"[Cache] Removed signal {signal_id} ({symbol}) from active cache.")
 
-# --- حلقة إدارة الصفقات الموحدة والجديدة ---
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting unified trade management loop...")
     while True:
@@ -1189,33 +1343,22 @@ def trade_management_loop():
                     time.sleep(2)
                     continue
                 symbols_to_monitor = list(open_signals_cache.keys())
-
             for symbol in symbols_to_monitor:
                 with signal_cache_lock:
                     if symbol not in open_signals_cache: continue
                     signal = open_signals_cache[symbol]
-
                 with live_prices_lock:
                     current_price = live_prices.get(symbol)
                 if not current_price: continue
-
                 stop_loss = signal['stop_loss']
                 target_price_2 = signal.get('target_price_2')
-
-                # 1. تحقق من وقف الخسارة
                 if current_price <= stop_loss:
                     close_signal(signal, stop_loss, "SL_HIT")
                     continue
-
-                # 2. تحقق من الهدف النهائي
                 if target_price_2 and current_price >= target_price_2:
                     close_signal(signal, target_price_2, "TP2_HIT")
                     continue
-                
-                # يمكنك إضافة منطق الخروج الجزئي وتحديث الأهداف هنا إذا لزم الأمر
-                # حالياً، التركيز على الإصلاح الأساسي
-
-            time.sleep(1) # حلقة سريعة للتفاعل مع تغيرات السوق
+            time.sleep(1)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] A critical error occurred in management loop: {e}", exc_info=True)
             time.sleep(10)
@@ -1252,7 +1395,7 @@ def update_market_state_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V13.2.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V14.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -1273,4 +1416,3 @@ if __name__ == '__main__':
     Thread(target=update_market_state_loop, daemon=True).start()
     logger.info("🌐 [Flask] Starting user interface on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
