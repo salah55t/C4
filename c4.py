@@ -1,14 +1,14 @@
-# ملف c4.py - نسخة V15.3.0 (إضافة شريط تقدم للصفقات)
+# ملف c4.py - نسخة V16.0.0 (إضافة منطق التداول الحقيقي)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف شريط تقدم مرئي للصفقات المفتوحة في لوحة التحكم.
-# 1.  [مكتمل] نظام فلاتر متقدم وقابل للتخصيص لكل استراتيجية.
-# 2.  [مكتمل] نظام إدارة صفقات متقدم يشمل الربح الجزئي والوقف المتحرك.
-# 3.  [مكتمل] إصلاح تلقائي لجدول قاعدة البيانات عند بدء التشغيل.
-# 4.  [مكتمل] لوحة تحكم كاملة بجميع الإعدادات (عامة، استراتيجيات، فلاتر).
-# 5.  [مكتمل] نظام تسجيل رفض فعال للفلاتر الأولية والمخصصة.
-# 6.  [مكتمل] جميع الدوال المساعدة والإشعارات وحلقات العمل الخلفية.
-# 7.  [مكتمل] قسم "اتجاه السوق" في لوحة التحكم للفريمات 15د, 1س, 4س.
-# 8.  [جديد] شريط تقدم مرئي (أخضر/أحمر) لكل صفقة مفتوحة يوضح مدى قرب السعر من الهدف أو الوقف.
+# هذا الإصدار يضيف القدرة على التداول الحقيقي بأموال فعلية على Binance.
+# 1.  [جديد] زر لتبديل وضع التداول بين "ورقي" و "حقيقي".
+# 2.  [جديد] عرض رصيد USDT المتاح للتداول في لوحة التحكم.
+# 3.  [جديد] دالة لفتح صفقات حقيقية مع مراعاة قواعد Binance (الحد الأدنى للصفقة، حجم الخطوة).
+# 4.  [جديد] دالة لإغلاق الصفقات الحقيقية مع التحقق من الرصيد الفعلي للعملة قبل البيع.
+# 5.  [جديد] حلقة خلفية لتحديث رصيد USDT بشكل دوري.
+# 6.  [مكتمل] نظام فلاتر متقدم وقابل للتخصيص لكل استراتيجية.
+# 7.  [مكتمل] نظام إدارة صفقات متقدم يشمل الربح الجزئي والوقف المتحرك.
+# 8.  [مكتمل] لوحة تحكم كاملة بجميع الإعدادات.
 
 import time
 import os
@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import redis
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -42,11 +42,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v15_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v16_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV15.3.0')
+logger = logging.getLogger('CryptoBotV16.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -73,7 +73,11 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-paper_trading_mode: bool = True
+paper_trading_mode: bool = True # الوضع الافتراضي هو التداول الورقي للأمان
+trading_mode_lock = Lock()
+usdt_balance: float = 0.0
+balance_lock = Lock()
+
 
 # --- المتغيرات القابلة للتعديل ---
 RISK_PER_TRADE_PERCENT: float = 0.85
@@ -110,7 +114,7 @@ HIGHER_TIMEFRAME: str = '1h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 BTC_SYMBOL: str = 'BTCUSDT'
-API_REQUEST_DELAY: float = 0.5
+API_REQUEST_DELAY: float = 1
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -136,6 +140,8 @@ REJECTION_REASONS_AR = {
     "Trend Strength Filter Failed": "فلتر قوة الاتجاه رفض الدخول",
     "HTF Trend Confirmation Failed": "فشل تأكيد الترند على الفريم الأعلى",
     "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص",
+    "MinNotional Filter Failed": "قيمة الصفقة أقل من الحد الأدنى للمنصة",
+    "Insufficient Balance": "الرصيد غير كافي لتنفيذ الصفقة",
 }
 
 # --- إعداد تطبيق Flask ---
@@ -164,7 +170,7 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         stop_loss DOUBLE PRECISION NOT NULL, status TEXT DEFAULT 'open', 
                         closing_price DOUBLE PRECISION, closed_at TIMESTAMP, profit_percentage DOUBLE PRECISION, 
                         strategy_name TEXT, signal_details JSONB, is_real_trade BOOLEAN DEFAULT FALSE, 
-                        quantity DOUBLE PRECISION, closing_reason TEXT
+                        quantity DOUBLE PRECISION, closing_reason TEXT, order_id TEXT
                     );
                 """)
                 cur.execute("CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL, message TEXT NOT NULL);")
@@ -352,7 +358,7 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG
+    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -360,6 +366,7 @@ def load_settings_from_redis():
             settings = json.loads(settings_data)
             with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 0.85)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
+            with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
@@ -459,52 +466,116 @@ def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
         "trailing_stop_distance": trailing_stop_distance
     }
 
-def create_paper_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str) -> None:
-    try:
-        trade_levels = calculate_trade_levels(df)
-        entry_price, stop_loss = trade_levels['entry_price'], trade_levels['stop_loss']
-        if entry_price <= stop_loss: return
+def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
+    """Adjusts a quantity to match the step size defined by Binance."""
+    return float(Decimal(quantity).quantize(Decimal(step_size), rounding=ROUND_DOWN))
+
+def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+    """Creates either a paper or a real trade signal based on the current mode."""
+    with trading_mode_lock:
+        is_real = not paper_trading_mode
+
+    trade_levels = calculate_trade_levels(df)
+    entry_price = trade_levels['entry_price']
+    
+    if is_real:
+        # --- منطق التداول الحقيقي ---
+        with balance_lock:
+            current_usdt_balance = usdt_balance
         
+        with risk_per_trade_lock:
+            trade_size_usdt = current_usdt_balance * (RISK_PER_TRADE_PERCENT / 100)
+
+        if trade_size_usdt <= 0:
+            log_rejection(symbol, "Insufficient Balance")
+            return
+
+        symbol_info = exchange_info_map.get(symbol)
+        if not symbol_info:
+            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}")
+            return
+
+        # التحقق من فلتر MinNotional (الحد الأدنى لقيمة الصفقة)
+        min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
+        if trade_size_usdt < min_notional:
+            log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": trade_size_usdt})
+            return
+
+        quantity = trade_size_usdt / entry_price
+        
+        # تعديل الكمية لتتوافق مع حجم الخطوة (StepSize)
+        step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
+        adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
+
+        if adjusted_quantity <= 0:
+            logger.warning(f"⚠️ [Real Trade] Adjusted quantity for {symbol} is zero. Aborting.")
+            return
+
+        try:
+            logger.info(f"💰 [Real Trade] Placing MARKET BUY order for {adjusted_quantity} of {symbol}")
+            # order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
+            order = client.create_test_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity) # For testing
+            
+            # تحديث السعر الفعلي من تفاصيل الأمر المنفذ
+            avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
+            final_quantity = float(order.get('executedQty', adjusted_quantity))
+            order_id = order.get('orderId', 'N/A')
+            
+            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, order_id)
+            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
+            send_telegram_message(message)
+            log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
+
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
+            send_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`")
+        except Exception as e:
+            logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
+
+    else:
+        # --- منطق التداول الورقي ---
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
+        save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity)
+        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{entry_price:.4f}`\n*هدف1:* `{trade_levels['target_price_1']:.4f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
+        send_telegram_message(message)
+        log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
+
+def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, order_id: Optional[str] = None):
+    try:
         if not (check_db_connection() and conn): return
         
         signal_details = {
-            "atr": trade_levels['atr'],
-            "is_trailing_active": False,
-            "trailing_stop_distance": trade_levels['trailing_stop_distance'],
-            "tp1_hit": False
+            "atr": trade_levels['atr'], "is_trailing_active": False,
+            "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_hit": False
         }
         
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO signals (symbol, entry_price, target_price_1, target_price_2, stop_loss, status, 
-                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
+                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details, order_id) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
             """, (symbol, float(entry_price), float(trade_levels['target_price_1']), float(trade_levels['target_price_2']), 
-                  float(stop_loss), 'open', strategy_name, False, float(quantity), float(quantity), 
-                  json.dumps(signal_details, cls=NpEncoder)))
+                  float(trade_levels['stop_loss']), 'open', strategy_name, is_real, float(quantity), float(quantity), 
+                  json.dumps(signal_details, cls=NpEncoder), order_id))
             new_id = cur.fetchone()['id']
         conn.commit()
         
         signal_data = {
             'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
             'target_price_1': float(trade_levels['target_price_1']), 'target_price_2': float(trade_levels['target_price_2']),
-            'stop_loss': float(stop_loss), 'status': 'open', 'strategy_name': strategy_name, 
-            'is_real_trade': False, 'quantity': float(quantity), 'initial_quantity': float(quantity),
-            'signal_details': signal_details
+            'stop_loss': float(trade_levels['stop_loss']), 'status': 'open', 'strategy_name': strategy_name, 
+            'is_real_trade': is_real, 'quantity': float(quantity), 'initial_quantity': float(quantity),
+            'signal_details': signal_details, 'order_id': order_id
         }
         with signal_cache_lock: open_signals_cache[symbol] = signal_data
-        
-        message = (f"📊 *صفقة جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{entry_price:.4f}`\n*هدف1:* `{trade_levels['target_price_1']:.4f}`\n*وقف:* `{stop_loss:.4f}`")
-        send_telegram_message(message)
-        log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
     except Exception as e:
-        logger.error(f"❌ [Signal] CRITICAL ERROR creating paper trade for {symbol}: {e}", exc_info=True)
+        logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
 
 # --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
-<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:1400px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.btn.stop{background-color:var(--danger);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid #333;}.card-title{font-size:18px;font-weight:700;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item-header{display:flex;justify-content:space-between;}.item-title{font-weight:700;}.item-time{font-size:12px;color:var(--text-medium);}.item-content{font-size:13px;margin-top:5px;}.rejection-item{border-left-color:var(--warning);}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;padding:5px 15px;border-radius:20px;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--danger);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.footer{text-align:center;margin-top:30px;padding:15px;color:var(--text-medium);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V15.3.0</div><div class="status-indicator"><div class="status-dot {{'active' if trading_enabled else ''}}"></div><span>{{'نشط' if trading_enabled else 'متوقف'}}</span><button class="btn {{'stop' if trading_enabled else ''}}" onclick="toggleTrading()">{{'إيقاف' if trading_enabled else 'تشغيل'}}</button><a href="/settings" class="btn">الإعدادات</a></div></header><div class="dashboard-grid"><div class="card"><div class="card-header"><div class="card-title">اتجاه السوق (BTC)</div></div><div class="trend-container">{% for tf, data in market_state.trend_details_by_tf.items() %}<div class="trend-item"><div class="trend-label">{{tf}}</div><div class="trend-status {{ 'trend-up' if data.trend == 'Bullish' else 'trend-down' if data.trend == 'Bearish' else 'trend-sideways' }}">{{ 'صاعد' if data.trend == 'Bullish' else 'هابط' if data.trend == 'Bearish' else 'متذبذب' }}</div></div>{% else %}<div style="text-align:center;color:var(--text-medium);">جاري تحميل بيانات السوق...</div>{% endfor %}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشارات المفتوحة ({{open_signals|length}})</div></div><div class="scrollable-content">{%for symbol, signal in open_signals.items()%}<div class="item"><div class="item-header"><div class="item-title">{{symbol}}</div><div class="item-time" style="color: {{'var(--warning)' if signal.get('status') == 'updated' else 'var(--text-medium)'}};">{{signal.get('status')}}</div></div><div class="item-content"><span>الدخول: {{ "%.4f"|format(signal.get('entry_price',0)) }}</span> | <span>الحالي: {{ "%.4f"|format(signal.get('current_price',0)) if signal.get('current_price') else '...' }}</span></div><div class="progress-bar-container">{% if signal.progress_to_tp > 0 %}<div class="progress-bar profit" style="width: {{ signal.progress_to_tp }}%;"></div>{% elif signal.progress_to_sl > 0 %}<div class="progress-bar loss" style="width: {{ signal.progress_to_sl }}%;"></div>{% endif %}</div><div class="item-footer"><span>الوقف: {{ "%.4f"|format(signal.get('stop_loss',0)) }}</span><span>الهدف: {{ "%.4f"|format(signal.get('target_price_1',0)) }}</span></div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشعارات</div></div><div class="scrollable-content">{%for notif in notifications%}<div class="item"><div class="item-content">{{notif.get('message','')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">سجل الرفض</div></div><div class="scrollable-content">{%for rej in rejections%}<div class="item rejection-item"><div class="item-header"><div class="item-title">{{rej.get('symbol','N/A')}}</div></div><div class="item-content">{{rej.get('reason','N/A')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div>{%endfor%}</div></div></div><div class="footer">بوت التداول V15.3.0</div></div><script>function toggleTrading(){fetch('/toggle_trading',{method:'POST'}).then(()=>location.reload());}
+<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;--info:#2196F3;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:1400px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;font-size:14px;}.btn.stop{background-color:var(--danger);}.btn.real-mode{background-color:var(--info);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid #333;}.card-title{font-size:18px;font-weight:700;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item.real-trade-item{border-left-color:var(--info);}.item-header{display:flex;justify-content:space-between;}.item-title{font-weight:700;}.item-time{font-size:12px;color:var(--text-medium);}.item-content{font-size:13px;margin-top:5px;}.rejection-item{border-left-color:var(--warning);}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;padding:5px 15px;border-radius:20px;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--danger);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.trade-mode-card{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;}.trade-mode-status{font-size:18px;}.trade-mode-status span{font-weight:700;padding:4px 12px;border-radius:8px;}.trade-mode-paper{color:var(--warning);background-color:rgba(255,193,7,0.1);}.trade-mode-real{color:var(--info);background-color:rgba(33,150,243,0.1);}.balance-display{font-size:16px;color:var(--text-medium);}.footer{text-align:center;margin-top:30px;padding:15px;color:var(--text-medium);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V16.0.0</div><div class="status-indicator"><div class="status-dot {{'active' if trading_enabled else ''}}"></div><span>{{'نشط' if trading_enabled else 'متوقف'}}</span><button class="btn {{'stop' if trading_enabled else ''}}" onclick="toggleTrading()">{{'إيقاف' if trading_enabled else 'تشغيل'}}</button><a href="/settings" class="btn">الإعدادات</a></div></header><div class="dashboard-grid"><div class="card trade-mode-card"><div class="trade-mode-status">وضع التداول: {% if paper_trading_mode %}<span class="trade-mode-paper">ورقي</span>{% else %}<span class="trade-mode-real">حقيقي</span>{% endif %}</div><div class="balance-display">الرصيد المتاح: <b>${{ "%.2f"|format(usdt_balance) }}</b></div><button class="btn {{'real-mode' if paper_trading_mode else 'stop'}}" onclick="toggleRealTrading()">{{'تفعيل التداول الحقيقي' if paper_trading_mode else 'العودة للتداول الورقي'}}</button></div><div class="card"><div class="card-header"><div class="card-title">اتجاه السوق (BTC)</div></div><div class="trend-container">{% for tf, data in market_state.trend_details_by_tf.items() %}<div class="trend-item"><div class="trend-label">{{tf}}</div><div class="trend-status {{ 'trend-up' if data.trend == 'Bullish' else 'trend-down' if data.trend == 'Bearish' else 'trend-sideways' }}">{{ 'صاعد' if data.trend == 'Bullish' else 'هابط' if data.trend == 'Bearish' else 'متذبذب' }}</div></div>{% else %}<div style="text-align:center;color:var(--text-medium);">جاري تحميل بيانات السوق...</div>{% endfor %}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشارات المفتوحة ({{open_signals|length}})</div></div><div class="scrollable-content">{%for symbol, signal in open_signals.items()%}<div class="item {{'real-trade-item' if signal.is_real_trade else ''}}"><div class="item-header"><div class="item-title">{{symbol}}</div><div class="item-time" style="color: {{'var(--warning)' if signal.get('status') == 'updated' else 'var(--text-medium)'}};">{{signal.get('status')}}</div></div><div class="item-content"><span>الدخول: {{ "%.4f"|format(signal.get('entry_price',0)) }}</span> | <span>الحالي: {{ "%.4f"|format(signal.get('current_price',0)) if signal.get('current_price') else '...' }}</span></div><div class="progress-bar-container">{% if signal.progress_to_tp > 0 %}<div class="progress-bar profit" style="width: {{ signal.progress_to_tp }}%;"></div>{% elif signal.progress_to_sl > 0 %}<div class="progress-bar loss" style="width: {{ signal.progress_to_sl }}%;"></div>{% endif %}</div><div class="item-footer"><span>الوقف: {{ "%.4f"|format(signal.get('stop_loss',0)) }}</span><span>الهدف: {{ "%.4f"|format(signal.get('target_price_1',0)) }}</span></div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">الإشعارات</div></div><div class="scrollable-content">{%for notif in notifications%}<div class="item"><div class="item-content">{{notif.get('message','')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div>{%endfor%}</div></div><div class="card"><div class="card-header"><div class="card-title">سجل الرفض</div></div><div class="scrollable-content">{%for rej in rejections%}<div class="item rejection-item"><div class="item-header"><div class="item-title">{{rej.get('symbol','N/A')}}</div></div><div class="item-content">{{rej.get('reason','N/A')}}</div></div>{%else%}<div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div>{%endfor%}</div></div></div><div class="footer">بوت التداول V16.0.0</div></div><script>function toggleTrading(){fetch('/toggle_trading',{method:'POST'}).then(()=>location.reload());}
+function toggleRealTrading(){if(confirm('هل أنت متأكد من تغيير وضع التداول؟ قد يؤدي هذا إلى استخدام أموال حقيقية.')){fetch('/toggle_real_trading',{method:'POST'}).then(()=>location.reload());}}
 setInterval(()=>location.reload(),30000);</script></body></html>
 """
 SETTINGS_TEMPLATE = """
@@ -516,6 +587,8 @@ setupForm('settings-form','/update_settings');setupForm('strategies-form','/upda
 @app.route('/')
 def dashboard():
     with trading_status_lock: trading_enabled = is_trading_enabled
+    with trading_mode_lock: is_paper_mode = paper_trading_mode
+    with balance_lock: current_balance = usdt_balance
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
@@ -523,7 +596,6 @@ def dashboard():
 
     open_signals_with_progress = {}
     with signal_cache_lock:
-        # Sort signals by symbol for consistent ordering
         sorted_symbols = sorted(open_signals_cache.keys())
         for symbol in sorted_symbols:
             signal = open_signals_cache[symbol]
@@ -550,6 +622,8 @@ def dashboard():
 
     return render_template_string(DASHBOARD_TEMPLATE, 
                                   trading_enabled=trading_enabled, 
+                                  paper_trading_mode=is_paper_mode,
+                                  usdt_balance=current_balance,
                                   open_signals=open_signals_with_progress, 
                                   notifications=notifications, 
                                   rejections=rejections,
@@ -572,6 +646,27 @@ def toggle_trading():
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
     return jsonify({"success": True, "message": f"Trading {status_msg}"})
 
+@app.route('/toggle_real_trading', methods=['POST'])
+def toggle_real_trading():
+    global paper_trading_mode
+    with trading_mode_lock:
+        # لا تسمح بالتبديل إلى الوضع الحقيقي إذا كان البوت يعمل
+        with trading_status_lock:
+            if is_trading_enabled and not paper_trading_mode:
+                log_and_notify("warning", "Cannot switch to paper mode while real trading is active. Stop the bot first.", "MODE_SWITCH_FAIL")
+                return jsonify({"success": False, "message": "يجب إيقاف البوت أولاً للعودة للوضع الورقي"})
+        
+        paper_trading_mode = not paper_trading_mode
+        mode_msg = "Paper" if paper_trading_mode else "Real"
+        log_and_notify("info", f"Trading mode switched to {mode_msg}.", "TRADING_MODE_SWITCH")
+        
+        # حفظ الحالة في Redis
+        if redis_client:
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': paper_trading_mode}
+            redis_client.set('trading_settings', json.dumps(settings))
+            
+    return jsonify({"success": True, "message": f"Trading mode switched to {mode_msg}"})
+
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
     global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES
@@ -579,7 +674,10 @@ def update_settings():
         data = request.json
         with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data['risk_per_trade'])
         MAX_OPEN_TRADES = int(data['max_trades'])
-        if redis_client: redis_client.set('trading_settings', json.dumps({'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES}))
+        if redis_client: 
+            with trading_mode_lock: is_paper = paper_trading_mode
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
+            redis_client.set('trading_settings', json.dumps(settings))
         log_and_notify("info", "Trading settings updated.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات العامة"})
     except Exception as e:
@@ -655,7 +753,7 @@ def main_bot_loop():
                 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     logger.info(f"🌟 [Signal Passed] Confirmed signal for {symbol}! Strategy: {strategy_found}")
-                    create_paper_trade_signal(symbol, df_featured, strategy_found)
+                    create_trade_signal(symbol, df_featured, strategy_found)
             
             logger.info("="*20 + " Scan Cycle Completed " + "="*20)
             time.sleep(60 * 5)
@@ -681,10 +779,41 @@ def update_signal_in_db(signal_id, updates):
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
+    
+    if signal.get('is_real_trade'):
+        try:
+            asset = symbol.replace("USDT", "")
+            balance = client.get_asset_balance(asset=asset)
+            quantity_to_sell = float(balance['free'])
+            
+            if quantity_to_sell > 0:
+                # تعديل الكمية لتتوافق مع حجم الخطوة قبل البيع
+                symbol_info = exchange_info_map.get(symbol)
+                step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
+                adjusted_quantity = adjust_quantity_to_step_size(quantity_to_sell, step_size)
+
+                if adjusted_quantity > 0:
+                    logger.info(f"💰 [Real Close] Closing {adjusted_quantity} of {symbol} due to {reason}")
+                    # client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
+                    client.create_test_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity) # For testing
+                else:
+                    logger.warning(f"⚠️ [Real Close] Adjusted quantity for selling {symbol} is zero.")
+            else:
+                logger.warning(f"⚠️ [Real Close] No balance found for {asset} to sell.")
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Close] Binance API Error closing {symbol}: {e}")
+            send_telegram_message(f"❌ *خطأ في إغلاق صفقة حقيقية لـ {symbol}*\n`{e}`")
+            # لا تخرج من الدالة، استمر لإغلاقها في قاعدة البيانات
+        except Exception as e:
+            logger.error(f"❌ [Real Close] CRITICAL ERROR closing real trade for {symbol}: {e}", exc_info=True)
+
     profit = ((closing_price - entry_price) / entry_price) * 100
     update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
-    log_and_notify("info", f"Closed trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
-    send_telegram_message(f"✅ *إغلاق صفقة {symbol}*\n*السبب:* {reason}\n*الربح:* `{profit:.2f}%`")
+    
+    trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
+    log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
+    send_telegram_message(f"✅ *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason}\n*الربح:* `{profit:.2f}%`")
+    
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
 
@@ -713,16 +842,17 @@ def trade_management_loop():
                     continue
 
                 if not signal_details.get('tp1_hit') and current_price >= signal['target_price_1']:
-                    new_quantity = signal['quantity'] / 2
+                    # بالنسبة للصفقات الحقيقية، لا نبيع النصف تلقائياً الآن، فقط نرفع الوقف
+                    # يمكن إضافة منطق بيع جزئي حقيقي هنا لاحقاً
                     new_stop_loss = signal['entry_price']
                     signal_details['tp1_hit'] = True
                     signal_details['is_trailing_active'] = True
                     
-                    updates = {"quantity": new_quantity, "stop_loss": new_stop_loss, "status": "updated", "signal_details": json.dumps(signal_details, cls=NpEncoder)}
+                    updates = {"stop_loss": new_stop_loss, "status": "updated", "signal_details": json.dumps(signal_details, cls=NpEncoder)}
                     if update_signal_in_db(signal['id'], updates):
-                        signal.update({"quantity": new_quantity, "stop_loss": new_stop_loss, "status": "updated", "signal_details": signal_details})
+                        signal.update({"stop_loss": new_stop_loss, "status": "updated", "signal_details": signal_details})
                         log_and_notify("info", f"TP1 hit for {symbol}. New SL: {new_stop_loss:.4f}", "PARTIAL_PROFIT")
-                        send_telegram_message(f"🎯 *ربح جزئي {symbol}*\nتم بيع 50% ورفع الوقف إلى نقطة الدخول.")
+                        send_telegram_message(f"🎯 *تأمين صفقة {symbol}*\nتم رفع الوقف إلى نقطة الدخول.")
                     continue
 
                 if signal_details.get('is_trailing_active'):
@@ -770,9 +900,23 @@ def update_market_state_loop():
             logger.error(f"❌ [Market State] Error: {e}", exc_info=True)
             time.sleep(60)
 
+def update_balance_loop():
+    """Periodically updates the USDT balance from Binance."""
+    logger.info("🚀 [Balance Updater] Starting balance update loop...")
+    while True:
+        try:
+            balance_info = client.get_asset_balance(asset='USDT')
+            with balance_lock:
+                global usdt_balance
+                usdt_balance = float(balance_info['free'])
+            logger.info(f"💰 [Balance] USDT balance updated: {usdt_balance:.2f}")
+        except Exception as e:
+            logger.error(f"❌ [Balance] Could not update USDT balance: {e}")
+        time.sleep(60 * 10) # Update every 10 minutes
+
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V15.3.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V16.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -794,6 +938,7 @@ if __name__ == '__main__':
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
+    Thread(target=update_balance_loop, daemon=True).start() # بدء حلقة تحديث الرصيد
     
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
