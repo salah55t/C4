@@ -101,7 +101,7 @@ SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 BTC_SYMBOL: str = 'BTCUSDT'
 SYMBOL_PROCESSING_BATCH_SIZE: int = 5
 TRADING_FEE_PERCENT: float = 0.1
-API_REQUEST_DELAY: float = 0.5
+API_REQUEST_DELAY: float = 1
 API_RETRY_COUNT: int = 3
 API_RETRY_DELAY: float = 5.0
 
@@ -1273,3 +1273,4 @@ if __name__ == '__main__':
     Thread(target=update_market_state_loop, daemon=True).start()
     logger.info("🌐 [Flask] Starting user interface on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
