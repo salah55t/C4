@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V17.5.0 (تحليل الأداء وواجهة محسنة)
+# ملف c4.py - نسخة V17.5.1 (إصلاح خطأ تحليل الأداء)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف ميزات تحليلية قوية ويصلح واجهة المستخدم بشكل كامل.
-# 1.  [جديد] قسم تحليل الأداء: إضافة رسم بياني تفاعلي لتتبع أداء الحساب (Equity Curve) في لوحة التحكم.
-# 2.  [جديد] نظام إشعارات متقدم: إضافة مسار API للتحكم في إعدادات الإشعارات (تفعيل/تعطيل، شروط الربح/الخسارة).
-# 3.  [إصلاح] إصلاح شامل لواجهة التحكم: حل مشكلة تداخل العناصر على الشاشات الصغيرة وتصميم متجاوب.
-# 4.  [مكتمل] الحفاظ على جميع ميزات الإدارة المتقدمة للصفقات من الإصدار V17.4.0.
+# هذا الإصدار يعالج خطأ حرجًا كان يمنع عرض الرسم البياني للأداء.
+# 1.  [إصلاح] إصلاح خطأ 'NoneType' في دالة `/api/performance_data` عن طريق إضافة تحقق للقيم المفقودة في سجلات الصفقات القديمة.
+# 2.  [محسن] تحسين منطق نقطة البداية في الرسم البياني للأداء لعرض أكثر دقة.
+# 3.  [مكتمل] الحفاظ على جميع الميزات من الإصدار V17.5.0.
 
 import time
 import os
@@ -38,11 +37,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v17_5_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v17_5_1_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV17.5.0')
+logger = logging.getLogger('CryptoBotV17.5.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -255,7 +254,6 @@ def get_notification_settings() -> Dict:
         settings_data = redis_client.get('notification_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            # التأكد من وجود جميع المفاتيح
             for key, value in defaults.items():
                 settings.setdefault(key, value)
             return settings
@@ -620,7 +618,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             order_id = order.get('orderId', 'N/A')
             save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, order_id)
             message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
-            send_telegram_message(message, force=True) # إرسال إشعار الصفقة الجديدة دائمًا
+            send_telegram_message(message, force=True)
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
@@ -830,46 +828,56 @@ function render(data){
 }
 
 async function loadPerformanceChart() {
-  const res = await fetch('/api/performance_data');
-  const data = await res.json();
-  const ctx = document.getElementById('performanceChart').getContext('2d');
-  
-  if(performanceChartInstance) {
-      performanceChartInstance.data.labels = data.dates;
-      performanceChartInstance.data.datasets[0].data = data.equity;
-      performanceChartInstance.update();
-      return;
-  }
-
-  performanceChartInstance = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: data.dates,
-      datasets: [{
-        label: 'قيمة الحساب',
-        data: data.equity,
-        borderColor: '#3aa0ff',
-        backgroundColor: 'rgba(58, 160, 255, 0.1)',
-        tension: 0.4,
-        fill: true
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-          x: { ticks: { color: 'var(--muted)' } },
-          y: { ticks: { color: 'var(--muted)' } }
-      }
+  try {
+    const res = await fetch('/api/performance_data');
+    if (!res.ok) { console.error("Failed to fetch performance data"); return; }
+    const data = await res.json();
+    const ctx = document.getElementById('performanceChart').getContext('2d');
+    
+    if(performanceChartInstance) {
+        performanceChartInstance.data.labels = data.dates;
+        performanceChartInstance.data.datasets[0].data = data.equity;
+        performanceChartInstance.update();
+        return;
     }
-  });
+
+    performanceChartInstance = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.dates,
+        datasets: [{
+          label: 'قيمة الحساب',
+          data: data.equity,
+          borderColor: '#3aa0ff',
+          backgroundColor: 'rgba(58, 160, 255, 0.1)',
+          tension: 0.4,
+          fill: true
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+            x: { ticks: { color: 'var(--muted)' } },
+            y: { ticks: { color: 'var(--muted)' } }
+        }
+      }
+    });
+  } catch (error) {
+    console.error("Error loading performance chart:", error);
+  }
 }
 
 async function load(){
-  const res = await fetch('/api/dashboard_data', {cache:'no-cache'});
-  const data = await res.json();
-  render(data);
+  try {
+    const res = await fetch('/api/dashboard_data', {cache:'no-cache'});
+    if (!res.ok) { console.error("Failed to fetch dashboard data"); return; }
+    const data = await res.json();
+    render(data);
+  } catch(error) {
+    console.error("Error loading dashboard data:", error);
+  }
 }
 
 load();
@@ -931,9 +939,10 @@ def dashboard_data():
         logger.error(f"❌ [API Error] Failed to generate dashboard data: {e}", exc_info=True)
         return jsonify({"error": "Failed to load dashboard data."}), 500
 
+# --- [مُصلح] مسار بيانات الأداء ---
 @app.route('/api/performance_data')
 def performance_data():
-    """توفير بيانات الرسم البياني للأداء."""
+    """توفير بيانات الرسم البياني للأداء مع معالجة الأخطاء."""
     if not check_db_connection() or not conn:
         return jsonify({"dates": [], "equity": []})
     try:
@@ -941,26 +950,36 @@ def performance_data():
             cur.execute("""
                 SELECT entry_price, closing_price, initial_quantity, is_real_trade, closed_at 
                 FROM signals 
-                WHERE status = 'closed' AND closed_at IS NOT NULL 
+                WHERE status = 'closed' AND closed_at IS NOT NULL AND is_real_trade = FALSE
                 ORDER BY closed_at ASC;
             """)
             trades = cur.fetchall()
-        
-        dates = [PAPER_TRADE_INITIAL_BALANCE]
+
+        if not trades:
+            return jsonify({"dates": ["بداية"], "equity": [PAPER_TRADE_INITIAL_BALANCE]})
+
+        first_trade_time = trades[0]['closed_at'] - timedelta(minutes=1)
+        dates = [first_trade_time.strftime('%Y-%m-%d %H:%M')]
         equity = [PAPER_TRADE_INITIAL_BALANCE]
         current_equity = PAPER_TRADE_INITIAL_BALANCE
 
         for trade in trades:
-            # حاليًا يحسب للتداول الورقي فقط، يمكن توسيعه للحقيقي
-            if not trade['is_real_trade']:
-                pnl = (trade['closing_price'] - trade['entry_price']) * trade['initial_quantity']
-                current_equity += pnl
-                dates.append(trade['closed_at'].strftime('%Y-%m-%d %H:%M'))
-                equity.append(current_equity)
+            entry_price = trade.get('entry_price')
+            closing_price = trade.get('closing_price')
+            initial_quantity = trade.get('initial_quantity')
+
+            if entry_price is None or closing_price is None or initial_quantity is None:
+                logger.warning(f"Skipping performance calculation for a trade due to missing data: {trade}")
+                continue
+
+            pnl = (closing_price - entry_price) * initial_quantity
+            current_equity += pnl
+            dates.append(trade['closed_at'].strftime('%Y-%m-%d %H:%M'))
+            equity.append(round(current_equity, 2))
         
         return jsonify({"dates": dates, "equity": equity})
     except Exception as e:
-        logger.error(f"❌ [API] Error fetching performance data: {e}")
+        logger.error(f"❌ [API] Error fetching performance data: {e}", exc_info=True)
         return jsonify({"dates": [], "equity": []})
 
 @app.route('/settings')
@@ -1179,14 +1198,11 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     }
     reason_ar = reason_map.get(reason, reason)
     log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
-    
-    # التحقق من شروط الإشعار قبل الإرسال
     settings = get_notification_settings()
     profit_condition = profit >= settings['min_profit_notification']
     loss_condition = profit <= settings['max_loss_notification']
     if profit_condition or loss_condition:
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
-    
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
 
@@ -1320,7 +1336,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.5.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.5.1 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
