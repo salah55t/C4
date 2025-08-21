@@ -381,17 +381,47 @@ def load_settings_from_redis():
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 # --- Filters & Strategies ---
+
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
-    last = df.iloc[-1]
-    atr_percent = last.get('atr_percent', 0)
-    if atr_percent < 0.5 or atr_percent > 7.0:
+    """
+    15m-tuned volatility gate:
+    - Use last ~1 day (96 bars) of ATR% to compute adaptive bounds via percentiles.
+    - Keeps us out of dead markets and extreme whipsaws without being overly strict.
+    """
+    if 'atr_percent' not in df.columns or len(df) < 30:
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
+        return False
+
+    recent = df['atr_percent'].tail(96).dropna()
+    last = float(df.iloc[-1].get('atr_percent', 0))
+
+    if recent.empty:
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
+        return False
+
+    q25 = float(np.percentile(recent, 25))
+    q90 = float(np.percentile(recent, 90))
+    lower = max(0.35, q25 * 0.9)   # allow slightly under the 25th for flexibility
+    upper = min(8.0,  q90 * 1.1)   # cap extremes
+
+    if last < lower or last > upper:
         log_rejection(df.name, "Market Volatility Filter Failed")
         return False
     return True
 
+
 def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
-    last = df.iloc[-1]
-    if last['adx'] < adx_threshold:
+    """
+    15m-tuned trend gate:
+    - Consider the mean of the last 3 ADX values.
+    - Slight tolerance (95%) to avoid being too strict while keeping quality.
+    """
+    if 'adx' not in df.columns or len(df) < 5:
+        log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed")
+        return False
+
+    recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
+    if recent_adx < (adx_threshold * 0.95):
         log_rejection(df.name, "Trend Strength Filter Failed")
         return False
     return True
@@ -424,40 +454,120 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
+
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 21: return False
+    """
+    15m BB+Stoch (Reversal):
+    - Previous close below lower band, current close back above.
+    - StochRSI rising OR bullish body.
+    - RSI improving (current > previous) and not overbought.
+    """
+    if len(df) < 21 or not {'bb_lower','stoch_rsi_k','rsi','open','close'}.issubset(df.columns):
+        return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    signal_condition = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower']) and (last['stoch_rsi_k'] < 30)
-    bullish_confirmation = last['close'] > last['open']
-    if signal_condition and not bullish_confirmation:
+
+    bounce = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower'])
+    stoch_rising = last['stoch_rsi_k'] > prev['stoch_rsi_k']
+    bullish_body = last['close'] > last['open']
+    rsi_improving = last['rsi'] > prev['rsi']
+    not_overbought = last['rsi'] < 70
+
+    signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought
+    if not signal:
         log_rejection(df.name, "Bullish Confirmation Failed")
-    return signal_condition and bullish_confirmation
+    return signal
+
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 30: return False
-    last, prev = df.iloc[-1], df.iloc[-2]
-    return (prev['macd'] < prev['macd_signal']) and (last['macd'] > last['macd_signal']) and (last['close'] > last['ema50'])
+    """
+    15m MACD+EMA (Trend):
+    - MACD cross up OR histogram increasing for 2 bars.
+    - Close above EMA21 and EMA9 > EMA21.
+    - RSI < 70.
+    """
+    needed = {'macd','macd_signal','ema9','ema21','rsi','close'}
+    if len(df) < 30 or not needed.issubset(df.columns):
+        return False
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    macd_cross_up = (prev['macd'] <= prev['macd_signal']) and (last['macd'] > last['macd_signal'])
+    hist_now = last['macd'] - last['macd_signal']
+    hist_prev = prev['macd'] - prev['macd_signal']
+    hist_increasing = (hist_now > hist_prev) and (hist_prev > 0 or macd_cross_up)
+
+    ema_ok = (last['close'] > last['ema21']) and (last['ema9'] > last['ema21'])
+    rsi_ok = last['rsi'] < 70
+
+    return (macd_cross_up or hist_increasing) and ema_ok and rsi_ok
+
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 30: return False
-    last, prev = df.iloc[-1], df.iloc[-2]
-    return (prev['ema9'] < prev['ema21']) and (last['ema9'] > last['ema21']) and (50 < last['rsi'] < 65)
+    """
+    15m EMA+RSI (Mixed):
+    - EMA9 > EMA21 on at least 2 of the last 3 bars.
+    - RSI in 50–65 zone (momentum without overextension).
+    - Accept a mild pullback: low touches EMA9 but close above it.
+    """
+    needed = {'ema9','ema21','rsi','low','close'}
+    if len(df) < 25 or not needed.issubset(df.columns):
+        return False
+
+    last3 = df.tail(3)
+    ema9_over_21 = (last3['ema9'] > last3['ema21']).sum() >= 2
+    last = last3.iloc[-1]
+
+    rsi_ok = 50 <= float(last['rsi']) <= 65
+    pullback_ok = (float(last['low']) <= float(last['ema9'])) and (float(last['close']) > float(last['ema9']))
+
+    return ema9_over_21 and rsi_ok and pullback_ok
+
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 50: return False
+    """
+    15m Pullback (Re-entry in uptrend):
+    - Uptrend context: close and EMA21 above EMA50.
+    - 1–3 bar dip that tags EMA21/EMA9 and a bullish close back above EMA9.
+    """
+    needed = {'ema9','ema21','ema50','open','close','low'}
+    if len(df) < 55 or not needed.issubset(df.columns):
+        return False
+
     last = df.iloc[-1]
-    signal_condition = (last['close'] > last['ema50']) and (last['low'] < last['ema21']) and (last['close'] > last['ema21'])
-    bullish_confirmation = last['close'] > last['open']
-    if signal_condition and not bullish_confirmation:
-        log_rejection(df.name, "Bullish Confirmation Failed")
-    return signal_condition and bullish_confirmation
+    uptrend = (last['ema21'] > last['ema50']) and (last['close'] > last['ema50'])
+    if not uptrend:
+        return False
+
+    recent = df.tail(4)
+    dipped = ((recent['low'] <= recent['ema21']) | (recent['low'] <= recent['ema9'])).any()
+    bullish_close = last['close'] > last['open'] and last['close'] > last['ema9']
+
+    return dipped and bullish_close
+
 
 def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
-    if len(df) < 50: return False
-    last = df.iloc[-1]
-    return (last['atr_percent'] > df['atr_percent'].rolling(14).mean().iloc[-1] * 1.5) and (last['close'] > last['ema9'])
+    """
+    15m Momentum (Volatility-boosted breakout):
+    - ATR% > 1.2× its 14-period mean.
+    - EMA9 > EMA21 and close > EMA9.
+    - MACD histogram rising.
+    """
+    needed = {'atr_percent','ema9','ema21','macd','macd_signal','close'}
+    if len(df) < 30 or not needed.issubset(df.columns):
+        return False
+    last, prev = df.iloc[-1], df.iloc[-2]
 
-# --- نظام إدارة الصفقات ---
+    atr_mean = float(pd.Series(df['atr_percent'].tail(14)).mean())
+    atr_ok = float(last['atr_percent']) >= (1.2 * atr_mean)
+
+    hist_now = float(last['macd'] - last['macd_signal'])
+    hist_prev = float(prev['macd'] - prev['macd_signal'])
+    hist_rising = hist_now > hist_prev
+
+    ema_ok = (last['ema9'] > last['ema21']) and (last['close'] > last['ema9'])
+
+    return atr_ok and hist_rising and ema_ok
+
 def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
     last = df.iloc[-1]
     atr = last['atr']
@@ -572,56 +682,205 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
 
 # --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
-<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;--info:#2196F3;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:1400px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);transition:background-color 0.5s ease;}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;font-size:14px;}.btn-small{padding:5px 10px;font-size:12px;}.btn.stop{background-color:var(--danger);}.btn.real-mode{background-color:var(--info);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;padding-bottom:10px;border-bottom:1px solid #333;}.card-title{font-size:18px;font-weight:700;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item.real-trade-item{border-left-color:var(--info);}.item-header{display:flex;justify-content:space-between;align-items:center;}.item-title{font-weight:700;}.item-time{font-size:12px;color:var(--text-medium);}.item-content{font-size:13px;margin-top:5px;}.rejection-item{border-left-color:var(--warning);}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;padding:5px 15px;border-radius:20px;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--danger);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.trade-mode-card{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;}.trade-mode-status{font-size:18px;}.trade-mode-status span{font-weight:700;padding:4px 12px;border-radius:8px;}.trade-mode-paper{color:var(--warning);background-color:rgba(255,193,7,0.1);}.trade-mode-real{color:var(--info);background-color:rgba(33,150,243,0.1);}.balance-display{font-size:16px;color:var(--text-medium);}.footer{text-align:center;margin-top:30px;padding:15px;color:var(--text-medium);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V17.2.0</div><div class="status-indicator"><div id="status-dot" class="status-dot"></div><span id="status-text">متوقف</span><button id="toggle-trading-btn" class="btn">تشغيل</button><a href="/settings" class="btn">الإعدادات</a></div></header><div class="dashboard-grid"><div class="card trade-mode-card"><div id="trade-mode-status" class="trade-mode-status"></div><div id="balance-display" class="balance-display"></div><button id="toggle-real-trading-btn" class="btn"></button></div><div class="card"><div class="card-header"><div class="card-title">اتجاه السوق (BTC)</div></div><div id="market-trend-container" class="trend-container"></div></div><div class="card"><div class="card-header"><div id="open-signals-title" class="card-title">الإشارات المفتوحة (0)</div></div><div id="open-signals-container" class="scrollable-content"><div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div></div></div><div class="card"><div class="card-header"><div class="card-title">الإشعارات</div></div><div id="notifications-container" class="scrollable-content"><div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div></div></div><div class="card"><div class="card-header"><div class="card-title">سجل الرفض</div></div><div id="rejections-container" class="scrollable-content"><div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div></div></div></div><div class="footer">بوت التداول V17.2.0</div></div><script>
-function toggleTrading(){fetch('/toggle_trading',{method:'POST'}).then(res=>res.json()).then(updateUI).catch(err=>console.error('Error toggling trading:',err));}
-function toggleRealTrading(){if(confirm('تحذير: أنت على وشك تفعيل وضع التداول الحقيقي. هل أنت متأكد من رغبتك في المتابعة بأموال حقيقية؟')){fetch('/toggle_real_trading',{method:'POST'}).then(res=>res.json()).then(updateUI).catch(err=>console.error('Error toggling real trading:',err));}}
-function closeTrade(signalId,symbol){if(confirm(`هل أنت متأكد من رغبتك في إغلاق الصفقة لـ ${symbol} يدويًا بسعر السوق؟`)){fetch(`/close_trade/${signalId}`,{method:'POST'}).then(res=>res.json()).then(data=>{alert(data.message);fetchData();}).catch(err=>{alert('حدث خطأ أثناء محاولة إغلاق الصفقة.');console.error(err);});}}
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>لوحة التحكم - بوت التداول (15m)</title>
+<style>
+:root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
+.container{max-width:1200px;margin:0 auto;padding:16px}
+header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
+h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
+.badge{padding:6px 10px;border-radius:999px;font-size:12px;background:#0d1730;border:1px solid #1e2c52;color:#cce0ff}
+.row{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
+.card-body{padding:12px}
+.controls{display:flex;gap:8px;flex-wrap:wrap}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition:.18s}
+.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
+.btn.ok{background:linear-gradient(180deg,#0f3b26,#0b2418);border-color:#1d6a48}
+.btn.warn{background:linear-gradient(180deg,#3b2a0f,#291b08);border-color:#8b5b0f}
+.btn.muted{opacity:.8}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730}
+.sig-title{font-weight:700}
+.sig-meta{font-size:12px;color:var(--muted)}
+.price{font-variant-numeric:tabular-nums;direction:ltr}
+.price.flash{animation:flash .75s}
+@keyframes flash{0%{background:rgba(255,255,255,.14)}100%{background:transparent}}
+.progress{height:8px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden}
+.progress>span{display:block;height:100%;background:linear-gradient(90deg,var(--ok),#3fd1b0)}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px}
+.kv div:nth-child(odd){opacity:.8}
+.trend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.trend .pill{background:#0d1730;border:1px solid #1f2d55;border-radius:10px;padding:8px;text-align:center}
+.pill b{display:block;font-size:12px;color:#9fb7ef}
+.pill span{font-size:12px}
+.green{color:var(--ok)}.red{color:var(--bad)}.amber{color:var(--warn)}
+.footer{opacity:.7;font-size:12px;margin-top:10px}
+.table{width:100%;border-collapse:separate;border-spacing:0 8px}
+.table th{font-size:12px;text-align:right;color:#9ab2e2;font-weight:600;padding:0 6px}
+.table td{padding:8px;background:#0d1730;border:1px solid #24335f}
+.switch{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid #2a3a68;background:#0f1b3b;cursor:pointer;user-select:none}
+.switch input{display:none}
+.switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
+.switch input:checked + .dot{background:#24d08a;transform:translateX(2px) scale(1.1)}
+.small{font-size:12px;color:#a8bfeb}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>لوحة التحكم • فريم 15 دقيقة</h1>
+    <div class="badge" id="serverTime">—</div>
+  </header>
 
-function updateUI(data){
-    if (data.error) { console.error('Server error:', data.error); return; }
-    const statusDot=document.getElementById('status-dot');
-    const statusText=document.getElementById('status-text');
-    const toggleTradingBtn=document.getElementById('toggle-trading-btn');
-    if(data.trading_enabled){statusDot.classList.add('active');statusText.textContent='نشط';toggleTradingBtn.textContent='إيقاف';toggleTradingBtn.classList.add('stop');}else{statusDot.classList.remove('active');statusText.textContent='متوقف';toggleTradingBtn.textContent='تشغيل';toggleTradingBtn.classList.remove('stop');}
-    
-    const tradeModeStatus=document.getElementById('trade-mode-status');
-    const toggleRealBtn=document.getElementById('toggle-real-trading-btn');
-    if(data.paper_trading_mode){tradeModeStatus.innerHTML='وضع التداول: <span class="trade-mode-paper">ورقي</span>';toggleRealBtn.textContent='تفعيل التداول الحقيقي';toggleRealBtn.className='btn real-mode';}else{tradeModeStatus.innerHTML='وضع التداول: <span class="trade-mode-real">حقيقي (LIVE)</span>';toggleRealBtn.textContent='العودة للتداول الورقي';toggleRealBtn.className='btn stop';}
-    
-    document.getElementById('balance-display').innerHTML=`الرصيد المتاح: <b>$${data.usdt_balance.toFixed(2)}</b>`;
-    document.getElementById('open-signals-title').textContent=`الإشارات المفتوحة (${Object.keys(data.open_signals).length})`;
-    
-    const signalsContainer=document.getElementById('open-signals-container');
-    signalsContainer.innerHTML='';
-    if(Object.keys(data.open_signals).length>0){Object.entries(data.open_signals).forEach(([symbol,signal])=>{const isReal=signal.is_real_trade?'real-trade-item':'';const currentPrice=signal.current_price?signal.current_price.toFixed(4):'...';const progressBarHtml=signal.progress_to_tp>0?`<div class="progress-bar profit" style="width:${signal.progress_to_tp}%;"></div>`:signal.progress_to_sl>0?`<div class="progress-bar loss" style="width:${signal.progress_to_sl}%;"></div>`:'';signalsContainer.innerHTML+=`<div class="item ${isReal}"><div class="item-header"><div class="item-title">${symbol}</div><button class="btn btn-small stop" onclick="closeTrade(${signal.id},'${symbol}')">إغلاق</button></div><div class="item-content"><span>الدخول: ${signal.entry_price.toFixed(4)}</span> | <span id="price-${symbol}">الحالي: ${currentPrice}</span></div><div class="progress-bar-container">${progressBarHtml}</div><div class="item-footer"><span>الوقف: ${signal.stop_loss.toFixed(4)}</span><span>الهدف: ${signal.target_price_1.toFixed(4)}</span></div></div>`;});}else{signalsContainer.innerHTML='<div style="text-align:center;color:var(--text-medium);">لا توجد إشارات مفتوحة</div>';}
-    
-    const notificationsContainer=document.getElementById('notifications-container');
-    notificationsContainer.innerHTML='';
-    if(data.notifications.length>0){data.notifications.forEach(n=>{notificationsContainer.innerHTML+=`<div class="item"><div class="item-content">${n.message}</div></div>`;});}else{notificationsContainer.innerHTML='<div style="text-align:center;color:var(--text-medium);">لا توجد إشعارات</div>';}
-    
-    const rejectionsContainer=document.getElementById('rejections-container');
-    rejectionsContainer.innerHTML='';
-    if(data.rejections.length>0){data.rejections.forEach(r=>{rejectionsContainer.innerHTML+=`<div class="item rejection-item"><div class="item-header"><div class="item-title">${r.symbol}</div></div><div class="item-content">${r.reason}</div></div>`;});}else{rejectionsContainer.innerHTML='<div style="text-align:center;color:var(--text-medium);">لا توجد سجلات رفض</div>';}
+  <div class="row">
+    <div class="card">
+      <h2>الصفقات المفتوحة</h2>
+      <div class="card-body">
+        <div id="signals" class="grid"></div>
+      </div>
+    </div>
 
-    const marketTrendContainer = document.getElementById('market-trend-container');
-    marketTrendContainer.innerHTML = '';
-    if (data.market_state && Object.keys(data.market_state.trend_details_by_tf).length > 0) {
-        Object.entries(data.market_state.trend_details_by_tf).forEach(([tf, trend_data]) => {
-            let trendClass = 'trend-sideways';
-            let trendText = 'متذبذب';
-            if (trend_data.trend === 'Bullish') { trendClass = 'trend-up'; trendText = 'صاعد'; }
-            else if (trend_data.trend === 'Bearish') { trendClass = 'trend-down'; trendText = 'هابط'; }
-            marketTrendContainer.innerHTML += `<div class="trend-item"><div class="trend-label">${tf}</div><div class="trend-status ${trendClass}">${trendText}</div></div>`;
-        });
-    } else {
-        marketTrendContainer.innerHTML = '<div style="text-align:center;color:var(--text-medium);">جاري تحميل بيانات السوق...</div>';
-    }
+    <div class="card">
+      <h2>التحكم & الحالة</h2>
+      <div class="card-body">
+        <div class="controls">
+          <label class="switch">
+            <input id="toggleTrading" type="checkbox" />
+            <span class="dot"></span>
+            <span class="small">تشغيل التداول</span>
+          </label>
+          <button class="btn ok" id="toggleMode">وضع: ورقي</button>
+          <a class="btn" href="/settings">الإعدادات</a>
+        </div>
+        <div class="kv" style="margin-top:10px">
+          <div>الرصيد (USDT):</div><div id="balance">—</div>
+          <div>عدد الصفقات:</div><div id="openCount">—</div>
+        </div>
+        <div style="margin-top:10px">
+          <h3 style="font-size:13px;margin:0 0 6px 0;color:#cfe2ff">حالة السوق</h3>
+          <div id="trend" class="trend"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>سجل الأحداث</h2>
+    <div class="card-body">
+      <table class="table" id="events">
+        <thead><tr><th>الوقت</th><th>النوع</th><th>الرسالة</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="footer">تحديث لحظي مع تمييز تغير السعر ✨</div>
+</div>
+
+<script>
+const qs = (s, p=document)=>p.querySelector(s);
+const qsa = (s, p=document)=>[...p.querySelectorAll(s)];
+let lastPrices = {};
+
+async function toggleTrading() {
+  await fetch('/toggle_trading', {method:'POST'});
+  await load();
+}
+async function toggleMode() {
+  await fetch('/toggle_real_trading', {method:'POST'});
+  await load();
 }
 
-async function fetchData(){try{const response=await fetch('/api/dashboard_data');if(!response.ok){console.error(`API request failed with status ${response.status}`);return;}
-const data=await response.json();updateUI(data);}catch(error){console.error('Failed to fetch dashboard data:',error);}}
-document.addEventListener('DOMContentLoaded',()=>{document.getElementById('toggle-trading-btn').onclick=toggleTrading;document.getElementById('toggle-real-trading-btn').onclick=toggleRealTrading;fetchData();setInterval(fetchData,2000);});
-</script></body></html>
+qs('#toggleTrading').addEventListener('change', toggleTrading);
+qs('#toggleMode').addEventListener('click', toggleMode);
+
+function fmt(n){return n==null?'—':(+n).toLocaleString('en-US',{maximumFractionDigits:6})}
+function clsByDelta(d){if(d>0) return 'green'; if(d<0) return 'red'; return ''}
+
+function render(data){
+  // header
+  qs('#serverTime').textContent = data.server_time || '—';
+  qs('#toggleTrading').checked = !!data.trading_enabled;
+  qs('#toggleMode').textContent = 'وضع: ' + (data.paper_trading_mode ? 'ورقي' : 'حقيقي');
+  qs('#balance').textContent = fmt(data.usdt_balance);
+  const sigs = data.open_signals || {};
+  qs('#openCount').textContent = Object.keys(sigs).length;
+
+  // trend pills
+  const trend = data.market_state?.trend_details_by_tf || {};
+  const tfOrder = ['15m','1h','4h'];
+  qs('#trend').innerHTML = tfOrder.map(tf=>{
+    const t = trend[tf]||{};
+    const c = t.trend==='Bullish'?'green':(t.trend==='Bearish'?'red':'amber');
+    return `<div class="pill"><b>${tf}</b><span class="${c}">${t.trend||'—'}</span><br><span class="small">RSI ${fmt(t.rsi)}</span></div>`
+  }).join('');
+
+  // signals
+  const box = qs('#signals');
+  box.innerHTML = '';
+  Object.keys(sigs).sort().forEach(sym=>{
+    const s = sigs[sym];
+    const cp = s.current_price;
+    const prev = lastPrices[sym];
+    const delta = prev==null?0:cp - prev;
+    lastPrices[sym] = cp;
+
+    const priceClass = delta===0?'price':`price flash ${clsByDelta(delta)}`;
+    const pToTp = Math.min(100, s.progress_to_tp||0);
+    const pToSl = Math.min(100, s.progress_to_sl||0);
+    const progressBar = pToTp>0?`<div class="progress" title="نحو الهدف"><span style="width:${pToTp}%"></span></div>`:
+                                   `<div class="progress" title="نحو الوقف"><span style="width:${pToSl}%;background:linear-gradient(90deg,var(--bad),#ff7a7a)"></span></div>`;
+
+    const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • هدف ${fmt(s.target_price_1)}`;
+    const btnClose = s.id?`<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'}).then(()=>load())">إغلاق</button>`:'';
+
+    const el = document.createElement('div');
+    el.className = 'signal';
+    el.innerHTML = `
+      <div>
+        <div class="sig-title">${sym}</div>
+        <div class="sig-meta">${meta}</div>
+        ${progressBar}
+      </div>
+      <div style="text-align:end">
+        <div class="${priceClass}">${fmt(cp)}</div>
+        <div class="small ${clsByDelta(delta)}">${delta>0?'▲':(delta<0?'▼':'•')} ${fmt(Math.abs(delta))}</div>
+        ${btnClose}
+      </div>`;
+    box.appendChild(el);
+  });
+
+  // events
+  const tbody = qs('#events tbody');
+  tbody.innerHTML = (data.notifications||[]).map(n=>{
+    return `<tr>
+      <td>${n.timestamp||'—'}</td>
+      <td>${n.type||''}</td>
+      <td>${n.message||''}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function load(){
+  const res = await fetch('/api/dashboard_data', {cache:'no-cache'});
+  const data = await res.json();
+  render(data);
+}
+
+// gentle polling; price flashes are CSS-animated
+load();
+setInterval(load, 1500);
+</script>
+</body>
+</html>
 """
 SETTINGS_TEMPLATE = """
 <!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>إعدادات البوت</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:900px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.settings-form{background-color:var(--bg-surface);border-radius:12px;padding:25px;margin-bottom:20px;}.form-section-title{font-size:20px;font-weight:700;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid #333;}.form-group{margin-bottom:20px;}.form-group label{display:block;margin-bottom:8px;font-weight:bold;color:var(--text-medium);}.form-group input[type="number"],.form-group select{width:100%;padding:12px;border:1px solid #333;border-radius:8px;background-color:#252525;color:var(--text-light);}.checkbox-group{display:flex;align-items:center;gap:10px;padding:10px;}.filter-table{width:100%;border-collapse:collapse;}.filter-table th,.filter-table td{padding:12px;text-align:right;border-bottom:1px solid #333;}.filter-table select,.filter-table input{width:100%;padding:8px;}</style></head><body><div class="container"><header><div class="header-title">إعدادات البوت</div><a href="/" class="btn">العودة للرئيسية</a></header><div class="settings-form"><h3 class="form-section-title">إعدادات التداول العامة</h3><form id="settings-form"><div class="form-group"><label>نسبة المخاطرة للصفقة (%)</label><input type="number" name="risk_per_trade" step="0.1" value="{{RISK_PER_TRADE_PERCENT}}"></div><div class="form-group"><label>الحد الأقصى للصفقات المفتوحة</label><input type="number" name="max_trades" value="{{MAX_OPEN_TRADES}}"></div><button type="submit" class="btn">حفظ الإعدادات</button></form></div><div class="settings-form"><h3 class="form-section-title">تفعيل الاستراتيجيات</h3><form id="strategies-form"><div class="form-group checkbox-group"><input type="checkbox" id="use_bb_stoch" name="use_bb_stoch" {{'checked' if USE_BB_STOCH_STRATEGY else ''}}><label for="use_bb_stoch">BB+Stoch</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_macd_ema" name="use_macd_ema" {{'checked' if USE_MACD_EMA_STRATEGY else ''}}><label for="use_macd_ema">MACD+EMA</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_ema_rsi" name="use_ema_rsi" {{'checked' if USE_EMA_RSI_STRATEGY else ''}}><label for="use_ema_rsi">EMA+RSI</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{'checked' if USE_PULLBACK_STRATEGY else ''}}><label for="use_pullback">Pullback</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_momentum_volatility" name="use_momentum_volatility" {{'checked' if USE_MOMENTUM_VOLATILITY_STRATEGY else ''}}><label for="use_momentum_volatility">Momentum</label></div><button type="submit" class="btn">حفظ الاستراتيجيات</button></form></div><div class="settings-form"><h3 class="form-section-title">إعدادات فلاتر الاستراتيجيات</h3><form id="filters-form"><table class="filter-table"><thead><tr><th>الاستراتيجية</th><th>ملف تعريف الفلتر</th><th>حد ADX</th><th>تأكيد HTF</th></tr></thead><tbody>{%for key, config in STRATEGY_FILTER_CONFIG.items()%}<tr><td>{{STRATEGY_NAMES.get(key,key)}}</td><td><select name="{{key}}_profile"><option value="Strict" {{'selected' if config.profile=='Strict'}}>صارم</option><option value="Moderate" {{'selected' if config.profile=='Moderate'}}>متوسط</option><option value="Reversal" {{'selected' if config.profile=='Reversal'}}>انعكاسي</option><option value="Disabled" {{'selected' if config.profile=='Disabled'}}>معطل</option></select></td><td><input type="number" name="{{key}}_adx_threshold" value="{{config.adx_threshold}}"></td><td><select name="{{key}}_htf_confirmation_mode"><option value="Strict" {{'selected' if config.htf_confirmation_mode=='Strict'}}>صارم</option><option value="Relaxed" {{'selected' if config.htf_confirmation_mode=='Relaxed'}}>مخفف</option><option value="Disabled" {{'selected' if config.htf_confirmation_mode=='Disabled'}}>معطل</option></select></td></tr>{%endfor%}</tbody></table><button type="submit" class="btn">حفظ إعدادات الفلاتر</button></form></div></div><script>function setupForm(formId,url){document.getElementById(formId).addEventListener('submit',function(e){e.preventDefault();const formData=new FormData(this);const data=formId==='strategies-form'?Object.fromEntries([...formData.keys()].map(key=>[key,this.querySelector(`[name=${key}]`).checked])):Object.fromEntries(formData.entries());fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(res=>res.json()).then(data=>alert(data.message));});}
@@ -678,8 +937,9 @@ def dashboard_data():
             "open_signals": open_signals_with_progress,
             "notifications": notifications,
             "rejections": rejections,
-            "market_state": market_state
-        }
+            "market_state": market_state,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+            "live_prices": live_prices_copy }
         # استخدام json.dumps مع المشفر المخصص لضمان تحويل آمن للبيانات
         return app.response_class(
             response=json.dumps(payload, cls=NpEncoder),
@@ -691,6 +951,20 @@ def dashboard_data():
         return jsonify({"error": "Failed to load dashboard data."}), 500
 
 
+
+@app.route('/api/live_prices')
+def live_prices_api():
+    try:
+        with live_prices_lock:
+            prices = dict(live_prices)
+        return app.response_class(
+            response=json.dumps({"server_time": datetime.now(timezone.utc).isoformat(), "live_prices": prices}, cls=NpEncoder),
+            status=200,
+            mimetype='application/json'
+        )
+    except Exception as e:
+        logger.error(f"❌ [API Error] Failed to serve live prices: {e}", exc_info=True)
+        return jsonify({"error": "Failed to load live prices."}), 500
 @app.route('/settings')
 def settings():
     return render_template_string(SETTINGS_TEMPLATE, 
