@@ -687,50 +687,46 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (15m)</title>
+<title>لوحة التحكم - بوت التداول</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
-.container{max-width:1200px;margin:0 auto;padding:16px}
-header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
-h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
-.badge{padding:6px 10px;border-radius:999px;font-size:12px;background:#0d1730;border:1px solid #1e2c52;color:#cce0ff}
-.row{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}
-.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
-.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial;line-height:1.4}
+.container{max-width:1200px;margin:auto;padding:12px}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px}
+h1{font-size:18px;font-weight:700;color:#d7e4ff}
+.badge{padding:4px 10px;border-radius:999px;font-size:12px;background:#0d1730;border:1px solid #1e2c52;color:#cce0ff}
+
+.grid-main{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:768px){.grid-main{grid-template-columns:1fr}}
+
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:10px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
 .card-body{padding:12px}
-.controls{display:flex;gap:8px;flex-wrap:wrap}
-.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition:.18s}
-.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
-.btn.ok{background:linear-gradient(180deg,#0f3b26,#0b2418);border-color:#1d6a48}
-.btn.warn{background:linear-gradient(180deg,#3b2a0f,#291b08);border-color:#8b5b0f}
-.btn.muted{opacity:.8}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
-.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730}
-.sig-title{font-weight:700}
-.sig-meta{font-size:12px;color:var(--muted)}
-.price{font-variant-numeric:tabular-nums;direction:ltr}
-.price.flash{animation:flash .75s}
-@keyframes flash{0%{background:rgba(255,255,255,.14)}100%{background:transparent}}
-.progress{height:8px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden}
-.progress>span{display:block;height:100%;background:linear-gradient(90deg,var(--ok),#3fd1b0)}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px}
-.kv div:nth-child(odd){opacity:.8}
-.trend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.trend .pill{background:#0d1730;border:1px solid #1f2d55;border-radius:10px;padding:8px;text-align:center}
+
+.controls{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:8px 12px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn.ok{background:#13482c;border-color:#1d6a48}
+.btn.warn{background:#6a3a0f;border-color:#8b5b0f}
+
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px}
+.trend{display:flex;gap:6px;flex-wrap:wrap}
+.pill{flex:1;min-width:70px;text-align:center;background:#0d1730;border:1px solid #1f2d55;border-radius:8px;padding:6px}
 .pill b{display:block;font-size:12px;color:#9fb7ef}
 .pill span{font-size:12px}
 .green{color:var(--ok)}.red{color:var(--bad)}.amber{color:var(--warn)}
-.footer{opacity:.7;font-size:12px;margin-top:10px}
-.table{width:100%;border-collapse:separate;border-spacing:0 8px}
-.table th{font-size:12px;text-align:right;color:#9ab2e2;font-weight:600;padding:0 6px}
-.table td{padding:8px;background:#0d1730;border:1px solid #24335f}
-.switch{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid #2a3a68;background:#0f1b3b;cursor:pointer;user-select:none}
-.switch input{display:none}
-.switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
-.switch input:checked + .dot{background:#24d08a;transform:translateX(2px) scale(1.1)}
-.small{font-size:12px;color:#a8bfeb}
+
+#signals{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.signal{padding:10px;border:1px solid #24335f;border-radius:10px;background:#0d1730;display:flex;flex-direction:column;gap:6px}
+.sig-title{font-size:15px;font-weight:700}
+.sig-meta{font-size:12px;color:var(--muted)}
+.price{font-size:16px;font-weight:600}
+.progress{height:6px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden}
+.progress>span{display:block;height:100%;background:linear-gradient(90deg,var(--ok),#3fd1b0)}
+
+.table{width:100%;border-collapse:collapse;font-size:12px}
+.table th{padding:6px;text-align:right;color:#9ab2e2}
+.table td{padding:6px;background:#0d1730;border:1px solid #24335f}
 </style>
 </head>
 <body>
@@ -740,27 +736,22 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
     <div class="badge" id="serverTime">—</div>
   </header>
 
-  <div class="row">
+  <div class="grid-main">
     <div class="card">
       <h2>الصفقات المفتوحة</h2>
       <div class="card-body">
-        <div id="signals" class="grid"></div>
+        <div id="signals"></div>
       </div>
     </div>
-
     <div class="card">
-      <h2>التحكم & الحالة</h2>
+      <h2>التحكم والحالة</h2>
       <div class="card-body">
         <div class="controls">
-          <label class="switch">
-            <input id="toggleTrading" type="checkbox" />
-            <span class="dot"></span>
-            <span class="small">تشغيل التداول</span>
-          </label>
-          <button class="btn ok" id="toggleMode">وضع: ورقي</button>
+          <button class="btn ok" id="toggleTrading">تشغيل التداول</button>
+          <button class="btn" id="toggleMode">وضع: ورقي</button>
           <a class="btn" href="/settings">الإعدادات</a>
         </div>
-        <div class="kv" style="margin-top:10px">
+        <div class="kv">
           <div>الرصيد (USDT):</div><div id="balance">—</div>
           <div>عدد الصفقات:</div><div id="openCount">—</div>
         </div>
@@ -781,103 +772,49 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
       </table>
     </div>
   </div>
-
-  <div class="footer">تحديث لحظي مع تمييز تغير السعر ✨</div>
 </div>
 
 <script>
-const qs = (s, p=document)=>p.querySelector(s);
-const qsa = (s, p=document)=>[...p.querySelectorAll(s)];
-let lastPrices = {};
-
-async function toggleTrading() {
-  await fetch('/toggle_trading', {method:'POST'});
-  await load();
-}
-async function toggleMode() {
-  await fetch('/toggle_real_trading', {method:'POST'});
-  await load();
-}
-
-qs('#toggleTrading').addEventListener('change', toggleTrading);
-qs('#toggleMode').addEventListener('click', toggleMode);
-
-function fmt(n){return n==null?'—':(+n).toLocaleString('en-US',{maximumFractionDigits:6})}
-function clsByDelta(d){if(d>0) return 'green'; if(d<0) return 'red'; return ''}
-
-function render(data){
-  // header
-  qs('#serverTime').textContent = data.server_time || '—';
-  qs('#toggleTrading').checked = !!data.trading_enabled;
-  qs('#toggleMode').textContent = 'وضع: ' + (data.paper_trading_mode ? 'ورقي' : 'حقيقي');
-  qs('#balance').textContent = fmt(data.usdt_balance);
-  const sigs = data.open_signals || {};
-  qs('#openCount').textContent = Object.keys(sigs).length;
-
-  // trend pills
-  const trend = data.market_state?.trend_details_by_tf || {};
-  const tfOrder = ['15m','1h','4h'];
-  qs('#trend').innerHTML = tfOrder.map(tf=>{
-    const t = trend[tf]||{};
-    const c = t.trend==='Bullish'?'green':(t.trend==='Bearish'?'red':'amber');
-    return `<div class="pill"><b>${tf}</b><span class="${c}">${t.trend||'—'}</span><br><span class="small">RSI ${fmt(t.rsi)}</span></div>`
-  }).join('');
-
-  // signals
-  const box = qs('#signals');
-  box.innerHTML = '';
-  Object.keys(sigs).sort().forEach(sym=>{
-    const s = sigs[sym];
-    const cp = s.current_price;
-    const prev = lastPrices[sym];
-    const delta = prev==null?0:cp - prev;
-    lastPrices[sym] = cp;
-
-    const priceClass = delta===0?'price':`price flash ${clsByDelta(delta)}`;
-    const pToTp = Math.min(100, s.progress_to_tp||0);
-    const pToSl = Math.min(100, s.progress_to_sl||0);
-    const progressBar = pToTp>0?`<div class="progress" title="نحو الهدف"><span style="width:${pToTp}%"></span></div>`:
-                                   `<div class="progress" title="نحو الوقف"><span style="width:${pToSl}%;background:linear-gradient(90deg,var(--bad),#ff7a7a)"></span></div>`;
-
-    const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • هدف ${fmt(s.target_price_1)}`;
-    const btnClose = s.id?`<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'}).then(()=>load())">إغلاق</button>`:'';
-
-    const el = document.createElement('div');
-    el.className = 'signal';
-    el.innerHTML = `
-      <div>
-        <div class="sig-title">${sym}</div>
-        <div class="sig-meta">${meta}</div>
-        ${progressBar}
-      </div>
-      <div style="text-align:end">
-        <div class="${priceClass}">${fmt(cp)}</div>
-        <div class="small ${clsByDelta(delta)}">${delta>0?'▲':(delta<0?'▼':'•')} ${fmt(Math.abs(delta))}</div>
-        ${btnClose}
-      </div>`;
-    box.appendChild(el);
-  });
-
-  // events
-  const tbody = qs('#events tbody');
-  tbody.innerHTML = (data.notifications||[]).map(n=>{
-    return `<tr>
-      <td>${n.timestamp||'—'}</td>
-      <td>${n.type||''}</td>
-      <td>${n.message||''}</td>
-    </tr>`;
-  }).join('');
-}
+const qs = s=>document.querySelector(s);
+let lastPrices={};
 
 async function load(){
-  const res = await fetch('/api/dashboard_data', {cache:'no-cache'});
+  const res = await fetch('/api/dashboard_data',{cache:'no-cache'});
   const data = await res.json();
   render(data);
 }
+function render(data){
+  qs('#serverTime').textContent = data.server_time||'—';
+  qs('#toggleTrading').textContent = data.trading_enabled?"إيقاف التداول":"تشغيل التداول";
+  qs('#toggleMode').textContent = "وضع: "+(data.paper_trading_mode?"ورقي":"حقيقي");
+  qs('#balance').textContent = (data.usdt_balance||0).toFixed(2);
+  qs('#openCount').textContent = Object.keys(data.open_signals||{}).length;
 
-// gentle polling; price flashes are CSS-animated
-load();
-setInterval(load, 1500);
+  const trend = data.market_state?.trend_details_by_tf||{};
+  qs('#trend').innerHTML = Object.entries(trend).map(([tf,t])=>{
+    let c="amber"; if(t.trend=="Bullish")c="green"; else if(t.trend=="Bearish")c="red";
+    return `<div class="pill"><b>${tf}</b><span class="${c}">${t.trend||'—'}</span><br><span>RSI ${t.rsi||'—'}</span></div>`
+  }).join("");
+
+  const sigBox = qs('#signals'); sigBox.innerHTML="";
+  for(const [sym,s] of Object.entries(data.open_signals||{})){
+    const cp=s.current_price; const prev=lastPrices[sym]; lastPrices[sym]=cp;
+    const delta=prev?cp-prev:0; 
+    const prog=s.progress_to_tp?`<div class="progress"><span style="width:${s.progress_to_tp}%"></span></div>`:"";
+    sigBox.innerHTML += `<div class="signal">
+      <div class="sig-title">${sym}</div>
+      <div class="sig-meta">دخول ${s.entry_price} • وقف ${s.stop_loss} • هدف ${s.target_price_1}</div>
+      <div class="price">${cp||'—'} (${delta.toFixed(4)})</div>
+      ${prog}
+      <button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'}).then(load)">إغلاق</button>
+    </div>`;
+  }
+
+  qs('#events tbody').innerHTML=(data.notifications||[]).map(n=>`<tr><td>${n.timestamp}</td><td>${n.type}</td><td>${n.message}</td></tr>`).join("");
+}
+qs('#toggleTrading').onclick=()=>{fetch('/toggle_trading',{method:'POST'}).then(load)};
+qs('#toggleMode').onclick=()=>{fetch('/toggle_real_trading',{method:'POST'}).then(load)};
+load();setInterval(load,2000);
 </script>
 </body>
 </html>
