@@ -1,10 +1,10 @@
-# ملف c4.py - نسخة V17.6.0 (تحسينات الأداء ومراقبة الصحة)
+# ملف c4.py - نسخة V17.5.2 (إصلاحات شاملة)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف تحسينات كبيرة على الأداء وميزات مراقبة النظام.
-# 1.  [مُحسّن] تنفيذ إنشاء فهرس قاعدة البيانات تلقائيًا عند بدء التشغيل لتسريع لوحة التحكم.
-# 2.  [مُحسّن] إضافة نظام تخزين مؤقت (Caching) للبيانات التاريخية باستخدام Redis لتقليل طلبات API وتسريع الفحص.
-# 3.  [جديد] إضافة نظام مراقبة صحة (Health Check) يعمل في الخلفية للتحقق من الخدمات الحيوية (DB, Redis, Binance, WebSocket).
-# 4.  [مكتمل] الحفاظ على جميع الإصلاحات والميزات من الإصدار V17.5.2.
+# هذا الإصدار يعالج عدة مشاكل لتحسين الموثوقية والأداء.
+# 1.  [إصلاح] جعل زر الإغلاق اليدوي أكثر موثوقية عن طريق إضافة بحث في قاعدة البيانات كخطة بديلة.
+# 2.  [تحسين] إضافة معالجة أفضل لجلب السعر الحالي عند الإغلاق اليدوي في حال عدم توفره في WebSocket.
+# 3.  [توضيح] التحذير الخاص بحساب الأداء ليس خطأ، بل هو معالجة طبيعية للبيانات القديمة.
+# 4.  [ملاحظة أداء] تم اقتراح إضافة فهرس لقاعدة البيانات لتسريع تحميل مخطط الأداء.
 
 import time
 import os
@@ -38,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v17_6_0_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v17_5_2_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV17.6.0')
+logger = logging.getLogger('CryptoBotV17.5.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -76,7 +76,7 @@ balance_lock = Lock()
 cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 20
-PAPER_TRADE_INITIAL_BALANCE = 1000.0
+PAPER_TRADE_INITIAL_BALANCE = 1000.0 # رصيد ابتدائي افتراضي للرسم البياني
 
 # --- المتغيرات القابلة للتعديل ---
 RISK_PER_TRADE_PERCENT: float = 0.85
@@ -114,7 +114,7 @@ HIGHER_TIMEFRAME: str = '1h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
 BTC_SYMBOL: str = 'BTCUSDT'
-API_REQUEST_DELAY: float = 0.5 # يمكن تقليله بسبب الكاش
+API_REQUEST_DELAY: float = 1
 
 # --- متغيرات الحالة والكاش ---
 conn: Optional[psycopg2.extensions.connection] = None
@@ -187,11 +187,6 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     if not column_exists(cur, 'signals', col):
                         cur.execute(sql.SQL("ALTER TABLE signals ADD COLUMN {} {}").format(sql.Identifier(col), sql.SQL(col_type)))
                         logger.info(f"✅ [DB] Added missing column '{col}' to 'signals' table.")
-                
-                # [جديد] التأكد من وجود الفهرس لتحسين الأداء
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_closed_at ON signals (status, closed_at);")
-                logger.info("✅ [DB] Ensured performance index exists.")
-
             conn.commit()
             logger.info("✅ [DB] Database connection and schema updated successfully.")
             return
@@ -217,16 +212,16 @@ def check_db_connection() -> bool:
 def init_redis() -> None:
     global redis_client
     try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         logger.info("✅ [Redis] Connected successfully.")
-    except Exception as e:
+    except redis.exceptions.ConnectionError as e:
         logger.warning(f"⚠️ [Redis] Connection failed: {e}.")
         redis_client = None
 
 # --- دوال المساعدة والإشعارات ---
 def log_and_notify(level: str, message: str, notification_type: str):
-    log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error, 'critical': logger.critical}
+    log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error}
     log_methods.get(level.lower(), logger.info)(message)
     if not check_db_connection() or not conn: return
     try:
@@ -246,8 +241,36 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
     except Exception as e:
         logger.error(f"❌ [Log Rejection] Error logging rejection for {symbol}: {e}", exc_info=True)
 
+def get_notification_settings() -> Dict:
+    """جلب إعدادات الإشعارات من Redis مع قيم افتراضية."""
+    defaults = {
+        'telegram_enabled': True,
+        'email_enabled': False,
+        'min_profit_notification': 1.0,
+        'max_loss_notification': -1.0
+    }
+    if not redis_client:
+        return defaults
+    try:
+        settings_data = redis_client.get('notification_settings')
+        if settings_data:
+            settings = json.loads(settings_data)
+            for key, value in defaults.items():
+                settings.setdefault(key, value)
+            return settings
+        return defaults
+    except Exception as e:
+        logger.error(f"❌ [Redis] Failed to get notification settings: {e}")
+        return defaults
+
 def send_telegram_message(message: str, force: bool = False):
+    """إرسال رسالة تليجرام مع التحقق من الإعدادات."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
+    
+    settings = get_notification_settings()
+    if not settings.get('telegram_enabled') and not force:
+        return
+
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}, timeout=10)
     except requests.exceptions.RequestException as e:
@@ -294,8 +317,7 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     except Exception as e:
         logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
 
-def _fetch_historical_data_from_api(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """الدالة الأساسية لجلب البيانات من API فقط."""
+def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     time.sleep(API_REQUEST_DELAY)
     try:
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -308,36 +330,6 @@ def _fetch_historical_data_from_api(symbol: str, interval: str, days: int) -> Op
         return df.dropna().astype(float)
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
-
-# [جديد] دالة جلب البيانات المحسنة مع التخزين المؤقت
-def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
-    """جلب البيانات التاريخية مع التخزين المؤقت في Redis."""
-    cache_key = f"hist_data:{symbol}_{interval}_{days}"
-    
-    if redis_client:
-        try:
-            cached_data = redis_client.get(cache_key)
-            if cached_data:
-                logger.debug(f"[Cache] HIT for {cache_key}")
-                df = pd.read_json(cached_data, orient='split')
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-                df.set_index('timestamp', inplace=True)
-                return df
-        except Exception as e:
-            logger.warning(f"⚠️ [Redis Cache] Could not read from cache for {cache_key}: {e}")
-
-    logger.debug(f"[Cache] MISS for {cache_key}, fetching from API.")
-    df = _fetch_historical_data_from_api(symbol, interval, days)
-    
-    if df is not None and not df.empty and redis_client:
-        try:
-            # إعادة تعيين الفهرس للحفاظ على العمود عند التحويل إلى JSON
-            df_to_store = df.reset_index()
-            redis_client.setex(cache_key, 900, df_to_store.to_json(orient='split'))  # تخزين لمدة 15 دقيقة
-        except Exception as e:
-            logger.warning(f"⚠️ [Redis Cache] Could not write to cache for {cache_key}: {e}")
-    
-    return df
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
@@ -892,7 +884,7 @@ async function load(){
 load();
 loadPerformanceChart();
 setInterval(load, 2000);
-setInterval(loadPerformanceChart, 60000);
+setInterval(loadPerformanceChart, 60000); // تحديث الرسم البياني كل دقيقة
 </script>
 </body>
 </html>
@@ -950,10 +942,13 @@ def dashboard_data():
 
 @app.route('/api/performance_data')
 def performance_data():
+    """توفير بيانات الرسم البياني للأداء مع معالجة الأخطاء."""
     if not check_db_connection() or not conn:
         return jsonify({"dates": [], "equity": []})
     try:
         with conn.cursor() as cur:
+            # ملاحظة: أضف فهرسًا على (status, closed_at) لتسريع هذا الاستعلام
+            # CREATE INDEX IF NOT EXISTS idx_signals_status_closed_at ON signals (status, closed_at);
             cur.execute("""
                 SELECT entry_price, closing_price, initial_quantity, is_real_trade, closed_at 
                 FROM signals 
@@ -1022,12 +1017,15 @@ def toggle_real_trading():
             redis_client.set('trading_settings', json.dumps(settings))
     return jsonify({"status": "success"})
 
+# --- [مُصلح] مسار الإغلاق اليدوي ---
 @app.route('/close_trade/<int:signal_id>', methods=['POST'])
 def manual_close_trade(signal_id):
     signal_to_close = None
+    # 1. حاول العثور على الصفقة في الكاش السريع أولاً
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
 
+    # 2. إذا لم تكن في الكاش، ابحث في قاعدة البيانات كخطة بديلة
     if not signal_to_close:
         logger.warning(f"[Manual Close] Signal ID {signal_id} not in cache, querying DB.")
         if not check_db_connection() or not conn:
@@ -1037,11 +1035,12 @@ def manual_close_trade(signal_id):
                 cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
                 signal_from_db = cur.fetchone()
                 if signal_from_db:
-                    signal_to_close = dict(signal_from_db)
+                    signal_to_close = dict(signal_from_db) # تحويل RealDictRow إلى dict
         except Exception as e:
             logger.error(f"❌ [Manual Close] DB query failed for signal {signal_id}: {e}", exc_info=True)
             return jsonify({"success": False, "message": "خطأ أثناء البحث في قاعدة البيانات."}), 500
 
+    # 3. إذا لم يتم العثور عليها نهائياً، أرجع خطأ
     if not signal_to_close:
         return jsonify({"success": False, "message": "لم يتم العثور على الصفقة أو أنها مغلقة بالفعل."}), 404
 
@@ -1051,6 +1050,7 @@ def manual_close_trade(signal_id):
     
     if not current_price:
         try:
+            # محاولة أخيرة لجلب السعر الحالي مباشرة إذا لم يكن في الـ WebSocket
             ticker = client.get_symbol_ticker(symbol=symbol)
             current_price = float(ticker['price'])
             logger.info(f"[Manual Close] Fetched fallback price for {symbol}: {current_price}")
@@ -1059,6 +1059,7 @@ def manual_close_trade(signal_id):
             return jsonify({"success": False, "message": "لا يمكن الحصول على السعر الحالي."}), 500
 
     try:
+        # تأكد من أن signal_details هو قاموس وليس نص JSON
         if isinstance(signal_to_close.get('signal_details'), str):
             signal_to_close['signal_details'] = json.loads(signal_to_close['signal_details'])
         elif signal_to_close.get('signal_details') is None:
@@ -1123,6 +1124,21 @@ def update_filter_settings():
         return jsonify({"success": True, "message": "تم تحديث إعدادات الفلاتر"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/api/notifications_settings', methods=['POST'])
+def update_notification_settings():
+    """تحديث إعدادات الإشعارات"""
+    data = request.json
+    settings = {
+        'telegram_enabled': data.get('telegram_enabled', True),
+        'email_enabled': data.get('email_enabled', False),
+        'min_profit_notification': float(data.get('min_profit_notification', 1.0)),
+        'max_loss_notification': float(data.get('max_loss_notification', -1.0))
+    }
+    if redis_client:
+        redis_client.set('notification_settings', json.dumps(settings))
+    log_and_notify("info", "Notification settings updated.", "SETTINGS_UPDATE")
+    return jsonify({"status": "success", "message": "Notification settings updated"})
 
 # --- Main Loop & Threads ---
 def main_bot_loop():
@@ -1220,7 +1236,11 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     }
     reason_ar = reason_map.get(reason, reason)
     log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
-    send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
+    settings = get_notification_settings()
+    profit_condition = profit >= settings['min_profit_notification']
+    loss_condition = profit <= settings['max_loss_notification']
+    if profit_condition or loss_condition:
+        send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
 
@@ -1236,6 +1256,7 @@ def trade_management_loop():
                 with live_prices_lock: current_price = live_prices.get(symbol)
                 if not current_price: continue
                 
+                # التأكد من أن signal_details هو قاموس
                 if isinstance(signal.get('signal_details'), str):
                     try:
                         signal['signal_details'] = json.loads(signal['signal_details'])
@@ -1361,44 +1382,9 @@ def update_balance_loop():
             logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
         time.sleep(60 * 10) 
 
-# [جديد] نظام مراقبة صحة النظام
-def health_check():
-    """فحص صحة الخدمات الحيوية للنظام."""
-    logger.debug("[Health Check] Running health checks...")
-    checks = {}
-    try:
-        checks['database'] = check_db_connection()
-    except Exception: checks['database'] = False
-    try:
-        checks['redis'] = redis_client.ping() if redis_client else False
-    except Exception: checks['redis'] = False
-    try:
-        checks['binance_api'] = client.ping() is None if client else False
-    except Exception: checks['binance_api'] = False
-    try:
-        checks['websocket'] = ws_manager.is_alive() if ws_manager else False
-    except Exception: checks['websocket'] = False
-    
-    unhealthy = [k for k, v in checks.items() if not v]
-    if unhealthy:
-        msg = f"Health check failed for: {', '.join(unhealthy)}"
-        log_and_notify("critical", msg, "HEALTH_CHECK_FAILED")
-        send_telegram_message(f"🚨 *فحص صحة النظام فشل!* 🚨\nالخدمات التالية لا تعمل:\n`{', '.join(unhealthy)}`", force=True)
-        return False
-    
-    logger.debug("[Health Check] All systems nominal.")
-    return True
-
-def health_check_loop():
-    logger.info("🚀 [Health Check] Starting health monitoring loop...")
-    time.sleep(60) # انتظر دقيقة قبل أول فحص
-    while True:
-        health_check()
-        time.sleep(60 * 5) # فحص كل 5 دقائق
-
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.6.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.5.2 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -1425,8 +1411,7 @@ if __name__ == '__main__':
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
-    Thread(target=update_balance_loop, daemon=True).start()
-    Thread(target=health_check_loop, daemon=True).start() # [جديد] بدء مراقبة الصحة
+    Thread(target=update_balance_loop, daemon=True).start() 
     
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
