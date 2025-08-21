@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V17.5.1 (إصلاح خطأ تحليل الأداء)
+# ملف c4.py - نسخة V17.5.2 (إصلاحات شاملة)
 # --- وصف الإصدار:
-# هذا الإصدار يعالج خطأ حرجًا كان يمنع عرض الرسم البياني للأداء.
-# 1.  [إصلاح] إصلاح خطأ 'NoneType' في دالة `/api/performance_data` عن طريق إضافة تحقق للقيم المفقودة في سجلات الصفقات القديمة.
-# 2.  [محسن] تحسين منطق نقطة البداية في الرسم البياني للأداء لعرض أكثر دقة.
-# 3.  [مكتمل] الحفاظ على جميع الميزات من الإصدار V17.5.0.
+# هذا الإصدار يعالج عدة مشاكل لتحسين الموثوقية والأداء.
+# 1.  [إصلاح] جعل زر الإغلاق اليدوي أكثر موثوقية عن طريق إضافة بحث في قاعدة البيانات كخطة بديلة.
+# 2.  [تحسين] إضافة معالجة أفضل لجلب السعر الحالي عند الإغلاق اليدوي في حال عدم توفره في WebSocket.
+# 3.  [توضيح] التحذير الخاص بحساب الأداء ليس خطأ، بل هو معالجة طبيعية للبيانات القديمة.
+# 4.  [ملاحظة أداء] تم اقتراح إضافة فهرس لقاعدة البيانات لتسريع تحميل مخطط الأداء.
 
 import time
 import os
@@ -37,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v17_5_1_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v17_5_2_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV17.5.1')
+logger = logging.getLogger('CryptoBotV17.5.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -939,7 +940,6 @@ def dashboard_data():
         logger.error(f"❌ [API Error] Failed to generate dashboard data: {e}", exc_info=True)
         return jsonify({"error": "Failed to load dashboard data."}), 500
 
-# --- [مُصلح] مسار بيانات الأداء ---
 @app.route('/api/performance_data')
 def performance_data():
     """توفير بيانات الرسم البياني للأداء مع معالجة الأخطاء."""
@@ -947,6 +947,8 @@ def performance_data():
         return jsonify({"dates": [], "equity": []})
     try:
         with conn.cursor() as cur:
+            # ملاحظة: أضف فهرسًا على (status, closed_at) لتسريع هذا الاستعلام
+            # CREATE INDEX IF NOT EXISTS idx_signals_status_closed_at ON signals (status, closed_at);
             cur.execute("""
                 SELECT entry_price, closing_price, initial_quantity, is_real_trade, closed_at 
                 FROM signals 
@@ -1015,23 +1017,59 @@ def toggle_real_trading():
             redis_client.set('trading_settings', json.dumps(settings))
     return jsonify({"status": "success"})
 
+# --- [مُصلح] مسار الإغلاق اليدوي ---
 @app.route('/close_trade/<int:signal_id>', methods=['POST'])
 def manual_close_trade(signal_id):
+    signal_to_close = None
+    # 1. حاول العثور على الصفقة في الكاش السريع أولاً
     with signal_cache_lock:
         signal_to_close = next((s for s in open_signals_cache.values() if s['id'] == signal_id), None)
+
+    # 2. إذا لم تكن في الكاش، ابحث في قاعدة البيانات كخطة بديلة
     if not signal_to_close:
-        return jsonify({"success": False, "message": "لم يتم العثور على الصفقة."}), 404
+        logger.warning(f"[Manual Close] Signal ID {signal_id} not in cache, querying DB.")
+        if not check_db_connection() or not conn:
+            return jsonify({"success": False, "message": "لا يمكن الاتصال بقاعدة البيانات."}), 500
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
+                signal_from_db = cur.fetchone()
+                if signal_from_db:
+                    signal_to_close = dict(signal_from_db) # تحويل RealDictRow إلى dict
+        except Exception as e:
+            logger.error(f"❌ [Manual Close] DB query failed for signal {signal_id}: {e}", exc_info=True)
+            return jsonify({"success": False, "message": "خطأ أثناء البحث في قاعدة البيانات."}), 500
+
+    # 3. إذا لم يتم العثور عليها نهائياً، أرجع خطأ
+    if not signal_to_close:
+        return jsonify({"success": False, "message": "لم يتم العثور على الصفقة أو أنها مغلقة بالفعل."}), 404
+
     symbol = signal_to_close['symbol']
     with live_prices_lock:
         current_price = live_prices.get(symbol)
+    
     if not current_price:
-        return jsonify({"success": False, "message": "لا يمكن الحصول على السعر الحالي."}), 500
+        try:
+            # محاولة أخيرة لجلب السعر الحالي مباشرة إذا لم يكن في الـ WebSocket
+            ticker = client.get_symbol_ticker(symbol=symbol)
+            current_price = float(ticker['price'])
+            logger.info(f"[Manual Close] Fetched fallback price for {symbol}: {current_price}")
+        except Exception as e:
+            logger.error(f"❌ [Manual Close] Could not get live price for {symbol}: {e}")
+            return jsonify({"success": False, "message": "لا يمكن الحصول على السعر الحالي."}), 500
+
     try:
+        # تأكد من أن signal_details هو قاموس وليس نص JSON
+        if isinstance(signal_to_close.get('signal_details'), str):
+            signal_to_close['signal_details'] = json.loads(signal_to_close['signal_details'])
+        elif signal_to_close.get('signal_details') is None:
+             signal_to_close['signal_details'] = {}
+
         close_signal(signal_to_close, current_price, "MANUAL_CLOSE")
         return jsonify({"success": True, "message": f"تم إرسال أمر إغلاق لـ {symbol}"})
     except Exception as e:
         logger.error(f"❌ [Manual Close] Error closing signal {signal_id}: {e}", exc_info=True)
-        return jsonify({"success": False, "message": "حدث خطأ."}), 500
+        return jsonify({"success": False, "message": "حدث خطأ أثناء عملية الإغلاق."}), 500
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -1217,6 +1255,16 @@ def trade_management_loop():
                 symbol = signal['symbol']
                 with live_prices_lock: current_price = live_prices.get(symbol)
                 if not current_price: continue
+                
+                # التأكد من أن signal_details هو قاموس
+                if isinstance(signal.get('signal_details'), str):
+                    try:
+                        signal['signal_details'] = json.loads(signal['signal_details'])
+                    except (json.JSONDecodeError, TypeError):
+                        signal['signal_details'] = {}
+                elif signal.get('signal_details') is None:
+                    signal['signal_details'] = {}
+
                 if current_price <= signal['stop_loss']:
                     reason = "TRAILING_SL_HIT" if signal['signal_details'].get('is_trailing_active') else "SL_HIT"
                     close_signal(signal, signal['stop_loss'], reason)
@@ -1336,7 +1384,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.5.1 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.5.2 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
