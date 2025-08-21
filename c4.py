@@ -73,6 +73,11 @@ trading_mode_lock = Lock()
 usdt_balance: float = 0.0
 balance_lock = Lock()
 
+# Cooldown after stop-out per symbol
+cooldowns_by_symbol = {}
+cooldowns_lock = Lock()
+COOLDOWN_MINUTES_AFTER_SL = 20
+
 
 # --- المتغيرات القابلة للتعديل ---
 RISK_PER_TRADE_PERCENT: float = 0.85
@@ -586,6 +591,15 @@ def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
     return float(Decimal(quantity).quantize(Decimal(step_size), rounding=ROUND_DOWN))
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+    # Cooldown check
+    try:
+        with cooldowns_lock:
+            until = cooldowns_by_symbol.get(symbol)
+        if until and datetime.datetime.now(datetime.timezone.utc) < until:
+            log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()})
+            return
+    except Exception:
+        pass
     with trading_mode_lock:
         is_real = not paper_trading_mode
 
@@ -596,10 +610,16 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         with balance_lock:
             current_usdt_balance = usdt_balance
         
+        
         with risk_per_trade_lock:
-            trade_size_usdt = current_usdt_balance * (RISK_PER_TRADE_PERCENT / 100)
+            max_risk_usdt = current_usdt_balance * (RISK_PER_TRADE_PERCENT / 100)
 
-        if trade_size_usdt <= 0:
+        # Position sizing by stop distance (ATR-based)
+        stop_loss = trade_levels['stop_loss']
+        risk_per_unit = max(entry_price - stop_loss, 1e-8)
+        quantity = max_risk_usdt / risk_per_unit
+
+        if quantity <= 0:
             log_rejection(symbol, "Insufficient Balance")
             return
 
@@ -608,18 +628,13 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}")
             return
 
-        min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
-        if trade_size_usdt < min_notional:
-            log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": trade_size_usdt})
-            return
-
-        quantity = trade_size_usdt / entry_price
-        
         step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
         adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
+        notional = adjusted_quantity * entry_price
 
-        if adjusted_quantity <= 0:
-            logger.warning(f"⚠️ [Real Trade] Adjusted quantity for {symbol} is zero. Aborting.")
+        min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
+        if notional < min_notional:
+            log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": notional})
             return
 
         try:
@@ -654,7 +669,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         
         signal_details = {
             "atr": trade_levels['atr'], "is_trailing_active": False,
-            "trailing_stop_distance": trade_levels['trailing_stop_distance']
+            "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False
         }
         
         with conn.cursor() as cur:
@@ -693,6 +708,7 @@ DASHBOARD_TEMPLATE = """
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
 .container{max-width:1200px;margin:0 auto;padding:16px}
+@media (max-width:700px){.grid{grid-template-columns:1fr !important}.signal{grid-template-columns:1fr;gap:6px}}
 header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px}
 h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .badge{padding:6px 10px;border-radius:999px;font-size:12px;background:#0d1730;border:1px solid #1e2c52;color:#cce0ff}
@@ -1197,6 +1213,10 @@ def trade_management_loop():
                 if current_price <= stop_loss:
                     reason = "TRAILING_SL_HIT" if signal_details.get('is_trailing_active') else "SL_HIT"
                     close_signal(signal, stop_loss, reason)
+                    # Set cooldown if stopped out
+                    if reason in ("SL_HIT", "TRAILING_SL_HIT"):
+                        with cooldowns_lock:
+                            cooldowns_by_symbol[symbol] = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=COOLDOWN_MINUTES_AFTER_SL)
                     continue
 
                 if signal.get('target_price_2') and current_price >= signal['target_price_2']:
