@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V17.3.0 (تحسين أداء وسرعة لوحة التحكم)
+# ملف c4.py - نسخة V17.3.1 (إصلاح خطأ اتصال قاعدة البيانات)
 # --- وصف الإصدار:
-# هذا الإصدار يعالج بطء لوحة التحكم عبر إعادة هيكلة طريقة تحديث البيانات.
-# 1.  [جديد] تقسيم جلب البيانات: يتم الآن تحميل البيانات الثابتة مرة واحدة، والبيانات المتغيرة (الأسعار) فقط كل ثانيتين.
-# 2.  [جديد] إضافة مسار API جديد وخفيف (`/api/dashboard_updates`) مخصص فقط لإرسال الأسعار الحالية للصفقات المفتوحة.
-# 3.  [محسن] تحديث JavaScript في الواجهة ليقوم بتحديث أجزاء محددة فقط من الصفحة (الأسعار وأشرطة التقدم) بدلاً من إعادة رسم كل شيء.
-# 4.  [النتيجة] لوحة تحكم أسرع وأكثر استجابة بشكل ملحوظ.
+# هذا الإصدار يضيف دالة check_db_connection المفقودة التي كانت تسبب خطأ NameError عند بدء التشغيل.
+# 1.  [جديد] إضافة دالة check_db_connection للتحقق من حالة الاتصال بقاعدة البيانات وإعادة الاتصال عند الحاجة.
+# 2.  [إصلاح] استدعاء الدالة الجديدة في جميع الأماكن التي تتطلب عمليات قاعدة البيانات لضمان استقرار الاتصال.
+# 3.  [محسن] تحسين طفيف في منطق استدعاء الدالة ليكون أكثر إيجازًا.
 
 import time
 import os
@@ -42,7 +41,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV17.3.0')
+logger = logging.getLogger('CryptoBotV17.3.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -189,6 +188,31 @@ def init_redis() -> None:
         logger.warning(f"⚠️ [Redis] Connection failed: {e}.")
         redis_client = None
 
+# [FIX] Added the missing database connection check function
+def check_db_connection() -> bool:
+    """Checks if the database connection is alive and tries to reconnect if not."""
+    global conn
+    try:
+        # If conn is None or closed, attempt to reconnect
+        if conn is None or conn.closed != 0:
+            logger.warning("⚠️ [DB] Connection lost or not established. Attempting to reconnect...")
+            init_db()
+            # Check again after trying to initialize
+            if conn is None or conn.closed != 0:
+                logger.error("❌ [DB] Reconnection failed.")
+                return False
+            logger.info("✅ [DB] Reconnection successful.")
+        return True
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"❌ [DB] Connection check failed with an exception: {e}. Attempting to reconnect...")
+        init_db()
+        if conn is None or conn.closed != 0:
+            logger.error("❌ [DB] Reconnection after exception failed.")
+            return False
+        logger.info("✅ [DB] Reconnection after exception was successful.")
+        return True
+
+
 # --- دوال المساعدة والإشعارات ---
 def log_and_notify(level: str, message: str, notification_type: str):
     log_methods = {'info': logger.info, 'warning': logger.warning, 'error': logger.error}
@@ -288,7 +312,8 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # --- Data Loading ---
 def load_open_signals_to_cache():
-    if not check_db_connection() or not conn: return
+    # [FIX] Use the new check_db_connection function
+    if not check_db_connection(): return
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM signals WHERE status IN ('open', 'updated');")
@@ -392,7 +417,8 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, order_id: Optional[str] = None):
     try:
-        if not (check_db_connection() and conn): return
+        # [FIX] Use the new check_db_connection function
+        if not check_db_connection(): return
         signal_details = {
             "atr": trade_levels['atr'], "is_trailing_active": False,
             "trailing_stop_distance": trade_levels['trailing_stop_distance']
@@ -424,7 +450,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
 
 # --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
-<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;--info:#2196F3;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;margin:0;padding:20px;box-sizing:border-box;}.container{max-width:1400px;margin:0 auto;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);transition:background-color 0.5s ease;}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;}.btn-small{padding:5px 10px;font-size:12px;}.btn.stop{background-color:var(--danger);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-title{font-size:18px;font-weight:700;margin:0 0 15px 0;padding-bottom:10px;border-bottom:1px solid #333;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item.real-trade-item{border-left-color:var(--info);}.item-header{display:flex;justify-content:space-between;align-items:center;}.item-title{font-weight:700;}.item-content{font-size:13px;margin-top:5px;}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--warning);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.trade-mode-card{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;}.trade-mode-status span{font-weight:700;padding:4px 12px;border-radius:8px;}.trade-mode-paper{color:var(--warning);background-color:rgba(255,193,7,0.1);}.trade-mode-real{color:var(--info);background-color:rgba(33,150,243,0.1);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V17.3.0</div><div class="status-indicator"><div id="status-dot" class="status-dot"></div><span id="status-text">متوقف</span><button id="toggle-trading-btn" class="btn">تشغيل</button></div></header><div class="dashboard-grid"><div class="card trade-mode-card"><div id="trade-mode-status"></div><div id="balance-display"></div><button id="toggle-real-trading-btn" class="btn"></button></div><div class="card"><div class="card-title">اتجاه السوق (BTC)</div><div id="market-trend-container" class="trend-container"></div></div><div class="card"><div class="card-title" id="open-signals-title">الإشارات المفتوحة (0)</div><div id="open-signals-container" class="scrollable-content"></div></div><div class="card"><div class="card-title">الإشعارات</div><div id="notifications-container" class="scrollable-content"></div></div></div></div>
+<!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>لوحة تحكم بوت التداول</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;--success:#4CAF50;--danger:#F44336;--warning:#FFC107;--info:#2196F3;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;margin:0;padding:20px;box-sizing:border-box;}.container{max-width:1400px;margin:0 auto;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:15px;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.status-indicator{display:flex;align-items:center;gap:15px;}.status-dot{width:12px;height:12px;border-radius:50%;background-color:var(--danger);transition:background-color 0.5s ease;}.status-dot.active{background-color:var(--success);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:14px;}.btn-small{padding:5px 10px;font-size:12px;}.btn.stop{background-color:var(--danger);}.dashboard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px;}.card{background-color:var(--bg-surface);border-radius:12px;padding:20px;display:flex;flex-direction:column;}.card-title{font-size:18px;font-weight:700;margin:0 0 15px 0;padding-bottom:10px;border-bottom:1px solid #333;}.scrollable-content{overflow-y:auto;max-height:400px;flex-grow:1;}.item{padding:12px;border-radius:8px;margin-bottom:10px;border-left:4px solid var(--primary);background-color:#252525;}.item.real-trade-item{border-left-color:var(--info);}.item-header{display:flex;justify-content:space-between;align-items:center;}.item-title{font-weight:700;}.item-content{font-size:13px;margin-top:5px;}.trend-container{display:flex;justify-content:space-around;align-items:center;padding:15px 0;}.trend-item{text-align:center;}.trend-label{font-size:14px;color:var(--text-medium);margin-bottom:8px;}.trend-status{font-size:18px;font-weight:700;}.trend-up{color:var(--success);}.trend-down{color:var(--danger);}.trend-sideways{color:var(--warning);}.progress-bar-container{width:100%;background-color:#3c3c3c;border-radius:5px;height:10px;margin:8px 0;overflow:hidden;}.progress-bar{height:100%;transition:width 0.4s ease-in-out;}.progress-bar.profit{background-color:var(--success);}.progress-bar.loss{background-color:var(--danger);}.item-footer{display:flex;justify-content:space-between;font-size:12px;color:var(--text-medium);margin-top:4px;}.trade-mode-card{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;}.trade-mode-status span{font-weight:700;padding:4px 12px;border-radius:8px;}.trade-mode-paper{color:var(--warning);background-color:rgba(255,193,7,0.1);}.trade-mode-real{color:var(--info);background-color:rgba(33,150,243,0.1);}</style></head><body><div class="container"><header><div class="header-title">بوت التداول V17.3.1</div><div class="status-indicator"><div id="status-dot" class="status-dot"></div><span id="status-text">متوقف</span><button id="toggle-trading-btn" class="btn">تشغيل</button></div></header><div class="dashboard-grid"><div class="card trade-mode-card"><div id="trade-mode-status"></div><div id="balance-display"></div><button id="toggle-real-trading-btn" class="btn"></button></div><div class="card"><div class="card-title">اتجاه السوق (BTC)</div><div id="market-trend-container" class="trend-container"></div></div><div class="card"><div class="card-title" id="open-signals-title">الإشارات المفتوحة (0)</div><div id="open-signals-container" class="scrollable-content"></div></div><div class="card"><div class="card-title">الإشعارات</div><div id="notifications-container" class="scrollable-content"></div></div></div></div>
 <script>
 // مخزن لحفظ بيانات الصفقات الثابتة لتجنب إعادة طلبها
 let openSignalsData = {};
@@ -749,7 +775,8 @@ def main_bot_loop():
             time.sleep(60)
 
 def update_signal_in_db(signal_id, updates):
-    if not (check_db_connection() and conn): return False
+    # [FIX] Use the new check_db_connection function
+    if not check_db_connection(): return False
     try:
         with conn.cursor() as cur:
             set_clause = sql.SQL(', ').join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in updates.keys())
@@ -873,7 +900,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.3.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V17.3.1 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
