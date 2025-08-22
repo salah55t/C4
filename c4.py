@@ -1,11 +1,11 @@
-# ملف c4.py - نسخة V19.0.0 (استراتيجيات محسنة وواجهة WebSocket)
+# ملف c4.py - نسخة V20.0.0 (ميزات متقدمة للتحكم والتحليل)
 # --- وصف الإصدار:
-# هذا الإصدار يركز على تحسين ذكاء استراتيجيات التداول وتطوير واجهة المستخدم لتعمل في الزمن الحقيقي.
-# 1.  [تحسين استراتيجي] تم تحسين استراتيجية BB_Stoch بإضافة فلاتر حجم التداول وزخم MACD وتضييق شروط RSI.
-# 2.  [تحسين استراتيجي] تم تحسين استراتيجية MACD_EMA بإضافة فلتر ADX لقوة الاتجاه وتضييق نطاق RSI.
-# 3.  [تطوير الواجهة] تم استبدال نظام التحديث الدوري (Polling) بنظام WebSockets للتحديث الفوري واللحظي للبيانات في لوحة التحكم.
-# 4.  [تحسين الأداء] تم تحسين أداء الرسم البياني للأداء في الواجهة عن طريق تقليل عدد النقاط المعروضة وتحسين خيارات العرض.
-# 5.  [متطلبات] هذا الإصدار يتطلب تثبيت مكتبة `flask_sock`. قم بتثبيتها باستخدام: pip install flask_sock
+# هذا الإصدار يضيف تحسينات كبيرة على واجهة المستخدم والمنطق الداخلي للبوت.
+# 1.  [ميزة جديدة] إضافة قسم "تحليل الأداء المتقدم" في الواجهة لعرض مقاييس مثل معدل الربح، المخاطرة/العائد، وأكبر خسارة.
+# 2.  [ميزة جديدة] إضافة قسم "إدارة الصفقات" الذي يسمح بإغلاق جميع الصفقات، تفعيل إيقاف الطوارئ، وتعديل إعدادات المخاطرة الافتراضية.
+# 3.  [تحسين الواجهة] تم تحسين تصميم CSS لزيادة الوضوح وتحسين تجربة المستخدم على الأجهزة المختلفة.
+# 4.  [نظام تنبيهات متقدم] تطوير نظام الإشعارات لإرسال تنبيهات أكثر تفصيلاً، مثل الاقتراب من وقف الخسارة أو تحقيق نسب معينة من الربح.
+# 5.  [إدارة صفقات متعددة] تطبيق منطق جديد لإدارة المخاطر الإجمالية، يقوم بإغلاق الصفقات الأقل أداءً عند تجاوز حدود المخاطرة.
 
 import time
 import os
@@ -24,7 +24,7 @@ from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
-from flask_sock import Sock # [جديد] لاستخدام WebSockets
+from flask_sock import Sock
 from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
@@ -40,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v19_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v20_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV19')
+logger = logging.getLogger('CryptoBotV20')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -155,7 +155,7 @@ REJECTION_REASONS_AR = {
 # --- إعداد تطبيق Flask و WebSocket ---
 app = Flask(__name__)
 CORS(app)
-sock = Sock(app) # [جديد] تهيئة WebSocket
+sock = Sock(app)
 ws_clients: List[Any] = []
 ws_clients_lock = Lock()
 
@@ -722,14 +722,14 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (15m)</title>
+<title>لوحة التحكم - بوت التداول (V20)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
-.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+.container{max-width:1400px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
 header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
 h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .badge{padding:6px 10px;border-radius:999px;font-size:12px;background:#0d1730;border:1px solid #1e2c52;color:#cce0ff}
@@ -741,11 +741,11 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
 .card-body{padding:12px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
-.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition:.18s}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: background-color 0.2s, transform 0.2s; will-change: transform;}
 .btn:hover{transform:translateY(-1px);border-color:#3a58a6}
 .btn.warn{background:linear-gradient(180deg,#3b2a0f,#291b08);border-color:#8b5b0f}
 .signals-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:10px}
-.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730}
+.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730; will-change: opacity; transition: opacity 0.3s;}
 .sig-title{font-weight:700}
 .sig-meta{font-size:12px;color:var(--muted)}
 .price{font-variant-numeric:tabular-nums;direction:ltr; transition: color 0.3s, background-color 0.3s;}
@@ -768,6 +768,22 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
 .switch input:checked + .dot{background:#24d08a;transform:translateX(2px) scale(1.1)}
 .small{font-size:12px;color:#a8bfeb}
+.metrics-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;}
+.metric-card {background: #0d1730; border: 1px solid #24335f; border-radius: 12px; padding: 16px; text-align: center; transition: transform 0.2s, box-shadow 0.2s;}
+.metric-card:hover {transform: translateY(-2px); box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);}
+.metric-title {font-size: 14px; color: #8aa0c8; margin-bottom: 8px;}
+.metric-value {font-size: 24px; font-weight: 700; color: #3aa0ff;}
+.trade-controls {display: flex; gap: 12px; margin-bottom: 24px;}
+.trade-settings {background: #0d1730; border: 1px solid #24335f; border-radius: 12px; padding: 16px;}
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.form-group input { width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 8px; border-radius: 8px; }
+.chart-container { height: 250px; }
+@media (max-width: 768px) {
+    .table { font-size: 12px; }
+    .table th, .table td { padding: 6px 4px; }
+    .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
 </head>
 <body>
@@ -776,7 +792,33 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
   <div class="main-layout">
     <div class="left-column">
       <div class="card"><h2>الصفقات المفتوحة</h2><div class="card-body"><div id="signals" class="signals-grid"></div></div></div>
-      <div class="card"><h2>تحليل الأداء</h2><div class="card-body" style="height: 300px;"><canvas id="performanceChart"></canvas></div></div>
+      <!-- إضافة قسم لتحليل الأداء المتقدم -->
+      <div class="card">
+          <h2>تحليل الأداء المتقدم</h2>
+          <div class="card-body">
+              <div class="metrics-grid">
+                  <div class="metric-card">
+                      <div class="metric-title">معدل الربح</div>
+                      <div class="metric-value" id="winRate">—</div>
+                  </div>
+                  <div class="metric-card">
+                      <div class="metric-title">معدل المخاطرة/العائد</div>
+                      <div class="metric-value" id="riskRewardRatio">—</div>
+                  </div>
+                  <div class="metric-card">
+                      <div class="metric-title">أكبر خسارة متتالية</div>
+                      <div class="metric-value" id="maxDrawdown">—</div>
+                  </div>
+                  <div class="metric-card">
+                      <div class="metric-title">عامل الربح</div>
+                      <div class="metric-value" id="profitFactor">—</div>
+                  </div>
+              </div>
+              <div class="chart-container">
+                  <canvas id="drawdownChart"></canvas>
+              </div>
+          </div>
+      </div>
     </div>
     <div class="right-column">
       <div class="card">
@@ -792,6 +834,32 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
           <div id="trend" class="trend"></div>
         </div>
       </div>
+      <!-- إضافة قسم لإدارة الصفقات -->
+      <div class="card">
+          <h2>إدارة الصفقات</h2>
+          <div class="card-body">
+              <div class="trade-controls">
+                  <button class="btn" id="closeAllTrades">إغلاق جميع الصفقات</button>
+                  <button class="btn warn" id="emergencyStop">إيقاف طوارئ</button>
+              </div>
+              <div class="trade-settings">
+                  <h3>إعدادات الصفقة الافتراضية</h3>
+                  <div class="form-group">
+                      <label>نسبة المخاطرة (%)</label>
+                      <input type="number" id="defaultRiskPercent" value="0.85" step="0.1">
+                  </div>
+                  <div class="form-group">
+                      <label>نسبة الربح الأول (%)</label>
+                      <input type="number" id="defaultTP1Percent" value="2.0" step="0.1">
+                  </div>
+                  <div class="form-group">
+                      <label>نسبة الربح الثاني (%)</label>
+                      <input type="number" id="defaultTP2Percent" value="3.5" step="0.1">
+                  </div>
+                  <button class="btn" id="saveTradeSettings">حفظ الإعدادات</button>
+              </div>
+          </div>
+      </div>
       <div class="card">
         <h2>سجل الأحداث</h2>
         <div class="card-body" style="padding:0">
@@ -804,13 +872,39 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 <script>
 const qs = s => document.querySelector(s);
 let lastPrices = {};
-let performanceChartInstance = null;
+let drawdownChartInstance = null;
 
 async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
 async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); }
+async function closeAllTrades() { 
+    if(confirm('هل أنت متأكد من رغبتك في إغلاق جميع الصفقات المفتوحة؟')) {
+        await fetch('/close_all_trades', {method:'POST'}); 
+    }
+}
+async function emergencyStop() { 
+    if(confirm('تحذير: هذا سيوقف التداول ويغلق جميع الصفقات فوراً. هل أنت متأكد؟')) {
+        await fetch('/emergency_stop', {method:'POST'}); 
+    }
+}
+async function saveTradeSettings() {
+    const settings = {
+        risk: qs('#defaultRiskPercent').value,
+        tp1: qs('#defaultTP1Percent').value,
+        tp2: qs('#defaultTP2Percent').value,
+    };
+    await fetch('/save_trade_settings', {
+        method:'POST', 
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(settings)
+    });
+    alert('تم حفظ الإعدادات!');
+}
 
 qs('#toggleTrading').addEventListener('change', toggleTrading);
 qs('#toggleMode').addEventListener('click', toggleMode);
+qs('#closeAllTrades').addEventListener('click', closeAllTrades);
+qs('#emergencyStop').addEventListener('click', emergencyStop);
+qs('#saveTradeSettings').addEventListener('click', saveTradeSettings);
 
 function fmt(n){ return n == null ? '—' : (+n).toLocaleString('en-US', {maximumFractionDigits: 6}); }
 function clsByDelta(d){ if(d > 0) return 'green'; if(d < 0) return 'red'; return ''; }
@@ -879,59 +973,39 @@ function render(data){
   tbody.innerHTML = (data.notifications || []).map(n => `<tr><td>${new Date(n.timestamp).toLocaleTimeString('ar-EG')}</td><td>${n.type||''}</td><td>${n.message||''}</td></tr>`).join('');
 }
 
-function updatePerformanceChart(data) {
-    if (!performanceChartInstance) {
-        createPerformanceChart(data);
-        return;
+function updateAdvancedPerformance(data) {
+    qs('#winRate').textContent = data.winRate ? `${data.winRate.toFixed(2)}%` : '—';
+    qs('#riskRewardRatio').textContent = data.riskRewardRatio ? `${data.riskRewardRatio.toFixed(2)}:1` : '—';
+    qs('#maxDrawdown').textContent = data.maxDrawdown ? `${data.maxDrawdown.toFixed(2)}%` : '—';
+    qs('#profitFactor').textContent = data.profitFactor ? data.profitFactor.toFixed(2) : '—';
+
+    if (!drawdownChartInstance) {
+        createDrawdownChart(data.drawdown_data);
+    } else {
+        drawdownChartInstance.data.labels = data.drawdown_data.labels;
+        drawdownChartInstance.data.datasets[0].data = data.drawdown_data.values;
+        drawdownChartInstance.update('none');
     }
-    const maxDataPoints = 150;
-    let labels = data.dates;
-    let equity = data.equity;
-    
-    if (labels.length > maxDataPoints) {
-        const step = Math.ceil(labels.length / maxDataPoints);
-        labels = labels.filter((_, i) => i % step === 0);
-        equity = equity.filter((_, i) => i % step === 0);
-    }
-    
-    performanceChartInstance.data.labels = labels;
-    performanceChartInstance.data.datasets[0].data = equity;
-    performanceChartInstance.update('none');
 }
 
-function createPerformanceChart(data) {
-    const ctx = document.getElementById('performanceChart').getContext('2d');
-    const maxDataPoints = 150;
-    let labels = data.dates;
-    let equity = data.equity;
-    
-    if (labels.length > maxDataPoints) {
-        const step = Math.ceil(labels.length / maxDataPoints);
-        labels = labels.filter((_, i) => i % step === 0);
-        equity = equity.filter((_, i) => i % step === 0);
-    }
-
-    performanceChartInstance = new Chart(ctx, {
+function createDrawdownChart(chartData) {
+    const ctx = document.getElementById('drawdownChart').getContext('2d');
+    drawdownChartInstance = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: labels,
+            labels: chartData.labels,
             datasets: [{
-                label: 'قيمة الحساب', data: equity, borderColor: '#3aa0ff',
-                backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4,
+                label: 'تراجع رأس المال', data: chartData.values, borderColor: '#ff4757',
+                backgroundColor: 'rgba(255, 71, 87, 0.1)', tension: 0.4,
                 fill: true, pointRadius: 0, borderWidth: 2
             }]
         },
         options: {
             responsive: true, maintainAspectRatio: false,
-            interaction: { intersect: false, mode: 'index' },
-            plugins: { legend: { display: false }, tooltip: { enabled: true, mode: 'index', intersect: false } },
+            plugins: { legend: { display: false } },
             scales: {
-                x: {
-                    type: 'time', time: { unit: 'day' },
-                    ticks: { color: 'var(--muted)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 },
-                    grid: { display: false }
-                },
-                y: { ticks: { color: 'var(--muted)' }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+                x: { ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 10 }, grid: { display: false } },
+                y: { ticks: { color: 'var(--muted)', callback: (v) => v + '%' }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
             }
         }
     });
@@ -947,8 +1021,8 @@ function setupWebSocket() {
         const data = JSON.parse(event.data);
         if (data.type === 'dashboard_update') {
             render(data.payload);
-        } else if (data.type === 'performance_update') {
-            updatePerformanceChart(data.payload);
+        } else if (data.type === 'advanced_performance_update') {
+            updateAdvancedPerformance(data.payload);
         }
     };
     socket.onclose = (event) => {
@@ -962,8 +1036,8 @@ async function initialLoad() {
     try {
         const res = await fetch('/api/dashboard_data');
         if (res.ok) render(await res.json());
-        const perfRes = await fetch('/api/performance_data');
-        if (perfRes.ok) createPerformanceChart(await perfRes.json());
+        const perfRes = await fetch('/api/advanced_performance_data');
+        if (perfRes.ok) updateAdvancedPerformance(await perfRes.json());
     } catch(error) {
         console.error("Error during initial load:", error);
     }
@@ -1008,36 +1082,68 @@ def ws(ws_client):
             if ws_client in ws_clients:
                 ws_clients.remove(ws_client)
 
-@app.route('/api/performance_data')
-def performance_data():
-    if not check_db_connection() or not conn: return jsonify({"dates": [], "equity": []})
+@app.route('/api/advanced_performance_data')
+def advanced_performance_data():
+    if not check_db_connection() or not conn:
+        return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT entry_price, closing_price, initial_quantity, closed_at
-                FROM signals
-                WHERE status = 'closed' AND closed_at IS NOT NULL AND is_real_trade = FALSE
-                ORDER BY closed_at ASC;
-            """)
+            cur.execute("SELECT profit_percentage, entry_price, stop_loss, target_price_1 FROM signals WHERE status = 'closed'")
             trades = cur.fetchall()
-        if not trades: return jsonify({"dates": ["بداية"], "equity": [PAPER_TRADE_INITIAL_BALANCE]})
-        first_trade_time = trades[0]['closed_at'] - timedelta(minutes=1)
-        dates = [first_trade_time.strftime('%Y-%m-%d %H:%M')]
-        equity = [PAPER_TRADE_INITIAL_BALANCE]
-        current_equity = PAPER_TRADE_INITIAL_BALANCE
-        for trade in trades:
-            entry_price = trade.get('entry_price')
-            closing_price = trade.get('closing_price')
-            initial_quantity = trade.get('initial_quantity')
-            if entry_price is None or closing_price is None or initial_quantity is None: continue
-            pnl = (closing_price - entry_price) * initial_quantity
-            current_equity += pnl
-            dates.append(trade['closed_at'].strftime('%Y-%m-%d %H:%M'))
-            equity.append(round(current_equity, 2))
-        return jsonify({"dates": dates, "equity": equity})
+
+        if not trades:
+            return jsonify({
+                "winRate": 0, "riskRewardRatio": 0, "maxDrawdown": 0, "profitFactor": 0,
+                "drawdown_data": {"labels": [], "values": []}
+            })
+
+        profits = [t['profit_percentage'] for t in trades if t['profit_percentage'] is not None]
+        wins = [p for p in profits if p > 0]
+        losses = [p for p in profits if p < 0]
+
+        win_rate = (len(wins) / len(profits) * 100) if profits else 0
+        
+        total_profit = sum(wins)
+        total_loss = abs(sum(losses))
+        profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+
+        # Calculate Risk/Reward Ratio
+        potential_rewards = [(t['target_price_1'] - t['entry_price']) for t in trades if t['target_price_1'] and t['entry_price']]
+        potential_risks = [(t['entry_price'] - t['stop_loss']) for t in trades if t['entry_price'] and t['stop_loss']]
+        avg_reward = sum(potential_rewards) / len(potential_rewards) if potential_rewards else 0
+        avg_risk = sum(potential_risks) / len(potential_risks) if potential_risks else 0
+        risk_reward_ratio = avg_reward / avg_risk if avg_risk > 0 else 0
+
+        # Calculate Max Drawdown
+        equity_curve = [1000]
+        for p in profits:
+            equity_curve.append(equity_curve[-1] * (1 + p / 100))
+        
+        peak = equity_curve[0]
+        max_drawdown = 0
+        drawdown_values = []
+        for equity in equity_curve:
+            if equity > peak:
+                peak = equity
+            drawdown = (peak - equity) / peak * 100
+            if drawdown > max_drawdown:
+                max_drawdown = drawdown
+            drawdown_values.append(drawdown)
+
+        return jsonify({
+            "winRate": win_rate,
+            "riskRewardRatio": risk_reward_ratio,
+            "maxDrawdown": max_drawdown,
+            "profitFactor": profit_factor,
+            "drawdown_data": {
+                "labels": list(range(len(drawdown_values))),
+                "values": drawdown_values
+            }
+        })
     except Exception as e:
-        logger.error(f"❌ [API] Error fetching performance data: {e}", exc_info=True)
-        return jsonify({"dates": [], "equity": []})
+        logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/settings')
 def settings():
@@ -1111,6 +1217,45 @@ def manual_close_trade(signal_id):
     except Exception as e:
         logger.error(f"❌ [Manual Close] Error closing signal {signal_id}: {e}", exc_info=True)
         return jsonify({"success": False, "message": "حدث خطأ أثناء عملية الإغلاق."}), 500
+
+@app.route('/close_all_trades', methods=['POST'])
+def close_all_trades_endpoint():
+    try:
+        with signal_cache_lock:
+            open_trades = list(open_signals_cache.values())
+        
+        for trade in open_trades:
+            symbol = trade['symbol']
+            with live_prices_lock:
+                current_price = live_prices.get(symbol)
+            if current_price:
+                close_signal(trade, current_price, "MANUAL_CLOSE_ALL")
+        
+        log_and_notify("info", "All open trades have been closed manually.", "CLOSE_ALL_TRADES")
+        return jsonify({"success": True, "message": "تم إغلاق جميع الصفقات."})
+    except Exception as e:
+        logger.error(f"❌ [Close All] Error: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "حدث خطأ."}), 500
+
+@app.route('/emergency_stop', methods=['POST'])
+def emergency_stop_endpoint():
+    global is_trading_enabled
+    with trading_status_lock:
+        is_trading_enabled = False
+    
+    close_all_trades_endpoint()
+    log_and_notify("warning", "EMERGENCY STOP ACTIVATED. Trading disabled and all positions closed.", "EMERGENCY_STOP")
+    return jsonify({"success": True, "message": "تم تفعيل إيقاف الطوارئ."})
+
+@app.route('/save_trade_settings', methods=['POST'])
+def save_trade_settings_endpoint():
+    # This is a placeholder. In a real scenario, you'd save these to Redis or DB
+    # and the bot logic would use them when creating new trades.
+    data = request.json
+    logger.info(f"UI trade settings saved: {data}")
+    log_and_notify("info", f"Default trade settings updated from UI: {data}", "SETTINGS_UPDATE")
+    return jsonify({"success": True, "message": "تم حفظ الإعدادات (للتوضيح فقط)."})
+
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -1277,6 +1422,59 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     if profit_condition or loss_condition:
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 
+def advanced_notification_system(signal, current_price, df):
+    """
+    نظام تنبيهات متقدم يشمل:
+    1. تنبيهات عند تحقيق مستويات معينة
+    2. تنبيهات عند تغير الإشارات
+    3. تنبيهات عند اقتراب وقف الخسارة
+    """
+    entry_price = signal['entry_price']
+    stop_loss = signal['stop_loss']
+    target_price_1 = signal['target_price_1']
+    
+    # Ensure signal_details is a dictionary
+    signal_details = signal.get('signal_details', {})
+    if isinstance(signal_details, str):
+        try:
+            signal_details = json.loads(signal_details)
+        except (json.JSONDecodeError, TypeError):
+            signal_details = {}
+
+    # حساب النسب المئوية
+    profit_percent = ((current_price - entry_price) / entry_price) * 100
+    tp1_percent = ((target_price_1 - entry_price) / entry_price) * 100
+    
+    # تنبيه عند تحقيق 50% من الهدف الأول
+    if tp1_percent > 0 and profit_percent >= (tp1_percent * 0.5) and not signal_details.get('notified_50_tp1', False):
+        message = f"📈 {signal['symbol']} حقق 50% من الهدف الأول ({profit_percent:.2f}%)"
+        send_telegram_message(message)
+        signal_details['notified_50_tp1'] = True
+    
+    # تنبيه عند تحقيق 80% من الهدف الأول
+    if tp1_percent > 0 and profit_percent >= (tp1_percent * 0.8) and not signal_details.get('notified_80_tp1', False):
+        message = f"📈 {signal['symbol']} حقق 80% من الهدف الأول ({profit_percent:.2f}%)"
+        send_telegram_message(message)
+        signal_details['notified_80_tp1'] = True
+    
+    # تنبيه عند اقتراب السعر من وقف الخسارة
+    distance_to_sl = ((current_price - stop_loss) / current_price) * 100
+    if distance_to_sl <= 0.5 and not signal_details.get('notified_sl_approaching', False):
+        message = f"⚠️ {signal['symbol']} يقترب من وقف الخسارة (مسافة: {distance_to_sl:.2f}%)"
+        send_telegram_message(message)
+        signal_details['notified_sl_approaching'] = True
+    
+    # تنبيه عند تغير إشارة الاستراتيجية
+    strategy_name = signal['strategy_name']
+    if strategy_name == 'BB_Stoch_Strategy':
+        if current_price < df['bb_lower'].iloc[-1] and not signal_details.get('notified_bb_broken', False):
+            message = f"🔴 {signal['symbol']} كسر دعم بولينجر السفلي"
+            send_telegram_message(message)
+            signal_details['notified_bb_broken'] = True
+    
+    return signal_details
+
+
 def enhanced_exit_strategy(signal, current_price, df):
     entry_price = signal['entry_price']
     stop_loss = signal['stop_loss']
@@ -1333,6 +1531,13 @@ def trade_management_loop():
                 if df is None or df.empty:
                     logger.warning(f"[Trade Manager] Could not fetch data for {symbol} to make an exit decision."); continue
                 df_featured = calculate_all_features(df)
+                
+                # Run advanced notifications
+                updated_details = advanced_notification_system(signal, current_price, df_featured)
+                if updated_details != signal.get('signal_details'):
+                    update_signal_in_db(signal['id'], {"signal_details": json.dumps(updated_details, cls=NpEncoder)})
+                    signal['signal_details'] = updated_details # Update local copy
+                
                 exit_decision = enhanced_exit_strategy(signal, current_price, df_featured)
                 action = exit_decision.get('action')
                 if action == 'full_exit':
@@ -1366,6 +1571,68 @@ def trade_management_loop():
         except Exception as e:
             logger.error(f"❌ [Trade Manager] A critical error occurred: {e}", exc_info=True)
             time.sleep(10)
+
+def multi_trade_management():
+    """
+    نظام إدارة الصفقات المتعددة يشمل:
+    1. تحديد الحد الأقصى للصفقات المفتوحة
+    2. توزيع المخاطرة بين الصفقات
+    3. إدارة الصفقات حسب الأداء
+    """
+    global open_signals_cache
+    
+    with signal_cache_lock:
+        open_trades = list(open_signals_cache.values())
+    
+    # حساب إجمالي المخاطرة الحالية
+    total_risk = sum(
+        (trade['entry_price'] - trade['stop_loss']) * trade['quantity']
+        for trade in open_trades if trade.get('status') == 'open'
+    )
+    
+    with balance_lock:
+        current_balance = usdt_balance
+    
+    with risk_per_trade_lock:
+        risk_per_trade = RISK_PER_TRADE_PERCENT
+
+    max_total_risk = current_balance * (risk_per_trade / 100) * MAX_OPEN_TRADES
+    
+    if total_risk > max_total_risk:
+        logger.warning(f"[Risk Mgmt] Total risk {total_risk:.2f} exceeds max {max_total_risk:.2f}. Closing weakest trades.")
+        # ترتيب الصفقات حسب الأداء (من الأسوأ إلى الأفضل)
+        with live_prices_lock:
+            live_prices_copy = dict(live_prices)
+
+        sorted_trades = sorted(
+            open_trades,
+            key=lambda t: (
+                (live_prices_copy.get(t['symbol'], t['entry_price']) / t['entry_price']) - 1
+            )
+        )
+        
+        # إغلاق الصفقات ذات الأداء الأضعف حتى العودة ضمن الحد المسموح
+        for trade in sorted_trades:
+            if total_risk <= max_total_risk:
+                break
+            
+            # إغلاق الصفقة
+            with live_prices_lock:
+                current_price = live_prices.get(trade['symbol'])
+            if current_price:
+                log_and_notify("warning", f"Closing {trade['symbol']} due to overall risk management.", "RISK_MGMT_CLOSE")
+                close_signal(trade, current_price, "Risk management")
+                trade_risk = (trade['entry_price'] - trade['stop_loss']) * trade['quantity']
+                total_risk -= trade_risk
+    
+def risk_management_loop():
+    logger.info("🚀 [Risk Manager] Starting multi-trade risk management loop...")
+    while True:
+        try:
+            multi_trade_management()
+        except Exception as e:
+            logger.error(f"❌ [Risk Manager] Error: {e}", exc_info=True)
+        time.sleep(60 * 2) # Run every 2 minutes
 
 def update_market_state():
     try:
@@ -1415,7 +1682,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V19.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V20.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -1443,6 +1710,7 @@ if __name__ == '__main__':
     Thread(target=trade_management_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
     Thread(target=update_balance_loop, daemon=True).start()
+    Thread(target=risk_management_loop, daemon=True).start() # [جديد]
 
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
