@@ -1,14 +1,11 @@
-# ملف c4.py - نسخة V23.0.0 (واجهة تفاعلية وتحكم محسن)
+# ملف c4.py - نسخة V23.1.0 (إصلاح أخطاء التداول الحقيقي)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف ميزات تفاعلية جديدة لواجهة المستخدم، مما يمنح المستخدم تحكماً أكبر
-# ورؤية أوضح لحالة السوق مباشرة من لوحة التحكم.
-# 1.  [إضافة UI] إضافة قسم جديد لعرض حالة السوق (صاعد/هابط/جانبي) على فريمات زمنية متعددة (15m, 1h, 4h).
-# 2.  [إضافة UI] تحسين زر التبديل بين التداول الورقي والحقيقي مع نافذة تأكيد للوضع الحقيقي.
-# 3.  [إضافة UI] إضافة فلتر تفاعلي (slider) للتحكم في الحد الأدنى لجودة الإشارة المقبولة.
-# 4.  [إضافة Backend] إنشاء نقاط نهاية API جديدة للتحكم في وضع التداول وفلتر الجودة.
-# 5.  [تحسين Backend] إضافة حلقة (thread) جديدة لبث تحديثات حالة السوق بشكل دوري عبر WebSocket.
-# 6.  [تحسين JS] تحديث كود الواجهة الأمامية للتعامل مع العناصر الجديدة والتحديثات الفورية عبر WebSocket.
-# 7.  [تحسين CSS] إضافة تنسيقات للعناصر الجديدة لتحسين المظهر.
+# هذا الإصدار يعالج أخطاء حرجة متعلقة بتنفيذ الصفقات الحقيقية على منصة Binance.
+# 1.  [إصلاح Bug] معالجة خطأ "Filter failure: LOT_SIZE" عن طريق التحقق من أقل كمية (`minQty`)
+#     بالإضافة إلى حجم الخطوة (`stepSize`) قبل إرسال أي أمر شراء.
+# 2.  [تحسين أمان] عند إغلاق أي صفقة حقيقية (أمر بيع)، يقوم البوت الآن بالاستعلام عن الرصيد الفعلي
+#     للعملة من المنصة مباشرة لضمان بيع الكمية الصحيحة وتجنب الأخطاء.
+# 3.  [تحسين Logs] إضافة سجلات أكثر تفصيلاً لعمليات التحقق من الكميات والأرصدة.
 
 import time
 import os
@@ -152,6 +149,7 @@ REJECTION_REASONS_AR = {
     "HTF Trend Confirmation Failed": "فشل تأكيد الترند على الفريم الأعلى",
     "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص",
     "MinNotional Filter Failed": "قيمة الصفقة أقل من الحد الأدنى للمنصة",
+    "LotSize Filter Failed": "كمية الصفقة لا تتوافق مع قواعد المنصة",
     "Insufficient Balance": "الرصيد غير كافي لتنفيذ الصفقة",
     "Bullish Confirmation Failed": "فشل تأكيد الشمعة الصعودية",
     "Volume Filter Failed": "فلتر حجم التداول فشل",
@@ -777,15 +775,34 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         risk_per_unit = max(entry_price - stop_loss, 1e-8)
         quantity = max_risk_usdt / risk_per_unit
         if quantity <= 0: log_rejection(symbol, "Insufficient Balance"); return
+        
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info: logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
-        step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
-        adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
-        notional = adjusted_quantity * entry_price
-        min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
-        if notional < min_notional:
-            log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": notional}); return
+        if not symbol_info: 
+            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
+        
+        # [إصلاح Bug] معالجة شاملة لفلاتر LOT_SIZE و NOTIONAL
         try:
+            lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), None)
+
+            if not lot_size_filter or not notional_filter:
+                logger.error(f"❌ [Real Trade] Filters not found for {symbol}"); return
+
+            step_size = lot_size_filter['stepSize']
+            min_qty = float(lot_size_filter['minQty'])
+            min_notional = float(notional_filter['minNotional'])
+
+            adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
+            notional_value = adjusted_quantity * entry_price
+
+            if adjusted_quantity < min_qty:
+                log_rejection(symbol, "LotSize Filter Failed", {"required_min_qty": min_qty, "actual_qty": adjusted_quantity})
+                return
+            
+            if notional_value < min_notional:
+                log_rejection(symbol, "MinNotional Filter Failed", {"required_notional": min_notional, "actual_notional": notional_value})
+                return
+
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
             order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
@@ -841,7 +858,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V23 - تفاعلي)</title>
+<title>لوحة التحكم - بوت التداول (V23.1 - إصلاحات)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -909,7 +926,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V23 (تفاعلي)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V23.1 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2274,33 +2291,57 @@ def update_signal_in_db(signal_id, updates):
         if conn: conn.rollback()
         return False
 
-def execute_close_order(symbol: str, quantity: float, reason: str):
+def execute_close_order(symbol: str, reason: str):
+    """
+    [إصلاح] تم تعديل الدالة لتعتمد على الرصيد الفعلي من المنصة بدلاً من الكمية المسجلة.
+    """
     with trading_mode_lock: is_real = not paper_trading_mode
     if is_real:
         try:
             symbol_info = exchange_info_map.get(symbol)
             if not symbol_info:
                 logger.error(f"❌ [Execute Close] No exchange info for {symbol}"); return
-            step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
-            adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
-            if adjusted_quantity > 0:
-                logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity} of {symbol} due to {reason}")
-                client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
-            else:
-                logger.warning(f"⚠️ [Execute Close] Adjusted quantity for {symbol} is zero.")
+
+            base_asset = symbol_info['baseAsset']
+            logger.info(f"💰 [Real Close] Fetching actual balance for {base_asset}...")
+            balance_info = client.get_asset_balance(asset=base_asset)
+            quantity_to_sell = float(balance_info['free'])
+            logger.info(f"💰 [Real Close] Actual balance is {quantity_to_sell} {base_asset}.")
+
+            if quantity_to_sell <= 0:
+                logger.warning(f"⚠️ [Execute Close] No balance of {base_asset} to sell for {symbol}."); return
+
+            lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            if not lot_size_filter:
+                 logger.error(f"❌ [Real Close] LOT_SIZE filter not found for {symbol}"); return
+
+            step_size = lot_size_filter['stepSize']
+            min_qty = float(lot_size_filter['minQty'])
+            
+            adjusted_quantity = adjust_quantity_to_step_size(quantity_to_sell, step_size)
+            
+            if adjusted_quantity < min_qty:
+                logger.warning(f"⚠️ [Execute Close] Adjusted quantity {adjusted_quantity} is below minQty {min_qty} for {symbol}. Cannot sell.")
+                return
+
+            logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity} of {symbol} due to {reason}")
+            client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
+            
         except BinanceAPIException as e:
             logger.error(f"❌ [Execute Close] Binance API Error for {symbol}: {e}")
             send_telegram_message(f"❌ *خطأ في تنفيذ إغلاق لـ {symbol}*\n`{e}`", force=True)
         except Exception as e:
             logger.error(f"❌ [Execute Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
     else:
-        logger.info(f"📊 [Paper Close] Simulating close of {quantity} of {symbol} for reason: {reason}")
+        # في الوضع الورقي، لا نحتاج لجلب الرصيد
+        logger.info(f"📊 [Paper Close] Simulating close of trade for {symbol} for reason: {reason}")
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
-    remaining_quantity = signal.get('quantity', 0)
-    if remaining_quantity > 0:
-        execute_close_order(symbol, remaining_quantity, reason)
+    
+    # [تعديل] تم تمرير السبب فقط، الكمية ستُجلب من المنصة
+    execute_close_order(symbol, reason)
+
     profit = ((closing_price - entry_price) / entry_price) * 100
     with consecutive_losses_lock:
         if profit < 0:
@@ -2407,7 +2448,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.0 (Interactive) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.1 (Bug Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
