@@ -1,13 +1,15 @@
-# ملف c4.py - نسخة V21.0.5 (تحسين الاختبار الخلفي والمؤشرات)
+# ملف c4.py - نسخة V22.0.0 (تحسينات الأداء المقترحة)
 # --- وصف الإصدار:
-# هذا الإصدار يركز على تحسين تجربة المستخدم عبر واجهة عرض أكثر تفاعلية وغنية بالبيانات.
-# 1.  [تحسين UI] تحديث واجهة عرض الصفقات المفتوحة لتشمل نقاط الجودة بشكل مرئي.
-# 2.  [إضافة UI] إضافة أزرار لفرز الصفقات المفتوحة حسب (الجودة، التقدم، الاستراتيجية).
-# 3.  [إضافة Backend] إنشاء مسار API جديد (`/api/advanced_performance_data`) لحساب مؤشرات أداء متقدمة (Sharpe Ratio, Max Drawdown, etc.).
-# 4.  [إضافة UI] إضافة قسم جديد في لوحة التحكم لعرض مؤشرات الأداء المتقدمة ومنحنى بياني لتطور رأس المال.
-# 5.  [تحسين JS] تحديث كود JavaScript لمعالجة الفرز وعرض البيانات الجديدة.
-# 6.  [تحسين Backend] تحديث دالة حساب المؤشرات الفنية.
-# 7.  [تحسين Backend] تطبيق نظام اختبار خلفي (Backtesting) متقدم مع واجهة API جديدة.
+# هذا الإصدار يطبق مجموعة من التحسينات الشاملة على الخادم (Backend) والواجهة الأمامية (Frontend)
+# لزيادة سرعة الاستجابة وتقليل استهلاك الموارد وتحسين تجربة المستخدم بشكل عام.
+# 1.  [تحسين Backend] إضافة مسارات API محسنة للتحديث الجزئي للبيانات (مثل الصفقات المفتوحة).
+# 2.  [تحسين Backend] إضافة مسار API لمؤشرات الأداء مع التخزين المؤقت (Caching) في Redis.
+# 3.  [تحسين Backend] إضافة ترقيم الصفحات (Pagination) للبيانات التاريخية الكبيرة.
+# 4.  [تحسين Frontend] تحسين آلية تحميل البيانات الأولية لعرض المحتوى الأساسي بسرعة.
+# 5.  [تحسين Frontend] استخدام WebSocket للتحديثات الجزئية بدلاً من إعادة تحميل كل شيء.
+# 6.  [تحسين Frontend] تحسين وظيفة الفرز لتكون أسرع وتعتمد على الخادم.
+# 7.  [تحسين CSS] تطبيق تحسينات CSS لزيادة سلاسة الرسوم المتحركة وأداء العرض.
+# 8.  [تحسين WebSocket] التأكد من موثوقية بث البيانات ومعالجة انقطاع الاتصال.
 
 import time
 import os
@@ -42,11 +44,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v21_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v22_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV21')
+logger = logging.getLogger('CryptoBotV22')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -164,16 +166,24 @@ ws_clients_lock = Lock()
 
 # --- دوال WebSocket ---
 def broadcast(data: Dict):
-    """إرسال البيانات إلى جميع عملاء WebSocket المتصلين."""
+    """
+    [تحسين] إرسال البيانات إلى جميع عملاء WebSocket المتصلين مع معالجة الأخطاء.
+    هذه الدالة موثوقة وتزيل العملاء غير المتصلين تلقائياً.
+    """
     with ws_clients_lock:
         clients_to_remove = []
         for client in ws_clients:
             try:
                 client.send(json.dumps(data, cls=NpEncoder))
-            except Exception:
+            except Exception as e:
+                logger.warning(f"WebSocket send failed, removing client: {e}")
                 clients_to_remove.append(client)
+        
         for client in clients_to_remove:
-            ws_clients.remove(client)
+            try:
+                ws_clients.remove(client)
+            except ValueError:
+                pass # Client might have been removed in another thread
 
 def get_dashboard_payload() -> Dict:
     """تجميع بيانات لوحة التحكم لإرسالها."""
@@ -183,39 +193,13 @@ def get_dashboard_payload() -> Dict:
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
-    with live_prices_lock: live_prices_copy = dict(live_prices)
-    open_signals_with_progress = {}
-    with signal_cache_lock:
-        sorted_symbols = sorted(open_signals_cache.keys())
-        for symbol in sorted_symbols:
-            signal = open_signals_cache[symbol]
-            signal_data = signal.copy()
-            current_price = live_prices_copy.get(symbol)
-            signal_data['current_price'] = current_price
-            signal_data['progress_to_tp'] = 0
-            signal_data['progress_to_sl'] = 0
-            if current_price:
-                entry_price = signal.get('entry_price', 0)
-                stop_loss = signal.get('stop_loss', 0)
-                target_price_1 = signal.get('target_price_1', 0)
-                if current_price > entry_price and target_price_1 > entry_price:
-                    progress = ((current_price - entry_price) / (target_price_1 - entry_price)) * 100
-                    signal_data['progress_to_tp'] = min(progress, 100)
-                elif current_price < entry_price and entry_price > stop_loss:
-                    progress = ((entry_price - current_price) / (entry_price - stop_loss)) * 100
-                    signal_data['progress_to_sl'] = min(progress, 100)
-            open_signals_with_progress[symbol] = signal_data
+    
     return {
         "trading_enabled": trading_enabled, "paper_trading_mode": is_paper_mode,
-        "usdt_balance": current_balance, "open_signals": open_signals_with_progress,
+        "usdt_balance": current_balance,
         "notifications": notifications, "rejections": rejections, "market_state": market_state,
-        "server_time": datetime.now(timezone.utc).isoformat(), "live_prices": live_prices_copy
+        "server_time": datetime.now(timezone.utc).isoformat()
     }
-
-def broadcast_dashboard_update():
-    """تجميع وإرسال تحديثات لوحة التحكم عبر WebSocket."""
-    payload = get_dashboard_payload()
-    broadcast({"type": "dashboard_update", "payload": payload})
 
 # --- دوال تهيئة الخدمات وقاعدة البيانات ---
 def optimize_database():
@@ -261,6 +245,16 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 cur.execute("CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL, message TEXT NOT NULL);")
+                # [تحسين] إضافة جدول ملخص الأداء
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS performance_summary (
+                        id SERIAL PRIMARY KEY,
+                        trade_id INTEGER REFERENCES signals(id),
+                        profit_percentage DOUBLE PRECISION,
+                        drawdown DOUBLE PRECISION,
+                        date DATE
+                    );
+                """)
                 columns_to_add = {
                     "target_price_1": "DOUBLE PRECISION", "target_price_2": "DOUBLE PRECISION",
                     "initial_quantity": "DOUBLE PRECISION"
@@ -312,7 +306,8 @@ def log_and_notify(level: str, message: str, notification_type: str):
         with notifications_lock: notifications_cache.appendleft(new_notification)
         with conn.cursor() as cur: cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
         conn.commit()
-        broadcast_dashboard_update()
+        # [تحسين] إرسال إشعار جزئي عبر WebSocket
+        broadcast({"type": "new_notification", "payload": new_notification})
     except Exception as e:
         logger.error(f"❌ [DB] Failed to save notification: {e}")
         if conn: conn.rollback()
@@ -325,7 +320,7 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
             reason_ar = f"{reason_ar} ({details_str})"
         log_entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol, "reason": reason_ar}
         with rejection_logs_lock: rejection_logs_cache.appendleft(log_entry)
-        broadcast_dashboard_update()
+        broadcast({"type": "new_rejection", "payload": log_entry})
     except Exception as e:
         logger.error(f"❌ [Log Rejection] Error logging rejection for {symbol}: {e}", exc_info=True)
 
@@ -356,10 +351,17 @@ def handle_socket_message(msg):
     global live_prices
     if msg and 'e' in msg and msg['e'] == 'error': logger.error(f"❌ [WebSocket] Error: {msg['m']}"); return
     if isinstance(msg, list):
+        price_updates = {}
         with live_prices_lock:
             for ticker in msg:
-                if 's' in ticker and 'c' in ticker: live_prices[ticker['s']] = float(ticker['c'])
-        broadcast_dashboard_update()
+                if 's' in ticker and 'c' in ticker: 
+                    symbol = ticker['s']
+                    price = float(ticker['c'])
+                    live_prices[symbol] = price
+                    price_updates[symbol] = price
+        # [تحسين] إرسال تحديثات الأسعار فقط
+        if price_updates:
+            broadcast({"type": "price_update", "payload": price_updates})
 
 def start_websocket():
     global ws_manager
@@ -812,6 +814,8 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
             'signal_details': signal_details, 'order_id': order_id
         }
         with signal_cache_lock: open_signals_cache[symbol] = signal_data
+        # [تحسين] إرسال تحديث جزئي للإشارة الجديدة
+        broadcast({"type": "new_signal", "payload": signal_data})
     except Exception as e:
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
@@ -823,10 +827,11 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V21)</title>
+<title>لوحة التحكم - بوت التداول (V22 - محسن)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
+/* [تحسين] تطبيق تحسينات CSS والأداء */
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
@@ -846,8 +851,8 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .btn:hover{transform:translateY(-1px);border-color:#3a58a6}
 .btn.warn{background:linear-gradient(180deg,#3b2a0f,#291b08);border-color:#8b5b0f}
 .btn.small{padding: 6px 10px; font-size: 12px;}
-.signals-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:10px}
-.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730; will-change: opacity; transition: opacity 0.3s; grid-template-rows: auto auto;}
+.signals-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:10px; contain: layout style paint;} /* [تحسين] استخدام CSS Containment */
+.signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730; will-change: transform, opacity; transition: transform 0.2s ease, opacity 0.2s ease; grid-template-rows: auto auto;} /* [تحسين] استخدام will-change */
 .signal > *:nth-child(1) { grid-column: 1 / 2; }
 .signal > *:nth-child(2) { grid-column: 2 / 3; grid-row: 1 / 3; }
 .signal > *:nth-child(3) { grid-column: 1 / 2; }
@@ -865,9 +870,9 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .pill b{display:block;font-size:12px;color:#9fb7ef}
 .pill span{font-size:12px}
 .green{color:var(--ok)}.red{color:var(--bad)}.amber{color:var(--warn)}
-.table{width:100%;border-collapse:separate;border-spacing:0 8px}
+.table{width:100%;border-collapse:separate;border-spacing:0 8px; table-layout: fixed;} /* [تحسين] أداء الجداول */
 .table th{font-size:12px;text-align:right;color:#9ab2e2;font-weight:600;padding:0 6px}
-.table td{padding:8px;background:#0d1730;border:1px solid #24335f}
+.table td{padding:8px;background:#0d1730;border:1px solid #24335f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;} /* [تحسين] أداء الجداول */
 .switch{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid #2a3a68;background:#0f1b3b;cursor:pointer;user-select:none}
 .switch input{display:none}
 .switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
@@ -878,20 +883,34 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .metric-title {font-size: 12px; color: #8aa0c8; margin-bottom: 6px;}
 .metric-value {font-size: 18px; font-weight: 700;}
 .chart-container { height: 200px; }
+/* [تحسين] مؤشر التحميل */
+.loading-spinner {
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-radius: 50%;
+    border-top: 3px solid #3aa0ff;
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+    margin: 20px auto;
+}
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
 </style>
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V21</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V22 (محسن)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
         <h2>الصفقات المفتوحة <span class="small" id="signalCount">(0)</span></h2>
         <div class="card-body">
             <div class="controls" style="margin-bottom: 12px;">
-                <button class="btn small" data-sort="quality">الترتيب حسب الجودة</button>
-                <button class="btn small" data-sort="progress">الترتيب حسب التقدم</button>
-                <button class="btn small" data-sort="strategy">الترتيب حسب الاستراتيجية</button>
+                <button class="btn small" data-sort="quality_score">الترتيب حسب الجودة</button>
+                <button class="btn small" data-sort="id">الترتيب حسب الأحدث</button>
+                <button class="btn small" data-sort="strategy_name">الترتيب حسب الاستراتيجية</button>
             </div>
             <div id="signals" class="signals-grid"></div>
         </div>
@@ -900,10 +919,10 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
         <h2>مؤشرات الأداء</h2>
         <div class="card-body">
             <div class="performance-grid">
-                <div class="metric-card"><div class="metric-title">معدل الربح</div><div class="metric-value" id="winRate">—</div></div>
-                <div class="metric-card"><div class="metric-title">عامل الربح</div><div class="metric-value" id="profitFactor">—</div></div>
-                <div class="metric-card"><div class="metric-title">أكبر تراجع</div><div class="metric-value" id="maxDrawdown">—</div></div>
-                <div class="metric-card"><div class="metric-title">نسبة شارب</div><div class="metric-value" id="sharpeRatio">—</div></div>
+                <div class="metric-card"><div class="metric-title">معدل الربح (30 يوم)</div><div class="metric-value" id="winRate">—</div></div>
+                <div class="metric-card"><div class="metric-title">متوسط الربح (30 يوم)</div><div class="metric-value" id="avgProfit">—</div></div>
+                <div class="metric-card"><div class="metric-title">أكبر تراجع (30 يوم)</div><div class="metric-value" id="maxDrawdown">—</div></div>
+                <div class="metric-card"><div class="metric-title">إجمالي الصفقات (30 يوم)</div><div class="metric-value" id="totalTrades">—</div></div>
             </div>
             <div class="chart-container"><canvas id="performanceChart"></canvas></div>
         </div>
@@ -941,105 +960,240 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
   </div>
 </div>
 <script>
+// [تحسين] إعادة هيكلة كود الواجهة الأمامية بالكامل
 const qs = s => document.querySelector(s);
 let lastPrices = {};
 let performanceChartInstance = null;
-let currentSortBy = 'quality';
-let currentDashboardData = {};
+let openSignals = {}; // مخزن محلي للصفقات المفتوحة
 
+// --- دوال المساعدة ---
+const debounce = (func, delay) => {
+    let timeout;
+    return (...args) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), delay);
+    };
+};
+function fmt(n){ return n == null ? '—' : (+n).toLocaleString('en-US', {maximumFractionDigits: 6}); }
+function showLoadingIndicator(containerId) {
+    const container = qs(containerId);
+    if(container) container.innerHTML = '<div class="loading-spinner"></div>';
+}
+function hideLoadingIndicator(containerId) {
+    const spinner = qs(`${containerId} .loading-spinner`);
+    if (spinner) spinner.parentElement.innerHTML = '';
+}
+
+// --- دوال العرض والتحديث ---
+function renderSignal(signal) {
+    const cp = signal.current_price || lastPrices[signal.symbol] || signal.entry_price;
+    const pToTp = signal.progress_to_tp || 0;
+    const qualityScore = signal.signal_details?.quality_score || 0;
+    const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
+    
+    return `
+        <div class="signal" id="signal-${signal.id}" data-symbol="${signal.symbol}">
+            <div>
+                <div class="sig-title">${signal.symbol}</div>
+                <div class="sig-meta">${signal.strategy_name} | <span style="color: ${qualityColor}; font-weight: bold;">⭐ ${qualityScore}/100</span></div>
+            </div>
+            <div style="text-align:end">
+                <div class="price">${fmt(cp)}</div>
+                <div class="small price-delta"></div>
+                <button class="btn warn small" onclick="fetch('/close_trade/${signal.id}',{method:'POST'})">إغلاق</button>
+            </div>
+            <div class="progress" title="التقدم نحو الهدف: ${pToTp.toFixed(1)}%">
+                <span class="progress-bar" style="width:${pToTp}%; background:linear-gradient(90deg, var(--ok), #3fd1b0)"></span>
+            </div>
+        </div>`;
+}
+
+function renderAllSignals(signals) {
+    const container = qs('#signals');
+    if (!signals || signals.length === 0) {
+        container.innerHTML = '<p style="text-align:center;color:var(--muted);">لا توجد صفقات مفتوحة حالياً.</p>';
+        return;
+    }
+    container.innerHTML = signals.map(renderSignal).join('');
+}
+
+function updateSingleSignal(signal) {
+    const existingElement = qs(`#signal-${signal.id}`);
+    if (existingElement) {
+        existingElement.outerHTML = renderSignal(signal);
+    } else {
+        qs('#signals').insertAdjacentHTML('afterbegin', renderSignal(signal));
+    }
+}
+
+function updatePrices(priceData) {
+    for (const [symbol, price] of Object.entries(priceData)) {
+        const signalElements = document.querySelectorAll(`.signal[data-symbol="${symbol}"]`);
+        signalElements.forEach(el => {
+            const priceEl = el.querySelector('.price');
+            const deltaEl = el.querySelector('.price-delta');
+            const prevPrice = lastPrices[symbol] || price;
+            const delta = price - prevPrice;
+            
+            if (priceEl) priceEl.textContent = fmt(price);
+            if (deltaEl) {
+                deltaEl.className = `small price-delta ${delta > 0 ? 'green' : (delta < 0 ? 'red' : '')}`;
+                deltaEl.textContent = delta > 0 ? '▲' : (delta < 0 ? '▼' : '•');
+            }
+            
+            // تحديث شريط التقدم
+            const signalId = el.id.split('-')[1];
+            const signalData = openSignals[signalId];
+            if (signalData) {
+                const entry = signalData.entry_price;
+                const tp1 = signalData.target_price_1;
+                let progress = 0;
+                if (price > entry && tp1 > entry) {
+                    progress = Math.min(100, ((price - entry) / (tp1 - entry)) * 100);
+                }
+                const progressBar = el.querySelector('.progress-bar');
+                if(progressBar) progressBar.style.width = `${progress}%`;
+            }
+        });
+        lastPrices[symbol] = price;
+    }
+}
+
+function addNotification(notification) {
+    const tbody = qs('#events tbody');
+    const row = `<tr><td>${new Date(notification.timestamp).toLocaleTimeString('ar-EG')}</td><td>${notification.type||''}</td><td>${notification.message||''}</td></tr>`;
+    tbody.insertAdjacentHTML('afterbegin', row);
+    if (tbody.rows.length > 20) tbody.deleteRow(-1);
+}
+
+function addRejection(rejection) {
+    const tbody = qs('#rejections tbody');
+    const row = `<tr><td>${new Date(rejection.timestamp).toLocaleTimeString('ar-EG')}</td><td>${rejection.symbol||''}</td><td>${rejection.reason||''}</td></tr>`;
+    tbody.insertAdjacentHTML('afterbegin', row);
+    if (tbody.rows.length > 30) tbody.deleteRow(-1);
+}
+
+// --- تحميل البيانات والاتصال ---
+async function initializeDashboard() {
+    try {
+        // [تحسين] تحميل البيانات الأساسية أولاً
+        showLoadingIndicator('#signals');
+        const [baseRes, signalsRes, metricsRes] = await Promise.all([
+            fetch('/api/dashboard_data'),
+            fetch('/api/open_signals'),
+            fetch('/api/performance_metrics')
+        ]);
+        
+        const baseData = await baseRes.json();
+        const signalsData = await signalsRes.json();
+        const metricsData = await metricsRes.json();
+        
+        // عرض البيانات فوراً
+        qs('#serverTime').textContent = new Date(baseData.server_time).toLocaleTimeString('ar-EG');
+        qs('#toggleTrading').checked = !!baseData.trading_enabled;
+        qs('#toggleMode').textContent = 'وضع: ' + (baseData.paper_trading_mode ? 'ورقي' : 'حقيقي');
+        qs('#balance').textContent = fmt(baseData.usdt_balance);
+        
+        openSignals = signalsData.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
+        renderAllSignals(signalsData.signals);
+        qs('#openCount').textContent = signalsData.signals.length;
+        qs('#signalCount').textContent = `(${signalsData.signals.length})`;
+        
+        qs('#winRate').textContent = `${metricsData.win_rate.toFixed(2)}%`;
+        qs('#avgProfit').textContent = `${metricsData.avg_profit.toFixed(2)}%`;
+        qs('#maxDrawdown').textContent = `${metricsData.max_drawdown.toFixed(2)}%`;
+        qs('#totalTrades').textContent = metricsData.total_trades;
+
+        // تحميل البيانات الإضافية في الخلفية
+        loadAdditionalData();
+        
+    } catch (error) {
+        console.error("فشل تحميل البيانات الأساسية:", error);
+        qs('#signals').innerHTML = '<p>فشل تحميل البيانات. حاول تحديث الصفحة.</p>';
+    }
+}
+
+async function loadAdditionalData() {
+    try {
+        const perfRes = await fetch('/api/advanced_performance_data');
+        if (perfRes.ok) updateAdvancedPerformance(await perfRes.json());
+    } catch (error) {
+        console.error("Error loading additional data:", error);
+    }
+}
+
+// [تحسين] معالجة التحديثات عبر WebSocket
+function setupWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const socket = new WebSocket(wsUrl);
+    
+    socket.onopen = () => console.log("WebSocket connection established");
+    
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        switch(data.type) {
+            case 'price_update':
+                updatePrices(data.payload);
+                break;
+            case 'new_signal':
+                openSignals[data.payload.id] = data.payload;
+                updateSingleSignal(data.payload);
+                break;
+            case 'signal_update': // e.g. status change
+                openSignals[data.payload.id] = data.payload;
+                updateSingleSignal(data.payload);
+                break;
+            case 'signal_closed':
+                const el = qs(`#signal-${data.payload.id}`);
+                if (el) el.remove();
+                delete openSignals[data.payload.id];
+                break;
+            case 'new_notification':
+                addNotification(data.payload);
+                break;
+            case 'new_rejection':
+                addRejection(data.payload);
+                break;
+        }
+    };
+    
+    socket.onclose = () => {
+        console.log("WebSocket connection closed, reconnecting...");
+        setTimeout(setupWebSocket, 3000);
+    };
+    socket.onerror = (error) => console.error("WebSocket error:", error);
+}
+
+// [تحسين] وظيفة الفرز
+function setupSorting() {
+    const sortButtons = document.querySelectorAll('[data-sort]');
+    const debouncedSort = debounce((sortBy) => {
+        showLoadingIndicator('#signals');
+        fetch(`/api/open_signals?sort=${sortBy}`)
+            .then(res => res.json())
+            .then(data => {
+                openSignals = data.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
+                renderAllSignals(data.signals);
+            })
+            .catch(err => console.error("Sort failed:", err));
+    }, 300);
+
+    sortButtons.forEach(button => {
+        button.addEventListener('click', () => {
+            const sortBy = button.dataset.sort;
+            debouncedSort(sortBy);
+        });
+    });
+}
+
+// --- دوال التحكم والرسوم البيانية ---
 async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
 async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); }
 qs('#toggleTrading').addEventListener('change', toggleTrading);
 qs('#toggleMode').addEventListener('click', toggleMode);
-document.querySelectorAll('.controls button[data-sort]').forEach(button => {
-    button.addEventListener('click', (e) => {
-        currentSortBy = e.target.dataset.sort;
-        render(currentDashboardData);
-    });
-});
-
-function fmt(n){ return n == null ? '—' : (+n).toLocaleString('en-US', {maximumFractionDigits: 6}); }
-function clsByDelta(d){ if(d > 0) return 'green'; if(d < 0) return 'red'; return ''; }
-
-function sortSignals(signals, sortBy) {
-    const signalsArray = Object.values(signals);
-    switch(sortBy) {
-        case 'quality':
-            return signalsArray.sort((a, b) => (b.signal_details?.quality_score || 0) - (a.signal_details?.quality_score || 0));
-        case 'progress':
-            return signalsArray.sort((a, b) => {
-                const progressA = ((a.current_price - a.entry_price) / (a.target_price_1 - a.entry_price)) || 0;
-                const progressB = ((b.current_price - b.entry_price) / (b.target_price_1 - b.entry_price)) || 0;
-                return progressB - progressA;
-            });
-        case 'strategy':
-            return signalsArray.sort((a, b) => (a.strategy_name || '').localeCompare(b.strategy_name || ''));
-        default:
-            return signalsArray;
-    }
-}
-
-function render(data) {
-  if (!data) return;
-  currentDashboardData = data;
-  qs('#serverTime').textContent = new Date(data.server_time).toLocaleTimeString('ar-EG');
-  qs('#toggleTrading').checked = !!data.trading_enabled;
-  qs('#toggleMode').textContent = 'وضع: ' + (data.paper_trading_mode ? 'ورقي' : 'حقيقي');
-  qs('#balance').textContent = fmt(data.usdt_balance);
-  const sigs = data.open_signals || {};
-  qs('#openCount').textContent = Object.keys(sigs).length;
-  qs('#signalCount').textContent = `(${Object.keys(sigs).length})`;
-  
-  const trend = data.market_state?.trend_details_by_tf || {};
-  const tfOrder = ['15m','1h','4h'];
-  qs('#trend').innerHTML = tfOrder.map(tf => {
-    const t = trend[tf] || {};
-    const c = t.trend === 'Bullish' ? 'green' : (t.trend === 'Bearish' ? 'red' : 'amber');
-    return `<div class="pill"><b>${tf}</b><span class="${c}">${t.trend||'—'}</span><br><span class="small">RSI ${fmt(t.rsi)}</span></div>`;
-  }).join('');
-
-  const sortedSignals = sortSignals(sigs, currentSortBy);
-  const box = qs('#signals');
-  box.innerHTML = sortedSignals.map(s => {
-    const cp = s.current_price;
-    const prev = lastPrices[s.symbol] || cp;
-    const delta = cp - prev;
-    lastPrices[s.symbol] = cp;
-    const pToTp = Math.min(100, s.progress_to_tp || 0);
-    const qualityScore = s.signal_details?.quality_score || 0;
-    const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
-    const btnClose = `<button class="btn warn small" onclick="fetch('/close_trade/${s.id}',{method:'POST'})">إغلاق</button>`;
-
-    return `
-        <div class="signal" data-id="${s.id}">
-            <div>
-                <div class="sig-title">${s.symbol}</div>
-                <div class="sig-meta">${s.strategy_name} | <span style="color: ${qualityColor}; font-weight: bold;">⭐ ${qualityScore}/100</span></div>
-            </div>
-            <div style="text-align:end">
-                <div class="price">${fmt(cp)}</div>
-                <div class="small ${clsByDelta(delta)}">${delta > 0 ? '▲' : (delta < 0 ? '▼' : '•')}</div>
-                ${btnClose}
-            </div>
-            <div class="progress" title="التقدم نحو الهدف: ${pToTp.toFixed(1)}%">
-                <span style="width:${pToTp}%; background:linear-gradient(90deg, var(--ok), #3fd1b0)"></span>
-            </div>
-        </div>`;
-  }).join('');
-  
-  const eventsTbody = qs('#events tbody');
-  eventsTbody.innerHTML = (data.notifications || []).map(n => `<tr><td>${new Date(n.timestamp).toLocaleTimeString('ar-EG')}</td><td>${n.type||''}</td><td>${n.message||''}</td></tr>`).join('');
-  
-  const rejectionsTbody = qs('#rejections tbody');
-  rejectionsTbody.innerHTML = (data.rejections || []).map(r => `<tr><td>${new Date(r.timestamp).toLocaleTimeString('ar-EG')}</td><td>${r.symbol||''}</td><td>${r.reason||''}</td></tr>`).join('');
-}
 
 function updateAdvancedPerformance(data) {
-    qs('#winRate').textContent = data.winRate ? `${data.winRate.toFixed(2)}%` : '—';
-    qs('#profitFactor').textContent = data.profitFactor ? data.profitFactor.toFixed(2) : '—';
-    qs('#maxDrawdown').textContent = data.maxDrawdown ? `${data.maxDrawdown.toFixed(2)}%` : '—';
-    qs('#sharpeRatio').textContent = data.sharpeRatio ? data.sharpeRatio.toFixed(2) : '—';
-    
     if (!performanceChartInstance && data.equity_curve && data.equity_curve.labels.length > 0) {
         createPerformanceChart(data.equity_curve);
     } else if (performanceChartInstance) {
@@ -1053,57 +1207,17 @@ function createPerformanceChart(chartData) {
     const ctx = document.getElementById('performanceChart').getContext('2d');
     performanceChartInstance = new Chart(ctx, {
         type: 'line',
-        data: {
-            labels: chartData.labels,
-            datasets: [{
-                label: 'رأس المال', data: chartData.values, borderColor: '#3aa0ff',
-                backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4,
-                fill: true, pointRadius: 0, borderWidth: 2
-            }]
-        },
-        options: {
-            responsive: true, maintainAspectRatio: false,
-            plugins: { legend: { display: false } },
-            scales: {
-                x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
-                y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
-            }
-        }
+        data: { labels: chartData.labels, datasets: [{ label: 'رأس المال', data: chartData.values, borderColor: '#3aa0ff', backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4, fill: true, pointRadius: 0, borderWidth: 2 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } }, y: { ticks: { color: 'var(--muted)', callback: (v) => v.toFixed(0) }, grid: { color: 'rgba(255, 255, 255, 0.05)' } } } }
     });
 }
 
-function setupWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const socket = new WebSocket(wsUrl);
-    socket.onopen = (e) => console.log("WebSocket connection established");
-    socket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === 'dashboard_update') {
-            render(data.payload);
-        } else if (data.type === 'advanced_performance_update') {
-            updateAdvancedPerformance(data.payload);
-        }
-    };
-    socket.onclose = (event) => {
-        console.log("WebSocket connection closed, attempting to reconnect...");
-        setTimeout(setupWebSocket, 3000);
-    };
-    socket.onerror = (error) => console.error("WebSocket error:", error);
-}
-
-async function initialLoad() {
-    try {
-        const res = await fetch('/api/dashboard_data');
-        if (res.ok) render(await res.json());
-        const perfRes = await fetch('/api/advanced_performance_data');
-        if (perfRes.ok) updateAdvancedPerformance(await perfRes.json());
-    } catch(error) {
-        console.error("Error during initial load:", error);
-    }
-}
-initialLoad();
-setupWebSocket();
+// --- بدء التشغيل ---
+document.addEventListener('DOMContentLoaded', () => {
+    initializeDashboard();
+    setupWebSocket();
+    setupSorting();
+});
 </script>
 </body>
 </html>
@@ -1332,11 +1446,121 @@ def backtest_page():
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
+    """
+    [تحسين] هذا المسار الآن يرسل البيانات الأساسية فقط التي لا تتغير كثيراً.
+    """
     try:
         return jsonify(get_dashboard_payload())
     except Exception as e:
         logger.error(f"❌ [API Error] Failed to generate dashboard data: {e}", exc_info=True)
         return jsonify({"error": "Failed to load dashboard data."}), 500
+
+# [تحسين جديد] إضافة مسار API محسن للتحديث الجزئي للصفقات المفتوحة
+@app.route('/api/open_signals')
+def get_open_signals():
+    if not check_db_connection():
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    sort_by = request.args.get('sort', 'id')
+    # قائمة الحقول المسموح بها للفرز لتجنب SQL Injection
+    allowed_sort_fields = ['id', 'symbol', 'entry_price', 'strategy_name', 'quality_score']
+    if sort_by not in allowed_sort_fields:
+        sort_by = 'id'
+
+    order_direction = 'DESC' if sort_by in ['id', 'quality_score'] else 'ASC'
+
+    try:
+        with conn.cursor() as cur:
+            # استخدام sql.Identifier لأسماء الأعمدة بشكل آمن
+            query = sql.SQL("""
+                SELECT id, symbol, entry_price, target_price_1, target_price_2, 
+                       stop_loss, strategy_name, is_real_trade, quantity, 
+                       signal_details->>'quality_score' as quality_score
+                FROM signals 
+                WHERE status IN ('open', 'updated')
+                ORDER BY {sort_col} {direction}
+            """).format(
+                sort_col=sql.Identifier(sort_by),
+                direction=sql.SQL(order_direction)
+            )
+            cur.execute(query)
+            signals = cur.fetchall()
+        return jsonify({"signals": signals})
+    except Exception as e:
+        logger.error(f"Error fetching open signals: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# [تحسين جديد] إضافة مسار لمؤشرات الأداء مع التخزين المؤقت
+@app.route('/api/performance_metrics')
+def get_performance_metrics():
+    cache_key = "performance_metrics"
+    if redis_client:
+        cached_data = redis_client.get(cache_key)
+        if cached_data:
+            return jsonify(json.loads(cached_data))
+    
+    if not check_db_connection():
+        return jsonify({"error": "Database connection failed"}), 500
+
+    try:
+        with conn.cursor() as cur:
+            # حساب المؤشرات الأساسية فقط لآخر 30 يوم
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as winning_trades,
+                    AVG(profit_percentage) as avg_profit,
+                    MAX(drawdown) as max_drawdown
+                FROM performance_summary
+                WHERE date >= NOW() - INTERVAL '30 days'
+            """)
+            metrics = cur.fetchone()
+        
+        total_trades = metrics['total_trades'] if metrics['total_trades'] is not None else 0
+        winning_trades = metrics['winning_trades'] if metrics['winning_trades'] is not None else 0
+        
+        result = {
+            "total_trades": total_trades,
+            "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0,
+            "avg_profit": metrics['avg_profit'] if metrics['avg_profit'] is not None else 0,
+            "max_drawdown": metrics['max_drawdown'] if metrics['max_drawdown'] is not None else 0
+        }
+        
+        # تخزين النتائج في Redis لمدة 5 دقائق
+        if redis_client:
+            redis_client.setex(cache_key, 300, json.dumps(result, cls=NpEncoder))
+        
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error calculating performance metrics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# [تحسين جديد] إضافة ترقيم الصفحات للبيانات الكبيرة (مثل تاريخ الصفقات)
+@app.route('/api/signals_history')
+def get_signals_history():
+    if not check_db_connection():
+        return jsonify({"error": "Database connection failed"}), 500
+        
+    page = request.args.get('page', 1, type=int)
+    per_page = 20
+    offset = (page - 1) * per_page
+    
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM signals WHERE status = 'closed' ORDER BY closed_at DESC LIMIT %s OFFSET %s", (per_page, offset))
+        signals = cur.fetchall()
+        
+        cur.execute("SELECT COUNT(*) FROM signals WHERE status = 'closed'")
+        total = cur.fetchone()['count']
+    
+    return jsonify({
+        "signals": signals,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": (total + per_page - 1) // per_page
+        }
+    })
 
 @sock.route('/ws')
 def ws(ws_client):
@@ -1344,8 +1568,13 @@ def ws(ws_client):
     with ws_clients_lock:
         ws_clients.append(ws_client)
     try:
+        # إرسال حالة أولية عند الاتصال
+        ws_client.send(json.dumps({"type": "connection_established"}, cls=NpEncoder))
         while True:
-            time.sleep(1)
+            # البقاء على قيد الحياة
+            message = ws_client.receive(timeout=30)
+            if message is None: # No message received, send a ping
+                ws_client.send(json.dumps({"type": "ping"}, cls=NpEncoder))
     except Exception:
         logger.info("WebSocket client disconnected.")
     finally:
@@ -1880,7 +2109,8 @@ def update_signal_in_db(signal_id, updates):
                 open_signals_cache[symbol].update(updates)
                 if 'signal_details' in updates and isinstance(updates['signal_details'], str):
                     open_signals_cache[symbol]['signal_details'] = json.loads(updates['signal_details'])
-        broadcast_dashboard_update()
+                # [تحسين] إرسال تحديث جزئي للإشارة
+                broadcast({"type": "signal_update", "payload": open_signals_cache[symbol]})
         return True
     except Exception as e:
         logger.error(f"❌ [DB] Failed to update signal {signal_id}: {e}")
@@ -1923,7 +2153,10 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
-    broadcast_dashboard_update()
+    
+    # [تحسين] إرسال إشعار إغلاق الصفقة
+    broadcast({"type": "signal_closed", "payload": {"id": signal_id, "symbol": symbol}})
+    
     trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
     result_emoji = "✅" if profit >= 0 else "🔻"
     reason_map = {
@@ -2010,7 +2243,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.5 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V22.0 (Optimized) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
