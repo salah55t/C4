@@ -1,12 +1,10 @@
-# ملف c4.py - نسخة V23.2.0 (إصلاح خطأ MIN_NOTIONAL الحاسم)
+# ملف c4.py - نسخة V23.3.0 (إصلاح اسم فلتر NOTIONAL)
 # --- وصف الإصدار:
-# هذا الإصدار يعالج السبب الجذري لخطأ "Filter failure" الذي يحدث مع الأرصدة الصغيرة.
-# 1.  [إصلاح Bug حاسم] إضافة تحقق إلزامي من فلتر MIN_NOTIONAL (أقل قيمة للصفقة بالدولار)
-#     قبل إرسال أي أمر شراء حقيقي. سيقوم البوت الآن برفض أي صفقة تكون قيمتها الإجمالية
-#     أقل من الحد الأدنى الذي تفرضه المنصة (مثل 5 أو 10 دولار)، مما يمنع الخطأ من الحدوث.
-# 2.  [تحسين Logs] إضافة سجلات رفض واضحة ومخصصة لسبب "MinNotional Filter Failed".
-# 3.  [تحسين أمان] التأكد من أن جميع عمليات التحقق من الفلاتر (Lot Size و Notional) تتم
-#     بشكل صحيح ومتسلسل لضمان سلامة أوامر التداول الحقيقي.
+# هذا الإصدار يعالج خطأ "Filters not found" الذي كان يمنع تنفيذ الصفقات الحقيقية.
+# 1.  [إصلاح Bug حاسم] تصحيح اسم فلتر قيمة الصفقة من 'MIN_NOTIONAL' إلى 'NOTIONAL' وهو الاسم
+#     الصحيح المستخدم في استجابة API من Binance. هذا الإصلاح يحل مشكلة عدم العثور على
+#     الفلاتر ويسمح للبوت بالتحقق من الحد الأدنى لقيمة الصفقة بشكل صحيح.
+# 2.  [استقرار] تحسينات طفيفة على السجلات لزيادة وضوحها عند حدوث أخطاء في الفلاتر.
 
 import time
 import os
@@ -781,13 +779,13 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         if not symbol_info: 
             logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
         
-        # [إصلاح Bug] معالجة شاملة لفلاتر LOT_SIZE و NOTIONAL
         try:
             lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+            # [إصلاح Bug] استخدام الاسم الصحيح للفلتر 'NOTIONAL'
+            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), None)
 
             if not lot_size_filter or not notional_filter:
-                logger.error(f"❌ [Real Trade] Filters not found for {symbol}"); return
+                logger.error(f"❌ [Real Trade] Critical filters (LOT_SIZE or NOTIONAL) not found for {symbol}"); return
 
             step_size = lot_size_filter['stepSize']
             min_qty = float(lot_size_filter['minQty'])
@@ -860,7 +858,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V23.2 - إصلاحات)</title>
+<title>لوحة التحكم - بوت التداول (V23.3 - إصلاحات)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -928,7 +926,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V23.2 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V23.3 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2450,7 +2448,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2 (MIN_NOTIONAL Fix) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.3 (Filter Name Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
