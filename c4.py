@@ -1491,6 +1491,10 @@ def backtest_strategy(strategy_name, symbol, days=90):
         if not active_trade:
             # نستخدم البيانات حتى الشمعة *قبل* الحالية لتجنب الانحياز
             df_slice = df.iloc[:i]
+            # ======================= FIX START =======================
+            # إضافة اسم العملة إلى الـ DataFrame لضمان عمل الدوال بشكل صحيح
+            df_slice.name = symbol
+            # ======================== FIX END ========================
             if check_strategy(df_slice):
                 trade_levels = calculate_trade_levels(df_slice)
                 active_trade = {
