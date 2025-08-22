@@ -1,10 +1,11 @@
-# ملف c4.py - نسخة V18.0.0 (تحسينات شاملة)
+# ملف c4.py - نسخة V19.0.0 (استراتيجيات محسنة وواجهة WebSocket)
 # --- وصف الإصدار:
-# هذا الإصدار يقدم تحسينات جوهرية في إدارة المخاطر والخروج من الصفقات، بالإضافة إلى تحسين أداء قاعدة البيانات.
-# 1.  [ميزة جديدة] إضافة نظام ديناميكي لإدارة المخاطر يعدل نسبة المخاطرة بناءً على تقلب السوق وعدد الخسائر المتتالية.
-# 2.  [ميزة جديدة] تطبيق استراتيجية خروج محسنة مركزية تشمل وقف خسارة متحرك ذكي، وخروج جزئي، وإغلاق عند تغير إشارات الاستراتيجية.
-# 3.  [تحسين] إضافة فهارس (indexes) لقاعدة البيانات لتسريع الاستعلامات بشكل كبير، خصوصاً في واجهة المستخدم.
-# 4.  [إعادة هيكلة] تم إعادة تنظيم حلقة إدارة الصفقات (trade_management_loop) لتكون أكثر كفاءة وتستخدم الوظائف الجديدة.
+# هذا الإصدار يركز على تحسين ذكاء استراتيجيات التداول وتطوير واجهة المستخدم لتعمل في الزمن الحقيقي.
+# 1.  [تحسين استراتيجي] تم تحسين استراتيجية BB_Stoch بإضافة فلاتر حجم التداول وزخم MACD وتضييق شروط RSI.
+# 2.  [تحسين استراتيجي] تم تحسين استراتيجية MACD_EMA بإضافة فلتر ADX لقوة الاتجاه وتضييق نطاق RSI.
+# 3.  [تطوير الواجهة] تم استبدال نظام التحديث الدوري (Polling) بنظام WebSockets للتحديث الفوري واللحظي للبيانات في لوحة التحكم.
+# 4.  [تحسين الأداء] تم تحسين أداء الرسم البياني للأداء في الواجهة عن طريق تقليل عدد النقاط المعروضة وتحسين خيارات العرض.
+# 5.  [متطلبات] هذا الإصدار يتطلب تثبيت مكتبة `flask_sock`. قم بتثبيتها باستخدام: pip install flask_sock
 
 import time
 import os
@@ -23,6 +24,7 @@ from binance import ThreadedWebsocketManager
 from binance.exceptions import BinanceAPIException
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
+from flask_sock import Sock # [جديد] لاستخدام WebSockets
 from threading import Thread, Lock
 from datetime import datetime, timezone, timedelta
 from decouple import config
@@ -38,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v18_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v19_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV18')
+logger = logging.getLogger('CryptoBotV19')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -69,19 +71,19 @@ except Exception as e:
 # --- متغيرات عامة وإعدادات البوت ---
 is_trading_enabled: bool = False
 trading_status_lock = Lock()
-paper_trading_mode: bool = True 
+paper_trading_mode: bool = True
 trading_mode_lock = Lock()
 usdt_balance: float = 0.0
 balance_lock = Lock()
 cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
-consecutive_losses_by_symbol = {} # [جديد] لتتبع الخسائر المتتالية
+consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-RISK_PER_TRADE_PERCENT: float = 0.85 # سيتم استخدامه كقاعدة للمخاطر الديناميكية
+RISK_PER_TRADE_PERCENT: float = 0.85
 risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 PAPER_TRADE_SIZE_USDT: float = 10.0
@@ -150,39 +152,87 @@ REJECTION_REASONS_AR = {
     "Long-term Trend Filter Failed": "فلتر الاتجاه طويل الأجل فشل",
 }
 
-# --- إعداد تطبيق Flask ---
+# --- إعداد تطبيق Flask و WebSocket ---
 app = Flask(__name__)
 CORS(app)
+sock = Sock(app) # [جديد] تهيئة WebSocket
+ws_clients: List[Any] = []
+ws_clients_lock = Lock()
 
-# --- [جديد] تحسين أداء قاعدة البيانات ---
+# --- دوال WebSocket ---
+def broadcast(data: Dict):
+    """إرسال البيانات إلى جميع عملاء WebSocket المتصلين."""
+    with ws_clients_lock:
+        clients_to_remove = []
+        for client in ws_clients:
+            try:
+                client.send(json.dumps(data, cls=NpEncoder))
+            except Exception:
+                clients_to_remove.append(client)
+        for client in clients_to_remove:
+            ws_clients.remove(client)
+
+def get_dashboard_payload() -> Dict:
+    """تجميع بيانات لوحة التحكم لإرسالها."""
+    with trading_status_lock: trading_enabled = is_trading_enabled
+    with trading_mode_lock: is_paper_mode = paper_trading_mode
+    with balance_lock: current_balance = usdt_balance
+    with notifications_lock: notifications = list(notifications_cache)
+    with rejection_logs_lock: rejections = list(rejection_logs_cache)
+    with market_state_lock: market_state = dict(current_market_state)
+    with live_prices_lock: live_prices_copy = dict(live_prices)
+    open_signals_with_progress = {}
+    with signal_cache_lock:
+        sorted_symbols = sorted(open_signals_cache.keys())
+        for symbol in sorted_symbols:
+            signal = open_signals_cache[symbol]
+            signal_data = signal.copy()
+            current_price = live_prices_copy.get(symbol)
+            signal_data['current_price'] = current_price
+            signal_data['progress_to_tp'] = 0
+            signal_data['progress_to_sl'] = 0
+            if current_price:
+                entry_price = signal.get('entry_price', 0)
+                stop_loss = signal.get('stop_loss', 0)
+                target_price_1 = signal.get('target_price_1', 0)
+                if current_price > entry_price and target_price_1 > entry_price:
+                    progress = ((current_price - entry_price) / (target_price_1 - entry_price)) * 100
+                    signal_data['progress_to_tp'] = min(progress, 100)
+                elif current_price < entry_price and entry_price > stop_loss:
+                    progress = ((entry_price - current_price) / (entry_price - stop_loss)) * 100
+                    signal_data['progress_to_sl'] = min(progress, 100)
+            open_signals_with_progress[symbol] = signal_data
+    return {
+        "trading_enabled": trading_enabled, "paper_trading_mode": is_paper_mode,
+        "usdt_balance": current_balance, "open_signals": open_signals_with_progress,
+        "notifications": notifications, "rejections": rejections, "market_state": market_state,
+        "server_time": datetime.now(timezone.utc).isoformat(), "live_prices": live_prices_copy
+    }
+
+def broadcast_dashboard_update():
+    """تجميع وإرسال تحديثات لوحة التحكم عبر WebSocket."""
+    payload = get_dashboard_payload()
+    broadcast({"type": "dashboard_update", "payload": payload})
+
+# --- دوال تهيئة الخدمات وقاعدة البيانات ---
 def optimize_database():
-    """
-    تحسين أداء قاعدة البيانات بإضافة الفهارس اللازمة
-    """
+    """تحسين أداء قاعدة البيانات بإضافة الفهارس اللازمة."""
     if not check_db_connection() or not conn:
         return
-    
     try:
         with conn.cursor() as cur:
             logger.info("[DB] Optimizing database with indexes...")
-            # إضافة فهرس لعمود الرمز في جدول الإشارات
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol);")
-            # إضافة فهرس لعمود الحالة في جدول الإشارات
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status ON signals(status);")
-            # إضافة فهرس مركب للرمز والحالة
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol_status ON signals(symbol, status);")
-            # إضافة فهرس لعمود الطابع الزمني في جدول الإشعارات
             cur.execute("CREATE INDEX IF NOT EXISTS idx_notifications_timestamp ON notifications(timestamp);")
-            # فهرس مهم جداً لواجهة الأداء
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_status_closed_at ON signals(status, closed_at);")
-            
             conn.commit()
             logger.info("✅ [DB] Database indexes optimized successfully.")
     except Exception as e:
         logger.error(f"❌ [DB] Error optimizing database: {e}")
         if conn: conn.rollback()
 
-# --- دوال تهيئة الخدمات وقاعدة البيانات ---
 def column_exists(cursor, table_name, column_name):
     cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s", (table_name, column_name))
     return cursor.fetchone() is not None
@@ -201,14 +251,13 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS signals (
                         id SERIAL PRIMARY KEY, symbol TEXT NOT NULL, entry_price DOUBLE PRECISION NOT NULL,
-                        stop_loss DOUBLE PRECISION NOT NULL, status TEXT DEFAULT 'open', 
-                        closing_price DOUBLE PRECISION, closed_at TIMESTAMP, profit_percentage DOUBLE PRECISION, 
-                        strategy_name TEXT, signal_details JSONB, is_real_trade BOOLEAN DEFAULT FALSE, 
+                        stop_loss DOUBLE PRECISION NOT NULL, status TEXT DEFAULT 'open',
+                        closing_price DOUBLE PRECISION, closed_at TIMESTAMP, profit_percentage DOUBLE PRECISION,
+                        strategy_name TEXT, signal_details JSONB, is_real_trade BOOLEAN DEFAULT FALSE,
                         quantity DOUBLE PRECISION, closing_reason TEXT, order_id TEXT
                     );
                 """)
                 cur.execute("CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL, message TEXT NOT NULL);")
-                
                 columns_to_add = {
                     "target_price_1": "DOUBLE PRECISION", "target_price_2": "DOUBLE PRECISION",
                     "initial_quantity": "DOUBLE PRECISION"
@@ -219,11 +268,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                         logger.info(f"✅ [DB] Added missing column '{col}' to 'signals' table.")
             conn.commit()
             logger.info("✅ [DB] Database connection and schema updated successfully.")
-            
-            # [جديد] استدعاء دالة تحسين قاعدة البيانات بعد التهيئة
             optimize_database()
             return
-
         except Exception as e:
             logger.error(f"❌ [DB] Error during initialization (Attempt {attempt + 1}/{retries}): {e}")
             if conn: conn.rollback()
@@ -263,6 +309,7 @@ def log_and_notify(level: str, message: str, notification_type: str):
         with notifications_lock: notifications_cache.appendleft(new_notification)
         with conn.cursor() as cur: cur.execute("INSERT INTO notifications (type, message) VALUES (%s, %s);", (notification_type, message))
         conn.commit()
+        broadcast_dashboard_update()
     except Exception as e:
         logger.error(f"❌ [DB] Failed to save notification: {e}")
         if conn: conn.rollback()
@@ -272,11 +319,12 @@ def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
         reason_ar = REJECTION_REASONS_AR.get(reason_key, reason_key)
         log_entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol, "reason": reason_ar}
         with rejection_logs_lock: rejection_logs_cache.appendleft(log_entry)
+        broadcast_dashboard_update()
     except Exception as e:
         logger.error(f"❌ [Log Rejection] Error logging rejection for {symbol}: {e}", exc_info=True)
 
 def get_notification_settings() -> Dict:
-    defaults = { 'telegram_enabled': True, 'email_enabled': False, 'min_profit_notification': 1.0, 'max_loss_notification': -1.0 }
+    defaults = {'telegram_enabled': True, 'email_enabled': False, 'min_profit_notification': 1.0, 'max_loss_notification': -1.0}
     if not redis_client: return defaults
     try:
         settings_data = redis_client.get('notification_settings')
@@ -305,6 +353,7 @@ def handle_socket_message(msg):
         with live_prices_lock:
             for ticker in msg:
                 if 's' in ticker and 'c' in ticker: live_prices[ticker['s']] = float(ticker['c'])
+        broadcast_dashboard_update()
 
 def start_websocket():
     global ws_manager
@@ -436,61 +485,39 @@ def load_settings_from_redis():
     except Exception as e:
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
-# --- [جديد] تحسين إدارة المخاطر ---
+# --- Risk Management ---
 def dynamic_risk_management(symbol, df, consecutive_losses=0):
-    """
-    حساب نسبة المخاطرة ديناميكياً بناءً على:
-    1. تقلبات السوق (ATR)
-    2. عدد الخسائر المتتالية
-    """
-    with risk_per_trade_lock:
-        base_risk = RISK_PER_TRADE_PERCENT
-    
-    # تعديل بناءً على تقلبات السوق
+    with risk_per_trade_lock: base_risk = RISK_PER_TRADE_PERCENT
     atr_percent = df['atr_percent'].iloc[-1]
-    if atr_percent > 5.0:  # سوق شديد التقلب
-        volatility_factor = 0.7
-    elif atr_percent < 1.5:  # سوق منخفض التقلب
-        volatility_factor = 1.2
-    else:
-        volatility_factor = 1.0
-    
-    # تعديل بناءً على الخسائر المتتالية
+    if atr_percent > 5.0: volatility_factor = 0.7
+    elif atr_percent < 1.5: volatility_factor = 1.2
+    else: volatility_factor = 1.0
     loss_factor = max(0.5, 1.0 - (consecutive_losses * 0.15))
-    
-    # حساب نسبة المخاطرة النهائية
     final_risk = base_risk * volatility_factor * loss_factor
-    final_risk_percent = min(final_risk, 2.0) # الحد الأقصى 2%
+    final_risk_percent = min(final_risk, 2.0)
     logger.info(f"[Risk] Dynamic risk for {symbol}: {final_risk_percent:.2f}% (Base: {base_risk}%, Vol: {volatility_factor:.2f}, Loss: {loss_factor:.2f})")
     return final_risk_percent
 
 # --- Filters & Strategies ---
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
     if 'atr_percent' not in df.columns or len(df) < 30:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
-        return False
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
     recent = df['atr_percent'].tail(96).dropna()
     last = float(df.iloc[-1].get('atr_percent', 0))
     if recent.empty:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
-        return False
-    q25 = float(np.percentile(recent, 25))
-    q90 = float(np.percentile(recent, 90))
-    lower = max(0.35, q25 * 0.9)
-    upper = min(8.0,  q90 * 1.1)
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
+    q25 = float(np.percentile(recent, 25)); q90 = float(np.percentile(recent, 90))
+    lower = max(0.35, q25 * 0.9); upper = min(8.0, q90 * 1.1)
     if last < lower or last > upper:
-        log_rejection(df.name, "Market Volatility Filter Failed")
-        return False
+        log_rejection(df.name, "Market Volatility Filter Failed"); return False
     return True
 
 def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
     if 'adx' not in df.columns or len(df) < 5:
-        log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed")
-        return False
+        log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed"); return False
     recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
     if recent_adx < (adx_threshold * 0.95):
-        log_rejection(df.name, "Trend Strength Filter Failed")
-        return False
+        log_rejection(df.name, "Trend Strength Filter Failed"); return False
     return True
 
 def check_volume_filter(df: pd.DataFrame, min_volume_percentile: float = 30) -> bool:
@@ -498,16 +525,16 @@ def check_volume_filter(df: pd.DataFrame, min_volume_percentile: float = 30) -> 
     if df['volume'].tail(50).isnull().any(): return False
     current_volume = df['volume'].iloc[-1]
     volume_ma = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
-    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile/100).iloc[-1]
+    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
     if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile): return False
     return current_volume > max(volume_ma, volume_percentile)
 
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', mode: str = 'Strict') -> bool:
     if mode == 'Disabled': return True
     try:
-        df = fetch_historical_data(symbol, htf, days=40) 
+        df = fetch_historical_data(symbol, htf, days=40)
         if df is None or len(df) < 50: return False
-        df['ema50']  = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
         last = df.iloc[-1]
         if mode == 'Strict':
             df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -530,29 +557,33 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
     return True
 
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 21 or not {'bb_lower','stoch_rsi_k','rsi','open','close', 'macd', 'macd_signal'}.issubset(df.columns): return False
-    if not check_volume_filter(df): log_rejection(df.name, "Volume Filter Failed"); return False
-    if df['macd'].iloc[-1] < df['macd_signal'].iloc[-1]: log_rejection(df.name, "MACD Momentum Failed"); return False
+    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'macd', 'macd_signal'}.issubset(df.columns): return False
+    if not check_volume_filter(df, min_volume_percentile=40):
+        log_rejection(df.name, "Volume Filter Failed"); return False
+    if df['macd'].iloc[-1] < df['macd_signal'].iloc[-1]:
+        log_rejection(df.name, "MACD Momentum Failed"); return False
     last, prev = df.iloc[-1], df.iloc[-2]
     bounce = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower'])
     stoch_rising = last['stoch_rsi_k'] > prev['stoch_rsi_k']
     bullish_body = last['close'] > last['open']
     rsi_improving = last['rsi'] > prev['rsi']
-    not_overbought = last['rsi'] < 70
+    not_overbought = last['rsi'] < 65
     signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought
     if not signal: log_rejection(df.name, "Bullish Confirmation Failed")
     return signal
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd','macd_signal','ema9','ema21','rsi','close'}
+    needed = {'macd', 'macd_signal', 'ema9', 'ema21', 'rsi', 'close', 'adx'}
     if len(df) < 30 or not needed.issubset(df.columns): return False
+    if df['adx'].iloc[-1] < 22:
+        log_rejection(df.name, "Trend Strength Filter Failed"); return False
     last, prev = df.iloc[-1], df.iloc[-2]
     macd_cross_up = (prev['macd'] <= prev['macd_signal']) and (last['macd'] > last['macd_signal'])
     hist_now = last['macd'] - last['macd_signal']
     hist_prev = prev['macd'] - prev['macd_signal']
     hist_increasing = (hist_now > hist_prev) and (hist_prev > 0 or macd_cross_up)
     ema_ok = (last['close'] > last['ema21']) and (last['ema9'] > last['ema21'])
-    rsi_ok = last['rsi'] < 70
+    rsi_ok = 40 <= last['rsi'] <= 65
     return (macd_cross_up or hist_increasing) and ema_ok and rsi_ok
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
@@ -609,42 +640,30 @@ def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
-        with cooldowns_lock:
-            until = cooldowns_by_symbol.get(symbol)
+        with cooldowns_lock: until = cooldowns_by_symbol.get(symbol)
         if until and datetime.now(timezone.utc) < until:
             log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()}); return
     except Exception: pass
-
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
-    
     if is_real:
         with balance_lock: current_usdt_balance = usdt_balance
-        with consecutive_losses_lock:
-            losses = consecutive_losses_by_symbol.get(symbol, 0)
-        
-        # [تعديل] استخدام إدارة المخاطر الديناميكية
+        with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
         risk_percent = dynamic_risk_management(symbol, df, losses)
         max_risk_usdt = current_usdt_balance * (risk_percent / 100)
-
         stop_loss = trade_levels['stop_loss']
         risk_per_unit = max(entry_price - stop_loss, 1e-8)
         quantity = max_risk_usdt / risk_per_unit
-        if quantity <= 0:
-            log_rejection(symbol, "Insufficient Balance"); return
-            
+        if quantity <= 0: log_rejection(symbol, "Insufficient Balance"); return
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
-            
+        if not symbol_info: logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
         step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
         adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
         notional = adjusted_quantity * entry_price
         min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
         if notional < min_notional:
             log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": notional}); return
-            
         try:
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
             order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
@@ -676,18 +695,18 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         }
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO signals (symbol, entry_price, target_price_1, target_price_2, stop_loss, status, 
-                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details, order_id) 
+                INSERT INTO signals (symbol, entry_price, target_price_1, target_price_2, stop_loss, status,
+                                   strategy_name, is_real_trade, quantity, initial_quantity, signal_details, order_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id;
-            """, (symbol, float(entry_price), float(trade_levels['target_price_1']), float(trade_levels['target_price_2']), 
-                  float(trade_levels['stop_loss']), 'open', strategy_name, is_real, float(quantity), float(quantity), 
+            """, (symbol, float(entry_price), float(trade_levels['target_price_1']), float(trade_levels['target_price_2']),
+                  float(trade_levels['stop_loss']), 'open', strategy_name, is_real, float(quantity), float(quantity),
                   json.dumps(signal_details, cls=NpEncoder), order_id))
             new_id = cur.fetchone()['id']
         conn.commit()
         signal_data = {
-            'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price), 
+            'id': new_id, 'symbol': symbol, 'entry_price': float(entry_price),
             'target_price_1': float(trade_levels['target_price_1']), 'target_price_2': float(trade_levels['target_price_2']),
-            'stop_loss': float(trade_levels['stop_loss']), 'status': 'open', 'strategy_name': strategy_name, 
+            'stop_loss': float(trade_levels['stop_loss']), 'status': 'open', 'strategy_name': strategy_name,
             'is_real_trade': is_real, 'quantity': float(quantity), 'initial_quantity': float(quantity),
             'signal_details': signal_details, 'order_id': order_id
         }
@@ -696,7 +715,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
 
-# --- قوالب HTML (بدون تغيير) ---
+# --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
@@ -705,6 +724,7 @@ DASHBOARD_TEMPLATE = """
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>لوحة التحكم - بوت التداول (15m)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -728,9 +748,9 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .signal{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:10px;border:1px solid #24335f;border-radius:12px;background:#0d1730}
 .sig-title{font-weight:700}
 .sig-meta{font-size:12px;color:var(--muted)}
-.price{font-variant-numeric:tabular-nums;direction:ltr}
-.price.flash{animation:flash .75s}
-@keyframes flash{0%{background:rgba(255,255,255,.14)}100%{background:transparent}}
+.price{font-variant-numeric:tabular-nums;direction:ltr; transition: color 0.3s, background-color 0.3s;}
+.price.flash-up{background-color:rgba(21, 196, 106, 0.2); color: #15c46a;}
+.price.flash-down{background-color:rgba(255, 71, 87, 0.2); color: #ff4757;}
 .progress{height:8px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden}
 .progress>span{display:block;height:100%;}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px}
@@ -752,42 +772,22 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 </head>
 <body>
 <div class="container">
-  <header>
-    <h1>لوحة التحكم • فريم 15 دقيقة</h1>
-    <div class="badge" id="serverTime">—</div>
-  </header>
-
+  <header><h1>لوحة التحكم • فريم 15 دقيقة</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
-      <div class="card">
-        <h2>الصفقات المفتوحة</h2>
-        <div class="card-body">
-          <div id="signals" class="signals-grid"></div>
-        </div>
-      </div>
-      <div class="card">
-        <h2>تحليل الأداء</h2>
-        <div class="card-body">
-          <canvas id="performanceChart"></canvas>
-        </div>
-      </div>
+      <div class="card"><h2>الصفقات المفتوحة</h2><div class="card-body"><div id="signals" class="signals-grid"></div></div></div>
+      <div class="card"><h2>تحليل الأداء</h2><div class="card-body" style="height: 300px;"><canvas id="performanceChart"></canvas></div></div>
     </div>
     <div class="right-column">
       <div class="card">
         <h2>التحكم والحالة</h2>
         <div class="card-body">
           <div class="controls">
-            <label class="switch">
-              <input id="toggleTrading" type="checkbox" />
-              <span class="dot"></span>
-              <span class="small">تشغيل التداول</span>
-            </label>
-            <button class="btn" id="toggleMode">وضع: ورقي</button>
-            <a class="btn" href="/settings">الإعدادات</a>
+            <label class="switch"><input id="toggleTrading" type="checkbox" /><span class="dot"></span><span class="small">تشغيل التداول</span></label>
+            <button class="btn" id="toggleMode">وضع: ورقي</button><a class="btn" href="/settings">الإعدادات</a>
           </div>
           <div class="kv" style="margin-top:12px">
-            <div>الرصيد (USDT):</div><div id="balance">—</div>
-            <div>عدد الصفقات:</div><div id="openCount">—</div>
+            <div>الرصيد (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
           </div>
           <div id="trend" class="trend"></div>
         </div>
@@ -795,23 +795,19 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
       <div class="card">
         <h2>سجل الأحداث</h2>
         <div class="card-body" style="padding:0">
-          <table class="table" id="events">
-            <thead><tr><th>الوقت</th><th>النوع</th><th>الرسالة</th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <table class="table" id="events"><thead><tr><th>الوقت</th><th>النوع</th><th>الرسالة</th></tr></thead><tbody></tbody></table>
         </div>
       </div>
     </div>
   </div>
 </div>
-
 <script>
 const qs = s => document.querySelector(s);
 let lastPrices = {};
 let performanceChartInstance = null;
 
-async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); await load(); }
-async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); await load(); }
+async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
+async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); }
 
 qs('#toggleTrading').addEventListener('change', toggleTrading);
 qs('#toggleMode').addEventListener('click', toggleMode);
@@ -820,7 +816,7 @@ function fmt(n){ return n == null ? '—' : (+n).toLocaleString('en-US', {maximu
 function clsByDelta(d){ if(d > 0) return 'green'; if(d < 0) return 'red'; return ''; }
 
 function render(data){
-  qs('#serverTime').textContent = data.server_time || '—';
+  qs('#serverTime').textContent = new Date(data.server_time).toLocaleTimeString('ar-EG');
   qs('#toggleTrading').checked = !!data.trading_enabled;
   qs('#toggleMode').textContent = 'وضع: ' + (data.paper_trading_mode ? 'ورقي' : 'حقيقي');
   qs('#balance').textContent = fmt(data.usdt_balance);
@@ -836,89 +832,145 @@ function render(data){
   }).join('');
 
   const box = qs('#signals');
-  box.innerHTML = '';
-  Object.keys(sigs).sort().forEach(sym => {
-    const s = sigs[sym];
-    const cp = s.current_price;
-    const prev = lastPrices[sym];
-    const delta = prev == null ? 0 : cp - prev;
-    lastPrices[sym] = cp;
+  const existingSignalIds = new Set([...box.children].map(el => el.dataset.id));
+  const incomingSignalIds = new Set(Object.values(sigs).map(s => String(s.id)));
 
-    const priceClass = delta === 0 ? 'price' : `price flash ${clsByDelta(delta)}`;
+  existingSignalIds.forEach(id => {
+    if (!incomingSignalIds.has(id)) {
+      const el = box.querySelector(`[data-id='${id}']`);
+      if (el) el.remove();
+    }
+  });
+
+  Object.values(sigs).forEach(s => {
+    const cp = s.current_price;
+    const prev = lastPrices[s.symbol] || cp;
+    const delta = cp - prev;
+    lastPrices[s.symbol] = cp;
+
     const pToTp = Math.min(100, s.progress_to_tp || 0);
     const pToSl = Math.min(100, s.progress_to_sl || 0);
     const progressBar = pToTp > 0 ? `<div class="progress" title="نحو الهدف"><span style="width:${pToTp}%; background:linear-gradient(90deg,var(--ok),#3fd1b0)"></span></div>` :
                                    `<div class="progress" title="نحو الوقف"><span style="width:${pToSl}%; background:linear-gradient(90deg,var(--bad),#ff7a7a)"></span></div>`;
     const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • هدف ${fmt(s.target_price_1)}`;
-    const btnClose = s.id ? `<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'}).then(()=>load())">إغلاق</button>` : '';
+    const btnClose = `<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'})">إغلاق</button>`;
 
-    const el = document.createElement('div');
-    el.className = 'signal';
-    el.innerHTML = `<div><div class="sig-title">${sym}</div><div class="sig-meta">${meta}</div>${progressBar}</div><div style="text-align:end"><div class="${priceClass}">${fmt(cp)}</div><div class="small ${clsByDelta(delta)}">${delta>0?'▲':(delta<0?'▼':'•')} ${fmt(Math.abs(delta))}</div>${btnClose}</div>`;
-    box.appendChild(el);
+    let el = box.querySelector(`[data-id='${s.id}']`);
+    if (!el) {
+        el = document.createElement('div');
+        el.className = 'signal';
+        el.dataset.id = s.id;
+        box.appendChild(el);
+    }
+    
+    el.innerHTML = `<div><div class="sig-title">${s.symbol}</div><div class="sig-meta">${meta}</div>${progressBar}</div><div style="text-align:end"><div class="price">${fmt(cp)}</div><div class="small ${clsByDelta(delta)}">${delta>0?'▲':(delta<0?'▼':'•')} ${fmt(Math.abs(delta))}</div>${btnClose}</div>`;
+    
+    const priceEl = el.querySelector('.price');
+    if (delta > 0) {
+        priceEl.classList.add('flash-up');
+        setTimeout(() => priceEl.classList.remove('flash-up'), 500);
+    } else if (delta < 0) {
+        priceEl.classList.add('flash-down');
+        setTimeout(() => priceEl.classList.remove('flash-down'), 500);
+    }
   });
 
   const tbody = qs('#events tbody');
   tbody.innerHTML = (data.notifications || []).map(n => `<tr><td>${new Date(n.timestamp).toLocaleTimeString('ar-EG')}</td><td>${n.type||''}</td><td>${n.message||''}</td></tr>`).join('');
 }
 
-async function loadPerformanceChart() {
-  try {
-    const res = await fetch('/api/performance_data');
-    if (!res.ok) { console.error("Failed to fetch performance data"); return; }
-    const data = await res.json();
-    const ctx = document.getElementById('performanceChart').getContext('2d');
-    
-    if(performanceChartInstance) {
-        performanceChartInstance.data.labels = data.dates;
-        performanceChartInstance.data.datasets[0].data = data.equity;
-        performanceChartInstance.update();
+function updatePerformanceChart(data) {
+    if (!performanceChartInstance) {
+        createPerformanceChart(data);
         return;
+    }
+    const maxDataPoints = 150;
+    let labels = data.dates;
+    let equity = data.equity;
+    
+    if (labels.length > maxDataPoints) {
+        const step = Math.ceil(labels.length / maxDataPoints);
+        labels = labels.filter((_, i) => i % step === 0);
+        equity = equity.filter((_, i) => i % step === 0);
+    }
+    
+    performanceChartInstance.data.labels = labels;
+    performanceChartInstance.data.datasets[0].data = equity;
+    performanceChartInstance.update('none');
+}
+
+function createPerformanceChart(data) {
+    const ctx = document.getElementById('performanceChart').getContext('2d');
+    const maxDataPoints = 150;
+    let labels = data.dates;
+    let equity = data.equity;
+    
+    if (labels.length > maxDataPoints) {
+        const step = Math.ceil(labels.length / maxDataPoints);
+        labels = labels.filter((_, i) => i % step === 0);
+        equity = equity.filter((_, i) => i % step === 0);
     }
 
     performanceChartInstance = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: data.dates,
-        datasets: [{
-          label: 'قيمة الحساب',
-          data: data.equity,
-          borderColor: '#3aa0ff',
-          backgroundColor: 'rgba(58, 160, 255, 0.1)',
-          tension: 0.4,
-          fill: true
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-            x: { ticks: { color: 'var(--muted)' } },
-            y: { ticks: { color: 'var(--muted)' } }
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'قيمة الحساب', data: equity, borderColor: '#3aa0ff',
+                backgroundColor: 'rgba(58, 160, 255, 0.1)', tension: 0.4,
+                fill: true, pointRadius: 0, borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            interaction: { intersect: false, mode: 'index' },
+            plugins: { legend: { display: false }, tooltip: { enabled: true, mode: 'index', intersect: false } },
+            scales: {
+                x: {
+                    type: 'time', time: { unit: 'day' },
+                    ticks: { color: 'var(--muted)', maxRotation: 0, autoSkip: true, maxTicksLimit: 7 },
+                    grid: { display: false }
+                },
+                y: { ticks: { color: 'var(--muted)' }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+            }
         }
-      }
     });
-  } catch (error) {
-    console.error("Error loading performance chart:", error);
-  }
 }
 
-async function load(){
-  try {
-    const res = await fetch('/api/dashboard_data', {cache:'no-cache'});
-    if (!res.ok) { console.error("Failed to fetch dashboard data"); return; }
-    const data = await res.json();
-    render(data);
-  } catch(error) {
-    console.error("Error loading dashboard data:", error);
-  }
+function setupWebSocket() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    const socket = new WebSocket(wsUrl);
+    
+    socket.onopen = (e) => console.log("WebSocket connection established");
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'dashboard_update') {
+            render(data.payload);
+        } else if (data.type === 'performance_update') {
+            updatePerformanceChart(data.payload);
+        }
+    };
+    socket.onclose = (event) => {
+        console.log("WebSocket connection closed, attempting to reconnect...");
+        setTimeout(setupWebSocket, 3000);
+    };
+    socket.onerror = (error) => console.error("WebSocket error:", error);
 }
 
-load();
-loadPerformanceChart();
-setInterval(load, 2000);
-setInterval(loadPerformanceChart, 60000);
+async function initialLoad() {
+    try {
+        const res = await fetch('/api/dashboard_data');
+        if (res.ok) render(await res.json());
+        const perfRes = await fetch('/api/performance_data');
+        if (perfRes.ok) createPerformanceChart(await perfRes.json());
+    } catch(error) {
+        console.error("Error during initial load:", error);
+    }
+}
+
+initialLoad();
+setupWebSocket();
 </script>
 </body>
 </html>
@@ -936,43 +988,25 @@ def dashboard():
 @app.route('/api/dashboard_data')
 def dashboard_data():
     try:
-        with trading_status_lock: trading_enabled = is_trading_enabled
-        with trading_mode_lock: is_paper_mode = paper_trading_mode
-        with balance_lock: current_balance = usdt_balance
-        with notifications_lock: notifications = list(notifications_cache)
-        with rejection_logs_lock: rejections = list(rejection_logs_cache)
-        with market_state_lock: market_state = dict(current_market_state)
-        with live_prices_lock: live_prices_copy = dict(live_prices)
-        open_signals_with_progress = {}
-        with signal_cache_lock:
-            sorted_symbols = sorted(open_signals_cache.keys())
-            for symbol in sorted_symbols:
-                signal = open_signals_cache[symbol]
-                signal_data = signal.copy()
-                current_price = live_prices_copy.get(symbol)
-                signal_data['current_price'] = current_price
-                signal_data['progress_to_tp'] = 0
-                signal_data['progress_to_sl'] = 0
-                if current_price:
-                    entry_price = signal.get('entry_price', 0)
-                    stop_loss = signal.get('stop_loss', 0)
-                    target_price_1 = signal.get('target_price_1', 0)
-                    if current_price > entry_price and target_price_1 > entry_price:
-                        progress = ((current_price - entry_price) / (target_price_1 - entry_price)) * 100
-                        signal_data['progress_to_tp'] = min(progress, 100)
-                    elif current_price < entry_price and entry_price > stop_loss:
-                        progress = ((entry_price - current_price) / (entry_price - stop_loss)) * 100
-                        signal_data['progress_to_sl'] = min(progress, 100)
-                open_signals_with_progress[symbol] = signal_data
-        payload = {
-            "trading_enabled": trading_enabled, "paper_trading_mode": is_paper_mode,
-            "usdt_balance": current_balance, "open_signals": open_signals_with_progress,
-            "notifications": notifications, "rejections": rejections, "market_state": market_state,
-            "server_time": datetime.now(timezone.utc).isoformat(), "live_prices": live_prices_copy }
-        return app.response_class(response=json.dumps(payload, cls=NpEncoder), status=200, mimetype='application/json')
+        return jsonify(get_dashboard_payload())
     except Exception as e:
         logger.error(f"❌ [API Error] Failed to generate dashboard data: {e}", exc_info=True)
         return jsonify({"error": "Failed to load dashboard data."}), 500
+
+@sock.route('/ws')
+def ws(ws_client):
+    logger.info("WebSocket client connected.")
+    with ws_clients_lock:
+        ws_clients.append(ws_client)
+    try:
+        while True:
+            time.sleep(1)
+    except Exception:
+        logger.info("WebSocket client disconnected.")
+    finally:
+        with ws_clients_lock:
+            if ws_client in ws_clients:
+                ws_clients.remove(ws_client)
 
 @app.route('/api/performance_data')
 def performance_data():
@@ -980,8 +1014,8 @@ def performance_data():
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT entry_price, closing_price, initial_quantity, is_real_trade, closed_at 
-                FROM signals 
+                SELECT entry_price, closing_price, initial_quantity, closed_at
+                FROM signals
                 WHERE status = 'closed' AND closed_at IS NOT NULL AND is_real_trade = FALSE
                 ORDER BY closed_at ASC;
             """)
@@ -992,9 +1026,10 @@ def performance_data():
         equity = [PAPER_TRADE_INITIAL_BALANCE]
         current_equity = PAPER_TRADE_INITIAL_BALANCE
         for trade in trades:
-            entry_price, closing_price, initial_quantity = trade.get('entry_price'), trade.get('closing_price'), trade.get('initial_quantity')
-            if entry_price is None or closing_price is None or initial_quantity is None:
-                logger.warning(f"Skipping performance calculation for a trade due to missing data: {trade}"); continue
+            entry_price = trade.get('entry_price')
+            closing_price = trade.get('closing_price')
+            initial_quantity = trade.get('initial_quantity')
+            if entry_price is None or closing_price is None or initial_quantity is None: continue
             pnl = (closing_price - entry_price) * initial_quantity
             current_equity += pnl
             dates.append(trade['closed_at'].strftime('%Y-%m-%d %H:%M'))
@@ -1006,7 +1041,7 @@ def performance_data():
 
 @app.route('/settings')
 def settings():
-    return render_template_string(SETTINGS_TEMPLATE, 
+    return render_template_string(SETTINGS_TEMPLATE,
         RISK_PER_TRADE_PERCENT=RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES=MAX_OPEN_TRADES,
         USE_BB_STOCH_STRATEGY=USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY=USE_MACD_EMA_STRATEGY,
         USE_EMA_RSI_STRATEGY=USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY=USE_PULLBACK_STRATEGY,
@@ -1084,7 +1119,7 @@ def update_settings():
         data = request.json
         with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data['risk_per_trade'])
         MAX_OPEN_TRADES = int(data['max_trades'])
-        if redis_client: 
+        if redis_client:
             with trading_mode_lock: is_paper = paper_trading_mode
             settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
             redis_client.set('trading_settings', json.dumps(settings))
@@ -1131,18 +1166,6 @@ def update_filter_settings():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-@app.route('/api/notifications_settings', methods=['POST'])
-def update_notification_settings():
-    data = request.json
-    settings = {
-        'telegram_enabled': data.get('telegram_enabled', True), 'email_enabled': data.get('email_enabled', False),
-        'min_profit_notification': float(data.get('min_profit_notification', 1.0)),
-        'max_loss_notification': float(data.get('max_loss_notification', -1.0))
-    }
-    if redis_client: redis_client.set('notification_settings', json.dumps(settings))
-    log_and_notify("info", "Notification settings updated.", "SETTINGS_UPDATE")
-    return jsonify({"status": "success", "message": "Notification settings updated"})
-
 # --- Main Loop & Threads ---
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop...")
@@ -1157,7 +1180,7 @@ def main_bot_loop():
                 with signal_cache_lock:
                     if symbol in open_signals_cache: continue
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df is None or len(df) < 200: 
+                if df is None or len(df) < 200:
                     if df is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
                 df_featured = calculate_all_features(df); df_featured.name = symbol
@@ -1194,6 +1217,7 @@ def update_signal_in_db(signal_id, updates):
                 open_signals_cache[symbol].update(updates)
                 if 'signal_details' in updates and isinstance(updates['signal_details'], str):
                     open_signals_cache[symbol]['signal_details'] = json.loads(updates['signal_details'])
+        broadcast_dashboard_update()
         return True
     except Exception as e:
         logger.error(f"❌ [DB] Failed to update signal {signal_id}: {e}")
@@ -1228,18 +1252,15 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     if remaining_quantity > 0:
         execute_close_order(symbol, remaining_quantity, reason)
     profit = ((closing_price - entry_price) / entry_price) * 100
-    
-    # [تعديل] تحديث عداد الخسائر المتتالية
     with consecutive_losses_lock:
         if profit < 0:
             consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
-            logger.info(f"[Loss Tracker] Loss recorded for {symbol}. Consecutive losses: {consecutive_losses_by_symbol[symbol]}")
         else:
-            if consecutive_losses_by_symbol.get(symbol, 0) > 0:
-                logger.info(f"[Loss Tracker] Win recorded for {symbol}. Resetting consecutive losses from {consecutive_losses_by_symbol.get(symbol, 0)} to 0.")
             consecutive_losses_by_symbol[symbol] = 0
-
     update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
+    with signal_cache_lock:
+        if symbol in open_signals_cache: del open_signals_cache[symbol]
+    broadcast_dashboard_update()
     trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
     result_emoji = "✅" if profit >= 0 else "🔻"
     reason_map = {
@@ -1255,123 +1276,74 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     loss_condition = profit <= settings['max_loss_notification']
     if profit_condition or loss_condition:
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
-    with signal_cache_lock:
-        if symbol in open_signals_cache: del open_signals_cache[symbol]
 
-# --- [جديد] تحسين نظام الخروج ---
 def enhanced_exit_strategy(signal, current_price, df):
-    """
-    استراتيجية خروج محسنة تشمل:
-    1. وقف خسارة متحرك ذكي
-    2. خروج جزئي عند تحقيق أهداف
-    3. إغلاق عند تغير الإشارات
-    """
     entry_price = signal['entry_price']
     stop_loss = signal['stop_loss']
     target_price_1 = signal.get('target_price_1')
     target_price_2 = signal.get('target_price_2')
     quantity = signal['quantity']
-    
-    # تأكد من أن signal_details هو قاموس
     signal_details = signal.get('signal_details', {})
     if isinstance(signal_details, str):
-        try:
-            signal_details = json.loads(signal_details)
-        except (json.JSONDecodeError, TypeError):
-            signal_details = {}
-
-    # وقف خسارة متحرك ذكي
-    if current_price > entry_price * 1.015:  # عند تحقيق ربح 1.5%
+        try: signal_details = json.loads(signal_details)
+        except (json.JSONDecodeError, TypeError): signal_details = {}
+    if current_price > entry_price * 1.015:
         new_stop_loss = entry_price * 1.005
         if new_stop_loss > stop_loss:
             stop_loss = new_stop_loss
             signal_details['trailing_stop_activated'] = True
-    
-    # وقف خسارة متحرك عند تحقيق ربح أكبر
-    if current_price > entry_price * 1.03:  # عند تحقيق ربح 3%
+    if current_price > entry_price * 1.03:
         atr = df['atr'].iloc[-1]
         new_stop_loss = current_price - (atr * 1.2)
         if new_stop_loss > stop_loss:
             stop_loss = new_stop_loss
             signal_details['trailing_stop_distance'] = atr * 1.2
-    
-    # الخروج الجزئي عند تحقيق الهدف الأول
     if target_price_1 and current_price >= target_price_1 and not signal_details.get('tp1_done', False):
         exit_quantity = quantity * 0.5
         remaining_quantity = quantity - exit_quantity
         signal_details['tp1_done'] = True
-        # بعد جني الربح الجزئي، انقل وقف الخسارة إلى نقطة الدخول
-        new_stop_loss_after_tp1 = entry_price 
+        new_stop_loss_after_tp1 = entry_price
         return {
-            'action': 'partial_exit',
-            'quantity': exit_quantity,
-            'remaining_quantity': remaining_quantity,
-            'new_stop_loss': new_stop_loss_after_tp1,
-            'updated_signal_details': signal_details
+            'action': 'partial_exit', 'quantity': exit_quantity, 'remaining_quantity': remaining_quantity,
+            'new_stop_loss': new_stop_loss_after_tp1, 'updated_signal_details': signal_details
         }
-    
-    # الخروج الكامل عند تحقيق الهدف الثاني أو تجاوز وقف الخسارة
     if (target_price_2 and current_price >= target_price_2) or current_price <= stop_loss:
         return {
-            'action': 'full_exit',
-            'quantity': quantity,
+            'action': 'full_exit', 'quantity': quantity,
             'reason': 'target_2_reached' if target_price_2 and current_price >= target_price_2 else 'stop_loss'
         }
-    
-    # الخروج عند تغير إشارة الاستراتيجية
     strategy_name = signal['strategy_name']
     if strategy_name == 'BB_Stoch_Strategy':
-        # إغلاق إذا انكسر الدعم السفلي لبولينجر
         if current_price < df['bb_lower'].iloc[-1]:
-            return {
-                'action': 'full_exit',
-                'quantity': quantity,
-                'reason': 'support_broken'
-            }
-    
+            return {'action': 'full_exit', 'quantity': quantity, 'reason': 'support_broken'}
     return {'action': 'hold', 'new_stop_loss': stop_loss, 'updated_signal_details': signal_details}
 
-# --- [إعادة هيكلة] حلقة إدارة الصفقات ---
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting advanced trade management loop...")
     while True:
         try:
             with signal_cache_lock:
-                if not open_signals_cache:
-                    time.sleep(2)
-                    continue
+                if not open_signals_cache: time.sleep(2); continue
                 signals_to_monitor = list(open_signals_cache.values())
-
             for signal in signals_to_monitor:
                 symbol = signal['symbol']
-                with live_prices_lock:
-                    current_price = live_prices.get(symbol)
-                if not current_price:
-                    continue
-                
-                # جلب بيانات حديثة لاتخاذ قرار الخروج
+                with live_prices_lock: current_price = live_prices.get(symbol)
+                if not current_price: continue
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days=3)
                 if df is None or df.empty:
-                    logger.warning(f"[Trade Manager] Could not fetch data for {symbol} to make an exit decision.")
-                    continue
-                
+                    logger.warning(f"[Trade Manager] Could not fetch data for {symbol} to make an exit decision."); continue
                 df_featured = calculate_all_features(df)
-                
-                # استدعاء استراتيجية الخروج المحسنة
                 exit_decision = enhanced_exit_strategy(signal, current_price, df_featured)
                 action = exit_decision.get('action')
-
                 if action == 'full_exit':
                     logger.info(f"[Exit Strategy] FULL EXIT for {symbol} triggered. Reason: {exit_decision.get('reason')}")
                     close_signal(signal, current_price, exit_decision.get('reason', 'STRATEGY_EXIT'))
                     if exit_decision.get('reason') == 'stop_loss':
                         with cooldowns_lock:
                             cooldowns_by_symbol[symbol] = datetime.now(timezone.utc) + timedelta(minutes=COOLDOWN_MINUTES_AFTER_SL)
-
                 elif action == 'partial_exit':
                     logger.info(f"[Exit Strategy] PARTIAL EXIT for {symbol} triggered at TP1.")
                     execute_close_order(symbol, exit_decision['quantity'], "TP1_PARTIAL")
-                    
                     updates = {
                         "quantity": exit_decision['remaining_quantity'],
                         "stop_loss": exit_decision['new_stop_loss'],
@@ -1381,9 +1353,7 @@ def trade_management_loop():
                         msg = f"🎯 *جني ربح جزئي {symbol}*\nتم إغلاق 50% ونقل الوقف للدخول."
                         log_and_notify("info", f"Partial profit taken for {symbol} at TP1.", "TP1_HIT")
                         send_telegram_message(msg, force=True)
-
                 elif action == 'hold':
-                    # تحديث وقف الخسارة إذا تغير (بسبب الوقف المتحرك)
                     new_stop_loss = exit_decision.get('new_stop_loss')
                     if new_stop_loss and new_stop_loss > signal['stop_loss']:
                         updates = {
@@ -1392,8 +1362,7 @@ def trade_management_loop():
                         }
                         if update_signal_in_db(signal['id'], updates):
                             logger.info(f"Updated trailing stop for {signal['symbol']} to {new_stop_loss:.4f}")
-
-            time.sleep(2) # إعطاء فترة راحة بين كل دورة فحص للصفقات المفتوحة
+            time.sleep(2)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] A critical error occurred: {e}", exc_info=True)
             time.sleep(10)
@@ -1403,7 +1372,7 @@ def update_market_state():
         trend_details = {}
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
             btc_df = fetch_historical_data(BTC_SYMBOL, tf, 30)
-            if btc_df is None or btc_df.empty: 
+            if btc_df is None or btc_df.empty:
                 trend_details[tf] = {"trend": "Unknown", "rsi": "N/A"}; continue
             btc_df_featured = calculate_all_features(btc_df)
             if 'rsi' not in btc_df_featured.columns:
@@ -1442,11 +1411,11 @@ def update_balance_loop():
             update_balance()
         except Exception as e:
             logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
-        time.sleep(60 * 10) 
+        time.sleep(60 * 10)
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V18.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V19.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -1454,16 +1423,16 @@ if __name__ == '__main__':
         logger.info("✅ [Binance] API connection successful.")
     except Exception as e:
         logger.critical(f"❌ [Binance] API connection failed: {e}"); exit(1)
-    
+
     get_exchange_info_map()
     validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
         logger.critical("❌ No valid symbols to scan. Exiting."); exit(1)
-    
+
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
-    
+
     logger.info("Performing initial data fetch for dashboard...")
     update_market_state()
     update_balance()
@@ -1473,7 +1442,7 @@ if __name__ == '__main__':
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
-    Thread(target=update_balance_loop, daemon=True).start() 
-    
+    Thread(target=update_balance_loop, daemon=True).start()
+
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
