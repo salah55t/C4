@@ -1,11 +1,10 @@
-# ملف c4.py - نسخة V21.0.2 (تحسين جودة الإشارات والفلاتر)
+# ملف c4.py - نسخة V21.0.3 (إضافة نظام نقاط الجودة للإشارات)
 # --- وصف الإصدار:
-# هذا الإصدار يركز على تحسين جودة الإشارات عبر فلاتر أكثر مرونة واستراتيجيات معدلة.
-# 1.  [إضافة] دالة `dynamic_adx_threshold` لحساب عتبة ADX ديناميكية بناءً على تقلب السوق (ATR).
-# 2.  [إضافة] دالة `flexible_volume_filter` كبديل لفلتر الحجم التقليدي، مع إمكانية التحكم في مدى صرامة الفلتر.
-# 3.  [تحسين] تحديث استراتيجية `check_bb_stoch_strategy_enhanced` لتكون أكثر مرونة في شروطها (RSI, MACD, شكل الشمعة) واستخدام فلتر الحجم الجديد.
-# 4.  [إصلاح] تم نقل حساب المؤشرات الإضافية (مثل ema200) إلى دالة `calculate_all_features` ليتم حسابها مرة واحدة فقط.
-# 5.  [تحسين] دوال فحص الاستراتيجيات الآن تقرأ البيانات فقط ولا تعدلها، مما يزيل تحذير `SettingWithCopyWarning` ويحسن السرعة بشكل كبير.
+# هذا الإصدار يضيف نظامًا متقدمًا لتقييم جودة كل إشارة قبل اتخاذ قرار الدخول.
+# 1.  [إضافة] دالة `calculate_signal_quality_score` لتقييم الإشارات بناءً على عدة عوامل (قوة الاتجاه، الحجم، الزخم، إلخ) وإعطائها درجة من 100.
+# 2.  [تحسين] تعديل دالة `create_trade_signal` لتستخدم نقاط الجودة. لن يتم فتح أي صفقة إلا إذا تجاوزت درجة جودتها حدًا أدنى معينًا يختلف باختلاف الاستراتيجية.
+# 3.  [إضافة] تسجيل نقاط الجودة في تفاصيل الإشارة عند حفظها في قاعدة البيانات لمراجعتها لاحقًا.
+# 4.  [إضافة] سبب رفض جديد "Low Quality Signal" لتسجيل الإشارات التي تم تجاهلها بسبب جودتها المنخفضة.
 
 import time
 import os
@@ -150,6 +149,7 @@ REJECTION_REASONS_AR = {
     "Volume Filter Failed": "فلتر حجم التداول فشل",
     "MACD Momentum Failed": "فلتر زخم الماكد فشل",
     "Long-term Trend Filter Failed": "فلتر الاتجاه طويل الأجل فشل",
+    "Low Quality Signal": "جودة الإشارة منخفضة" # إضافة جديدة
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -317,11 +317,17 @@ def log_and_notify(level: str, message: str, notification_type: str):
 def log_rejection(symbol: str, reason_key: str, details: Optional[Dict] = None):
     try:
         reason_ar = REJECTION_REASONS_AR.get(reason_key, reason_key)
+        # تعديل الرسالة لتشمل التفاصيل
+        if details:
+            details_str = ", ".join([f"{k}: {v}" for k, v in details.items()])
+            reason_ar = f"{reason_ar} ({details_str})"
+        
         log_entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "symbol": symbol, "reason": reason_ar}
         with rejection_logs_lock: rejection_logs_cache.appendleft(log_entry)
         broadcast_dashboard_update()
     except Exception as e:
         logger.error(f"❌ [Log Rejection] Error logging rejection for {symbol}: {e}", exc_info=True)
+
 
 def get_notification_settings() -> Dict:
     defaults = {'telegram_enabled': True, 'email_enabled': False, 'min_profit_notification': 1.0, 'max_loss_notification': -1.0}
@@ -502,44 +508,94 @@ def dynamic_risk_management(symbol, df, consecutive_losses=0):
 # --- Filters & Strategies ---
 
 # ======================= NEW FUNCTION START =======================
+def calculate_signal_quality_score(symbol, df, strategy_name):
+    """
+    حساب نقاط جودة الإشارة من 0 إلى 100
+    """
+    score = 0
+    
+    # تقييم قوة الاتجاه (0-25 نقطة)
+    adx_value = df['adx'].iloc[-1]
+    if adx_value > 30:
+        score += 25
+    elif adx_value > 20:
+        score += 20
+    elif adx_value > 15:
+        score += 15
+    else:
+        score += 5
+    
+    # تقييم الحجم (0-15 نقطة)
+    current_volume = df['volume'].iloc[-1]
+    volume_ma = df['volume'].rolling(20).mean().iloc[-1]
+    volume_ratio = current_volume / volume_ma if volume_ma > 0 else 1
+    
+    if volume_ratio > 1.5:
+        score += 15
+    elif volume_ratio > 1.2:
+        score += 10
+    elif volume_ratio > 1.0:
+        score += 5
+    
+    # تقييم الزخم (0-20 نقطة)
+    rsi = df['rsi'].iloc[-1]
+    if 40 <= rsi <= 60:
+        score += 20
+    elif 35 <= rsi <= 65:
+        score += 15
+    elif 30 <= rsi <= 70:
+        score += 10
+    
+    # تقييم موقف السعر بالنسبة للمتوسطات (0-20 نقطة)
+    ema9 = df['ema9'].iloc[-1]
+    ema21 = df['ema21'].iloc[-1]
+    ema50 = df['ema50'].iloc[-1]
+    close = df['close'].iloc[-1]
+    
+    if close > ema9 > ema21 > ema50:
+        score += 20
+    elif close > ema9 > ema21:
+        score += 15
+    elif close > ema21:
+        score += 10
+    
+    # تقييم التقلب (0-10 نقاط)
+    atr_percent = df['atr_percent'].iloc[-1]
+    if 1.5 <= atr_percent <= 3.5:
+        score += 10
+    elif 1.0 <= atr_percent <= 5.0:
+        score += 5
+    
+    # نقاط إضافية خاصة بالاستراتيجية (0-10 نقاط)
+    if strategy_name == "Momentum_Volatility_Strategy" and adx_value > 35:
+        score += 10
+    if strategy_name == "BB_Stoch_Strategy" and df['stoch_rsi_k'].iloc[-1] < 20:
+        score += 5
+        
+    return min(100, max(0, score))
+# ======================== NEW FUNCTION END ========================
+
 def dynamic_adx_threshold(symbol, df, base_threshold=20):
     """
     حساب عتبة ADX ديناميكية بناءً على تقلب السوق
     """
     atr_percent = df['atr_percent'].iloc[-1]
     
-    # في حالة التقلب العالي، نخفض العتبة للسماح بمزيد من الإشارات
-    if atr_percent > 4.0:
-        return base_threshold * 0.85
-    # في حالة التقلب المنخفض، نرفع العتبة لتجنب الإشارات الضعيفة
-    elif atr_percent < 1.5:
-        return base_threshold * 1.15
-    # في الحالات العادية، نستخدم العتبة الأساسية مع تعديل طفيف
-    else:
-        return base_threshold
-# ======================== NEW FUNCTION END ========================
+    if atr_percent > 4.0: return base_threshold * 0.85
+    elif atr_percent < 1.5: return base_threshold * 1.15
+    else: return base_threshold
 
-# ======================= NEW FUNCTION START =======================
 def flexible_volume_filter(df, min_volume_percentile=30, strictness=0.8):
     """
     فلتر حجم أكثر مرونة
-    strictness: 0.0 - 1.0 (حيث 1.0 هو الأكثر صرامة)
     """
-    if 'volume' not in df.columns or len(df) < 50:
-        return False
-    
+    if 'volume' not in df.columns or len(df) < 50: return False
     current_volume = df['volume'].iloc[-1]
     volume_ma = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
     volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
-    
-    if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile):
-        return False
-    
-    # حساب متوسط مرجح بين المتوسط المتحرك والنسبة المئوية
+    if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile): return False
     volume_threshold = (volume_ma * strictness) + (volume_percentile * (1 - strictness))
-    
     return current_volume > volume_threshold
-# ======================== NEW FUNCTION END ========================
 
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
     if 'atr_percent' not in df.columns or len(df) < 30:
@@ -558,20 +614,10 @@ def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
     if 'adx' not in df.columns or len(df) < 5:
         log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed"); return False
     recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
-    # استخدام فلتر ADX الديناميكي هنا
     dynamic_threshold = dynamic_adx_threshold(df.name, df, base_threshold=adx_threshold)
     if recent_adx < (dynamic_threshold * 0.95):
         log_rejection(df.name, "Trend Strength Filter Failed"); return False
     return True
-
-def check_volume_filter(df: pd.DataFrame, min_volume_percentile: float = 30) -> bool:
-    if 'volume' not in df.columns or len(df) < 50: return False
-    if df['volume'].tail(50).isnull().any(): return False
-    current_volume = df['volume'].iloc[-1]
-    volume_ma = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
-    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
-    if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile): return False
-    return current_volume > max(volume_ma, volume_percentile)
 
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', mode: str = 'Strict') -> bool:
     if mode == 'Disabled': return True
@@ -600,49 +646,20 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
-# ======================= STRATEGY UPDATE START =======================
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    النسخة المحسنة والأكثر مرونة من استراتيجية BB_Stoch.
-    - تستخدم فلتر حجم مرن.
-    - شروط أكثر تساهلاً للشمعة الصاعدة.
-    - زيادة نطاق RSI المسموح به.
-    - إضافة شرط زخم MACD مرن.
-    """
-    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'high', 'low', 'macd', 'macd_signal'}.issubset(df.columns):
-        return False
-    
-    # استخدام فلتر حجم أكثر مرونة
+    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'high', 'low', 'macd', 'macd_signal'}.issubset(df.columns): return False
     if not flexible_volume_filter(df, min_volume_percentile=30, strictness=0.7):
-        log_rejection(df.name, "Volume Filter Failed")
-        return False
-    
+        log_rejection(df.name, "Volume Filter Failed"); return False
     last, prev = df.iloc[-1], df.iloc[-2]
-    
-    # التحقق من الارتداد من الحد السفلي لبولينجر
     bounce = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower'])
-    
-    # التحقق من ارتفاع مؤشر Stoch RSI
     stoch_rising = last['stoch_rsi_k'] > prev['stoch_rsi_k']
-    
-    # التحقق من الشمعة الصعودية (أقل صرامة)
-    bullish_body = last['close'] > (last['open'] + (last['high'] - last['low']) * 0.3)  # 30% من الشمعة
-    
-    # تحسين RSI للسماح بمزيد من المرونة
+    bullish_body = last['close'] > (last['open'] + (last['high'] - last['low']) * 0.3)
     rsi_improving = last['rsi'] > prev['rsi']
-    not_overbought = last['rsi'] < 70  # زيادة من 65 إلى 70
-    
-    # إضافة شرط جديد: زخم MACD (أقل صرامة)
+    not_overbought = last['rsi'] < 70
     macd_ok = (last['macd'] > last['macd_signal']) or (last['macd'] - last['macd_signal'] > -0.1 * abs(last['macd']))
-    
     signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought and macd_ok
-    
-    if not signal:
-        log_rejection(df.name, "Bullish Confirmation Failed")
-    
+    if not signal: log_rejection(df.name, "Bullish Confirmation Failed")
     return signal
-# ======================== STRATEGY UPDATE END ========================
-
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'macd', 'macd_signal', 'ema9', 'ema21', 'rsi', 'close', 'adx'}
@@ -710,15 +727,49 @@ def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
 def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
     return float(Decimal(quantity).quantize(Decimal(step_size), rounding=ROUND_DOWN))
 
+# ======================= FUNCTION UPDATE START =======================
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
-        with cooldowns_lock: until = cooldowns_by_symbol.get(symbol)
-        if until and datetime.now(timezone.utc) < until:
-            log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()}); return
-    except Exception: pass
+        # حساب نقاط جودة الإشارة
+        quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
+        
+        # تعيين حد أدنى لنقاط الجودة بناءً على الاستراتيجية
+        min_quality_scores = {
+            "BB_Stoch_Strategy": 60,
+            "MACD_EMA_Strategy": 65,
+            "EMA_RSI_Strategy": 55,
+            "Pullback_Strategy": 50,
+            "Momentum_Volatility_Strategy": 70
+        }
+        
+        min_score = min_quality_scores.get(strategy_name, 60)
+        
+        if quality_score < min_score:
+            log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
+            return
+            
+        logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
+
+        with cooldowns_lock: 
+            until = cooldowns_by_symbol.get(symbol)
+            if until and datetime.now(timezone.utc) < until:
+                log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()})
+                return
+    except Exception as e:
+        logger.error(f"❌ [Signal Creation] Error during pre-checks for {symbol}: {e}", exc_info=True)
+        return
+
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
+    
+    # إضافة نقاط الجودة إلى تفاصيل الإشارة
+    signal_details = {
+        "atr": trade_levels['atr'], "trailing_stop_activated": False,
+        "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False,
+        "quality_score": quality_score
+    }
+
     if is_real:
         with balance_lock: current_usdt_balance = usdt_balance
         with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
@@ -742,8 +793,8 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
             final_quantity = float(order.get('executedQty', adjusted_quantity))
             order_id = order.get('orderId', 'N/A')
-            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, order_id)
-            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
+            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, signal_details, order_id)
+            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
             send_telegram_message(message, force=True)
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
         except BinanceAPIException as e:
@@ -753,18 +804,16 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
     else:
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
-        save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity)
-        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*دخول:* `{entry_price:.4f}`\n*هدف1:* `{trade_levels['target_price_1']:.4f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
+        save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
+        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*هدف1:* `{trade_levels['target_price_1']:.4f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
         send_telegram_message(message, force=True)
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
+# ======================== FUNCTION UPDATE END ========================
 
-def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, order_id: Optional[str] = None):
+
+def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
         if not (check_db_connection() and conn): return
-        signal_details = {
-            "atr": trade_levels['atr'], "trailing_stop_activated": False,
-            "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False
-        }
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO signals (symbol, entry_price, target_price_1, target_price_2, stop_loss, status,
@@ -965,7 +1014,8 @@ function render(data){
     const pToSl = Math.min(100, s.progress_to_sl || 0);
     const progressBar = pToTp > 0 ? `<div class="progress" title="نحو الهدف"><span style="width:${pToTp}%; background:linear-gradient(90deg,var(--ok),#3fd1b0)"></span></div>` :
                                    `<div class="progress" title="نحو الوقف"><span style="width:${pToSl}%; background:linear-gradient(90deg,var(--bad),#ff7a7a)"></span></div>`;
-    const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • هدف ${fmt(s.target_price_1)}`;
+    const quality_score = s.signal_details && s.signal_details.quality_score ? `⭐ ${s.signal_details.quality_score}/100` : '';
+    const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • ${quality_score}`;
     const btnClose = `<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'})">إغلاق</button>`;
     let el = box.querySelector(`[data-id='${s.id}']`);
     if (!el) {
@@ -1933,7 +1983,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.2 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.3 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
