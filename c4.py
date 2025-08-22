@@ -1,11 +1,11 @@
-# ملف c4.py - نسخة V20.0.0 (ميزات متقدمة للتحكم والتحليل)
+# ملف c4.py - نسخة V21.0.0 (نظام اختبار الاستراتيجيات المتكامل)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف تحسينات كبيرة على واجهة المستخدم والمنطق الداخلي للبوت.
-# 1.  [ميزة جديدة] إضافة قسم "تحليل الأداء المتقدم" في الواجهة لعرض مقاييس مثل معدل الربح، المخاطرة/العائد، وأكبر خسارة.
-# 2.  [ميزة جديدة] إضافة قسم "إدارة الصفقات" الذي يسمح بإغلاق جميع الصفقات، تفعيل إيقاف الطوارئ، وتعديل إعدادات المخاطرة الافتراضية.
-# 3.  [تحسين الواجهة] تم تحسين تصميم CSS لزيادة الوضوح وتحسين تجربة المستخدم على الأجهزة المختلفة.
-# 4.  [نظام تنبيهات متقدم] تطوير نظام الإشعارات لإرسال تنبيهات أكثر تفصيلاً، مثل الاقتراب من وقف الخسارة أو تحقيق نسب معينة من الربح.
-# 5.  [إدارة صفقات متعددة] تطبيق منطق جديد لإدارة المخاطر الإجمالية، يقوم بإغلاق الصفقات الأقل أداءً عند تجاوز حدود المخاطرة.
+# هذا الإصدار يضيف ميزة رئيسية جديدة وهي نظام اختبار الاستراتيجيات (Backtesting).
+# 1.  [ميزة جديدة] إضافة صفحة "اختبار الاستراتيجيات" جديدة في واجهة المستخدم.
+# 2.  [ميزة جديدة] يمكن للمستخدم اختيار استراتيجية، رمز عملة، وفترة زمنية للاختبار.
+# 3.  [تحسين المنطق] تم تحسين منطق محاكاة الاختبار الخلفي لتجنب الانحياز للمستقبل، حيث يتم معالجة البيانات شمعة بشمعة.
+# 4.  [واجهة المستخدم] تعرض صفحة الاختبار نتائج مفصلة تشمل مقاييس الأداء (معدل الربح، إجمالي الصفقات، إلخ) ورسم بياني لمنحنى رأس المال.
+# 5.  [تكامل] إضافة مسارات API جديدة في Flask لمعالجة طلبات الاختبار الخلفي وتقديم النتائج للواجهة.
 
 import time
 import os
@@ -40,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v20_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v21_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV20')
+logger = logging.getLogger('CryptoBotV21')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -722,7 +722,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V20)</title>
+<title>لوحة التحكم - بوت التداول (V21)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -741,7 +741,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
 .card-body{padding:12px}
 .controls{display:flex;gap:8px;flex-wrap:wrap}
-.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: background-color 0.2s, transform 0.2s; will-change: transform;}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: background-color 0.2s, transform 0.2s; will-change: transform; text-decoration: none;}
 .btn:hover{transform:translateY(-1px);border-color:#3a58a6}
 .btn.warn{background:linear-gradient(180deg,#3b2a0f,#291b08);border-color:#8b5b0f}
 .signals-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));gap:10px}
@@ -792,31 +792,16 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
   <div class="main-layout">
     <div class="left-column">
       <div class="card"><h2>الصفقات المفتوحة</h2><div class="card-body"><div id="signals" class="signals-grid"></div></div></div>
-      <!-- إضافة قسم لتحليل الأداء المتقدم -->
       <div class="card">
           <h2>تحليل الأداء المتقدم</h2>
           <div class="card-body">
               <div class="metrics-grid">
-                  <div class="metric-card">
-                      <div class="metric-title">معدل الربح</div>
-                      <div class="metric-value" id="winRate">—</div>
-                  </div>
-                  <div class="metric-card">
-                      <div class="metric-title">معدل المخاطرة/العائد</div>
-                      <div class="metric-value" id="riskRewardRatio">—</div>
-                  </div>
-                  <div class="metric-card">
-                      <div class="metric-title">أكبر خسارة متتالية</div>
-                      <div class="metric-value" id="maxDrawdown">—</div>
-                  </div>
-                  <div class="metric-card">
-                      <div class="metric-title">عامل الربح</div>
-                      <div class="metric-value" id="profitFactor">—</div>
-                  </div>
+                  <div class="metric-card"><div class="metric-title">معدل الربح</div><div class="metric-value" id="winRate">—</div></div>
+                  <div class="metric-card"><div class="metric-title">معدل المخاطرة/العائد</div><div class="metric-value" id="riskRewardRatio">—</div></div>
+                  <div class="metric-card"><div class="metric-title">أكبر تراجع</div><div class="metric-value" id="maxDrawdown">—</div></div>
+                  <div class="metric-card"><div class="metric-title">عامل الربح</div><div class="metric-value" id="profitFactor">—</div></div>
               </div>
-              <div class="chart-container">
-                  <canvas id="drawdownChart"></canvas>
-              </div>
+              <div class="chart-container"><canvas id="drawdownChart"></canvas></div>
           </div>
       </div>
     </div>
@@ -826,7 +811,9 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
         <div class="card-body">
           <div class="controls">
             <label class="switch"><input id="toggleTrading" type="checkbox" /><span class="dot"></span><span class="small">تشغيل التداول</span></label>
-            <button class="btn" id="toggleMode">وضع: ورقي</button><a class="btn" href="/settings">الإعدادات</a>
+            <button class="btn" id="toggleMode">وضع: ورقي</button>
+            <a class="btn" href="/settings">الإعدادات</a>
+            <a class="btn" href="/backtest">الاختبار الخلفي</a>
           </div>
           <div class="kv" style="margin-top:12px">
             <div>الرصيد (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
@@ -834,29 +821,12 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
           <div id="trend" class="trend"></div>
         </div>
       </div>
-      <!-- إضافة قسم لإدارة الصفقات -->
       <div class="card">
           <h2>إدارة الصفقات</h2>
           <div class="card-body">
               <div class="trade-controls">
                   <button class="btn" id="closeAllTrades">إغلاق جميع الصفقات</button>
                   <button class="btn warn" id="emergencyStop">إيقاف طوارئ</button>
-              </div>
-              <div class="trade-settings">
-                  <h3>إعدادات الصفقة الافتراضية</h3>
-                  <div class="form-group">
-                      <label>نسبة المخاطرة (%)</label>
-                      <input type="number" id="defaultRiskPercent" value="0.85" step="0.1">
-                  </div>
-                  <div class="form-group">
-                      <label>نسبة الربح الأول (%)</label>
-                      <input type="number" id="defaultTP1Percent" value="2.0" step="0.1">
-                  </div>
-                  <div class="form-group">
-                      <label>نسبة الربح الثاني (%)</label>
-                      <input type="number" id="defaultTP2Percent" value="3.5" step="0.1">
-                  </div>
-                  <button class="btn" id="saveTradeSettings">حفظ الإعدادات</button>
               </div>
           </div>
       </div>
@@ -873,7 +843,6 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 const qs = s => document.querySelector(s);
 let lastPrices = {};
 let drawdownChartInstance = null;
-
 async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
 async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); }
 async function closeAllTrades() { 
@@ -886,29 +855,12 @@ async function emergencyStop() {
         await fetch('/emergency_stop', {method:'POST'}); 
     }
 }
-async function saveTradeSettings() {
-    const settings = {
-        risk: qs('#defaultRiskPercent').value,
-        tp1: qs('#defaultTP1Percent').value,
-        tp2: qs('#defaultTP2Percent').value,
-    };
-    await fetch('/save_trade_settings', {
-        method:'POST', 
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(settings)
-    });
-    alert('تم حفظ الإعدادات!');
-}
-
 qs('#toggleTrading').addEventListener('change', toggleTrading);
 qs('#toggleMode').addEventListener('click', toggleMode);
 qs('#closeAllTrades').addEventListener('click', closeAllTrades);
 qs('#emergencyStop').addEventListener('click', emergencyStop);
-qs('#saveTradeSettings').addEventListener('click', saveTradeSettings);
-
 function fmt(n){ return n == null ? '—' : (+n).toLocaleString('en-US', {maximumFractionDigits: 6}); }
 function clsByDelta(d){ if(d > 0) return 'green'; if(d < 0) return 'red'; return ''; }
-
 function render(data){
   qs('#serverTime').textContent = new Date(data.server_time).toLocaleTimeString('ar-EG');
   qs('#toggleTrading').checked = !!data.trading_enabled;
@@ -916,7 +868,6 @@ function render(data){
   qs('#balance').textContent = fmt(data.usdt_balance);
   const sigs = data.open_signals || {};
   qs('#openCount').textContent = Object.keys(sigs).length;
-
   const trend = data.market_state?.trend_details_by_tf || {};
   const tfOrder = ['15m','1h','4h'];
   qs('#trend').innerHTML = tfOrder.map(tf => {
@@ -924,31 +875,26 @@ function render(data){
     const c = t.trend === 'Bullish' ? 'green' : (t.trend === 'Bearish' ? 'red' : 'amber');
     return `<div class="pill"><b>${tf}</b><span class="${c}">${t.trend||'—'}</span><br><span class="small">RSI ${fmt(t.rsi)}</span></div>`;
   }).join('');
-
   const box = qs('#signals');
   const existingSignalIds = new Set([...box.children].map(el => el.dataset.id));
   const incomingSignalIds = new Set(Object.values(sigs).map(s => String(s.id)));
-
   existingSignalIds.forEach(id => {
     if (!incomingSignalIds.has(id)) {
       const el = box.querySelector(`[data-id='${id}']`);
       if (el) el.remove();
     }
   });
-
   Object.values(sigs).forEach(s => {
     const cp = s.current_price;
     const prev = lastPrices[s.symbol] || cp;
     const delta = cp - prev;
     lastPrices[s.symbol] = cp;
-
     const pToTp = Math.min(100, s.progress_to_tp || 0);
     const pToSl = Math.min(100, s.progress_to_sl || 0);
     const progressBar = pToTp > 0 ? `<div class="progress" title="نحو الهدف"><span style="width:${pToTp}%; background:linear-gradient(90deg,var(--ok),#3fd1b0)"></span></div>` :
                                    `<div class="progress" title="نحو الوقف"><span style="width:${pToSl}%; background:linear-gradient(90deg,var(--bad),#ff7a7a)"></span></div>`;
     const meta = `دخول ${fmt(s.entry_price)} • وقف ${fmt(s.stop_loss)} • هدف ${fmt(s.target_price_1)}`;
     const btnClose = `<button class="btn warn" onclick="fetch('/close_trade/${s.id}',{method:'POST'})">إغلاق</button>`;
-
     let el = box.querySelector(`[data-id='${s.id}']`);
     if (!el) {
         el = document.createElement('div');
@@ -956,9 +902,7 @@ function render(data){
         el.dataset.id = s.id;
         box.appendChild(el);
     }
-    
     el.innerHTML = `<div><div class="sig-title">${s.symbol}</div><div class="sig-meta">${meta}</div>${progressBar}</div><div style="text-align:end"><div class="price">${fmt(cp)}</div><div class="small ${clsByDelta(delta)}">${delta>0?'▲':(delta<0?'▼':'•')} ${fmt(Math.abs(delta))}</div>${btnClose}</div>`;
-    
     const priceEl = el.querySelector('.price');
     if (delta > 0) {
         priceEl.classList.add('flash-up');
@@ -968,17 +912,14 @@ function render(data){
         setTimeout(() => priceEl.classList.remove('flash-down'), 500);
     }
   });
-
   const tbody = qs('#events tbody');
   tbody.innerHTML = (data.notifications || []).map(n => `<tr><td>${new Date(n.timestamp).toLocaleTimeString('ar-EG')}</td><td>${n.type||''}</td><td>${n.message||''}</td></tr>`).join('');
 }
-
 function updateAdvancedPerformance(data) {
     qs('#winRate').textContent = data.winRate ? `${data.winRate.toFixed(2)}%` : '—';
     qs('#riskRewardRatio').textContent = data.riskRewardRatio ? `${data.riskRewardRatio.toFixed(2)}:1` : '—';
     qs('#maxDrawdown').textContent = data.maxDrawdown ? `${data.maxDrawdown.toFixed(2)}%` : '—';
     qs('#profitFactor').textContent = data.profitFactor ? data.profitFactor.toFixed(2) : '—';
-
     if (!drawdownChartInstance) {
         createDrawdownChart(data.drawdown_data);
     } else {
@@ -987,7 +928,6 @@ function updateAdvancedPerformance(data) {
         drawdownChartInstance.update('none');
     }
 }
-
 function createDrawdownChart(chartData) {
     const ctx = document.getElementById('drawdownChart').getContext('2d');
     drawdownChartInstance = new Chart(ctx, {
@@ -1010,12 +950,10 @@ function createDrawdownChart(chartData) {
         }
     });
 }
-
 function setupWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
     const socket = new WebSocket(wsUrl);
-    
     socket.onopen = (e) => console.log("WebSocket connection established");
     socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -1031,7 +969,6 @@ function setupWebSocket() {
     };
     socket.onerror = (error) => console.error("WebSocket error:", error);
 }
-
 async function initialLoad() {
     try {
         const res = await fetch('/api/dashboard_data');
@@ -1042,13 +979,206 @@ async function initialLoad() {
         console.error("Error during initial load:", error);
     }
 }
-
 initialLoad();
 setupWebSocket();
 </script>
 </body>
 </html>
 """
+
+BACKTEST_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>اختبار الاستراتيجيات (Backtesting)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+:root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
+.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding-bottom:16px;border-bottom:1px solid #1e2c52;}
+h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
+.card-body{padding:16px}
+.form-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end;}
+.form-group label {display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px;}
+.form-group input, .form-group select {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
+.btn.primary {background: var(--accent); color: #fff; border-color: var(--accent);}
+.results-grid {display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 24px;}
+@media(min-width: 900px){.results-grid{grid-template-columns: 1fr 1fr;}}
+.metrics-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;}
+.metric-card {background: #0d1730; border-radius: 12px; padding: 16px; text-align: center;}
+.metric-title {font-size: 14px; color: #8aa0c8; margin-bottom: 8px;}
+.metric-value {font-size: 22px; font-weight: 700;}
+.green{color:var(--ok)}.red{color:var(--bad)}
+.table-container {max-height: 400px; overflow-y: auto;}
+.table{width:100%;border-collapse:collapse; font-size: 12px;}
+.table th, .table td{padding: 8px; text-align: right; border-bottom: 1px solid #1e2c52;}
+.table th {font-weight: 600; color: #9ab2e2;}
+#loader {text-align: center; padding: 40px; display: none;}
+</style>
+</head>
+<body>
+<div class="container">
+    <header><h1>اختبار الاستراتيجيات (Backtesting)</h1><a href="/" class="btn">العودة للرئيسية</a></header>
+    <div class="card">
+        <div class="card-body">
+            <form id="backtest-form">
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="strategy">اختر الاستراتيجية</label>
+                        <select id="strategy" name="strategy">
+                            {% for key, name in STRATEGY_NAMES.items() %}
+                            <option value="{{ key }}">{{ name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="symbol">رمز العملة (مثل BTCUSDT)</label>
+                        <input type="text" id="symbol" name="symbol" value="BTCUSDT" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="days">أيام الاختبار</label>
+                        <input type="number" id="days" name="days" value="90" required>
+                    </div>
+                    <button type="submit" class="btn primary">بدء الاختبار</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    <div id="loader">جاري تحميل النتائج...</div>
+    <div id="results-container" style="display: none;">
+        <div class="results-grid">
+            <div class="card">
+                <h2>ملخص الأداء</h2>
+                <div class="card-body">
+                    <div class="metrics-grid">
+                        <div class="metric-card"><div class="metric-title">إجمالي الصفقات</div><div class="metric-value" id="totalTrades"></div></div>
+                        <div class="metric-card"><div class="metric-title">معدل الربح</div><div class="metric-value" id="winRate"></div></div>
+                        <div class="metric-card"><div class="metric-title">متوسط الربح/الخسارة</div><div class="metric-value" id="avgProfit"></div></div>
+                        <div class="metric-card"><div class="metric-title">عامل الربح</div><div class="metric-value" id="profitFactor"></div></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>منحنى رأس المال</h2>
+                <div class="card-body" style="height: 250px;"><canvas id="equityChart"></canvas></div>
+            </div>
+        </div>
+        <div class="card" style="margin-top: 16px;">
+            <h2>تفاصيل الصفقات</h2>
+            <div class="card-body table-container">
+                <table class="table">
+                    <thead><tr><th>وقت الدخول</th><th>سعر الدخول</th><th>وقت الخروج</th><th>سعر الخروج</th><th>سبب الخروج</th><th>الربح %</th></tr></thead>
+                    <tbody id="trades-table"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+const qs = s => document.querySelector(s);
+let equityChartInstance = null;
+
+qs('#backtest-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    qs('#loader').style.display = 'block';
+    qs('#results-container').style.display = 'none';
+    
+    const formData = new FormData(e.target);
+    const data = Object.fromEntries(formData.entries());
+
+    try {
+        const response = await fetch('/api/run_backtest', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        const results = await response.json();
+        
+        if (results.error) {
+            alert('خطأ: ' + results.error);
+            return;
+        }
+        
+        displayResults(results);
+    } catch (err) {
+        alert('حدث خطأ غير متوقع. يرجى مراجعة الكونسول.');
+        console.error(err);
+    } finally {
+        qs('#loader').style.display = 'none';
+    }
+});
+
+function displayResults(data) {
+    qs('#results-container').style.display = 'block';
+    
+    qs('#totalTrades').textContent = data.total_trades;
+    qs('#winRate').textContent = `${data.win_rate.toFixed(2)}%`;
+    qs('#avgProfit').textContent = `${data.avg_profit.toFixed(2)}%`;
+    qs('#profitFactor').textContent = data.profit_factor.toFixed(2);
+    
+    const avgProfitEl = qs('#avgProfit');
+    avgProfitEl.classList.toggle('green', data.avg_profit > 0);
+    avgProfitEl.classList.toggle('red', data.avg_profit < 0);
+
+    const tradesTable = qs('#trades-table');
+    tradesTable.innerHTML = data.results.map(trade => `
+        <tr>
+            <td>${new Date(trade.entry_time).toLocaleString('ar-EG')}</td>
+            <td>${trade.entry_price.toFixed(4)}</td>
+            <td>${new Date(trade.exit_time).toLocaleString('ar-EG')}</td>
+            <td>${trade.exit_price.toFixed(4)}</td>
+            <td>${trade.exit_reason}</td>
+            <td class="${trade.profit_percent > 0 ? 'green' : 'red'}">${trade.profit_percent.toFixed(2)}%</td>
+        </tr>
+    `).join('');
+    
+    updateEquityChart(data.equity_curve);
+}
+
+function updateEquityChart(equityData) {
+    const ctx = document.getElementById('equityChart').getContext('2d');
+    if (equityChartInstance) {
+        equityChartInstance.destroy();
+    }
+    equityChartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: equityData.map((_, i) => i),
+            datasets: [{
+                label: 'رأس المال',
+                data: equityData,
+                borderColor: '#3aa0ff',
+                backgroundColor: 'rgba(58, 160, 255, 0.1)',
+                tension: 0.1,
+                fill: true,
+                pointRadius: 0,
+                borderWidth: 2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { ticks: { color: 'var(--muted)', display: false }, grid: { display: false } },
+                y: { ticks: { color: 'var(--muted)' }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
+            }
+        }
+    });
+}
+</script>
+</body>
+</html>
+"""
+
 SETTINGS_TEMPLATE = """
 <!DOCTYPE html><html dir="rtl" lang="ar"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>إعدادات البوت</title><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap" rel="stylesheet"><style>:root{--bg-dark:#121212;--bg-surface:#1e1e1e;--primary:#BB86FC;--primary-variant:#3700B3;--text-light:#e0e0e0;--text-medium:#a0a0a0;}body{background-color:var(--bg-dark);color:var(--text-light);font-family:'Tajawal',sans-serif;}.container{max-width:900px;margin:0 auto;padding:20px;}header{background-color:var(--bg-surface);padding:15px 25px;border-radius:12px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;}.header-title{font-size:24px;font-weight:700;color:var(--primary);}.btn{background-color:var(--primary-variant);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;text-decoration:none;}.settings-form{background-color:var(--bg-surface);border-radius:12px;padding:25px;margin-bottom:20px;}.form-section-title{font-size:20px;font-weight:700;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid #333;}.form-group{margin-bottom:20px;}.form-group label{display:block;margin-bottom:8px;font-weight:bold;color:var(--text-medium);}.form-group input[type="number"],.form-group select,.form-group input[type="text"]{width:100%;padding:12px;border:1px solid #333;border-radius:8px;background-color:#252525;color:var(--text-light);}.checkbox-group{display:flex;align-items:center;gap:10px;padding:10px;}.filter-table{width:100%;border-collapse:collapse;}.filter-table th,.filter-table td{padding:12px;text-align:right;border-bottom:1px solid #333;}.filter-table select,.filter-table input{width:100%;padding:8px;}</style></head><body><div class="container"><header><div class="header-title">إعدادات البوت</div><a href="/" class="btn">العودة للرئيسية</a></header><div class="settings-form"><h3 class="form-section-title">إعدادات التداول العامة</h3><form id="settings-form"><div class="form-group"><label>نسبة المخاطرة الأساسية للصفقة (%)</label><input type="number" name="risk_per_trade" step="0.1" value="{{RISK_PER_TRADE_PERCENT}}"></div><div class="form-group"><label>الحد الأقصى للصفقات المفتوحة</label><input type="number" name="max_trades" value="{{MAX_OPEN_TRADES}}"></div><button type="submit" class="btn">حفظ الإعدادات</button></form></div><div class="settings-form"><h3 class="form-section-title">تفعيل الاستراتيجيات</h3><form id="strategies-form"><div class="form-group checkbox-group"><input type="checkbox" id="use_bb_stoch" name="use_bb_stoch" {{'checked' if USE_BB_STOCH_STRATEGY else ''}}><label for="use_bb_stoch">BB+Stoch</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_macd_ema" name="use_macd_ema" {{'checked' if USE_MACD_EMA_STRATEGY else ''}}><label for="use_macd_ema">MACD+EMA</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_ema_rsi" name="use_ema_rsi" {{'checked' if USE_EMA_RSI_STRATEGY else ''}}><label for="use_ema_rsi">EMA+RSI</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_pullback" name="use_pullback" {{'checked' if USE_PULLBACK_STRATEGY else ''}}><label for="use_pullback">Pullback</label></div><div class="form-group checkbox-group"><input type="checkbox" id="use_momentum_volatility" name="use_momentum_volatility" {{'checked' if USE_MOMENTUM_VOLATILITY_STRATEGY else ''}}><label for="use_momentum_volatility">Momentum</label></div><button type="submit" class="btn">حفظ الاستراتيجيات</button></form></div><div class="settings-form"><h3 class="form-section-title">إعدادات فلاتر الاستراتيجيات</h3><form id="filters-form"><table class="filter-table"><thead><tr><th>الاستراتيجية</th><th>ملف تعريف الفلتر</th><th>حد ADX</th><th>تأكيد HTF</th></tr></thead><tbody>{%for key, config in STRATEGY_FILTER_CONFIG.items()%}<tr><td>{{STRATEGY_NAMES.get(key,key)}}</td><td><select name="{{key}}_profile"><option value="Strict" {{'selected' if config.profile=='Strict'}}>صارم</option><option value="Moderate" {{'selected' if config.profile=='Moderate'}}>متوسط</option><option value="Reversal" {{'selected' if config.profile=='Reversal'}}>انعكاسي</option><option value="Disabled" {{'selected' if config.profile=='Disabled'}}>معطل</option></select></td><td><input type="number" name="{{key}}_adx_threshold" value="{{config.adx_threshold}}"></td><td><select name="{{key}}_htf_confirmation_mode"><option value="Strict" {{'selected' if config.htf_confirmation_mode=='Strict'}}>صارم</option><option value="Relaxed" {{'selected' if config.htf_confirmation_mode=='Relaxed'}}>مخفف</option><option value="Disabled" {{'selected' if config.htf_confirmation_mode=='Disabled'}}>معطل</option></select></td></tr>{%endfor%}</tbody></table><button type="submit" class="btn">حفظ إعدادات الفلاتر</button></form></div></div><script>function setupForm(formId,url){document.getElementById(formId).addEventListener('submit',function(e){e.preventDefault();const formData=new FormData(this);const data=formId==='strategies-form'?Object.fromEntries([...formData.keys()].map(key=>[key,this.querySelector(`[name=${key}]`).checked])):Object.fromEntries(formData.entries());fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(res=>res.json()).then(data=>alert(data.message));});}
 setupForm('settings-form','/update_settings');setupForm('strategies-form','/update_strategies');setupForm('filters-form','/update_filter_settings');</script></body></html>
@@ -1058,6 +1188,11 @@ setupForm('settings-form','/update_settings');setupForm('strategies-form','/upda
 @app.route('/')
 def dashboard():
     return render_template_string(DASHBOARD_TEMPLATE)
+
+@app.route('/backtest')
+def backtest_page():
+    return render_template_string(BACKTEST_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
+
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
@@ -1107,14 +1242,12 @@ def advanced_performance_data():
         total_loss = abs(sum(losses))
         profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
 
-        # Calculate Risk/Reward Ratio
         potential_rewards = [(t['target_price_1'] - t['entry_price']) for t in trades if t['target_price_1'] and t['entry_price']]
         potential_risks = [(t['entry_price'] - t['stop_loss']) for t in trades if t['entry_price'] and t['stop_loss']]
         avg_reward = sum(potential_rewards) / len(potential_rewards) if potential_rewards else 0
         avg_risk = sum(potential_risks) / len(potential_risks) if potential_risks else 0
         risk_reward_ratio = avg_reward / avg_risk if avg_risk > 0 else 0
 
-        # Calculate Max Drawdown
         equity_curve = [1000]
         for p in profits:
             equity_curve.append(equity_curve[-1] * (1 + p / 100))
@@ -1131,14 +1264,8 @@ def advanced_performance_data():
             drawdown_values.append(drawdown)
 
         return jsonify({
-            "winRate": win_rate,
-            "riskRewardRatio": risk_reward_ratio,
-            "maxDrawdown": max_drawdown,
-            "profitFactor": profit_factor,
-            "drawdown_data": {
-                "labels": list(range(len(drawdown_values))),
-                "values": drawdown_values
-            }
+            "winRate": win_rate, "riskRewardRatio": risk_reward_ratio, "maxDrawdown": max_drawdown,
+            "profitFactor": profit_factor, "drawdown_data": {"labels": list(range(len(drawdown_values))), "values": drawdown_values}
         })
     except Exception as e:
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
@@ -1247,15 +1374,6 @@ def emergency_stop_endpoint():
     log_and_notify("warning", "EMERGENCY STOP ACTIVATED. Trading disabled and all positions closed.", "EMERGENCY_STOP")
     return jsonify({"success": True, "message": "تم تفعيل إيقاف الطوارئ."})
 
-@app.route('/save_trade_settings', methods=['POST'])
-def save_trade_settings_endpoint():
-    # This is a placeholder. In a real scenario, you'd save these to Redis or DB
-    # and the bot logic would use them when creating new trades.
-    data = request.json
-    logger.info(f"UI trade settings saved: {data}")
-    log_and_notify("info", f"Default trade settings updated from UI: {data}", "SETTINGS_UPDATE")
-    return jsonify({"success": True, "message": "تم حفظ الإعدادات (للتوضيح فقط)."})
-
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -1310,6 +1428,115 @@ def update_filter_settings():
         return jsonify({"success": True, "message": "تم تحديث إعدادات الفلاتر"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+# --- نظام اختبار الاستراتيجيات ---
+def backtest_strategy(strategy_name, symbol, days=90):
+    """
+    اختبار استراتيجية على بيانات تاريخية بمنطق محاكاة دقيق.
+    """
+    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
+    df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
+    if df is None or len(df) < 50:
+        logger.error(f"[Backtest] Insufficient historical data for {symbol}.")
+        return {"error": "Insufficient historical data."}
+    
+    df = calculate_all_features(df)
+    
+    results = []
+    active_trade = None
+    initial_balance = 1000
+    equity_curve = [initial_balance]
+
+    # استراتيجيات الفحص
+    strategy_functions = {
+        'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
+        'MACD_EMA_Strategy': check_macd_ema_strategy_enhanced,
+        'EMA_RSI_Strategy': check_ema_rsi_strategy_enhanced,
+        'Pullback_Strategy': check_pullback_strategy_enhanced,
+        'Momentum_Volatility_Strategy': check_momentum_volatility_strategy
+    }
+    check_strategy = strategy_functions.get(strategy_name)
+    if not check_strategy:
+        return {"error": f"Strategy '{strategy_name}' not found."}
+
+    for i in range(50, len(df)):
+        current_candle = df.iloc[i]
+        
+        # إدارة الصفقة المفتوحة
+        if active_trade:
+            exit_price = None
+            exit_reason = None
+            # تحقق من وقف الخسارة
+            if current_candle['low'] <= active_trade['stop_loss']:
+                exit_price = active_trade['stop_loss']
+                exit_reason = 'stop_loss'
+            # تحقق من الهدف الأول
+            elif current_candle['high'] >= active_trade['target_price_1']:
+                exit_price = active_trade['target_price_1']
+                exit_reason = 'target_1'
+            
+            if exit_price:
+                profit_percent = ((exit_price - active_trade['entry_price']) / active_trade['entry_price']) * 100
+                active_trade['exit_time'] = current_candle.name
+                active_trade['exit_price'] = exit_price
+                active_trade['profit_percent'] = profit_percent
+                active_trade['exit_reason'] = exit_reason
+                results.append(active_trade)
+                
+                # تحديث منحنى رأس المال
+                equity_curve.append(equity_curve[-1] * (1 + profit_percent / 100))
+                active_trade = None
+
+        # البحث عن إشارة دخول جديدة
+        if not active_trade:
+            # نستخدم البيانات حتى الشمعة *قبل* الحالية لتجنب الانحياز
+            df_slice = df.iloc[:i]
+            if check_strategy(df_slice):
+                trade_levels = calculate_trade_levels(df_slice)
+                active_trade = {
+                    'entry_time': current_candle.name,
+                    'entry_price': current_candle['open'], # الدخول عند افتتاح الشمعة التالية
+                    'stop_loss': trade_levels['stop_loss'],
+                    'target_price_1': trade_levels['target_price_1'],
+                }
+
+    if not results:
+        return {"error": "No trades were executed during this period."}
+
+    total_trades = len(results)
+    wins = [r for r in results if r['profit_percent'] > 0]
+    losses = [r for r in results if r['profit_percent'] <= 0]
+    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+    
+    total_profit = sum(r['profit_percent'] for r in wins)
+    total_loss = abs(sum(r['profit_percent'] for r in losses))
+    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+    
+    avg_profit = sum(r['profit_percent'] for r in results) / total_trades if total_trades > 0 else 0
+
+    return {
+        'strategy': strategy_name, 'symbol': symbol, 'total_trades': total_trades,
+        'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor,
+        'results': results, 'equity_curve': equity_curve
+    }
+
+@app.route('/api/run_backtest', methods=['POST'])
+def run_backtest():
+    try:
+        data = request.json
+        strategy = data.get('strategy')
+        symbol = data.get('symbol', '').upper()
+        days = int(data.get('days', 90))
+
+        if not all([strategy, symbol, days]):
+            return jsonify({"error": "Missing parameters."}), 400
+
+        results = backtest_strategy(strategy, symbol, days)
+        return jsonify(results)
+    except Exception as e:
+        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
+        return jsonify({"error": "An internal error occurred."}), 500
+
 
 # --- Main Loop & Threads ---
 def main_bot_loop():
@@ -1423,55 +1650,34 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 
 def advanced_notification_system(signal, current_price, df):
-    """
-    نظام تنبيهات متقدم يشمل:
-    1. تنبيهات عند تحقيق مستويات معينة
-    2. تنبيهات عند تغير الإشارات
-    3. تنبيهات عند اقتراب وقف الخسارة
-    """
     entry_price = signal['entry_price']
     stop_loss = signal['stop_loss']
     target_price_1 = signal['target_price_1']
-    
-    # Ensure signal_details is a dictionary
     signal_details = signal.get('signal_details', {})
     if isinstance(signal_details, str):
-        try:
-            signal_details = json.loads(signal_details)
-        except (json.JSONDecodeError, TypeError):
-            signal_details = {}
-
-    # حساب النسب المئوية
+        try: signal_details = json.loads(signal_details)
+        except (json.JSONDecodeError, TypeError): signal_details = {}
     profit_percent = ((current_price - entry_price) / entry_price) * 100
     tp1_percent = ((target_price_1 - entry_price) / entry_price) * 100
-    
-    # تنبيه عند تحقيق 50% من الهدف الأول
     if tp1_percent > 0 and profit_percent >= (tp1_percent * 0.5) and not signal_details.get('notified_50_tp1', False):
         message = f"📈 {signal['symbol']} حقق 50% من الهدف الأول ({profit_percent:.2f}%)"
         send_telegram_message(message)
         signal_details['notified_50_tp1'] = True
-    
-    # تنبيه عند تحقيق 80% من الهدف الأول
     if tp1_percent > 0 and profit_percent >= (tp1_percent * 0.8) and not signal_details.get('notified_80_tp1', False):
         message = f"📈 {signal['symbol']} حقق 80% من الهدف الأول ({profit_percent:.2f}%)"
         send_telegram_message(message)
         signal_details['notified_80_tp1'] = True
-    
-    # تنبيه عند اقتراب السعر من وقف الخسارة
     distance_to_sl = ((current_price - stop_loss) / current_price) * 100
     if distance_to_sl <= 0.5 and not signal_details.get('notified_sl_approaching', False):
         message = f"⚠️ {signal['symbol']} يقترب من وقف الخسارة (مسافة: {distance_to_sl:.2f}%)"
         send_telegram_message(message)
         signal_details['notified_sl_approaching'] = True
-    
-    # تنبيه عند تغير إشارة الاستراتيجية
     strategy_name = signal['strategy_name']
     if strategy_name == 'BB_Stoch_Strategy':
         if current_price < df['bb_lower'].iloc[-1] and not signal_details.get('notified_bb_broken', False):
             message = f"🔴 {signal['symbol']} كسر دعم بولينجر السفلي"
             send_telegram_message(message)
             signal_details['notified_bb_broken'] = True
-    
     return signal_details
 
 
@@ -1531,13 +1737,10 @@ def trade_management_loop():
                 if df is None or df.empty:
                     logger.warning(f"[Trade Manager] Could not fetch data for {symbol} to make an exit decision."); continue
                 df_featured = calculate_all_features(df)
-                
-                # Run advanced notifications
                 updated_details = advanced_notification_system(signal, current_price, df_featured)
                 if updated_details != signal.get('signal_details'):
                     update_signal_in_db(signal['id'], {"signal_details": json.dumps(updated_details, cls=NpEncoder)})
-                    signal['signal_details'] = updated_details # Update local copy
-                
+                    signal['signal_details'] = updated_details
                 exit_decision = enhanced_exit_strategy(signal, current_price, df_featured)
                 action = exit_decision.get('action')
                 if action == 'full_exit':
@@ -1573,52 +1776,26 @@ def trade_management_loop():
             time.sleep(10)
 
 def multi_trade_management():
-    """
-    نظام إدارة الصفقات المتعددة يشمل:
-    1. تحديد الحد الأقصى للصفقات المفتوحة
-    2. توزيع المخاطرة بين الصفقات
-    3. إدارة الصفقات حسب الأداء
-    """
     global open_signals_cache
-    
     with signal_cache_lock:
         open_trades = list(open_signals_cache.values())
-    
-    # حساب إجمالي المخاطرة الحالية
     total_risk = sum(
         (trade['entry_price'] - trade['stop_loss']) * trade['quantity']
         for trade in open_trades if trade.get('status') == 'open'
     )
-    
-    with balance_lock:
-        current_balance = usdt_balance
-    
-    with risk_per_trade_lock:
-        risk_per_trade = RISK_PER_TRADE_PERCENT
-
+    with balance_lock: current_balance = usdt_balance
+    with risk_per_trade_lock: risk_per_trade = RISK_PER_TRADE_PERCENT
     max_total_risk = current_balance * (risk_per_trade / 100) * MAX_OPEN_TRADES
-    
     if total_risk > max_total_risk:
         logger.warning(f"[Risk Mgmt] Total risk {total_risk:.2f} exceeds max {max_total_risk:.2f}. Closing weakest trades.")
-        # ترتيب الصفقات حسب الأداء (من الأسوأ إلى الأفضل)
-        with live_prices_lock:
-            live_prices_copy = dict(live_prices)
-
+        with live_prices_lock: live_prices_copy = dict(live_prices)
         sorted_trades = sorted(
             open_trades,
-            key=lambda t: (
-                (live_prices_copy.get(t['symbol'], t['entry_price']) / t['entry_price']) - 1
-            )
+            key=lambda t: ((live_prices_copy.get(t['symbol'], t['entry_price']) / t['entry_price']) - 1)
         )
-        
-        # إغلاق الصفقات ذات الأداء الأضعف حتى العودة ضمن الحد المسموح
         for trade in sorted_trades:
-            if total_risk <= max_total_risk:
-                break
-            
-            # إغلاق الصفقة
-            with live_prices_lock:
-                current_price = live_prices.get(trade['symbol'])
+            if total_risk <= max_total_risk: break
+            with live_prices_lock: current_price = live_prices.get(trade['symbol'])
             if current_price:
                 log_and_notify("warning", f"Closing {trade['symbol']} due to overall risk management.", "RISK_MGMT_CLOSE")
                 close_signal(trade, current_price, "Risk management")
@@ -1632,7 +1809,7 @@ def risk_management_loop():
             multi_trade_management()
         except Exception as e:
             logger.error(f"❌ [Risk Manager] Error: {e}", exc_info=True)
-        time.sleep(60 * 2) # Run every 2 minutes
+        time.sleep(60 * 2)
 
 def update_market_state():
     try:
@@ -1682,7 +1859,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V20.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.0 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -1710,7 +1887,7 @@ if __name__ == '__main__':
     Thread(target=trade_management_loop, daemon=True).start()
     Thread(target=update_market_state_loop, daemon=True).start()
     Thread(target=update_balance_loop, daemon=True).start()
-    Thread(target=risk_management_loop, daemon=True).start() # [جديد]
+    Thread(target=risk_management_loop, daemon=True).start()
 
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
