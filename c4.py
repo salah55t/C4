@@ -1,11 +1,12 @@
-# ملف c4.py - نسخة V23.1.0 (إصلاح أخطاء التداول الحقيقي)
+# ملف c4.py - نسخة V23.2.0 (إصلاح خطأ MIN_NOTIONAL الحاسم)
 # --- وصف الإصدار:
-# هذا الإصدار يعالج أخطاء حرجة متعلقة بتنفيذ الصفقات الحقيقية على منصة Binance.
-# 1.  [إصلاح Bug] معالجة خطأ "Filter failure: LOT_SIZE" عن طريق التحقق من أقل كمية (`minQty`)
-#     بالإضافة إلى حجم الخطوة (`stepSize`) قبل إرسال أي أمر شراء.
-# 2.  [تحسين أمان] عند إغلاق أي صفقة حقيقية (أمر بيع)، يقوم البوت الآن بالاستعلام عن الرصيد الفعلي
-#     للعملة من المنصة مباشرة لضمان بيع الكمية الصحيحة وتجنب الأخطاء.
-# 3.  [تحسين Logs] إضافة سجلات أكثر تفصيلاً لعمليات التحقق من الكميات والأرصدة.
+# هذا الإصدار يعالج السبب الجذري لخطأ "Filter failure" الذي يحدث مع الأرصدة الصغيرة.
+# 1.  [إصلاح Bug حاسم] إضافة تحقق إلزامي من فلتر MIN_NOTIONAL (أقل قيمة للصفقة بالدولار)
+#     قبل إرسال أي أمر شراء حقيقي. سيقوم البوت الآن برفض أي صفقة تكون قيمتها الإجمالية
+#     أقل من الحد الأدنى الذي تفرضه المنصة (مثل 5 أو 10 دولار)، مما يمنع الخطأ من الحدوث.
+# 2.  [تحسين Logs] إضافة سجلات رفض واضحة ومخصصة لسبب "MinNotional Filter Failed".
+# 3.  [تحسين أمان] التأكد من أن جميع عمليات التحقق من الفلاتر (Lot Size و Notional) تتم
+#     بشكل صحيح ومتسلسل لضمان سلامة أوامر التداول الحقيقي.
 
 import time
 import os
@@ -783,7 +784,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         # [إصلاح Bug] معالجة شاملة لفلاتر LOT_SIZE و NOTIONAL
         try:
             lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), None)
+            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
 
             if not lot_size_filter or not notional_filter:
                 logger.error(f"❌ [Real Trade] Filters not found for {symbol}"); return
@@ -794,15 +795,16 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
             adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
             notional_value = adjusted_quantity * entry_price
+            
+            # [إصلاح حاسم] التحقق من قيمة الصفقة (Notional) قبل كل شيء آخر
+            if notional_value < min_notional:
+                log_rejection(symbol, "MinNotional Filter Failed", {"required": f"{min_notional:.2f}$", "actual": f"{notional_value:.2f}$"})
+                return
 
             if adjusted_quantity < min_qty:
-                log_rejection(symbol, "LotSize Filter Failed", {"required_min_qty": min_qty, "actual_qty": adjusted_quantity})
+                log_rejection(symbol, "LotSize Filter Failed", {"required": min_qty, "actual": adjusted_quantity})
                 return
             
-            if notional_value < min_notional:
-                log_rejection(symbol, "MinNotional Filter Failed", {"required_notional": min_notional, "actual_notional": notional_value})
-                return
-
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
             order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
@@ -858,7 +860,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V23.1 - إصلاحات)</title>
+<title>لوحة التحكم - بوت التداول (V23.2 - إصلاحات)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -926,7 +928,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V23.1 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V23.2 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2448,7 +2450,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.1 (Bug Fixes) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2 (MIN_NOTIONAL Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
