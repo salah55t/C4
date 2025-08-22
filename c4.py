@@ -1,9 +1,11 @@
-# ملف c4.py - نسخة V21.0.1 (تحسين أداء الاختبار الخلفي)
+# ملف c4.py - نسخة V21.0.2 (تحسين جودة الإشارات والفلاتر)
 # --- وصف الإصدار:
-# هذا الإصدار يحل مشكلة الأداء في نظام الاختبار الخلفي التي كانت تسبب توقفه.
-# 1.  [إصلاح] تم نقل حساب المؤشرات الإضافية (مثل ema200) إلى دالة `calculate_all_features` ليتم حسابها مرة واحدة فقط.
-# 2.  [تحسين] دوال فحص الاستراتيجيات الآن تقرأ البيانات فقط ولا تعدلها، مما يزيل تحذير `SettingWithCopyWarning` ويحسن السرعة بشكل كبير.
-# 3.  [تحسين] أصبحت جميع الاستراتيجيات الآن قابلة للاختبار الخلفي بكفاءة وسرعة.
+# هذا الإصدار يركز على تحسين جودة الإشارات عبر فلاتر أكثر مرونة واستراتيجيات معدلة.
+# 1.  [إضافة] دالة `dynamic_adx_threshold` لحساب عتبة ADX ديناميكية بناءً على تقلب السوق (ATR).
+# 2.  [إضافة] دالة `flexible_volume_filter` كبديل لفلتر الحجم التقليدي، مع إمكانية التحكم في مدى صرامة الفلتر.
+# 3.  [تحسين] تحديث استراتيجية `check_bb_stoch_strategy_enhanced` لتكون أكثر مرونة في شروطها (RSI, MACD, شكل الشمعة) واستخدام فلتر الحجم الجديد.
+# 4.  [إصلاح] تم نقل حساب المؤشرات الإضافية (مثل ema200) إلى دالة `calculate_all_features` ليتم حسابها مرة واحدة فقط.
+# 5.  [تحسين] دوال فحص الاستراتيجيات الآن تقرأ البيانات فقط ولا تعدلها، مما يزيل تحذير `SettingWithCopyWarning` ويحسن السرعة بشكل كبير.
 
 import time
 import os
@@ -404,10 +406,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
-    # ======================= FIX START =======================
-    # إضافة حساب ema200 هنا ليتم حسابه مرة واحدة فقط
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-    # ======================== FIX END ========================
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -501,6 +500,47 @@ def dynamic_risk_management(symbol, df, consecutive_losses=0):
     return final_risk_percent
 
 # --- Filters & Strategies ---
+
+# ======================= NEW FUNCTION START =======================
+def dynamic_adx_threshold(symbol, df, base_threshold=20):
+    """
+    حساب عتبة ADX ديناميكية بناءً على تقلب السوق
+    """
+    atr_percent = df['atr_percent'].iloc[-1]
+    
+    # في حالة التقلب العالي، نخفض العتبة للسماح بمزيد من الإشارات
+    if atr_percent > 4.0:
+        return base_threshold * 0.85
+    # في حالة التقلب المنخفض، نرفع العتبة لتجنب الإشارات الضعيفة
+    elif atr_percent < 1.5:
+        return base_threshold * 1.15
+    # في الحالات العادية، نستخدم العتبة الأساسية مع تعديل طفيف
+    else:
+        return base_threshold
+# ======================== NEW FUNCTION END ========================
+
+# ======================= NEW FUNCTION START =======================
+def flexible_volume_filter(df, min_volume_percentile=30, strictness=0.8):
+    """
+    فلتر حجم أكثر مرونة
+    strictness: 0.0 - 1.0 (حيث 1.0 هو الأكثر صرامة)
+    """
+    if 'volume' not in df.columns or len(df) < 50:
+        return False
+    
+    current_volume = df['volume'].iloc[-1]
+    volume_ma = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
+    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
+    
+    if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile):
+        return False
+    
+    # حساب متوسط مرجح بين المتوسط المتحرك والنسبة المئوية
+    volume_threshold = (volume_ma * strictness) + (volume_percentile * (1 - strictness))
+    
+    return current_volume > volume_threshold
+# ======================== NEW FUNCTION END ========================
+
 def check_market_volatility_filter(df: pd.DataFrame) -> bool:
     if 'atr_percent' not in df.columns or len(df) < 30:
         log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
@@ -518,7 +558,9 @@ def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
     if 'adx' not in df.columns or len(df) < 5:
         log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed"); return False
     recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
-    if recent_adx < (adx_threshold * 0.95):
+    # استخدام فلتر ADX الديناميكي هنا
+    dynamic_threshold = dynamic_adx_threshold(df.name, df, base_threshold=adx_threshold)
+    if recent_adx < (dynamic_threshold * 0.95):
         log_rejection(df.name, "Trend Strength Filter Failed"); return False
     return True
 
@@ -558,21 +600,49 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
+# ======================= STRATEGY UPDATE START =======================
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'macd', 'macd_signal'}.issubset(df.columns): return False
-    if not check_volume_filter(df, min_volume_percentile=40):
-        log_rejection(df.name, "Volume Filter Failed"); return False
-    if df['macd'].iloc[-1] < df['macd_signal'].iloc[-1]:
-        log_rejection(df.name, "MACD Momentum Failed"); return False
+    """
+    النسخة المحسنة والأكثر مرونة من استراتيجية BB_Stoch.
+    - تستخدم فلتر حجم مرن.
+    - شروط أكثر تساهلاً للشمعة الصاعدة.
+    - زيادة نطاق RSI المسموح به.
+    - إضافة شرط زخم MACD مرن.
+    """
+    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'high', 'low', 'macd', 'macd_signal'}.issubset(df.columns):
+        return False
+    
+    # استخدام فلتر حجم أكثر مرونة
+    if not flexible_volume_filter(df, min_volume_percentile=30, strictness=0.7):
+        log_rejection(df.name, "Volume Filter Failed")
+        return False
+    
     last, prev = df.iloc[-1], df.iloc[-2]
+    
+    # التحقق من الارتداد من الحد السفلي لبولينجر
     bounce = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower'])
+    
+    # التحقق من ارتفاع مؤشر Stoch RSI
     stoch_rising = last['stoch_rsi_k'] > prev['stoch_rsi_k']
-    bullish_body = last['close'] > last['open']
+    
+    # التحقق من الشمعة الصعودية (أقل صرامة)
+    bullish_body = last['close'] > (last['open'] + (last['high'] - last['low']) * 0.3)  # 30% من الشمعة
+    
+    # تحسين RSI للسماح بمزيد من المرونة
     rsi_improving = last['rsi'] > prev['rsi']
-    not_overbought = last['rsi'] < 65
-    signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought
-    if not signal: log_rejection(df.name, "Bullish Confirmation Failed")
+    not_overbought = last['rsi'] < 70  # زيادة من 65 إلى 70
+    
+    # إضافة شرط جديد: زخم MACD (أقل صرامة)
+    macd_ok = (last['macd'] > last['macd_signal']) or (last['macd'] - last['macd_signal'] > -0.1 * abs(last['macd']))
+    
+    signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought and macd_ok
+    
+    if not signal:
+        log_rejection(df.name, "Bullish Confirmation Failed")
+    
     return signal
+# ======================== STRATEGY UPDATE END ========================
+
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'macd', 'macd_signal', 'ema9', 'ema21', 'rsi', 'close', 'adx'}
@@ -610,12 +680,8 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     return dipped and bullish_close
 
 def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
-    # ======================= FIX START =======================
-    # تم تعديل قائمة الأعمدة المطلوبة لتشمل ema200
     needed = {'atr_percent','ema9','ema21','macd','macd_signal','close', 'ema200'}
     if len(df) < 200 or not needed.issubset(df.columns): return False
-    # تم حذف السطر الذي يحسب ema200 من هنا لأنه حُسب مسبقًا
-    # ======================== FIX END ========================
     if df['close'].iloc[-1] < df['ema200'].iloc[-1]: 
         log_rejection(df.name, "Long-term Trend Filter Failed"); return False
     last, prev = df.iloc[-1], df.iloc[-2]
@@ -1867,7 +1933,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.1 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.2 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
