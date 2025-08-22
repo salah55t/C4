@@ -1,4 +1,4 @@
-# ملف c4.py - نسخة V21.0.4 (تحسين واجهة المستخدم ومؤشرات الأداء)
+# ملف c4.py - نسخة V21.0.5 (تحسين الاختبار الخلفي والمؤشرات)
 # --- وصف الإصدار:
 # هذا الإصدار يركز على تحسين تجربة المستخدم عبر واجهة عرض أكثر تفاعلية وغنية بالبيانات.
 # 1.  [تحسين UI] تحديث واجهة عرض الصفقات المفتوحة لتشمل نقاط الجودة بشكل مرئي.
@@ -6,6 +6,8 @@
 # 3.  [إضافة Backend] إنشاء مسار API جديد (`/api/advanced_performance_data`) لحساب مؤشرات أداء متقدمة (Sharpe Ratio, Max Drawdown, etc.).
 # 4.  [إضافة UI] إضافة قسم جديد في لوحة التحكم لعرض مؤشرات الأداء المتقدمة ومنحنى بياني لتطور رأس المال.
 # 5.  [تحسين JS] تحديث كود JavaScript لمعالجة الفرز وعرض البيانات الجديدة.
+# 6.  [تحسين Backend] تحديث دالة حساب المؤشرات الفنية.
+# 7.  [تحسين Backend] تطبيق نظام اختبار خلفي (Backtesting) متقدم مع واجهة API جديدة.
 
 import time
 import os
@@ -405,39 +407,63 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
+# ======================= START: IMPROVED INDICATOR CALCULATION =======================
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+    
+    # حساب جميع المؤشرات الأساسية
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+    
+    # حساب ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
     df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
-    up_move = df_calc['high'].diff(); down_move = -df_calc['low'].diff()
+    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close']) * 100
+    
+    # حساب ADX
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
     plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
-    delta = df_calc['close'].diff(); gain = delta.where(delta > 0, 0); loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14).mean(); avg_loss = loss.rolling(window=14).mean()
+    
+    # حساب RSI
+    delta = df_calc['close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
+    
+    # حساب Stoch RSI
     rsi_val = df_calc['rsi']
     stoch_rsi = (rsi_val - rsi_val.rolling(14).min()) / (rsi_val.rolling(14).max() - rsi_val.rolling(14).min()).replace(0, 1e-9)
     df_calc['stoch_rsi_k'] = stoch_rsi.rolling(3).mean() * 100
+    
+    # حساب بولينجر باند
     bb_middle = df_calc['close'].rolling(window=20).mean()
     bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_lower'] = bb_middle - (bb_std * 2)
-    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean(); exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
+    
+    # حساب MACD
+    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close']) * 100
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    
     return df_calc
+# ======================== END: IMPROVED INDICATOR CALCULATION ========================
 
 # --- Data Loading ---
 def load_open_signals_to_cache():
@@ -1104,7 +1130,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .card-body{padding:16px}
 .form-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end;}
 .form-group label {display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px;}
-.form-group input, .form-group select {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
+.form-group input, .form-group textarea {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
 .btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
 .btn.primary {background: var(--accent); color: #fff; border-color: var(--accent);}
 .results-grid {display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 24px;}
@@ -1129,20 +1155,20 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
             <form id="backtest-form">
                 <div class="form-grid">
                     <div class="form-group">
-                        <label for="strategy">اختر الاستراتيجية</label>
-                        <select id="strategy" name="strategy">
-                            {% for key, name in STRATEGY_NAMES.items() %}
-                            <option value="{{ key }}">{{ name }}</option>
-                            {% endfor %}
-                        </select>
+                        <label for="symbols">رموز العملات (مفصولة بفاصلة)</label>
+                        <textarea id="symbols" name="symbols" rows="2">BTCUSDT,ETHUSDT,BNBUSDT</textarea>
                     </div>
                     <div class="form-group">
-                        <label for="symbol">رمز العملة (مثل BTCUSDT)</label>
-                        <input type="text" id="symbol" name="symbol" value="BTCUSDT" required>
+                        <label for="start_date">تاريخ البدء</label>
+                        <input type="date" id="start_date" name="start_date" required>
                     </div>
                     <div class="form-group">
-                        <label for="days">أيام الاختبار</label>
-                        <input type="number" id="days" name="days" value="90" required>
+                        <label for="end_date">تاريخ الانتهاء</label>
+                        <input type="date" id="end_date" name="end_date" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="initial_balance">الرصيد المبدئي</label>
+                        <input type="number" id="initial_balance" name="initial_balance" value="10000" required>
                     </div>
                     <button type="submit" class="btn primary">بدء الاختبار</button>
                 </div>
@@ -1156,10 +1182,12 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
                 <h2>ملخص الأداء</h2>
                 <div class="card-body">
                     <div class="metrics-grid">
+                        <div class="metric-card"><div class="metric-title">الرصيد النهائي</div><div class="metric-value" id="finalBalance"></div></div>
                         <div class="metric-card"><div class="metric-title">إجمالي الصفقات</div><div class="metric-value" id="totalTrades"></div></div>
                         <div class="metric-card"><div class="metric-title">معدل الربح</div><div class="metric-value" id="winRate"></div></div>
-                        <div class="metric-card"><div class="metric-title">متوسط الربح/الخسارة</div><div class="metric-value" id="avgProfit"></div></div>
                         <div class="metric-card"><div class="metric-title">عامل الربح</div><div class="metric-value" id="profitFactor"></div></div>
+                        <div class="metric-card"><div class="metric-title">أكبر تراجع</div><div class="metric-value red" id="maxDrawdown"></div></div>
+                        <div class="metric-card"><div class="metric-title">متوسط الربح/صفقة</div><div class="metric-value" id="avgProfit"></div></div>
                     </div>
                 </div>
             </div>
@@ -1172,7 +1200,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
             <h2>تفاصيل الصفقات</h2>
             <div class="card-body table-container">
                 <table class="table">
-                    <thead><tr><th>وقت الدخول</th><th>سعر الدخول</th><th>وقت الخروج</th><th>سعر الخروج</th><th>سبب الخروج</th><th>الربح %</th></tr></thead>
+                    <thead><tr><th>الرمز</th><th>الاستراتيجية</th><th>وقت الدخول</th><th>سعر الدخول</th><th>وقت الخروج</th><th>سعر الخروج</th><th>الربح %</th></tr></thead>
                     <tbody id="trades-table"></tbody>
                 </table>
             </div>
@@ -1183,13 +1211,26 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 const qs = s => document.querySelector(s);
 let equityChartInstance = null;
 
+// Set default dates
+const today = new Date();
+const thirtyDaysAgo = new Date();
+thirtyDaysAgo.setDate(today.getDate() - 30);
+qs('#end_date').valueAsDate = today;
+qs('#start_date').valueAsDate = thirtyDaysAgo;
+
+
 qs('#backtest-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     qs('#loader').style.display = 'block';
     qs('#results-container').style.display = 'none';
     
     const formData = new FormData(e.target);
-    const data = Object.fromEntries(formData.entries());
+    const data = {
+        symbols: formData.get('symbols').split(',').map(s => s.trim().toUpperCase()),
+        start_date: formData.get('start_date'),
+        end_date: formData.get('end_date'),
+        initial_balance: parseFloat(formData.get('initial_balance'))
+    };
 
     try {
         const response = await fetch('/api/run_backtest', {
@@ -1216,24 +1257,23 @@ qs('#backtest-form').addEventListener('submit', async (e) => {
 function displayResults(data) {
     qs('#results-container').style.display = 'block';
     
+    qs('#finalBalance').textContent = `$${data.final_balance.toFixed(2)}`;
     qs('#totalTrades').textContent = data.total_trades;
-    qs('#winRate').textContent = `${data.win_rate.toFixed(2)}%`;
-    qs('#avgProfit').textContent = `${data.avg_profit.toFixed(2)}%`;
-    qs('#profitFactor').textContent = data.profit_factor.toFixed(2);
-    
-    const avgProfitEl = qs('#avgProfit');
-    avgProfitEl.classList.toggle('green', data.avg_profit > 0);
-    avgProfitEl.classList.toggle('red', data.avg_profit < 0);
+    qs('#winRate').textContent = `${(data.win_rate || 0).toFixed(2)}%`;
+    qs('#profitFactor').textContent = (data.profit_factor || 0).toFixed(2);
+    qs('#maxDrawdown').textContent = `${(data.max_drawdown || 0).toFixed(2)}%`;
+    qs('#avgProfit').textContent = `${(data.avg_profit_per_trade || 0).toFixed(2)}%`;
 
     const tradesTable = qs('#trades-table');
-    tradesTable.innerHTML = data.results.map(trade => `
+    tradesTable.innerHTML = data.trades.map(trade => `
         <tr>
-            <td>${new Date(trade.entry_time).toLocaleString('ar-EG')}</td>
+            <td>${trade.symbol}</td>
+            <td>${trade.strategy}</td>
+            <td>${new Date(trade.entry_date).toLocaleString('ar-EG')}</td>
             <td>${trade.entry_price.toFixed(4)}</td>
-            <td>${new Date(trade.exit_time).toLocaleString('ar-EG')}</td>
+            <td>${new Date(trade.exit_date).toLocaleString('ar-EG')}</td>
             <td>${trade.exit_price.toFixed(4)}</td>
-            <td>${trade.exit_reason}</td>
-            <td class="${trade.profit_percent > 0 ? 'green' : 'red'}">${trade.profit_percent.toFixed(2)}%</td>
+            <td class="${trade.profit_percentage > 0 ? 'green' : 'red'}">${trade.profit_percentage.toFixed(2)}%</td>
         </tr>
     `).join('');
     
@@ -1248,10 +1288,10 @@ function updateEquityChart(equityData) {
     equityChartInstance = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: equityData.map((_, i) => i),
+            labels: equityData.map(d => d.timestamp),
             datasets: [{
                 label: 'رأس المال',
-                data: equityData,
+                data: equityData.map(d => d.balance),
                 borderColor: '#3aa0ff',
                 backgroundColor: 'rgba(58, 160, 255, 0.1)',
                 tension: 0.1,
@@ -1265,7 +1305,7 @@ function updateEquityChart(equityData) {
             maintainAspectRatio: false,
             plugins: { legend: { display: false } },
             scales: {
-                x: { ticks: { color: 'var(--muted)', display: false }, grid: { display: false } },
+                x: { type: 'time', time: { unit: 'day' }, ticks: { color: 'var(--muted)', autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
                 y: { ticks: { color: 'var(--muted)' }, grid: { color: 'rgba(255, 255, 255, 0.05)' } }
             }
         }
@@ -1313,7 +1353,6 @@ def ws(ws_client):
             if ws_client in ws_clients:
                 ws_clients.remove(ws_client)
 
-# ======================= NEW ENDPOINT START =======================
 @app.route('/api/advanced_performance_data')
 def advanced_performance_data():
     if not check_db_connection() or not conn:
@@ -1369,8 +1408,6 @@ def advanced_performance_data():
     except Exception as e:
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-# ======================== NEW ENDPOINT END ========================
-
 
 @app.route('/settings')
 def settings():
@@ -1491,61 +1528,307 @@ def update_filter_settings():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-# --- نظام اختبار الاستراتيجيات ---
-def backtest_strategy(strategy_name, symbol, days=90):
-    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
-    df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
-    if df is None or len(df) < 50:
-        return {"error": "Insufficient historical data."}
-    df = calculate_all_features(df)
-    results, active_trade, equity_curve = [], None, [1000]
-    strategy_functions = {
-        'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced, 'MACD_EMA_Strategy': check_macd_ema_strategy_enhanced,
-        'EMA_RSI_Strategy': check_ema_rsi_strategy_enhanced, 'Pullback_Strategy': check_pullback_strategy_enhanced,
-        'Momentum_Volatility_Strategy': check_momentum_volatility_strategy
+# ======================= START: IMPROVED BACKTESTING SYSTEM =======================
+def run_backtest(symbols: List[str], start_date: str, end_date: str, initial_balance: float = 10000.0) -> Dict:
+    """
+    تشغيل الاختبار الخلفي للفترة المحددة
+    """
+    logger.info(f"[Backtest] Starting backtest from {start_date} to {end_date}")
+    
+    # إعداد نتائج الاختبار
+    results = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "initial_balance": initial_balance,
+        "final_balance": initial_balance,
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "total_profit": 0.0,
+        "max_drawdown": 0.0,
+        "max_drawdown_period": "",
+        "trades": [],
+        "balance_history": [],
+        "equity_curve": [],
+        "drawdown_curve": [],
+        "strategy_performance": {}
     }
-    check_strategy = strategy_functions.get(strategy_name)
-    if not check_strategy: return {"error": f"Strategy '{strategy_name}' not found."}
+    
+    # إعداد المتغيرات اللازمة
+    current_balance = initial_balance
+    max_balance = initial_balance
+    max_drawdown = 0.0
+    max_drawdown_date = start_date
+    open_trades = {}
+    balance_history = [(start_date, initial_balance)]
+    
+    # إعداد أداء كل استراتيجية
+    for strategy in STRATEGY_NAMES.keys():
+        results["strategy_performance"][strategy] = {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "total_profit": 0.0,
+            "avg_profit": 0.0,
+            "max_profit": 0.0,
+            "max_loss": 0.0
+        }
+    
+    # معالجة كل رمز
+    for symbol in symbols:
+        try:
+            logger.info(f"[Backtest] Processing {symbol}")
+            
+            # جلب البيانات التاريخية
+            df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 
+                                      (datetime.strptime(end_date, "%Y-%m-%d") - datetime.strptime(start_date, "%Y-%m-%d")).days + 5)
+            
+            if df is None or len(df) == 0:
+                logger.warning(f"[Backtest] No data available for {symbol}")
+                continue
+            
+            # فلترة البيانات حسب تاريخ البدء والانتهاء
+            df = df[(df.index >= start_date) & (df.index <= end_date)]
+            
+            if len(df) < 200:  # التأكد من وجود بيانات كافية
+                logger.warning(f"[Backtest] Insufficient data for {symbol}")
+                continue
+            
+            # حساب جميع المؤشرات
+            df = calculate_all_features(df)
+            df.name = symbol  # تعيين اسم الرمز لاستخدامه في دوال الفلترة
+            
+            # معالجة كل شمعة في البيانات
+            for i, (timestamp, row) in enumerate(df.iterrows()):
+                # تحديث الصفقات المفتوحة
+                trades_to_close = []
+                for trade_id, trade in open_trades.items():
+                    if trade['symbol'] == symbol:
+                        # التحقق من شروط الإغلاق
+                        if row['high'] >= trade['target_price_1']:
+                            # الوصول إلى الهدف الأول
+                            profit_percentage = ((trade['target_price_1'] - trade['entry_price']) / trade['entry_price']) * 100
+                            trade_profit = current_balance * trade['risk_percent'] / 100 * (profit_percentage / 100) # حساب الربح الفعلي
+                            current_balance += trade_profit
+                            
+                            # تحديث نتائج الاختبار
+                            results["total_trades"] += 1
+                            results["winning_trades"] += 1
+                            results["total_profit"] += profit_percentage
+                            
+                            # تحديث أداء الاستراتيجية
+                            strategy_name = trade['strategy']
+                            strat_perf = results["strategy_performance"][strategy_name]
+                            strat_perf["total_trades"] += 1
+                            strat_perf["winning_trades"] += 1
+                            strat_perf["total_profit"] += profit_percentage
+                            strat_perf["avg_profit"] = strat_perf["total_profit"] / strat_perf["total_trades"]
+                            strat_perf["max_profit"] = max(strat_perf["max_profit"], profit_percentage)
+                            
+                            # إضافة الصفقة إلى النتائج
+                            results["trades"].append({
+                                "symbol": symbol,
+                                "strategy": strategy_name,
+                                "entry_date": trade['entry_date'],
+                                "exit_date": timestamp.isoformat(),
+                                "entry_price": trade['entry_price'],
+                                "exit_price": trade['target_price_1'],
+                                "profit_percentage": profit_percentage,
+                                "type": "win"
+                            })
+                            
+                            trades_to_close.append(trade_id)
+                            
+                        elif row['low'] <= trade['stop_loss']:
+                            # الوصول إلى وقف الخسارة
+                            loss_percentage = ((trade['stop_loss'] - trade['entry_price']) / trade['entry_price']) * 100
+                            trade_loss = current_balance * trade['risk_percent'] / 100 * (loss_percentage / 100) # حساب الخسارة الفعلية
+                            current_balance += trade_loss
+                            
+                            # تحديث نتائج الاختبار
+                            results["total_trades"] += 1
+                            results["losing_trades"] += 1
+                            results["total_profit"] += loss_percentage
+                            
+                            # تحديث أداء الاستراتيجية
+                            strategy_name = trade['strategy']
+                            strat_perf = results["strategy_performance"][strategy_name]
+                            strat_perf["total_trades"] += 1
+                            strat_perf["max_loss"] = min(strat_perf["max_loss"], loss_percentage)
+                            strat_perf["total_profit"] += loss_percentage
+                            strat_perf["avg_profit"] = strat_perf["total_profit"] / strat_perf["total_trades"]
+                            
+                            # إضافة الصفقة إلى النتائج
+                            results["trades"].append({
+                                "symbol": symbol,
+                                "strategy": strategy_name,
+                                "entry_date": trade['entry_date'],
+                                "exit_date": timestamp.isoformat(),
+                                "entry_price": trade['entry_price'],
+                                "exit_price": trade['stop_loss'],
+                                "profit_percentage": loss_percentage,
+                                "type": "loss"
+                            })
+                            
+                            trades_to_close.append(trade_id)
+                
+                # إغلاق الصفقات
+                for trade_id in trades_to_close:
+                    del open_trades[trade_id]
+                
+                # التحقق من وجود إشارات جديدة
+                if i >= 200:  # التأكد من وجود بيانات كافية لحساب المؤشرات
+                    current_df = df.iloc[:i+1]
+                    
+                    # دالة مساعدة لإنشاء صفقة
+                    def create_backtest_trade(strategy_name):
+                        if apply_strategy_filters(symbol, current_df, strategy_name):
+                            trade_levels = calculate_trade_levels(current_df)
+                            risk_percent = dynamic_risk_management(symbol, current_df)
+                            trade_id = f"{symbol}_{timestamp.isoformat()}_{strategy_name}"
+                            open_trades[trade_id] = {
+                                "symbol": symbol, "entry_date": timestamp.isoformat(),
+                                "entry_price": trade_levels['entry_price'], "stop_loss": trade_levels['stop_loss'],
+                                "target_price_1": trade_levels['target_price_1'], "target_price_2": trade_levels['target_price_2'],
+                                "strategy": strategy_name, "risk_percent": risk_percent
+                            }
 
-    for i in range(50, len(df)):
-        current_candle = df.iloc[i]
-        if active_trade:
-            exit_price, exit_reason = None, None
-            if current_candle['low'] <= active_trade['stop_loss']: exit_price, exit_reason = active_trade['stop_loss'], 'stop_loss'
-            elif current_candle['high'] >= active_trade['target_price_1']: exit_price, exit_reason = active_trade['target_price_1'], 'target_1'
-            if exit_price:
-                profit_percent = ((exit_price - active_trade['entry_price']) / active_trade['entry_price']) * 100
-                active_trade.update({'exit_time': current_candle.name, 'exit_price': exit_price, 'profit_percent': profit_percent, 'exit_reason': exit_reason})
-                results.append(active_trade)
-                equity_curve.append(equity_curve[-1] * (1 + profit_percent / 100))
-                active_trade = None
-        if not active_trade:
-            df_slice = df.iloc[:i]; df_slice.name = symbol
-            if check_strategy(df_slice):
-                trade_levels = calculate_trade_levels(df_slice)
-                active_trade = {'entry_time': current_candle.name, 'entry_price': current_candle['open'], **trade_levels}
+                    # التحقق من جميع الاستراتيجيات
+                    if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(current_df):
+                        create_backtest_trade("BB_Stoch_Strategy")
+                    if USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(current_df):
+                        create_backtest_trade("MACD_EMA_Strategy")
+                    if USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(current_df):
+                        create_backtest_trade("EMA_RSI_Strategy")
+                    if USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(current_df):
+                        create_backtest_trade("Pullback_Strategy")
+                    if USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(current_df):
+                        create_backtest_trade("Momentum_Volatility_Strategy")
 
-    if not results: return {"error": "No trades were executed."}
-    total_trades = len(results)
-    wins = [r for r in results if r['profit_percent'] > 0]
-    losses = [r for r in results if r['profit_percent'] <= 0]
-    win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-    total_profit = sum(r['profit_percent'] for r in wins)
-    total_loss = abs(sum(r['profit_percent'] for r in losses))
-    profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
-    avg_profit = sum(r['profit_percent'] for r in results) / total_trades if total_trades > 0 else 0
-    return {'total_trades': total_trades, 'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor, 'results': results, 'equity_curve': equity_curve}
+                # تحديث سجل الرصيد
+                balance_history.append((timestamp.isoformat(), current_balance))
+                
+                # حساب أقصى انخفاض
+                if current_balance > max_balance:
+                    max_balance = current_balance
+                
+                drawdown = (max_balance - current_balance) / max_balance * 100 if max_balance > 0 else 0
+                if drawdown > max_drawdown:
+                    max_drawdown = drawdown
+                    max_drawdown_date = timestamp.isoformat()
+                
+                # إضافة نقاط إلى منحنى الرصيد والانخفاض
+                results["equity_curve"].append({
+                    "timestamp": timestamp.isoformat(),
+                    "balance": current_balance
+                })
+                
+                results["drawdown_curve"].append({
+                    "timestamp": timestamp.isoformat(),
+                    "drawdown": drawdown
+                })
+        
+        except Exception as e:
+            logger.error(f"[Backtest] Error processing {symbol}: {e}", exc_info=True)
+            continue
+    
+    # إغلاق جميع الصفقات المفتوحة في نهاية الاختبار
+    for trade_id, trade in open_trades.items():
+        symbol = trade['symbol']
+        try:
+            df_symbol = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, 1)
+            if df_symbol is not None and len(df_symbol) > 0:
+                last_price = df_symbol['close'].iloc[-1]
+                profit_percentage = ((last_price - trade['entry_price']) / trade['entry_price']) * 100
+                trade_profit = current_balance * trade['risk_percent'] / 100 * (profit_percentage / 100)
+                current_balance += trade_profit
+                
+                # تحديث نتائج الاختبار
+                results["total_trades"] += 1
+                if profit_percentage > 0:
+                    results["winning_trades"] += 1
+                else:
+                    results["losing_trades"] += 1
+                results["total_profit"] += profit_percentage
+                
+                # تحديث أداء الاستراتيجية
+                strategy_name = trade['strategy']
+                strat_perf = results["strategy_performance"][strategy_name]
+                strat_perf["total_trades"] += 1
+                strat_perf["total_profit"] += profit_percentage
+                strat_perf["avg_profit"] = strat_perf["total_profit"] / strat_perf["total_trades"] if strat_perf["total_trades"] > 0 else 0
+                if profit_percentage > 0:
+                    strat_perf["winning_trades"] += 1
+                    strat_perf["max_profit"] = max(strat_perf["max_profit"], profit_percentage)
+                else:
+                    strat_perf["max_loss"] = min(strat_perf["max_loss"], profit_percentage)
+                
+                # إضافة الصفقة إلى النتائج
+                results["trades"].append({
+                    "symbol": symbol, "strategy": strategy_name, "entry_date": trade['entry_date'],
+                    "exit_date": end_date, "entry_price": trade['entry_price'], "exit_price": last_price,
+                    "profit_percentage": profit_percentage, "type": "win" if profit_percentage > 0 else "loss"
+                })
+        except Exception as e:
+             logger.error(f"[Backtest] Error closing final trade for {symbol}: {e}")
+
+    # حساب النتائج النهائية
+    results["final_balance"] = current_balance
+    results["max_drawdown"] = max_drawdown
+    results["max_drawdown_period"] = max_drawdown_date
+    results["balance_history"] = balance_history
+    
+    # حساب معدل الربح
+    if results["total_trades"] > 0:
+        results["win_rate"] = (results["winning_trades"] / results["total_trades"]) * 100
+        results["avg_profit_per_trade"] = results["total_profit"] / results["total_trades"]
+    else:
+        results["win_rate"] = 0
+        results["avg_profit_per_trade"] = 0
+    
+    # حساب عامل الربح
+    gross_profit = sum(trade["profit_percentage"] for trade in results["trades"] if trade["profit_percentage"] > 0)
+    gross_loss = abs(sum(trade["profit_percentage"] for trade in results["trades"] if trade["profit_percentage"] < 0))
+    
+    if gross_loss > 0:
+        results["profit_factor"] = gross_profit / gross_loss
+    else:
+        results["profit_factor"] = float('inf') if gross_profit > 0 else 0
+    
+    logger.info(f"[Backtest] Backtest completed. Final balance: {current_balance:.2f}, Win rate: {results.get('win_rate', 0):.2f}%")
+    
+    return results
 
 @app.route('/api/run_backtest', methods=['POST'])
-def run_backtest():
+def api_run_backtest():
     try:
-        data = request.json
-        strategy, symbol, days = data.get('strategy'), data.get('symbol', '').upper(), int(data.get('days', 90))
-        if not all([strategy, symbol, days]): return jsonify({"error": "Missing parameters."}), 400
-        return jsonify(backtest_strategy(strategy, symbol, days))
+        data = request.get_json()
+        
+        # استخراج المعلمات
+        symbols = data.get('symbols', validated_symbols_to_scan)
+        start_date = data.get('start_date', (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d'))
+        end_date = data.get('end_date', datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+        initial_balance = float(data.get('initial_balance', 10000.0))
+        
+        # التحقق من صحة التواريخ
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        if start_dt >= end_dt:
+            return jsonify({"error": "Start date must be before end date"}), 400
+        
+        if (end_dt - start_dt).days > 365 * 2: # زيادة المدة المسموح بها إلى سنتين
+            return jsonify({"error": "Backtest period cannot exceed 2 years"}), 400
+        
+        # تشغيل الاختبار الخلفي
+        results = run_backtest(symbols, start_date, end_date, initial_balance)
+        
+        return jsonify(results)
+    
     except Exception as e:
-        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred."}), 500
+        logger.error(f"Error running backtest: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+# ======================== END: IMPROVED BACKTESTING SYSTEM ========================
+
 
 # --- Main Loop & Threads ---
 def main_bot_loop():
@@ -1727,7 +2010,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.4 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.5 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
