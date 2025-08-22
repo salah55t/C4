@@ -1,11 +1,9 @@
-# ملف c4.py - نسخة V21.0.0 (نظام اختبار الاستراتيجيات المتكامل)
+# ملف c4.py - نسخة V21.0.1 (تحسين أداء الاختبار الخلفي)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف ميزة رئيسية جديدة وهي نظام اختبار الاستراتيجيات (Backtesting).
-# 1.  [ميزة جديدة] إضافة صفحة "اختبار الاستراتيجيات" جديدة في واجهة المستخدم.
-# 2.  [ميزة جديدة] يمكن للمستخدم اختيار استراتيجية، رمز عملة، وفترة زمنية للاختبار.
-# 3.  [تحسين المنطق] تم تحسين منطق محاكاة الاختبار الخلفي لتجنب الانحياز للمستقبل، حيث يتم معالجة البيانات شمعة بشمعة.
-# 4.  [واجهة المستخدم] تعرض صفحة الاختبار نتائج مفصلة تشمل مقاييس الأداء (معدل الربح، إجمالي الصفقات، إلخ) ورسم بياني لمنحنى رأس المال.
-# 5.  [تكامل] إضافة مسارات API جديدة في Flask لمعالجة طلبات الاختبار الخلفي وتقديم النتائج للواجهة.
+# هذا الإصدار يحل مشكلة الأداء في نظام الاختبار الخلفي التي كانت تسبب توقفه.
+# 1.  [إصلاح] تم نقل حساب المؤشرات الإضافية (مثل ema200) إلى دالة `calculate_all_features` ليتم حسابها مرة واحدة فقط.
+# 2.  [تحسين] دوال فحص الاستراتيجيات الآن تقرأ البيانات فقط ولا تعدلها، مما يزيل تحذير `SettingWithCopyWarning` ويحسن السرعة بشكل كبير.
+# 3.  [تحسين] أصبحت جميع الاستراتيجيات الآن قابلة للاختبار الخلفي بكفاءة وسرعة.
 
 import time
 import os
@@ -406,6 +404,10 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
+    # ======================= FIX START =======================
+    # إضافة حساب ema200 هنا ليتم حسابه مرة واحدة فقط
+    df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+    # ======================== FIX END ========================
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -608,10 +610,14 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     return dipped and bullish_close
 
 def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
-    needed = {'atr_percent','ema9','ema21','macd','macd_signal','close'}
-    if len(df) < 200: return False
-    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]: log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+    # ======================= FIX START =======================
+    # تم تعديل قائمة الأعمدة المطلوبة لتشمل ema200
+    needed = {'atr_percent','ema9','ema21','macd','macd_signal','close', 'ema200'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
+    # تم حذف السطر الذي يحسب ema200 من هنا لأنه حُسب مسبقًا
+    # ======================== FIX END ========================
+    if df['close'].iloc[-1] < df['ema200'].iloc[-1]: 
+        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
     last, prev = df.iloc[-1], df.iloc[-2]
     atr_mean = float(pd.Series(df['atr_percent'].tail(14)).mean())
     atr_ok = float(last['atr_percent']) >= (1.2 * atr_mean)
@@ -1491,10 +1497,8 @@ def backtest_strategy(strategy_name, symbol, days=90):
         if not active_trade:
             # نستخدم البيانات حتى الشمعة *قبل* الحالية لتجنب الانحياز
             df_slice = df.iloc[:i]
-            # ======================= FIX START =======================
             # إضافة اسم العملة إلى الـ DataFrame لضمان عمل الدوال بشكل صحيح
             df_slice.name = symbol
-            # ======================== FIX END ========================
             if check_strategy(df_slice):
                 trade_levels = calculate_trade_levels(df_slice)
                 active_trade = {
@@ -1863,7 +1867,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.0 ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V21.0.1 ======\n" + "="*50)
     init_db()
     init_redis()
     try:
