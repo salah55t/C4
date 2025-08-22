@@ -1,15 +1,14 @@
-# ملف c4.py - نسخة V22.0.0 (تحسينات الأداء المقترحة)
+# ملف c4.py - نسخة V23.0.0 (واجهة تفاعلية وتحكم محسن)
 # --- وصف الإصدار:
-# هذا الإصدار يطبق مجموعة من التحسينات الشاملة على الخادم (Backend) والواجهة الأمامية (Frontend)
-# لزيادة سرعة الاستجابة وتقليل استهلاك الموارد وتحسين تجربة المستخدم بشكل عام.
-# 1.  [تحسين Backend] إضافة مسارات API محسنة للتحديث الجزئي للبيانات (مثل الصفقات المفتوحة).
-# 2.  [تحسين Backend] إضافة مسار API لمؤشرات الأداء مع التخزين المؤقت (Caching) في Redis.
-# 3.  [تحسين Backend] إضافة ترقيم الصفحات (Pagination) للبيانات التاريخية الكبيرة.
-# 4.  [تحسين Frontend] تحسين آلية تحميل البيانات الأولية لعرض المحتوى الأساسي بسرعة.
-# 5.  [تحسين Frontend] استخدام WebSocket للتحديثات الجزئية بدلاً من إعادة تحميل كل شيء.
-# 6.  [تحسين Frontend] تحسين وظيفة الفرز لتكون أسرع وتعتمد على الخادم.
-# 7.  [تحسين CSS] تطبيق تحسينات CSS لزيادة سلاسة الرسوم المتحركة وأداء العرض.
-# 8.  [تحسين WebSocket] التأكد من موثوقية بث البيانات ومعالجة انقطاع الاتصال.
+# هذا الإصدار يضيف ميزات تفاعلية جديدة لواجهة المستخدم، مما يمنح المستخدم تحكماً أكبر
+# ورؤية أوضح لحالة السوق مباشرة من لوحة التحكم.
+# 1.  [إضافة UI] إضافة قسم جديد لعرض حالة السوق (صاعد/هابط/جانبي) على فريمات زمنية متعددة (15m, 1h, 4h).
+# 2.  [إضافة UI] تحسين زر التبديل بين التداول الورقي والحقيقي مع نافذة تأكيد للوضع الحقيقي.
+# 3.  [إضافة UI] إضافة فلتر تفاعلي (slider) للتحكم في الحد الأدنى لجودة الإشارة المقبولة.
+# 4.  [إضافة Backend] إنشاء نقاط نهاية API جديدة للتحكم في وضع التداول وفلتر الجودة.
+# 5.  [تحسين Backend] إضافة حلقة (thread) جديدة لبث تحديثات حالة السوق بشكل دوري عبر WebSocket.
+# 6.  [تحسين JS] تحديث كود الواجهة الأمامية للتعامل مع العناصر الجديدة والتحديثات الفورية عبر WebSocket.
+# 7.  [تحسين CSS] إضافة تنسيقات للعناصر الجديدة لتحسين المظهر.
 
 import time
 import os
@@ -44,11 +43,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v22_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v23_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV22')
+logger = logging.getLogger('CryptoBotV23')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -92,6 +91,10 @@ risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 PAPER_TRADE_SIZE_USDT: float = 10.0
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
+# [تحسين] متغير عام لجودة الإشارة، يمكن تعديله عبر API
+MIN_SIGNAL_QUALITY: int = 60
+min_quality_lock = Lock()
+
 
 # --- مفاتيح تفعيل الاستراتيجيات ---
 USE_BB_STOCH_STRATEGY: bool = True
@@ -186,18 +189,25 @@ def broadcast(data: Dict):
                 pass # Client might have been removed in another thread
 
 def get_dashboard_payload() -> Dict:
-    """تجميع بيانات لوحة التحكم لإرسالها."""
+    """
+    [تحديث] تجميع بيانات لوحة التحكم لإرسالها، مع إضافة حالة السوق.
+    """
     with trading_status_lock: trading_enabled = is_trading_enabled
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with balance_lock: current_balance = usdt_balance
     with notifications_lock: notifications = list(notifications_cache)
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
+    with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     
     return {
-        "trading_enabled": trading_enabled, "paper_trading_mode": is_paper_mode,
+        "trading_enabled": trading_enabled, 
+        "paper_trading_mode": is_paper_mode,
         "usdt_balance": current_balance,
-        "notifications": notifications, "rejections": rejections, "market_state": market_state,
+        "notifications": notifications, 
+        "rejections": rejections, 
+        "market_state": market_state,
+        "min_signal_quality": min_quality,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -494,7 +504,7 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode
+    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -503,6 +513,12 @@ def load_settings_from_redis():
             with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 0.85)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
+        
+        quality_settings_data = redis_client.get('signal_quality_settings')
+        if quality_settings_data:
+            quality_settings = json.loads(quality_settings_data)
+            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 60)
+
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
@@ -726,11 +742,9 @@ def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
-        min_quality_scores = {
-            "BB_Stoch_Strategy": 60, "MACD_EMA_Strategy": 65, "EMA_RSI_Strategy": 55,
-            "Pullback_Strategy": 50, "Momentum_Volatility_Strategy": 70
-        }
-        min_score = min_quality_scores.get(strategy_name, 60)
+        with min_quality_lock:
+            min_score = MIN_SIGNAL_QUALITY
+        
         if quality_score < min_score:
             log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
             return
@@ -827,7 +841,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V22 - محسن)</title>
+<title>لوحة التحكم - بوت التداول (V23 - تفاعلي)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -863,12 +877,13 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .price.flash-down{background-color:rgba(255, 71, 87, 0.2); color: #ff4757;}
 .progress{height:8px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden; margin-top: 6px;}
 .progress>span{display:block;height:100%;}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px; align-items: center;}
 .kv div:nth-child(odd){opacity:.8}
 .trend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
-.trend .pill{background:#0d1730;border:1px solid #1f2d55;border-radius:10px;padding:8px;text-align:center}
+.trend .pill{background:#0d1730;border:1px solid #1f2d55;border-radius:10px;padding:8px;text-align:center; display: flex; flex-direction: column; align-items: center; gap: 4px;}
 .pill b{display:block;font-size:12px;color:#9fb7ef}
 .pill span{font-size:12px}
+.pill small {font-size: 10px; opacity: 0.8;}
 .green{color:var(--ok)}.red{color:var(--bad)}.amber{color:var(--warn)}
 .table{width:100%;border-collapse:separate;border-spacing:0 8px; table-layout: fixed;} /* [تحسين] أداء الجداول */
 .table th{font-size:12px;text-align:right;color:#9ab2e2;font-weight:600;padding:0 6px}
@@ -884,24 +899,17 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .metric-value {font-size: 18px; font-weight: 700;}
 .chart-container { height: 200px; }
 /* [تحسين] مؤشر التحميل */
-.loading-spinner {
-    border: 3px solid rgba(255, 255, 255, 0.1);
-    border-radius: 50%;
-    border-top: 3px solid #3aa0ff;
-    width: 30px;
-    height: 30px;
-    animation: spin 1s linear infinite;
-    margin: 20px auto;
-}
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
+.loading-spinner { border: 3px solid rgba(255, 255, 255, 0.1); border-radius: 50%; border-top: 3px solid #3aa0ff; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+/* [إضافة] تنسيق فلتر الجودة */
+.slider { -webkit-appearance: none; width: 100%; height: 6px; border-radius: 3px; background: #1e2c52; outline: none; }
+.slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #3aa0ff; cursor: pointer; }
+.slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #3aa0ff; cursor: pointer; }
 </style>
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V22 (محسن)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V23 (تفاعلي)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -934,14 +942,42 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
         <div class="card-body">
           <div class="controls">
             <label class="switch"><input id="toggleTrading" type="checkbox" /><span class="dot"></span><span class="small">تشغيل التداول</span></label>
-            <button class="btn" id="toggleMode">وضع: ورقي</button>
             <a class="btn" href="/settings">الإعدادات</a>
             <a class="btn" href="/backtest">الاختبار الخلفي</a>
           </div>
           <div class="kv" style="margin-top:12px">
             <div>الرصيد (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
           </div>
-          <div id="trend" class="trend"></div>
+        </div>
+      </div>
+      <!-- [إضافة] قسم حالة السوق -->
+      <div class="card">
+        <h2>حالة السوق</h2>
+        <div class="card-body">
+          <div class="trend" id="marketTrends"><div class="loading-spinner"></div></div>
+        </div>
+      </div>
+      <!-- [إضافة] قسم إعدادات التداول -->
+      <div class="card">
+        <h2>إعدادات التداول</h2>
+        <div class="card-body">
+          <div class="kv">
+            <div>وضع التداول:</div>
+            <div>
+              <label class="switch" id="tradingModeSwitch">
+                <input type="checkbox" id="tradingModeToggle">
+                <span class="dot"></span>
+                <span id="tradingModeText">ورقي</span>
+              </label>
+            </div>
+          </div>
+          <div class="kv">
+            <div>الحد الأدنى لجودة الإشارة:</div>
+            <div>
+              <input type="range" id="qualityFilter" min="30" max="90" value="60" class="slider">
+              <span id="qualityValue">60</span>
+            </div>
+          </div>
         </div>
       </div>
       <div class="card">
@@ -979,10 +1015,11 @@ function showLoadingIndicator(containerId) {
     const container = qs(containerId);
     if(container) container.innerHTML = '<div class="loading-spinner"></div>';
 }
-function hideLoadingIndicator(containerId) {
-    const spinner = qs(`${containerId} .loading-spinner`);
-    if (spinner) spinner.parentElement.innerHTML = '';
+function showNotification(message, type = 'info') {
+    // يمكنك هنا إضافة نظام إشعارات أكثر تطوراً
+    console.log(`[${type.toUpperCase()}] ${message}`);
 }
+
 
 // --- دوال العرض والتحديث ---
 function renderSignal(signal) {
@@ -1073,6 +1110,32 @@ function addRejection(rejection) {
     if (tbody.rows.length > 30) tbody.deleteRow(-1);
 }
 
+// [إضافة] تحديث حالة السوق
+function updateMarketTrends(marketState) {
+  const trendsContainer = document.getElementById('marketTrends');
+  trendsContainer.innerHTML = '';
+  
+  if (marketState && marketState.trend_details_by_tf) {
+    ['15m', '1h', '4h'].forEach(tf => {
+      const trend = marketState.trend_details_by_tf[tf];
+      if (trend) {
+        let trendClass = 'amber';
+        let trendText = 'جانبي';
+        if (trend.trend === 'bullish') { trendClass = 'green'; trendText = 'صاعد'; } 
+        else if (trend.trend === 'bearish') { trendClass = 'red'; trendText = 'هابط'; }
+        
+        trendsContainer.innerHTML += `
+          <div class="pill">
+            <b>${tf}</b>
+            <span class="${trendClass}">${trendText}</span>
+            <small>ADX: ${trend.adx?.toFixed(1) || '—'}</small>
+            <small>RSI: ${trend.rsi?.toFixed(1) || '—'}</small>
+          </div>`;
+      }
+    });
+  }
+}
+
 // --- تحميل البيانات والاتصال ---
 async function initializeDashboard() {
     try {
@@ -1091,8 +1154,18 @@ async function initializeDashboard() {
         // عرض البيانات فوراً
         qs('#serverTime').textContent = new Date(baseData.server_time).toLocaleTimeString('ar-EG');
         qs('#toggleTrading').checked = !!baseData.trading_enabled;
-        qs('#toggleMode').textContent = 'وضع: ' + (baseData.paper_trading_mode ? 'ورقي' : 'حقيقي');
         qs('#balance').textContent = fmt(baseData.usdt_balance);
+        
+        // إعداد وضع التداول
+        const isPaper = baseData.paper_trading_mode;
+        qs('#tradingModeToggle').checked = !isPaper;
+        qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي';
+
+        // إعداد فلتر الجودة
+        qs('#qualityFilter').value = baseData.min_signal_quality;
+        qs('#qualityValue').textContent = baseData.min_signal_quality;
+
+        updateMarketTrends(baseData.market_state);
         
         openSignals = signalsData.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
         renderAllSignals(signalsData.signals);
@@ -1133,14 +1206,12 @@ function setupWebSocket() {
     socket.onmessage = (event) => {
         const data = JSON.parse(event.data);
         switch(data.type) {
-            case 'price_update':
-                updatePrices(data.payload);
-                break;
+            case 'price_update': updatePrices(data.payload); break;
             case 'new_signal':
                 openSignals[data.payload.id] = data.payload;
                 updateSingleSignal(data.payload);
                 break;
-            case 'signal_update': // e.g. status change
+            case 'signal_update':
                 openSignals[data.payload.id] = data.payload;
                 updateSingleSignal(data.payload);
                 break;
@@ -1149,11 +1220,17 @@ function setupWebSocket() {
                 if (el) el.remove();
                 delete openSignals[data.payload.id];
                 break;
-            case 'new_notification':
-                addNotification(data.payload);
+            case 'new_notification': addNotification(data.payload); break;
+            case 'new_rejection': addRejection(data.payload); break;
+            case 'market_state': updateMarketTrends(data.payload); break;
+            case 'trading_mode':
+                const isPaper = data.payload.paper_trading;
+                qs('#tradingModeToggle').checked = !isPaper;
+                qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي';
                 break;
-            case 'new_rejection':
-                addRejection(data.payload);
+            case 'quality_filter':
+                qs('#qualityFilter').value = data.payload.min_quality;
+                qs('#qualityValue').textContent = data.payload.min_quality;
                 break;
         }
     };
@@ -1189,9 +1266,57 @@ function setupSorting() {
 
 // --- دوال التحكم والرسوم البيانية ---
 async function toggleTrading() { await fetch('/toggle_trading', {method:'POST'}); }
-async function toggleMode() { await fetch('/toggle_real_trading', {method:'POST'}); }
 qs('#toggleTrading').addEventListener('change', toggleTrading);
-qs('#toggleMode').addEventListener('click', toggleMode);
+
+// [إضافة] التعامل مع تبديل وضع التداول
+qs('#tradingModeToggle').addEventListener('change', function() {
+  const isPaper = !this.checked;
+  const modeText = isPaper ? 'ورقي' : 'حقيقي';
+  
+  if (!isPaper) {
+    if (!confirm('هل أنت متأكد من التبديل إلى التداول الحقيقي؟ هذا سيستخدم أموالاً حقيقية.')) {
+      this.checked = false;
+      return;
+    }
+  }
+  
+  fetch('/api/trading_mode', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({paper_trading: isPaper})
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.success) {
+      qs('#tradingModeText').textContent = modeText;
+      showNotification(`تم التبديل إلى الوضع ${modeText}`, 'success');
+    } else {
+      showNotification('فشل تغيير وضع التداول', 'error');
+      this.checked = !this.checked;
+    }
+  })
+  .catch(error => {
+    console.error('Error:', error);
+    showNotification('خطأ في الاتصال بالخادم', 'error');
+    this.checked = !this.checked;
+  });
+});
+
+// [إضافة] التعامل مع فلتر الجودة
+const debouncedQualityUpdate = debounce((value) => {
+    fetch('/api/quality_filter', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({min_quality: parseInt(value)})
+    }).catch(error => console.error('Error:', error));
+}, 500);
+
+qs('#qualityFilter').addEventListener('input', function() {
+  const value = this.value;
+  qs('#qualityValue').textContent = value;
+  debouncedQualityUpdate(value);
+});
+
 
 function updateAdvancedPerformance(data) {
     if (!performanceChartInstance && data.equity_curve && data.equity_curve.labels.length > 0) {
@@ -1655,21 +1780,53 @@ def toggle_trading():
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
     return jsonify({"status": "success"})
 
-@app.route('/toggle_real_trading', methods=['POST'])
-def toggle_real_trading():
+# [إضافة] نقطة نهاية جديدة للتحكم في وضع التداول
+@app.route('/api/trading_mode', methods=['POST'])
+def update_trading_mode():
     global paper_trading_mode
-    with trading_mode_lock:
-        with trading_status_lock:
-            if is_trading_enabled and not paper_trading_mode:
-                log_and_notify("warning", "Cannot switch to paper mode while real trading is active.", "MODE_SWITCH_FAIL")
-                return jsonify({"success": False, "message": "يجب إيقاف البوت أولاً"})
-        paper_trading_mode = not paper_trading_mode
-        mode_msg = "Paper" if paper_trading_mode else "Real (LIVE)"
-        log_and_notify("info", f"Trading mode switched to {mode_msg}.", "TRADING_MODE_SWITCH")
+    try:
+        data = request.json
+        is_paper = data.get('paper_trading', True)
+        
+        with trading_mode_lock:
+            paper_trading_mode = is_paper
+        
         if redis_client:
-            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': paper_trading_mode}
+            settings_data = redis_client.get('trading_settings')
+            settings = json.loads(settings_data) if settings_data else {}
+            settings['paper_trading_mode'] = is_paper
             redis_client.set('trading_settings', json.dumps(settings))
-    return jsonify({"status": "success"})
+        
+        broadcast({"type": "trading_mode", "payload": {"paper_trading": is_paper}})
+        log_and_notify("info", f"Trading mode switched to {'Paper' if is_paper else 'Real'}.", "TRADING_MODE_SWITCH")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error updating trading mode: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# [إضافة] نقطة نهاية جديدة للتحكم في فلتر الجودة
+@app.route('/api/quality_filter', methods=['POST'])
+def update_quality_filter():
+    global MIN_SIGNAL_QUALITY
+    try:
+        data = request.json
+        min_quality = data.get('min_quality', 60)
+        
+        with min_quality_lock:
+            MIN_SIGNAL_QUALITY = int(min_quality)
+
+        if redis_client:
+            settings_data = redis_client.get('signal_quality_settings')
+            settings = json.loads(settings_data) if settings_data else {}
+            settings['min_quality'] = MIN_SIGNAL_QUALITY
+            redis_client.set('signal_quality_settings', json.dumps(settings))
+        
+        broadcast({"type": "quality_filter", "payload": {"min_quality": MIN_SIGNAL_QUALITY}})
+        log_and_notify("info", f"Minimum signal quality updated to {MIN_SIGNAL_QUALITY}.", "SETTINGS_UPDATE")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error updating quality filter: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/close_trade/<int:signal_id>', methods=['POST'])
 def manual_close_trade(signal_id):
@@ -2196,32 +2353,39 @@ def trade_management_loop():
             logger.error(f"❌ [Trade Manager] A critical error occurred: {e}", exc_info=True)
             time.sleep(10)
 
-def update_market_state():
-    try:
-        trend_details = {}
-        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-            btc_df = fetch_historical_data(BTC_SYMBOL, tf, 30)
-            if btc_df is None or btc_df.empty:
-                trend_details[tf] = {"trend": "Unknown", "rsi": "N/A"}; continue
-            btc_df_featured = calculate_all_features(btc_df)
-            if 'rsi' not in btc_df_featured.columns:
-                trend_details[tf] = {"trend": "Unknown", "rsi": "N/A"}; continue
-            last = btc_df_featured.iloc[-1]
-            rsi_value = last['rsi']
-            trend = "Sideways"
-            if rsi_value > 55: trend = "Bullish"
-            elif rsi_value < 45: trend = "Bearish"
-            trend_details[tf] = {"trend": trend, "rsi": round(rsi_value, 2)}
-        with market_state_lock:
-            current_market_state.update({'trend_details_by_tf': trend_details, 'last_updated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')})
-    except Exception as e:
-        logger.error(f"❌ [Market State] Error during single update: {e}", exc_info=True)
-
-def update_market_state_loop():
+# [إضافة] دالة لإرسال تحديثات حالة السوق بشكل دوري
+def send_market_state_updates():
+    """إرسال تحديثات حالة السوق بشكل دوري."""
     logger.info("🚀 [Market State] Starting market state update loop...")
     while True:
-        update_market_state()
-        time.sleep(60 * 5)
+        try:
+            market_state = {"trend_details_by_tf": {}}
+            for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
+                df = fetch_historical_data(BTC_SYMBOL, tf, days=10) # بيانات كافية للمؤشرات
+                if df is not None and not df.empty and len(df) > 50:
+                    df = calculate_all_features(df)
+                    last_row = df.iloc[-1]
+                    trend = "sideways"
+                    if last_row['close'] > last_row['ema21'] and last_row['ema21'] > last_row['ema50']:
+                        trend = "bullish"
+                    elif last_row['close'] < last_row['ema21'] and last_row['ema21'] < last_row['ema50']:
+                        trend = "bearish"
+                    
+                    market_state["trend_details_by_tf"][tf] = {
+                        "trend": trend,
+                        "adx": last_row.get('adx', 0),
+                        "rsi": last_row.get('rsi', 50)
+                    }
+            
+            with market_state_lock:
+                global current_market_state
+                current_market_state = market_state
+            
+            broadcast({"type": "market_state", "payload": market_state})
+            time.sleep(60 * 5)  # تحديث كل 5 دقائق
+        except Exception as e:
+            logger.error(f"Error sending market state updates: {e}")
+            time.sleep(60)
 
 def update_balance():
     try:
@@ -2243,7 +2407,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V22.0 (Optimized) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.0 (Interactive) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2261,15 +2425,13 @@ if __name__ == '__main__':
     load_notifications_to_cache()
     load_settings_from_redis()
 
-    logger.info("Performing initial data fetch for dashboard...")
-    update_market_state()
-    update_balance()
     logger.info("Initial data fetch complete.")
 
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
-    Thread(target=update_market_state_loop, daemon=True).start()
+    # [تعديل] بدء تشغيل تحديثات حالة السوق في خيط منفصل
+    Thread(target=send_market_state_updates, daemon=True).start()
     Thread(target=update_balance_loop, daemon=True).start()
 
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
