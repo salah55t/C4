@@ -1,10 +1,14 @@
-# ملف c4.py - نسخة V23.3.0 (إصلاح اسم فلتر NOTIONAL)
+# ملف c4.py - نسخة V24.0.0 (التحكم بحجم الصفقة ومحرك قواعد التداول)
 # --- وصف الإصدار:
-# هذا الإصدار يعالج خطأ "Filters not found" الذي كان يمنع تنفيذ الصفقات الحقيقية.
-# 1.  [إصلاح Bug حاسم] تصحيح اسم فلتر قيمة الصفقة من 'MIN_NOTIONAL' إلى 'NOTIONAL' وهو الاسم
-#     الصحيح المستخدم في استجابة API من Binance. هذا الإصلاح يحل مشكلة عدم العثور على
-#     الفلاتر ويسمح للبوت بالتحقق من الحد الأدنى لقيمة الصفقة بشكل صحيح.
-# 2.  [استقرار] تحسينات طفيفة على السجلات لزيادة وضوحها عند حدوث أخطاء في الفلاتر.
+# هذا الإصدار يقدم تحسينات جذرية في أمان التداول ومرونته.
+# 1.  [ميزة جديدة] إضافة القدرة على التحكم بحجم الصفقة مباشرة من لوحة التحكم، مع خيارين:
+#     - نسبة المخاطرة (Risk Percentage %)
+#     - مبلغ ثابت بالدولار (Fixed USDT Amount)
+# 2.  [إصلاح Bug حاسم] تطبيق "محرك قواعد تداول" يقوم بتحميل جميع فلاتر المنصة (LOT_SIZE, NOTIONAL)
+#     عند بدء التشغيل. قبل إرسال أي أمر، يتم التحقق منه بدقة مقابل هذه القواعد المخزنة،
+#     مما يحل بشكل نهائي جميع أخطاء "Filter failure".
+# 3.  [إضافة Backend] إنشاء نقطة نهاية API جديدة (/api/trade_settings) لتحديث إعدادات حجم الصفقة.
+# 4.  [تحسين UI/JS] تحديث واجهة المستخدم لاستيعاب عناصر التحكم الجديدة وتحديثها بشكل فوري عبر WebSocket.
 
 import time
 import os
@@ -39,11 +43,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v23_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v24_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV23')
+logger = logging.getLogger('CryptoBotV24')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -82,12 +86,14 @@ COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
+# [تعديل] إعدادات حجم الصفقة
+TRADE_SIZE_MODE: str = 'risk'  # 'risk' or 'fixed'
 RISK_PER_TRADE_PERCENT: float = 0.85
-risk_per_trade_lock = Lock()
+FIXED_TRADE_AMOUNT_USDT: float = 10.0 # مبلغ ثابت للصفقة بالدولار
+trade_settings_lock = Lock()
+
 MAX_OPEN_TRADES: int = 3
-PAPER_TRADE_SIZE_USDT: float = 10.0
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
-# [تحسين] متغير عام لجودة الإشارة، يمكن تعديله عبر API
 MIN_SIGNAL_QUALITY: int = 60
 min_quality_lock = Lock()
 
@@ -131,6 +137,8 @@ ws_manager: Optional[ThreadedWebsocketManager] = None
 live_prices: Dict[str, float] = {}
 live_prices_lock = Lock()
 exchange_info_map: Dict[str, Any] = {}
+# [إضافة] قاموس مخصص لتخزين قواعد التداول
+TRADING_RULES: Dict[str, Dict] = {}
 validated_symbols_to_scan: List[str] = []
 open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
@@ -187,7 +195,7 @@ def broadcast(data: Dict):
 
 def get_dashboard_payload() -> Dict:
     """
-    [تحديث] تجميع بيانات لوحة التحكم لإرسالها، مع إضافة حالة السوق.
+    [تحديث] تجميع بيانات لوحة التحكم لإرسالها، مع إضافة حالة السوق وإعدادات حجم الصفقة.
     """
     with trading_status_lock: trading_enabled = is_trading_enabled
     with trading_mode_lock: is_paper_mode = paper_trading_mode
@@ -196,6 +204,12 @@ def get_dashboard_payload() -> Dict:
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
+    with trade_settings_lock:
+        trade_settings = {
+            "mode": TRADE_SIZE_MODE,
+            "risk_percent": RISK_PER_TRADE_PERCENT,
+            "fixed_amount": FIXED_TRADE_AMOUNT_USDT
+        }
     
     return {
         "trading_enabled": trading_enabled, 
@@ -205,6 +219,7 @@ def get_dashboard_payload() -> Dict:
         "rejections": rejections, 
         "market_state": market_state,
         "min_signal_quality": min_quality,
+        "trade_settings": trade_settings,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -386,6 +401,25 @@ def get_exchange_info_map() -> None:
     except Exception as e:
         logger.error(f"❌ [API] Error fetching exchange info: {e}")
 
+# [إضافة] دالة لتحميل وتخزين قواعد التداول
+def preload_trading_rules():
+    global TRADING_RULES
+    logger.info("[Rules Engine] Pre-loading trading rules for all symbols...")
+    for symbol, info in exchange_info_map.items():
+        try:
+            lot_size = next((f for f in info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            notional = next((f for f in info['filters'] if f['filterType'] == 'NOTIONAL'), None)
+            if lot_size and notional:
+                TRADING_RULES[symbol] = {
+                    'minQty': float(lot_size['minQty']),
+                    'maxQty': float(lot_size['maxQty']),
+                    'stepSize': lot_size['stepSize'],
+                    'minNotional': float(notional['minNotional'])
+                }
+        except (KeyError, ValueError) as e:
+            logger.warning(f"⚠️ [Rules Engine] Could not parse filters for {symbol}: {e}")
+    logger.info(f"✅ [Rules Engine] Successfully loaded rules for {len(TRADING_RULES)} symbols.")
+
 def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
     try:
         file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
@@ -501,13 +535,16 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY, TRADE_SIZE_MODE, FIXED_TRADE_AMOUNT_USDT
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 0.85)
+            with trade_settings_lock:
+                TRADE_SIZE_MODE = settings.get('trade_size_mode', 'risk')
+                RISK_PER_TRADE_PERCENT = settings.get('risk_percent', 0.85)
+                FIXED_TRADE_AMOUNT_USDT = settings.get('fixed_amount', 10.0)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
         
@@ -533,7 +570,7 @@ def load_settings_from_redis():
 
 # --- Risk Management ---
 def dynamic_risk_management(symbol, df, consecutive_losses=0):
-    with risk_per_trade_lock: base_risk = RISK_PER_TRADE_PERCENT
+    with trade_settings_lock: base_risk = RISK_PER_TRADE_PERCENT
     atr_percent = df['atr_percent'].iloc[-1]
     if atr_percent > 5.0: volatility_factor = 0.7
     elif atr_percent < 1.5: volatility_factor = 1.2
@@ -736,6 +773,36 @@ def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
 def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
     return float(Decimal(quantity).quantize(Decimal(step_size), rounding=ROUND_DOWN))
 
+# [إضافة] دالة جديدة للتحقق من الكمية مقابل جميع قواعد المنصة
+def validate_and_adjust_quantity(symbol: str, quantity: float, price: float) -> Optional[float]:
+    """
+    Validates and adjusts a quantity based on the symbol's trading rules.
+    Returns the adjusted quantity if valid, otherwise None.
+    """
+    rules = TRADING_RULES.get(symbol)
+    if not rules:
+        logger.error(f"❌ [Rules Engine] No trading rules found for {symbol}")
+        return None
+
+    # 1. Adjust quantity to step size
+    adjusted_quantity = adjust_quantity_to_step_size(quantity, rules['stepSize'])
+
+    # 2. Check min/max quantity (LOT_SIZE)
+    if adjusted_quantity < rules['minQty']:
+        log_rejection(symbol, "LotSize Filter Failed", {"reason": f"Qty {adjusted_quantity} < minQty {rules['minQty']}"})
+        return None
+    if adjusted_quantity > rules['maxQty']:
+        log_rejection(symbol, "LotSize Filter Failed", {"reason": f"Qty {adjusted_quantity} > maxQty {rules['maxQty']}"})
+        return None
+
+    # 3. Check notional value (NOTIONAL)
+    notional_value = adjusted_quantity * price
+    if notional_value < rules['minNotional']:
+        log_rejection(symbol, "MinNotional Filter Failed", {"required": f"{rules['minNotional']:.2f}$", "actual": f"{notional_value:.2f}$"})
+        return None
+
+    return adjusted_quantity
+
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
@@ -766,52 +833,49 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     }
 
     if is_real:
-        with balance_lock: current_usdt_balance = usdt_balance
-        with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
-        risk_percent = dynamic_risk_management(symbol, df, losses)
-        max_risk_usdt = current_usdt_balance * (risk_percent / 100)
-        stop_loss = trade_levels['stop_loss']
-        risk_per_unit = max(entry_price - stop_loss, 1e-8)
-        quantity = max_risk_usdt / risk_per_unit
-        if quantity <= 0: log_rejection(symbol, "Insufficient Balance"); return
-        
-        symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info: 
-            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
-        
         try:
-            lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-            # [إصلاح Bug] استخدام الاسم الصحيح للفلتر 'NOTIONAL'
-            notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), None)
+            # [تعديل] حساب الكمية الأولية بناءً على وضع حجم الصفقة
+            with trade_settings_lock:
+                mode = TRADE_SIZE_MODE
+                fixed_amount = FIXED_TRADE_AMOUNT_USDT
+                risk_percent = RISK_PER_TRADE_PERCENT
 
-            if not lot_size_filter or not notional_filter:
-                logger.error(f"❌ [Real Trade] Critical filters (LOT_SIZE or NOTIONAL) not found for {symbol}"); return
+            initial_quantity = 0
+            if mode == 'risk':
+                with balance_lock: current_usdt_balance = usdt_balance
+                with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
+                dynamic_risk = dynamic_risk_management(symbol, df, losses)
+                max_risk_usdt = current_usdt_balance * (dynamic_risk / 100)
+                stop_loss = trade_levels['stop_loss']
+                risk_per_unit = max(entry_price - stop_loss, 1e-8)
+                initial_quantity = max_risk_usdt / risk_per_unit
+            elif mode == 'fixed':
+                initial_quantity = fixed_amount / entry_price
 
-            step_size = lot_size_filter['stepSize']
-            min_qty = float(lot_size_filter['minQty'])
-            min_notional = float(notional_filter['minNotional'])
-
-            adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
-            notional_value = adjusted_quantity * entry_price
+            if initial_quantity <= 0:
+                log_rejection(symbol, "Insufficient Balance")
+                return
             
-            # [إصلاح حاسم] التحقق من قيمة الصفقة (Notional) قبل كل شيء آخر
-            if notional_value < min_notional:
-                log_rejection(symbol, "MinNotional Filter Failed", {"required": f"{min_notional:.2f}$", "actual": f"{notional_value:.2f}$"})
+            # [تعديل] استخدام محرك القواعد للتحقق من الكمية وتعديلها
+            final_quantity = validate_and_adjust_quantity(symbol, initial_quantity, entry_price)
+
+            if final_quantity is None:
+                # The rejection is already logged by the validation function
                 return
 
-            if adjusted_quantity < min_qty:
-                log_rejection(symbol, "LotSize Filter Failed", {"required": min_qty, "actual": adjusted_quantity})
-                return
+            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {final_quantity} of {symbol}")
+            order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=final_quantity)
             
-            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
-            order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
-            final_quantity = float(order.get('executedQty', adjusted_quantity))
+            executed_quantity = float(order.get('executedQty', final_quantity))
             order_id = order.get('orderId', 'N/A')
-            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, signal_details, order_id)
-            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
+            
+            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, executed_quantity, signal_details, order_id)
+            
+            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{executed_quantity}`")
             send_telegram_message(message, force=True)
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
+        
         except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
             send_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
@@ -858,7 +922,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V23.3 - إصلاحات)</title>
+<title>لوحة التحكم - بوت التداول (V24.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -894,7 +958,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .price.flash-down{background-color:rgba(255, 71, 87, 0.2); color: #ff4757;}
 .progress{height:8px;background:#0b1126;border:1px solid #233056;border-radius:999px;overflow:hidden; margin-top: 6px;}
 .progress>span{display:block;height:100%;}
-.kv{display:grid;grid-template-columns:auto 1fr;gap:6px 10px; align-items: center;}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:8px 10px; align-items: center;}
 .kv div:nth-child(odd){opacity:.8}
 .trend{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
 .trend .pill{background:#0d1730;border:1px solid #1f2d55;border-radius:10px;padding:8px;text-align:center; display: flex; flex-direction: column; align-items: center; gap: 4px;}
@@ -915,6 +979,8 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .metric-title {font-size: 12px; color: #8aa0c8; margin-bottom: 6px;}
 .metric-value {font-size: 18px; font-weight: 700;}
 .chart-container { height: 200px; }
+.input-group { display: flex; align-items: center; gap: 8px; }
+.input-group input { width: 70px; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 4px 8px; border-radius: 6px; text-align: center; }
 /* [تحسين] مؤشر التحميل */
 .loading-spinner { border: 3px solid rgba(255, 255, 255, 0.1); border-radius: 50%; border-top: 3px solid #3aa0ff; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 20px auto; }
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -926,7 +992,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V23.3 (إصلاحات)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V24.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -974,14 +1040,14 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
           <div class="trend" id="marketTrends"><div class="loading-spinner"></div></div>
         </div>
       </div>
-      <!-- [إضافة] قسم إعدادات التداول -->
+      <!-- [تعديل] قسم إعدادات التداول -->
       <div class="card">
         <h2>إعدادات التداول</h2>
         <div class="card-body">
           <div class="kv">
             <div>وضع التداول:</div>
             <div>
-              <label class="switch" id="tradingModeSwitch">
+              <label class="switch">
                 <input type="checkbox" id="tradingModeToggle">
                 <span class="dot"></span>
                 <span id="tradingModeText">ورقي</span>
@@ -989,7 +1055,31 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
             </div>
           </div>
           <div class="kv">
-            <div>الحد الأدنى لجودة الإشارة:</div>
+            <div>حجم الصفقة:</div>
+            <div>
+              <label class="switch">
+                <input type="checkbox" id="tradeSizeModeToggle">
+                <span class="dot"></span>
+                <span id="tradeSizeModeText">نسبة المخاطرة</span>
+              </label>
+            </div>
+          </div>
+          <div class="kv" id="riskPercentGroup">
+            <div>نسبة المخاطرة:</div>
+            <div class="input-group">
+              <input type="number" id="riskPercentInput" step="0.1" min="0.1" max="5">
+              <span>%</span>
+            </div>
+          </div>
+          <div class="kv" id="fixedAmountGroup" style="display: none;">
+            <div>المبلغ الثابت:</div>
+            <div class="input-group">
+              <input type="number" id="fixedAmountInput" step="1" min="5">
+              <span>USDT</span>
+            </div>
+          </div>
+          <div class="kv">
+            <div>أقل جودة إشارة:</div>
             <div>
               <input type="range" id="qualityFilter" min="30" max="90" value="60" class="slider">
               <span id="qualityValue">60</span>
@@ -1182,6 +1272,9 @@ async function initializeDashboard() {
         qs('#qualityFilter').value = baseData.min_signal_quality;
         qs('#qualityValue').textContent = baseData.min_signal_quality;
 
+        // إعداد حجم الصفقة
+        updateTradeSizeUI(baseData.trade_settings);
+
         updateMarketTrends(baseData.market_state);
         
         openSignals = signalsData.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
@@ -1240,6 +1333,7 @@ function setupWebSocket() {
             case 'new_notification': addNotification(data.payload); break;
             case 'new_rejection': addRejection(data.payload); break;
             case 'market_state': updateMarketTrends(data.payload); break;
+            case 'trade_settings_update': updateTradeSizeUI(data.payload); break;
             case 'trading_mode':
                 const isPaper = data.payload.paper_trading;
                 qs('#tradingModeToggle').checked = !isPaper;
@@ -1333,6 +1427,34 @@ qs('#qualityFilter').addEventListener('input', function() {
   qs('#qualityValue').textContent = value;
   debouncedQualityUpdate(value);
 });
+
+// [إضافة] التعامل مع إعدادات حجم الصفقة
+const debouncedTradeSettingsUpdate = debounce(() => {
+    const settings = {
+        mode: qs('#tradeSizeModeToggle').checked ? 'fixed' : 'risk',
+        risk_percent: parseFloat(qs('#riskPercentInput').value),
+        fixed_amount: parseFloat(qs('#fixedAmountInput').value)
+    };
+    fetch('/api/trade_settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(settings)
+    }).catch(error => console.error('Error updating trade settings:', error));
+}, 800);
+
+function updateTradeSizeUI(settings) {
+    const isFixed = settings.mode === 'fixed';
+    qs('#tradeSizeModeToggle').checked = isFixed;
+    qs('#tradeSizeModeText').textContent = isFixed ? 'مبلغ ثابت' : 'نسبة المخاطرة';
+    qs('#riskPercentGroup').style.display = isFixed ? 'none' : 'grid';
+    qs('#fixedAmountGroup').style.display = isFixed ? 'grid' : 'none';
+    qs('#riskPercentInput').value = settings.risk_percent;
+    qs('#fixedAmountInput').value = settings.fixed_amount;
+}
+
+qs('#tradeSizeModeToggle').addEventListener('change', debouncedTradeSettingsUpdate);
+qs('#riskPercentInput').addEventListener('input', debouncedTradeSettingsUpdate);
+qs('#fixedAmountInput').addEventListener('input', debouncedTradeSettingsUpdate);
 
 
 function updateAdvancedPerformance(data) {
@@ -1845,6 +1967,41 @@ def update_quality_filter():
         logger.error(f"Error updating quality filter: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+# [إضافة] نقطة نهاية جديدة للتحكم في إعدادات حجم الصفقة
+@app.route('/api/trade_settings', methods=['POST'])
+def update_trade_settings():
+    global TRADE_SIZE_MODE, RISK_PER_TRADE_PERCENT, FIXED_TRADE_AMOUNT_USDT
+    try:
+        data = request.json
+        with trade_settings_lock:
+            TRADE_SIZE_MODE = data.get('mode', 'risk')
+            RISK_PER_TRADE_PERCENT = float(data.get('risk_percent', 0.85))
+            FIXED_TRADE_AMOUNT_USDT = float(data.get('fixed_amount', 10.0))
+            
+            if redis_client:
+                settings = {
+                    'trade_size_mode': TRADE_SIZE_MODE,
+                    'risk_percent': RISK_PER_TRADE_PERCENT,
+                    'fixed_amount': FIXED_TRADE_AMOUNT_USDT
+                }
+                # دمج مع الإعدادات الأخرى
+                main_settings_data = redis_client.get('trading_settings')
+                main_settings = json.loads(main_settings_data) if main_settings_data else {}
+                main_settings.update(settings)
+                redis_client.set('trading_settings', json.dumps(main_settings))
+        
+        # بث التغييرات لجميع العملاء
+        broadcast({"type": "trade_settings_update", "payload": {
+            "mode": TRADE_SIZE_MODE,
+            "risk_percent": RISK_PER_TRADE_PERCENT,
+            "fixed_amount": FIXED_TRADE_AMOUNT_USDT
+        }})
+        log_and_notify("info", f"Trade size settings updated: Mode={TRADE_SIZE_MODE}, Risk={RISK_PER_TRADE_PERCENT}%, Fixed={FIXED_TRADE_AMOUNT_USDT}$", "SETTINGS_UPDATE")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error updating trade settings: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/close_trade/<int:signal_id>', methods=['POST'])
 def manual_close_trade(signal_id):
     signal_to_close = None
@@ -1879,16 +2036,16 @@ def manual_close_trade(signal_id):
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES
+    global MAX_OPEN_TRADES
     try:
         data = request.json
-        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data['risk_per_trade'])
         MAX_OPEN_TRADES = int(data['max_trades'])
         if redis_client:
-            with trading_mode_lock: is_paper = paper_trading_mode
-            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
+            settings_data = redis_client.get('trading_settings')
+            settings = json.loads(settings_data) if settings_data else {}
+            settings['MAX_OPEN_TRADES'] = MAX_OPEN_TRADES
             redis_client.set('trading_settings', json.dumps(settings))
-        log_and_notify("info", "Trading settings updated.", "SETTINGS_UPDATE")
+        log_and_notify("info", "General settings updated.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات العامة"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
@@ -2311,17 +2468,16 @@ def execute_close_order(symbol: str, reason: str):
             if quantity_to_sell <= 0:
                 logger.warning(f"⚠️ [Execute Close] No balance of {base_asset} to sell for {symbol}."); return
 
-            lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-            if not lot_size_filter:
-                 logger.error(f"❌ [Real Close] LOT_SIZE filter not found for {symbol}"); return
+            # [إصلاح] استخدام محرك القواعد للتحقق من كمية البيع
+            rules = TRADING_RULES.get(symbol)
+            if not rules:
+                logger.error(f"❌ [Rules Engine] No trading rules found for selling {symbol}")
+                return
 
-            step_size = lot_size_filter['stepSize']
-            min_qty = float(lot_size_filter['minQty'])
+            adjusted_quantity = adjust_quantity_to_step_size(quantity_to_sell, rules['stepSize'])
             
-            adjusted_quantity = adjust_quantity_to_step_size(quantity_to_sell, step_size)
-            
-            if adjusted_quantity < min_qty:
-                logger.warning(f"⚠️ [Execute Close] Adjusted quantity {adjusted_quantity} is below minQty {min_qty} for {symbol}. Cannot sell.")
+            if adjusted_quantity < rules['minQty']:
+                logger.warning(f"⚠️ [Execute Close] Adjusted quantity {adjusted_quantity} is below minQty {rules['minQty']} for {symbol}. Cannot sell.")
                 return
 
             logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity} of {symbol} due to {reason}")
@@ -2448,7 +2604,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.3 (Filter Name Fix) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V24.0 (Rules Engine) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2458,6 +2614,9 @@ if __name__ == '__main__':
         logger.critical(f"❌ [Binance] API connection failed: {e}"); exit(1)
 
     get_exchange_info_map()
+    # [تعديل] تحميل قواعد التداول بعد جلب معلومات المنصة
+    preload_trading_rules()
+
     validated_symbols_to_scan = get_validated_symbols()
     if not validated_symbols_to_scan:
         logger.critical("❌ No valid symbols to scan. Exiting."); exit(1)
@@ -2471,7 +2630,6 @@ if __name__ == '__main__':
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
-    # [تعديل] بدء تشغيل تحديثات حالة السوق في خيط منفصل
     Thread(target=send_market_state_updates, daemon=True).start()
     Thread(target=update_balance_loop, daemon=True).start()
 
