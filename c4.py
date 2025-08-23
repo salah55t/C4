@@ -1,8 +1,8 @@
-# ملف c4.py - نسخة V23.2.3 (إصلاح فقدان درجة الجودة عند التحديث)
+# ملف c4.py - نسخة V23.2.4 (إصلاح الإغلاق اليدوي)
 # --- وصف الإصدار:
-# هذا الإصدار يصلح خطأ كان يؤدي إلى اختفاء درجة جودة الإشارة عند تحديث الصفحة.
-# 1.  [إصلاح] تعديل استعلام قاعدة البيانات في مسار API `/api/open_signals` ليشمل حقل `signal_details` بالكامل في النتائج.
-# 2.  [نتيجة] الآن تحتفظ واجهة المستخدم بدرجة الجودة بشكل صحيح بعد إعادة تحميل الصفحة.
+# 1.  [إصلاح] تعديل منطق الإغلاق اليدوي للصفقات ليعتمد على الذاكرة المؤقتة (cache) بدلاً من قاعدة البيانات مباشرة.
+# 2.  [نتيجة] حل مشكلة فشل الإغلاق اليدوي ومنع ظهور خطأ "Attempted to close already closed signal".
+# 3.  [تحسين] ضمان إرسال إشعار تليجرام بشكل موثوق عند كل عملية إغلاق يدوية ناجحة.
 
 import time
 import os
@@ -2036,65 +2036,52 @@ def update_quality_filter():
 # ======================= START: إصلاحات الإغلاق اليدوي =======================
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
     """
-    Handles the logic for manually closing a trade. It fetches the signal,
-    determines the closing price, and then calls the main `close_signal` function
-    to ensure the trade is executed on the exchange and the database is updated correctly.
+    Handles the logic for manually closing a trade by checking the active signal cache first.
+    This ensures consistency with the trade management loop and prevents race conditions.
     """
-    if not check_db_connection() or not conn:
-        logger.error("[Manual Close] Database connection not available for signal %s", signal_id)
+    with signal_cache_lock:
+        # Find the signal in the active cache using its ID. This is the source of truth for the bot.
+        signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
+
+    if not signal_to_close:
+        logger.warning(f"[Manual Close] Signal {signal_id} not found in active cache. It might have been closed automatically.")
         return False
-    
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
-            signal = cur.fetchone()
-            
-        if not signal:
-            logger.warning(f"[Manual Close] Signal {signal_id} not found or already closed.")
-            return False
-        
-        signal_dict = dict(signal)
-        symbol = signal_dict['symbol']
-        
-        # If no closing price is provided, fetch the current live price
+
+    symbol = signal_to_close['symbol']
+
+    # If no closing price is provided by the API call, fetch the current live price.
+    if closing_price is None:
+        with live_prices_lock:
+            closing_price = live_prices.get(symbol)
+
         if closing_price is None:
-            with live_prices_lock:
-                closing_price = live_prices.get(symbol)
-            
-            if closing_price is None:
-                logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
-                return False
-        
-        logger.info(f"[Manual Close] Attempting to manually close signal {signal_id} for {symbol} at price {closing_price}")
-        
-        # Delegate to the main, reliable closing function
-        close_signal(signal_dict, closing_price, "manual_close")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"[Manual Close] Critical error closing trade {signal_id}: {e}", exc_info=True)
-        if conn:
-            conn.rollback()
-        return False
+            logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
+            send_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
+            return False
+
+    logger.info(f"[Manual Close] User initiated manual close for signal {signal_id} ({symbol}) at price {closing_price}")
+
+    # Delegate to the main, reliable closing function.
+    # This function handles the exchange order, DB update, cache removal, and notifications.
+    close_signal(signal_to_close, closing_price, "manual_close")
+    return True
 
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
     """
     API endpoint to manually close a trade.
-    It now uses `request.get_json(silent=True)` to prevent 400 errors on empty requests.
     """
-    # Use silent=True to avoid BadRequest error if the request body is empty
+    # Use silent=True to avoid BadRequest error if the request body is empty.
     data = request.get_json(silent=True) or {}
     closing_price = data.get('closing_price')
-    
-    success = close_trade_manually(signal_id, closing_price)
-    
-    if success:
-        return jsonify({"success": True, "message": "Trade close command sent successfully."})
-    else:
-        return jsonify({"success": False, "message": "Failed to close trade. Check logs for details."}), 400
+
+    # Start the closing process in a new thread to avoid blocking the API response.
+    thread = Thread(target=close_trade_manually, args=(signal_id, closing_price))
+    thread.start()
+
+    return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 # ======================== END: إصلاحات الإغلاق اليدوي ========================
+
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
