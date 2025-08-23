@@ -93,6 +93,8 @@ PAPER_TRADE_SIZE_USDT: float = 10.0
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
 # [تحسين] متغير عام لجودة الإشارة، يمكن تعديله عبر API
 MIN_SIGNAL_QUALITY: int = 60
+AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
+
 min_quality_lock = Lock()
 
 
@@ -347,16 +349,39 @@ def get_notification_settings() -> Dict:
     except Exception as e:
         logger.error(f"❌ [Redis] Failed to get notification settings: {e}"); return defaults
 
-def send_telegram_message(message: str, force: bool = False):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
-    settings = get_notification_settings()
-    if not settings.get('telegram_enabled') and not force: return
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={'chat_id': TELEGRAM_CHAT_ID, 'text': message, 'parse_mode': 'Markdown'}, timeout=10)
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [Telegram] Failed to send message: {e}")
 
-# --- WebSocket & Data Fetching ---
+def send_telegram_message(message: str, force: bool = False):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    settings = get_notification_settings()
+    if not settings.get('telegram_enabled') and not force:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(url, data=payload, timeout=10)
+            if r.status_code == 429:
+                try:
+                    retry_after = int(r.json().get("parameters", {}).get("retry_after", 1))
+                except Exception:
+                    retry_after = 1
+                time.sleep(min(5, retry_after))
+                continue
+            if r.ok:
+                break
+            else:
+                logger.warning(f"[Telegram] HTTP {r.status_code}: {r.text}")
+        except requests.exceptions.RequestException as e:
+            if attempt == 2:
+                logger.error(f"❌ [Telegram] Failed to send message after retries: {e}")
+            time.sleep(1.5)
+
 def handle_socket_message(msg):
     global live_prices
     if msg and 'e' in msg and msg['e'] == 'error': logger.error(f"❌ [WebSocket] Error: {msg['m']}"); return
@@ -782,20 +807,59 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
         adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
         notional = adjusted_quantity * entry_price
-        min_notional = float(next((f['minNotional'] for f in symbol_info['filters'] if f['filterType'] == 'NOTIONAL'), '0.0'))
-        if notional < min_notional:
-            log_rejection(symbol, "MinNotional Filter Failed", {"required": min_notional, "actual": notional}); return
+        
+        # Determine minimum notional (supports NOTIONAL and legacy MIN_NOTIONAL)
+        min_notional = 0.0
+        for f in symbol_info.get('filters', []):
+            if f.get('filterType') in ('NOTIONAL', 'MIN_NOTIONAL') and 'minNotional' in f:
+                try:
+                    min_notional = float(f['minNotional'])
+                    break
+                except Exception:
+                    pass
+
+        # If below min notional, try quoteOrderQty fallback using available USDT
+        if notional < max(min_notional, 1e-8):
+            with balance_lock:
+                free_usdt = float(usdt_balance)
+            quote_qty = min(max_risk_usdt, free_usdt * 0.95)
+            try:
+                from decimal import Decimal, ROUND_DOWN
+                quote_qty = float(Decimal(str(quote_qty)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+            except Exception:
+                quote_qty = float(f"{quote_qty:.2f}")
+            if quote_qty >= max(min_notional, 10.0) and quote_qty > 0:
+                try:
+                    logger.info(f"💰 [Real Trade] Using quoteOrderQty fallback: spending {quote_qty} USDT on {symbol}")
+                    order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quoteOrderQty=str(quote_qty))
+                    avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
+                    final_quantity = float(order.get('executedQty', 0)) or max(quote_qty / max(avg_fill_price, 1e-8), 1e-8)
+                    order_id = order.get('orderId', 'N/A')
+                    save_signal_to_db(symbol, avg_fill_price, trade_levels['target_price_2'], stop_loss, strategy_name, True, final_quantity, {**signal_details, "avg_fill": avg_fill_price, "used_quote_qty": quote_qty}, order_id)
+                    send_telegram_message(f"✅ *تم فتح صفقة حقيقية*\n`{symbol}` | `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية منفذة:* `{final_quantity:.6f}`\n*المبلغ المستخدم:* `{quote_qty} USDT`", force=True)
+                    log_and_notify("info", f"Opened REAL trade for {symbol} (quoteOrderQty)", "REAL_TRADE_OPEN")
+                    return
+                except Exception as e:
+                    logger.error(f"❌ [Real Trade] quoteOrderQty failed: {e}")
+            # Final fallback: open paper trade if allowed
+            if 'AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE' in globals() and AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE:
+                sim_qty = max(PAPER_TRADE_SIZE_USDT / max(entry_price, 1e-8), 1e-8)
+                save_signal_to_db(symbol, entry_price, trade_levels['target_price_2'], stop_loss, strategy_name, False, sim_qty, {**signal_details, "fallback_reason": "LOW_BALANCE"}, generate_trade_id(symbol))
+                send_telegram_message(f"⚠️ *رصيد غير كافٍ لفتح صفقة حقيقية*\nتم فتح *صفقة ورقية* لـ `{symbol}` بقيمة `{PAPER_TRADE_SIZE_USDT} USDT`.", force=True)
+                log_and_notify("warning", f"Fallback to PAPER trade for {symbol} due to low balance", "LOW_BALANCE_FALLBACK")
+                return
+
         try:
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
             order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
-            avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / sum(float(f['qty']) for f in order.get('fills', [])) if order.get('fills') else entry_price
+            avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
             final_quantity = float(order.get('executedQty', adjusted_quantity))
             order_id = order.get('orderId', 'N/A')
-            save_signal_to_db(symbol, avg_fill_price, trade_levels, strategy_name, True, final_quantity, signal_details, order_id)
-            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
+            save_signal_to_db(symbol, avg_fill_price, trade_levels['target_price_2'], stop_loss, strategy_name, True, final_quantity, {**signal_details, "avg_fill": avg_fill_price}, order_id)
+            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
             send_telegram_message(message, force=True)
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
-        except BinanceAPIException as e:
+except BinanceAPIException as e:
             logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
             send_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
         except Exception as e:
@@ -1581,6 +1645,20 @@ def dashboard_data():
         return jsonify({"error": "Failed to load dashboard data."}), 500
 
 # [تحسين جديد] إضافة مسار API محسن للتحديث الجزئي للصفقات المفتوحة
+
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    try:
+        return jsonify({
+            "status": "ok",
+            "trading_enabled": TRADING_ENABLED,
+            "mode": "REAL" if REAL_TRADING_ENABLED else "PAPER",
+            "open_signals": len(open_signals_cache),
+            "ws": {"connected": True}
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/api/open_signals')
 def get_open_signals():
     if not check_db_connection():
@@ -2330,30 +2408,95 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     if profit_condition or loss_condition:
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 
+
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting advanced trade management loop...")
     while True:
         try:
             with signal_cache_lock:
-                if not open_signals_cache: time.sleep(2); continue
+                if not open_signals_cache:
+                    time.sleep(2); continue
                 signals_to_monitor = list(open_signals_cache.values())
             for signal in signals_to_monitor:
                 symbol = signal['symbol']
-                with live_prices_lock: current_price = live_prices.get(symbol)
-                if not current_price: continue
-                # Check for SL/TP hits first for performance
-                if current_price <= signal['stop_loss']:
-                    close_signal(signal, signal['stop_loss'], "SL_HIT")
+                with live_prices_lock:
+                    current_price = live_prices.get(symbol)
+                if not current_price:
                     continue
-                if signal.get('target_price_2') and current_price >= signal['target_price_2']:
-                     close_signal(signal, signal['target_price_2'], "TP2_HIT")
-                     continue
-            time.sleep(1) # Faster checks for SL/TP
-        except Exception as e:
-            logger.error(f"❌ [Trade Manager] A critical error occurred: {e}", exc_info=True)
-            time.sleep(10)
 
-# [إضافة] دالة لإرسال تحديثات حالة السوق بشكل دوري
+                # Normalize details
+                details = signal.get('signal_details')
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except Exception:
+                        details = {}
+                details = details or {}
+
+                entry_price = float(signal.get('entry_price', 0))
+                stop_loss = float(signal.get('stop_loss', 0))
+                tp1 = float(details.get('target_price_1') or signal.get('target_price_1') or 0)
+                tp2 = float(details.get('target_price_2') or signal.get('target_price_2') or 0)
+                trail_dist = float(details.get('trailing_stop_distance') or 0)
+                remaining_qty = float(signal.get('quantity') or 0)
+
+                # 1) Hard SL
+                if stop_loss and current_price <= stop_loss:
+                    close_signal(signal, stop_loss, "SL_HIT")
+                    continue
+
+                # 2) Full TP2
+                if tp2 and current_price >= tp2:
+                    close_signal(signal, tp2, "TP2_HIT")
+                    continue
+
+                # 3) TP1 partial take + move SL to BE
+                if tp1 and not details.get('tp1_done') and remaining_qty > 0 and current_price >= tp1:
+                    part_qty = remaining_qty * 0.5
+                    execute_close_order(symbol, part_qty, "TP1_HIT")
+                    new_sl = max(stop_loss, entry_price)
+                    updates = {
+                        "quantity": remaining_qty - part_qty,
+                        "stop_loss": new_sl,
+                        "status": "updated",
+                        "updated_at": datetime.now(timezone.utc),
+                        "closing_reason": "TP1_HIT"
+                    }
+                    details['tp1_done'] = True
+                    updates['signal_details'] = json.dumps(details)
+                    update_signal_in_db(signal['id'], updates)
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache:
+                            open_signals_cache[symbol].update(updates)
+                            open_signals_cache[symbol]['signal_details'] = details
+                    send_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
+                    broadcast({"type": "signal_update", "payload": open_signals_cache.get(symbol, {})})
+                    continue
+
+                # 4) Activate trailing stop after reaching configured profit
+                profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
+                if trail_dist and not details.get('trailing_active') and profit_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PERCENT:
+                    details['trailing_active'] = True
+                    update_signal_in_db(signal['id'], {"signal_details": json.dumps(details), "updated_at": datetime.now(timezone.utc)})
+                    with signal_cache_lock:
+                        if symbol in open_signals_cache:
+                            open_signals_cache[symbol]['signal_details'] = details
+                    send_telegram_message(f"📈 *تفعيل الوقف المتحرك* لـ `{symbol}` عند ربح `{profit_pct:.2f}%`.")
+
+                # 5) Move trailing stop upwards
+                if details.get('trailing_active') and trail_dist:
+                    new_sl = max(stop_loss, current_price - trail_dist)
+                    if new_sl > stop_loss:
+                        update_signal_in_db(signal['id'], {"stop_loss": new_sl, "updated_at": datetime.now(timezone.utc)})
+                        with signal_cache_lock:
+                            if symbol in open_signals_cache:
+                                open_signals_cache[symbol]['stop_loss'] = new_sl
+                        send_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
+            time.sleep(2)
+
 def send_market_state_updates():
     """إرسال تحديثات حالة السوق بشكل دوري."""
     logger.info("🚀 [Market State] Starting market state update loop...")
