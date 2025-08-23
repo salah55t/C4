@@ -786,6 +786,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
+    stop_loss = trade_levels['stop_loss']
     
     signal_details = {
         "atr": trade_levels['atr'], "trailing_stop_activated": False,
@@ -798,17 +799,20 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
         risk_percent = dynamic_risk_management(symbol, df, losses)
         max_risk_usdt = current_usdt_balance * (risk_percent / 100)
-        stop_loss = trade_levels['stop_loss']
         risk_per_unit = max(entry_price - stop_loss, 1e-8)
         quantity = max_risk_usdt / risk_per_unit
         if quantity <= 0: log_rejection(symbol, "Insufficient Balance"); return
+        
         symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info: logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}"); return
+        if not symbol_info:
+            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}")
+            return
+
         step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
         adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
         notional = adjusted_quantity * entry_price
-        
-        # Determine minimum notional (supports NOTIONAL and legacy MIN_NOTIONAL)
+
+        # جلب الحد الأدنى المسموح به من باينانس
         min_notional = 0.0
         for f in symbol_info.get('filters', []):
             if f.get('filterType') in ('NOTIONAL', 'MIN_NOTIONAL') and 'minNotional' in f:
@@ -818,52 +822,84 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
                 except Exception:
                     pass
 
-        # If below min notional, try quoteOrderQty fallback using available USDT
+        # ⚡ في حالة القيمة أقل من الحد الأدنى → جرب الشراء باستخدام quoteOrderQty
         if notional < max(min_notional, 1e-8):
             with balance_lock:
                 free_usdt = float(usdt_balance)
             quote_qty = min(max_risk_usdt, free_usdt * 0.95)
-            try:
-                from decimal import Decimal, ROUND_DOWN
-                quote_qty = float(Decimal(str(quote_qty)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
-            except Exception:
-                quote_qty = float(f"{quote_qty:.2f}")
-            if quote_qty >= max(min_notional, 10.0) and quote_qty > 0:
+
+            if quote_qty >= max(min_notional, 10.0):
                 try:
-                    logger.info(f"💰 [Real Trade] Using quoteOrderQty fallback: spending {quote_qty} USDT on {symbol}")
-                    order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quoteOrderQty=str(quote_qty))
+                    logger.info(f"💰 [Real Trade] Using quoteOrderQty fallback: {quote_qty} USDT on {symbol}")
+                    order = client.create_order(
+                        symbol=symbol,
+                        side=Client.SIDE_BUY,
+                        type=Client.ORDER_TYPE_MARKET,
+                        quoteOrderQty=str(round(quote_qty, 2))
+                    )
                     avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
-                    final_quantity = float(order.get('executedQty', 0)) or max(quote_qty / max(avg_fill_price, 1e-8), 1e-8)
+                    final_quantity = float(order.get('executedQty', 0)) or (quote_qty / entry_price)
                     order_id = order.get('orderId', 'N/A')
-                    save_signal_to_db(symbol, avg_fill_price, trade_levels['target_price_2'], stop_loss, strategy_name, True, final_quantity, {**signal_details, "avg_fill": avg_fill_price, "used_quote_qty": quote_qty}, order_id)
-                    send_telegram_message(f"✅ *تم فتح صفقة حقيقية*\n`{symbol}` | `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية منفذة:* `{final_quantity:.6f}`\n*المبلغ المستخدم:* `{quote_qty} USDT`", force=True)
-                    log_and_notify("info", f"Opened REAL trade for {symbol} (quoteOrderQty)", "REAL_TRADE_OPEN")
+
+                    save_signal_to_db(
+                        symbol, avg_fill_price, trade_levels['target_price_2'],
+                        stop_loss, strategy_name, True, final_quantity,
+                        {**signal_details, "avg_fill": avg_fill_price, "used_quote_qty": quote_qty},
+                        order_id
+                    )
+                    send_telegram_message(
+                        f"✅ *تم فتح صفقة حقيقية*\n"
+                        f"*العملة:* `{symbol}`\n"
+                        f"*الكمية:* `{final_quantity:.6f}`\n"
+                        f"*السعر:* `{avg_fill_price:.4f}`\n"
+                        f"*المبلغ المستخدم:* `{quote_qty} USDT`",
+                        force=True
+                    )
+                    return
+                except BinanceAPIException as e:
+                    logger.error(f"❌ [Real Trade] Binance API Error: {e}")
+                    send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة*\\n`{e}`", force=True)
                     return
                 except Exception as e:
-                    logger.error(f"❌ [Real Trade] quoteOrderQty failed: {e}")
-            # Final fallback: open paper trade if allowed
-            if 'AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE' in globals() and AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE:
-                sim_qty = max(PAPER_TRADE_SIZE_USDT / max(entry_price, 1e-8), 1e-8)
-                save_signal_to_db(symbol, entry_price, trade_levels['target_price_2'], stop_loss, strategy_name, False, sim_qty, {**signal_details, "fallback_reason": "LOW_BALANCE"}, generate_trade_id(symbol))
-                send_telegram_message(f"⚠️ *رصيد غير كافٍ لفتح صفقة حقيقية*\nتم فتح *صفقة ورقية* لـ `{symbol}` بقيمة `{PAPER_TRADE_SIZE_USDT} USDT`.", force=True)
-                log_and_notify("warning", f"Fallback to PAPER trade for {symbol} due to low balance", "LOW_BALANCE_FALLBACK")
-                return
+                    logger.error(f"❌ [Real Trade] quoteOrderQty failed: {e}", exc_info=True)
+                    return
 
+        # ⚡ المسار العادي (فتح صفقة بكمية عادية)
         try:
             logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
-            order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
+            order = client.create_order(
+                symbol=symbol,
+                side=Client.SIDE_BUY,
+                type=Client.ORDER_TYPE_MARKET,
+                quantity=adjusted_quantity
+            )
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
             final_quantity = float(order.get('executedQty', adjusted_quantity))
             order_id = order.get('orderId', 'N/A')
-            save_signal_to_db(symbol, avg_fill_price, trade_levels['target_price_2'], stop_loss, strategy_name, True, final_quantity, {**signal_details, "avg_fill": avg_fill_price}, order_id)
-            message = (f"💰 *صفقة حقيقية جديدة*\n`{symbol}` | `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n*دخول:* `{avg_fill_price:.4f}`\n*كمية:* `{final_quantity}`")
-            send_telegram_message(message, force=True)
+
+            save_signal_to_db(
+                symbol, avg_fill_price, trade_levels['target_price_2'],
+                stop_loss, strategy_name, True, final_quantity,
+                {**signal_details, "avg_fill": avg_fill_price}, order_id
+            )
+            send_telegram_message(
+                f"✅ *تم فتح صفقة حقيقية*\n"
+                f"*العملة:* `{symbol}`\n"
+                f"*الكمية:* `{final_quantity:.6f}`\n"
+                f"*السعر:* `{avg_fill_price:.4f}`",
+                force=True
+            )
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
-except BinanceAPIException as e:
-            logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
-            send_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
+            return
+
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Trade] Binance API Error: {e}")
+            send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة*\\n`{e}`", force=True)
+            return
+
         except Exception as e:
-            logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
+            logger.error(f"❌ [Real Trade] Failed to place order: {e}", exc_info=True)
+            return
     else:
         quantity = PAPER_TRADE_SIZE_USDT / entry_price
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
