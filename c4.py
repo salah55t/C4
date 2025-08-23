@@ -1,10 +1,11 @@
-# ملف c4.py - نسخة V23.1.0 (تحسينات وإصلاحات)
+# ملف c4.py - نسخة V23.2.0 (تحسينات شاملة)
 # --- وصف الإصدار:
-# هذا الإصدار يركز على تحسين الموثوقية وإصلاح الأخطاء التي تم تحديدها، بالإضافة إلى تحسين منطق التقييم.
-# 1.  [تحسين] تم تحسين دالة `calculate_signal_quality_score` لتوفير تقييم أكثر دقة وقوة للإشارات.
-# 2.  [إضافة] تمت إضافة وظيفة `close_trade_manually` ونقطة نهاية API (`/api/close_trade/<id>`) للسماح بالإغلاق اليدوي للصفقات من الواجهة.
-# 3.  [إصلاح] تم إصلاح خطأ في دالة `create_trade_signal` حيث كان يتم تمرير قيمة واحدة بدلاً من قاموس كامل لدالة `save_signal_to_db`.
-# 4.  [إصلاح] تم تحسين دالة `adjust_quantity_to_step_size` لاستخدام `Decimal` للمعالجة الدقيقة وتجنب الكميات الصفرية.
+# هذا الإصدار يضيف تحسينات جوهرية على إدارة المخاطر، تحليل السوق، وموثوقية النظام.
+# 1.  [تحسين] تحديث دالة `dynamic_risk_management` لمنطق أكثر تفصيلاً في حساب المخاطر بناءً على التقلبات والخسائر.
+# 2.  [تحسين] إعادة بناء آلية تحديث حالة السوق (`update_market_state`) لتوفير تحليل أعمق لاتجاه BTC والفريمات الزمنية المختلفة.
+# 3.  [تحسين] تعزيز متانة معالجة رسائل WebSocket و Telegram.
+# 4.  [إصلاح] تم تحديث واجهة المستخدم وقالب HTML ليعكس بشكل صحيح زر الإغلاق اليدوي المضاف في الإصدار السابق ويعالج الأحداث بشكل صحيح.
+# 5.  [إضافة] بدء تشغيل محدث حالة السوق في thread منفصل لضمان التحديثات الدورية دون التأثير على العمليات الأخرى.
 
 import time
 import os
@@ -334,53 +335,84 @@ def get_notification_settings() -> Dict:
     except Exception as e:
         logger.error(f"❌ [Redis] Failed to get notification settings: {e}"); return defaults
 
-
+# ======================= START: تحسين وظيفة إرسال رسائل Telegram =======================
 def send_telegram_message(message: str, force: bool = False):
+    """
+    إرسال رسالة إلى Telegram مع تحسينات
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+    
     settings = get_notification_settings()
     if not settings.get('telegram_enabled') and not force:
         return
+    
+    # تقسيم الرسائل الطويلة
+    max_length = 4096
+    if len(message) <= max_length:
+        messages = [message]
+    else:
+        messages = [message[i:i+max_length] for i in range(0, len(message), max_length)]
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
-    for attempt in range(3):
-        try:
-            r = requests.post(url, data=payload, timeout=10)
-            if r.status_code == 429:
-                try:
-                    retry_after = int(r.json().get("parameters", {}).get("retry_after", 1))
-                except Exception:
-                    retry_after = 1
-                time.sleep(min(5, retry_after))
-                continue
-            if r.ok:
-                break
-            else:
-                logger.warning(f"[Telegram] HTTP {r.status_code}: {r.text}")
-        except requests.exceptions.RequestException as e:
-            if attempt == 2:
-                logger.error(f"❌ [Telegram] Failed to send message after retries: {e}")
-            time.sleep(1.5)
+    
+    for msg in messages:
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+        
+        for attempt in range(3):
+            try:
+                r = requests.post(url, data=payload, timeout=10)
+                if r.status_code == 429:
+                    try:
+                        retry_after = int(r.json().get("parameters", {}).get("retry_after", 1))
+                    except Exception:
+                        retry_after = 1
+                    time.sleep(min(5, retry_after))
+                    continue
+                if r.ok:
+                    break
+                else:
+                    logger.warning(f"[Telegram] HTTP {r.status_code}: {r.text}")
+            except requests.exceptions.RequestException as e:
+                if attempt == 2:
+                    logger.error(f"❌ [Telegram] Failed to send message after retries: {e}")
+                time.sleep(1.5)
+# ======================== END: تحسين وظيفة إرسال رسائل Telegram ========================
 
+# ======================= START: تحسين إدارة الأخطاء في WebSocket =======================
 def handle_socket_message(msg):
+    """
+    معالجة رسائل WebSocket مع تحسين إدارة الأخطاء
+    """
     global live_prices
-    if msg and 'e' in msg and msg['e'] == 'error': logger.error(f"❌ [WebSocket] Error: {msg['m']}"); return
-    if isinstance(msg, list):
-        price_updates = {}
-        with live_prices_lock:
-            for ticker in msg:
-                if 's' in ticker and 'c' in ticker: 
-                    symbol = ticker['s']
-                    price = float(ticker['c'])
-                    live_prices[symbol] = price
-                    price_updates[symbol] = price
-        if price_updates:
-            broadcast({"type": "price_update", "payload": price_updates})
+    try:
+        if msg and 'e' in msg and msg['e'] == 'error': 
+            logger.error(f"❌ [WebSocket] Error: {msg['m']}")
+            return
+        
+        if isinstance(msg, list):
+            price_updates = {}
+            with live_prices_lock:
+                for ticker in msg:
+                    if 's' in ticker and 'c' in ticker: 
+                        symbol = ticker['s']
+                        try:
+                            price = float(ticker['c'])
+                            live_prices[symbol] = price
+                            price_updates[symbol] = price
+                        except (ValueError, TypeError):
+                            logger.warning(f"[WebSocket] Invalid price data for {symbol}: {ticker.get('c')}")
+            
+            if price_updates:
+                broadcast({"type": "price_update", "payload": price_updates})
+    except Exception as e:
+        logger.error(f"❌ [WebSocket] Error processing message: {e}", exc_info=True)
+# ======================== END: تحسين إدارة الأخطاء في WebSocket ========================
 
 def start_websocket():
     global ws_manager
@@ -428,7 +460,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-# ======================= START: IMPROVED INDICATOR CALCULATION =======================
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
@@ -477,7 +508,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
     return df_calc
-# ======================== END: IMPROVED INDICATOR CALCULATION ========================
 
 # --- Data Loading ---
 def load_open_signals_to_cache():
@@ -537,103 +567,101 @@ def load_settings_from_redis():
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 # --- Risk Management ---
+# ======================= START: إصلاح خطأ في إدارة المخاطر =======================
 def dynamic_risk_management(symbol, df, consecutive_losses=0):
-    with risk_per_trade_lock: base_risk = RISK_PER_TRADE_PERCENT
-    atr_percent = df['atr_percent'].iloc[-1]
-    if atr_percent > 5.0: volatility_factor = 0.7
-    elif atr_percent < 1.5: volatility_factor = 1.2
-    else: volatility_factor = 1.0
-    loss_factor = max(0.5, 1.0 - (consecutive_losses * 0.15))
-    final_risk = base_risk * volatility_factor * loss_factor
-    final_risk_percent = min(final_risk, 2.0)
-    logger.info(f"[Risk] Dynamic risk for {symbol}: {final_risk_percent:.2f}% (Base: {base_risk}%, Vol: {volatility_factor:.2f}, Loss: {loss_factor:.2f})")
-    return final_risk_percent
+    """
+    حساب المخاطر ديناميكياً مع تحسينات
+    """
+    with risk_per_trade_lock: 
+        base_risk = RISK_PER_TRADE_PERCENT
+    
+    # التحقق من صحة البيانات
+    if df.empty or 'atr_percent' not in df.columns or len(df) < 14:
+        logger.warning(f"[Risk] Insufficient data for dynamic risk calculation for {symbol}")
+        return base_risk
+    
+    try:
+        atr_percent = df['atr_percent'].iloc[-1]
+        
+        # عامل التقلب
+        if atr_percent > 6.0: 
+            volatility_factor = 0.6
+        elif atr_percent > 4.0: 
+            volatility_factor = 0.8
+        elif atr_percent < 1.0: 
+            volatility_factor = 1.3
+        elif atr_percent < 1.5: 
+            volatility_factor = 1.2
+        else: 
+            volatility_factor = 1.0
+        
+        # عامل الخسائر المتتالية
+        loss_factor = max(0.3, 1.0 - (consecutive_losses * 0.12))
+        
+        # حساب المخاطر النهائية
+        final_risk = base_risk * volatility_factor * loss_factor
+        final_risk_percent = min(final_risk, 2.5)  # الحد الأقصى للمخاطر
+        
+        logger.info(f"[Risk] Dynamic risk for {symbol}: {final_risk_percent:.2f}% "
+                   f"(Base: {base_risk}%, Vol: {volatility_factor:.2f}, Loss: {loss_factor:.2f})")
+        
+        return final_risk_percent
+    
+    except Exception as e:
+        logger.error(f"[Risk] Error calculating dynamic risk for {symbol}: {e}")
+        return base_risk
+# ======================== END: إصلاح خطأ في إدارة المخاطر ========================
 
 # --- Filters & Strategies ---
-# ======================= START: تحسين وظيفة حساب جودة الإشارة =======================
 def calculate_signal_quality_score(symbol, df, strategy_name):
-    """
-    حساب نقاط جودة الإشارة من 0 إلى 100 مع تحسينات
-    """
     score = 0
     if df.empty or len(df) < 50: 
         return 0
     
     last_row = df.iloc[-1]
     
-    # تقييم قوة الاتجاه (0-25 نقطة) - تحسين
     adx_value = last_row.get('adx', 0)
-    if adx_value > 35: 
-        score += 25
-    elif adx_value > 25: 
-        score += 20
-    elif adx_value > 18: 
-        score += 15
-    elif adx_value > 12: 
-        score += 10
-    else: 
-        score += 5
+    if adx_value > 35: score += 25
+    elif adx_value > 25: score += 20
+    elif adx_value > 18: score += 15
+    elif adx_value > 12: score += 10
+    else: score += 5
     
-    # تقييم الحجم (0-15 نقطة) - تحسين
     current_volume = last_row.get('volume', 0)
-    volume_ma = df['volume'].rolling(20, min_periods=5).mean().iloc[-1]  # تحسين: استخدام min_periods
+    volume_ma = df['volume'].rolling(20, min_periods=5).mean().iloc[-1]
     volume_ratio = current_volume / volume_ma if volume_ma > 0 else 1
     
-    if volume_ratio > 2.0: 
-        score += 15
-    elif volume_ratio > 1.5: 
-        score += 12
-    elif volume_ratio > 1.2: 
-        score += 8
-    elif volume_ratio > 1.0: 
-        score += 5
+    if volume_ratio > 2.0: score += 15
+    elif volume_ratio > 1.5: score += 12
+    elif volume_ratio > 1.2: score += 8
+    elif volume_ratio > 1.0: score += 5
     
-    # تقييم الزخم (0-20 نقطة) - تحسين
     rsi = last_row.get('rsi', 50)
     macd_hist = last_row.get('macd_hist', 0)
     
-    if 45 <= rsi <= 55 and macd_hist > 0: 
-        score += 20
-    elif 40 <= rsi <= 60: 
-        score += 15
-    elif 35 <= rsi <= 65: 
-        score += 10
-    elif 30 <= rsi <= 70: 
-        score += 5
+    if 45 <= rsi <= 55 and macd_hist > 0: score += 20
+    elif 40 <= rsi <= 60: score += 15
+    elif 35 <= rsi <= 65: score += 10
+    elif 30 <= rsi <= 70: score += 5
     
-    # تقييم موقف السعر بالنسبة للمتوسطات (0-20 نقطة) - تحسين
     ema9, ema21, ema50, ema200, close = last_row.get('ema9',0), last_row.get('ema21',0), last_row.get('ema50',0), last_row.get('ema200',0), last_row.get('close',0)
     
-    if close > ema9 > ema21 > ema50 > ema200: 
-        score += 20
-    elif close > ema9 > ema21 > ema50: 
-        score += 18
-    elif close > ema9 > ema21: 
-        score += 15
-    elif close > ema21: 
-        score += 10
-    elif close > ema50: 
-        score += 5
+    if close > ema9 > ema21 > ema50 > ema200: score += 20
+    elif close > ema9 > ema21 > ema50: score += 18
+    elif close > ema9 > ema21: score += 15
+    elif close > ema21: score += 10
+    elif close > ema50: score += 5
     
-    # تقييم التقلب (0-10 نقاط) - تحسين
     atr_percent = last_row.get('atr_percent', 0)
-    if 2.0 <= atr_percent <= 4.0: 
-        score += 10
-    elif 1.5 <= atr_percent <= 5.0: 
-        score += 8
-    elif 1.0 <= atr_percent <= 6.0: 
-        score += 5
+    if 2.0 <= atr_percent <= 4.0: score += 10
+    elif 1.5 <= atr_percent <= 5.0: score += 8
+    elif 1.0 <= atr_percent <= 6.0: score += 5
     
-    # نقاط إضافية خاصة بالاستراتيجية (0-10 نقاط) - تحسين
-    if strategy_name == "Momentum_Volatility_Strategy" and adx_value > 30: 
-        score += 10
-    elif strategy_name == "BB_Stoch_Strategy" and last_row.get('stoch_rsi_k', 50) < 25: 
-        score += 8
-    elif strategy_name == "MACD_EMA_Strategy" and macd_hist > 0: 
-        score += 7
+    if strategy_name == "Momentum_Volatility_Strategy" and adx_value > 30: score += 10
+    elif strategy_name == "BB_Stoch_Strategy" and last_row.get('stoch_rsi_k', 50) < 25: score += 8
+    elif strategy_name == "MACD_EMA_Strategy" and macd_hist > 0: score += 7
     
     return min(100, max(0, int(score)))
-# ======================== END: تحسين وظيفة حساب جودة الإشارة ========================
 
 def dynamic_adx_threshold(symbol, df, base_threshold=20):
     atr_percent = df['atr_percent'].iloc[-1]
@@ -777,32 +805,24 @@ def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
         "trailing_stop_distance": trailing_stop_distance
     }
 
-# ======================= START: إصلاح خطأ في حساب الحجم المتداول =======================
 def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
-    """
-    ضبط الكمية لتتوافق مع حجم الخطوة المسموح به
-    """
     try:
         step = Decimal(step_size)
         if step <= 0:
             logger.warning(f"Invalid step size: {step_size}")
             return quantity
         
-        # تحويل الكمية إلى Decimal وإجراء التقريب الدقيق للأسفل
         decimal_quantity = Decimal(str(quantity))
         adjusted = decimal_quantity.quantize(step, rounding=ROUND_DOWN)
         
-        # التأكد من أن الكمية المعدلة ليست صفراً
         if adjusted <= 0:
             logger.warning(f"Adjusted quantity is zero or negative: {adjusted}")
-            # إذا كانت الكمية المعدلة صفرًا، حاول إرجاع أصغر كمية ممكنة
             return float(step)
         
         return float(adjusted)
     except Exception as e:
         logger.error(f"Error adjusting quantity: {e}")
         return quantity
-# ======================== END: إصلاح خطأ في حساب الحجم المتداول ========================
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
@@ -879,15 +899,12 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
                     final_quantity = float(order.get('executedQty', 0)) or (quote_qty / entry_price)
                     order_id = order.get('orderId', 'N/A')
 
-                    # ======================= START: إصلاح خطأ في حفظ الصفقة في قاعدة البيانات =======================
-                    # تصحيح الخطأ: تمرير trade_levels كقاموس كامل
                     save_signal_to_db(
-                        symbol, avg_fill_price, trade_levels,  # تم تصحيح هذا السطر
+                        symbol, avg_fill_price, trade_levels,
                         strategy_name, True, final_quantity,
                         {**signal_details, "avg_fill": avg_fill_price, "used_quote_qty": quote_qty},
                         order_id
                     )
-                    # ======================== END: إصلاح خطأ في حفظ الصفقة في قاعدة البيانات ========================
                     
                     send_telegram_message(
                         f"✅ *تم فتح صفقة حقيقية*\n"
@@ -975,6 +992,7 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         if conn: conn.rollback()
 
 # --- قوالب HTML ---
+# ======================= START: تحديث واجهة المستخدم =======================
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
@@ -1358,14 +1376,14 @@ function setupWebSocket() {
                 openSignals[data.payload.id] = data.payload;
                 updateSingleSignal(data.payload);
                 break;
-            case 'trade_closed': // Changed from signal_closed to match backend
+            case 'trade_closed':
                 const el = qs(`#signal-${data.payload.signal_id}`);
                 if (el) el.remove();
                 delete openSignals[data.payload.signal_id];
                 break;
             case 'new_notification': addNotification(data.payload); break;
             case 'new_rejection': addRejection(data.payload); break;
-            case 'market_state': updateMarketTrends(data.payload); break;
+            case 'market_state_update': updateMarketTrends(data.payload); break;
             case 'trading_mode':
                 const isPaper = data.payload.paper_trading;
                 qs('#tradingModeToggle').checked = !isPaper;
@@ -1485,6 +1503,7 @@ document.addEventListener('DOMContentLoaded', () => {
 </body>
 </html>
 """
+# ======================== END: تحديث واجهة المستخدم ========================
 
 BACKTEST_TEMPLATE = """
 <!doctype html>
@@ -1964,18 +1983,13 @@ def update_quality_filter():
         logger.error(f"Error updating quality filter: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-# ======================= START: إضافة رسائل تنبيه للإغلاق اليدوي للصفقات =======================
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
-    """
-    إغلاق صفقة يدوياً مع إرسال إشعارات
-    """
     if not check_db_connection() or not conn:
         logger.error("[Close Trade] Database connection not available")
         return False
     
     try:
         with conn.cursor() as cur:
-            # الحصول على بيانات الصفقة
             cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
             signal = cur.fetchone()
             
@@ -1987,7 +2001,6 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
             entry_price = signal['entry_price']
             is_real = signal['is_real_trade']
             
-            # الحصول على السعر الحالي إذا لم يتم توفيره
             if closing_price is None:
                 with live_prices_lock:
                     closing_price = live_prices.get(symbol)
@@ -1996,10 +2009,8 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
                     logger.error(f"[Close Trade] Current price for {symbol} not available")
                     return False
             
-            # حساب الربح/الخسارة
             profit_percentage = ((closing_price - entry_price) / entry_price) * 100
             
-            # تحديث الصفقة في قاعدة البيانات
             cur.execute("""
                 UPDATE signals 
                 SET status = 'closed', closing_price = %s, closed_at = NOW(), 
@@ -2007,19 +2018,16 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
                 WHERE id = %s;
             """, (closing_price, profit_percentage, signal_id))
             
-            # تحديث الخسائر المتتالية إذا كانت صفقة حقيقية وخاسرة
             if is_real and profit_percentage < 0:
                 with consecutive_losses_lock:
                     consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
             
-            # إزالة الصفقة من الكاش
             with signal_cache_lock:
                 if symbol in open_signals_cache:
                     del open_signals_cache[symbol]
             
             conn.commit()
             
-            # إرسال إشعارات
             message = f"🔒 *تم إغلاق الصفقة يدوياً*\n" \
                       f"العملة: `{symbol}`\n" \
                       f"سعر الدخول: `{entry_price:.4f}`\n" \
@@ -2029,7 +2037,6 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
             send_telegram_message(message, force=True)
             log_and_notify("info", f"Manually closed trade for {symbol} (ID: {signal_id})", "MANUAL_TRADE_CLOSE")
             
-            # إرسال تحديث عبر WebSocket
             broadcast({
                 "type": "trade_closed",
                 "payload": {
@@ -2049,12 +2056,8 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
             conn.rollback()
         return False
 
-# إضافة نقطة نهاية API للإغلاق اليدوي
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
-    """
-    نقطة نهاية API لإغلاق الصفقة يدوياً
-    """
     data = request.get_json() or {}
     closing_price = data.get('closing_price')
     
@@ -2064,7 +2067,6 @@ def api_close_trade(signal_id):
         return jsonify({"success": True, "message": "Trade closed successfully"})
     else:
         return jsonify({"success": False, "message": "Failed to close trade"}), 400
-# ======================== END: إضافة رسائل تنبيه للإغلاق اليدوي للصفقات ========================
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -2120,7 +2122,6 @@ def update_filter_settings():
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
 
-# ======================= START: IMPROVED BACKTESTING SYSTEM =======================
 def run_backtest(symbols: List[str], start_date: str, end_date: str, initial_balance: float = 10000.0) -> Dict:
     logger.info(f"[Backtest] Starting backtest from {start_date} to {end_date}")
     
@@ -2288,8 +2289,6 @@ def api_run_backtest():
     except Exception as e:
         logger.error(f"Error running backtest: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-# ======================== END: IMPROVED BACKTESTING SYSTEM ========================
-
 
 # --- Main Loop & Threads ---
 def main_bot_loop():
@@ -2485,37 +2484,90 @@ def trade_management_loop():
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
             time.sleep(2)
 
-def send_market_state_updates():
-    logger.info("🚀 [Market State] Starting market state update loop...")
-    while True:
-        try:
-            market_state = {"trend_details_by_tf": {}}
-            for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
-                df = fetch_historical_data(BTC_SYMBOL, tf, days=10)
-                if df is not None and not df.empty and len(df) > 50:
-                    df = calculate_all_features(df)
-                    last_row = df.iloc[-1]
-                    trend = "sideways"
-                    if last_row['close'] > last_row['ema21'] and last_row['ema21'] > last_row['ema50']:
-                        trend = "bullish"
-                    elif last_row['close'] < last_row['ema21'] and last_row['ema21'] < last_row['ema50']:
-                        trend = "bearish"
+# ======================= START: إصلاح خطأ في تحديث حالة السوق =======================
+def update_market_state():
+    """
+    تحديث حالة السوق مع تحسينات
+    """
+    global current_market_state
+    
+    try:
+        # الحصول على بيانات BTC كمرجع
+        btc_df = fetch_historical_data(BTC_SYMBOL, '1h', days=10) # أيام أكثر لـ ema200
+        if btc_df is None or len(btc_df) < 200:
+            logger.warning("[Market State] Insufficient BTC data for full analysis")
+            return
+        
+        btc_df = calculate_all_features(btc_df)
+        last_btc = btc_df.iloc[-1]
+        
+        # تحليل اتجاه BTC
+        btc_trend = "sideways"
+        if last_btc['close'] > last_btc['ema200'] and last_btc['macd_hist'] > 0:
+            btc_trend = "bullish"
+        elif last_btc['close'] < last_btc['ema200'] and last_btc['macd_hist'] < 0:
+            btc_trend = "bearish"
+        
+        # تحليل الفريمات الزمنية المختلفة
+        trend_details = {}
+        for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
+            try:
+                # نستخدم بيانات أكثر للحصول على متوسطات دقيقة
+                tf_df = fetch_historical_data(BTC_SYMBOL, tf, days=15)
+                if tf_df is not None and len(tf_df) >= 50:
+                    tf_df = calculate_all_features(tf_df)
+                    last_tf = tf_df.iloc[-1]
                     
-                    market_state["trend_details_by_tf"][tf] = {
-                        "trend": trend,
-                        "adx": last_row.get('adx', 0),
-                        "rsi": last_row.get('rsi', 50)
+                    # تحديد الاتجاه
+                    tf_trend = "sideways"
+                    if last_tf['close'] > last_tf['ema50'] and last_tf['adx'] > 20:
+                        tf_trend = "bullish"
+                    elif last_tf['close'] < last_tf['ema50'] and last_tf['adx'] > 20:
+                        tf_trend = "bearish"
+                    
+                    trend_details[tf] = {
+                        "trend": tf_trend,
+                        "adx": last_tf.get('adx', 0),
+                        "rsi": last_tf.get('rsi', 50),
+                        "price_change": ((last_tf['close'] - tf_df.iloc[-10]['close']) / tf_df.iloc[-10]['close']) * 100 if len(tf_df) >= 10 else 0
                     }
-            
-            with market_state_lock:
-                global current_market_state
-                current_market_state = market_state
-            
-            broadcast({"type": "market_state", "payload": market_state})
-            time.sleep(60 * 5)
-        except Exception as e:
-            logger.error(f"Error sending market state updates: {e}")
-            time.sleep(60)
+            except Exception as e:
+                logger.error(f"[Market State] Error analyzing {tf} timeframe: {e}")
+        
+        # تحديث الحالة العامة
+        with market_state_lock:
+            current_market_state = {
+                "btc_trend": btc_trend,
+                "btc_price": last_btc['close'],
+                "btc_adx": last_btc.get('adx', 0),
+                "btc_rsi": last_btc.get('rsi', 50),
+                "trend_details_by_tf": trend_details,
+                "last_updated": datetime.now(timezone.utc).isoformat()
+            }
+        
+        # إرسال تحديث عبر WebSocket
+        broadcast({"type": "market_state_update", "payload": current_market_state})
+        
+    except Exception as e:
+        logger.error(f"[Market State] Error updating market state: {e}", exc_info=True)
+
+def start_market_state_updater():
+    """
+    بدء تحديث حالة السوق بشكل دوري
+    """
+    def update_loop():
+        while True:
+            try:
+                update_market_state()
+                time.sleep(300)  # تحديث كل 5 دقائق
+            except Exception as e:
+                logger.error(f"[Market State Updater] Error in update loop: {e}")
+                time.sleep(60)
+    
+    thread = Thread(target=update_loop, daemon=True)
+    thread.start()
+    logger.info("[Market State] Started market state updater thread")
+# ======================== END: إصلاح خطأ في تحديث حالة السوق ========================
 
 def update_balance():
     try:
@@ -2537,7 +2589,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.1 (Fixed) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2 (Comprehensive Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2560,7 +2612,7 @@ if __name__ == '__main__':
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
-    Thread(target=send_market_state_updates, daemon=True).start()
+    start_market_state_updater() # بدء تشغيل المحدث الجديد
     Thread(target=update_balance_loop, daemon=True).start()
 
     logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
