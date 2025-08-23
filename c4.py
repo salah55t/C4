@@ -1,9 +1,8 @@
-# ملف c4.py - نسخة V23.2.2 (تحسين واجهة المستخدم لشريط التقدم)
+# ملف c4.py - نسخة V23.2.3 (إصلاح فقدان درجة الجودة عند التحديث)
 # --- وصف الإصدار:
-# هذا الإصدار يحسن من واجهة المستخدم لشريط التقدم في الصفقات المفتوحة.
-# 1.  [تحسين] تعديل منطق JavaScript في لوحة التحكم لعرض شريط التقدم باللون الأحمر عندما يتحرك السعر نحو وقف الخسارة.
-# 2.  [تحسين] عرض الشريط باللون الأخضر كالسابق عندما يتحرك السعر نحو الهدف.
-# 3.  [تحسين] يتم حساب التقدم لكلا الاتجاهين (الربح والخسارة) كنسبة مئوية من المسافة الإجمالية.
+# هذا الإصدار يصلح خطأ كان يؤدي إلى اختفاء درجة جودة الإشارة عند تحديث الصفحة.
+# 1.  [إصلاح] تعديل استعلام قاعدة البيانات في مسار API `/api/open_signals` ليشمل حقل `signal_details` بالكامل في النتائج.
+# 2.  [نتيجة] الآن تحتفظ واجهة المستخدم بدرجة الجودة بشكل صحيح بعد إعادة تحميل الصفحة.
 
 import time
 import os
@@ -1788,29 +1787,39 @@ def api_health():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# ======================= START: إصلاح استعلام جودة الإشارة =======================
 @app.route('/api/open_signals')
 def get_open_signals():
     if not check_db_connection():
         return jsonify({"error": "Database connection failed"}), 500
     
     sort_by = request.args.get('sort', 'id')
+    # The field for sorting must exist, so we extract it.
+    # The JS code relies on the full `signal_details` object.
     allowed_sort_fields = ['id', 'symbol', 'entry_price', 'strategy_name', 'quality_score']
     if sort_by not in allowed_sort_fields:
         sort_by = 'id'
 
     order_direction = 'DESC' if sort_by in ['id', 'quality_score'] else 'ASC'
+    
+    # We create a temporary column `quality_score` for sorting purposes
+    # but also select the main `signal_details` column for the UI.
+    sort_column_expression = sql.SQL("(signal_details->>'quality_score')::numeric")
 
     try:
         with conn.cursor() as cur:
             query = sql.SQL("""
-                SELECT id, symbol, entry_price, target_price_1, target_price_2, 
-                       stop_loss, strategy_name, is_real_trade, quantity, 
-                       (signal_details->>'quality_score')::numeric as quality_score
+                SELECT 
+                    id, symbol, entry_price, target_price_1, target_price_2, 
+                    stop_loss, strategy_name, is_real_trade, quantity, 
+                    signal_details, -- [FIX] Ensure the full details object is selected
+                    {sort_expression} as quality_score -- Keep this for sorting
                 FROM signals 
                 WHERE status IN ('open', 'updated')
                 ORDER BY {sort_col} {direction} NULLS LAST
             """).format(
-                sort_col=sql.Identifier(sort_by),
+                sort_expression=sort_column_expression,
+                sort_col=sql.Identifier(sort_by) if sort_by != 'quality_score' else sql.SQL('quality_score'),
                 direction=sql.SQL(order_direction)
             )
             cur.execute(query)
@@ -1819,6 +1828,7 @@ def get_open_signals():
     except Exception as e:
         logger.error(f"Error fetching open signals: {e}")
         return jsonify({"error": str(e)}), 500
+# ======================== END: إصلاح استعلام جودة الإشارة ========================
 
 @app.route('/api/performance_metrics')
 def get_performance_metrics():
