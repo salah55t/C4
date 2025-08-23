@@ -1,8 +1,10 @@
-# ملف c4.py - نسخة V23.2.4 (إصلاح الإغلاق اليدوي)
+# ملف c4.py - نسخة V23.2.5 (إصلاح LOT_SIZE وإضافة التحكم بحجم الصفقة)
 # --- وصف الإصدار:
-# 1.  [إصلاح] تعديل منطق الإغلاق اليدوي للصفقات ليعتمد على الذاكرة المؤقتة (cache) بدلاً من قاعدة البيانات مباشرة.
-# 2.  [نتيجة] حل مشكلة فشل الإغلاق اليدوي ومنع ظهور خطأ "Attempted to close already closed signal".
-# 3.  [تحسين] ضمان إرسال إشعار تليجرام بشكل موثوق عند كل عملية إغلاق يدوية ناجحة.
+# 1.  [إصلاح] معالجة خطأ Binance API (code=-1013): Filter failure: LOT_SIZE عن طريق تعديل الكمية لتتوافق مع `stepSize`.
+# 2.  [إضافة] متغير جديد `FIXED_TRADE_SIZE_USDT` بقيمة افتراضية 5.0 دولار للتحكم بحجم الصفقة.
+# 3.  [تحديث] إضافة حقل في لوحة التحكم لتغيير حجم الصفقة بسهولة.
+# 4.  [تحسين] إضافة فلتر للتحقق من `minNotional` لتجنب الصفقات الصغيرة جداً.
+# 5.  [نتيجة] أصبح البوت الآن أكثر موثوقية للحسابات ذات الأرصدة الصغيرة ويوفر تحكمًا أفضل للمستخدم.
 
 import time
 import os
@@ -80,10 +82,11 @@ COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-RISK_PER_TRADE_PERCENT: float = 0.85
+RISK_PER_TRADE_PERCENT: float = 0.85 # يستخدم فقط في حالة عدم استخدام حجم الصفقة الثابت
 risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
-PAPER_TRADE_SIZE_USDT: float = 10.0
+FIXED_TRADE_SIZE_USDT: float = 5.0 # [جديد] حجم الصفقة الثابت بالدولار
+fixed_trade_size_lock = Lock()
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
 MIN_SIGNAL_QUALITY: int = 60
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
@@ -147,6 +150,7 @@ REJECTION_REASONS_AR = {
     "HTF Trend Confirmation Failed": "فشل تأكيد الترند على الفريم الأعلى",
     "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص",
     "MinNotional Filter Failed": "قيمة الصفقة أقل من الحد الأدنى للمنصة",
+    "LOT_SIZE Filter Failed": "فشل تعديل حجم الصفقة",
     "Insufficient Balance": "الرصيد غير كافي لتنفيذ الصفقة",
     "Bullish Confirmation Failed": "فشل تأكيد الشمعة الصعودية",
     "Volume Filter Failed": "فلتر حجم التداول فشل",
@@ -187,7 +191,8 @@ def get_dashboard_payload() -> Dict:
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    
+    with fixed_trade_size_lock: trade_size = FIXED_TRADE_SIZE_USDT
+
     return {
         "trading_enabled": trading_enabled, 
         "paper_trading_mode": is_paper_mode,
@@ -196,6 +201,7 @@ def get_dashboard_payload() -> Dict:
         "rejections": rejections, 
         "market_state": market_state,
         "min_signal_quality": min_quality,
+        "fixed_trade_size": trade_size,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -533,7 +539,7 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY, FIXED_TRADE_SIZE_USDT
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -542,7 +548,8 @@ def load_settings_from_redis():
             with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 0.85)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
-        
+            with fixed_trade_size_lock: FIXED_TRADE_SIZE_USDT = settings.get('FIXED_TRADE_SIZE_USDT', 5.0)
+
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
@@ -564,50 +571,27 @@ def load_settings_from_redis():
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 # --- Risk Management ---
-# ======================= START: إصلاح خطأ في إدارة المخاطر =======================
 def dynamic_risk_management(symbol, df, consecutive_losses=0):
-    """
-    حساب المخاطر ديناميكياً مع تحسينات
-    """
     with risk_per_trade_lock: 
         base_risk = RISK_PER_TRADE_PERCENT
-    
-    # التحقق من صحة البيانات
     if df.empty or 'atr_percent' not in df.columns or len(df) < 14:
         logger.warning(f"[Risk] Insufficient data for dynamic risk calculation for {symbol}")
         return base_risk
-    
     try:
         atr_percent = df['atr_percent'].iloc[-1]
-        
-        # عامل التقلب
-        if atr_percent > 6.0: 
-            volatility_factor = 0.6
-        elif atr_percent > 4.0: 
-            volatility_factor = 0.8
-        elif atr_percent < 1.0: 
-            volatility_factor = 1.3
-        elif atr_percent < 1.5: 
-            volatility_factor = 1.2
-        else: 
-            volatility_factor = 1.0
-        
-        # عامل الخسائر المتتالية
+        if atr_percent > 6.0: volatility_factor = 0.6
+        elif atr_percent > 4.0: volatility_factor = 0.8
+        elif atr_percent < 1.0: volatility_factor = 1.3
+        elif atr_percent < 1.5: volatility_factor = 1.2
+        else: volatility_factor = 1.0
         loss_factor = max(0.3, 1.0 - (consecutive_losses * 0.12))
-        
-        # حساب المخاطر النهائية
         final_risk = base_risk * volatility_factor * loss_factor
-        final_risk_percent = min(final_risk, 2.5)  # الحد الأقصى للمخاطر
-        
-        logger.info(f"[Risk] Dynamic risk for {symbol}: {final_risk_percent:.2f}% "
-                   f"(Base: {base_risk}%, Vol: {volatility_factor:.2f}, Loss: {loss_factor:.2f})")
-        
+        final_risk_percent = min(final_risk, 2.5)
+        logger.info(f"[Risk] Dynamic risk for {symbol}: {final_risk_percent:.2f}% (Base: {base_risk}%, Vol: {volatility_factor:.2f}, Loss: {loss_factor:.2f})")
         return final_risk_percent
-    
     except Exception as e:
         logger.error(f"[Risk] Error calculating dynamic risk for {symbol}: {e}")
         return base_risk
-# ======================== END: إصلاح خطأ في إدارة المخاطر ========================
 
 # --- Filters & Strategies ---
 def calculate_signal_quality_score(symbol, df, strategy_name):
@@ -812,16 +796,14 @@ def adjust_quantity_to_step_size(quantity: float, step_size: str) -> float:
         decimal_quantity = Decimal(str(quantity))
         adjusted = decimal_quantity.quantize(step, rounding=ROUND_DOWN)
         
-        if adjusted <= 0:
-            logger.warning(f"Adjusted quantity is zero or negative: {adjusted}")
-            return float(step)
-        
         return float(adjusted)
     except Exception as e:
         logger.error(f"Error adjusting quantity: {e}")
         return quantity
 
+# ======================= START: [FIX] Refactored Trade Creation Logic =======================
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+    # --- 1. Pre-Trade Quality & Cooldown Checks ---
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
         with min_quality_lock:
@@ -831,6 +813,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
             return
         logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
+        
         with cooldowns_lock: 
             until = cooldowns_by_symbol.get(symbol)
             if until and datetime.now(timezone.utc) < until:
@@ -840,10 +823,10 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         logger.error(f"❌ [Signal Creation] Error during pre-checks for {symbol}: {e}", exc_info=True)
         return
 
+    # --- 2. Setup Trade Parameters ---
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
-    stop_loss = trade_levels['stop_loss']
     
     signal_details = {
         "atr": trade_levels['atr'], "trailing_stop_activated": False,
@@ -851,83 +834,55 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         "quality_score": quality_score
     }
 
+    # --- 3. Execute Trade (Real or Paper) ---
     if is_real:
         with balance_lock: current_usdt_balance = usdt_balance
-        with consecutive_losses_lock: losses = consecutive_losses_by_symbol.get(symbol, 0)
-        risk_percent = dynamic_risk_management(symbol, df, losses)
-        max_risk_usdt = current_usdt_balance * (risk_percent / 100)
-        risk_per_unit = max(entry_price - stop_loss, 1e-8)
-        quantity = max_risk_usdt / risk_per_unit
-        if quantity <= 0: log_rejection(symbol, "Insufficient Balance"); return
-        
+        with fixed_trade_size_lock: trade_size_usdt = FIXED_TRADE_SIZE_USDT
+
+        # 3.1. Balance Check
+        if trade_size_usdt > current_usdt_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": trade_size_usdt, "available": round(current_usdt_balance, 2)})
+            return
+
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
             logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}")
             return
 
-        step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
-        adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
-        notional = adjusted_quantity * entry_price
-
+        # 3.2. MinNotional Check
         min_notional = 0.0
         for f in symbol_info.get('filters', []):
             if f.get('filterType') in ('NOTIONAL', 'MIN_NOTIONAL') and 'minNotional' in f:
                 try:
                     min_notional = float(f['minNotional'])
                     break
-                except Exception:
-                    pass
+                except (ValueError, TypeError): pass
+        
+        if trade_size_usdt < min_notional:
+            logger.warning(f"⚠️ [Real Trade] Trade size ${trade_size_usdt} for {symbol} is below minNotional of ${min_notional}. Trade rejected.")
+            log_rejection(symbol, "MinNotional Filter Failed", {"trade_size": trade_size_usdt, "min_notional": min_notional})
+            return
+        
+        # 3.3. Quantity Calculation & LOT_SIZE Adjustment
+        quantity = trade_size_usdt / entry_price
+        step_size = next((f['stepSize'] for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), '0.000001')
+        adjusted_quantity = adjust_quantity_to_step_size(quantity, step_size)
 
-        if notional < max(min_notional, 1e-8):
-            with balance_lock:
-                free_usdt = float(usdt_balance)
-            quote_qty = min(max_risk_usdt, free_usdt * 0.95)
+        if adjusted_quantity <= 0:
+            logger.error(f"❌ [Real Trade] Adjusted quantity for {symbol} is 0 after applying LOT_SIZE filter. Trade rejected.")
+            log_rejection(symbol, "LOT_SIZE Filter Failed", {"original_qty": quantity, "adjusted_qty": adjusted_quantity})
+            return
 
-            if quote_qty >= max(min_notional, 10.0):
-                try:
-                    logger.info(f"💰 [Real Trade] Using quoteOrderQty fallback: {quote_qty} USDT on {symbol}")
-                    order = client.create_order(
-                        symbol=symbol,
-                        side=Client.SIDE_BUY,
-                        type=Client.ORDER_TYPE_MARKET,
-                        quoteOrderQty=str(round(quote_qty, 2))
-                    )
-                    avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
-                    final_quantity = float(order.get('executedQty', 0)) or (quote_qty / entry_price)
-                    order_id = order.get('orderId', 'N/A')
-
-                    save_signal_to_db(
-                        symbol, avg_fill_price, trade_levels,
-                        strategy_name, True, final_quantity,
-                        {**signal_details, "avg_fill": avg_fill_price, "used_quote_qty": quote_qty},
-                        order_id
-                    )
-                    
-                    send_telegram_message(
-                        f"✅ *تم فتح صفقة حقيقية*\n"
-                        f"*العملة:* `{symbol}`\n"
-                        f"*الكمية:* `{final_quantity:.6f}`\n"
-                        f"*السعر:* `{avg_fill_price:.4f}`\n"
-                        f"*المبلغ المستخدم:* `{quote_qty} USDT`",
-                        force=True
-                    )
-                    return
-                except BinanceAPIException as e:
-                    logger.error(f"❌ [Real Trade] Binance API Error: {e}")
-                    send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة*\\n`{e}`", force=True)
-                    return
-                except Exception as e:
-                    logger.error(f"❌ [Real Trade] quoteOrderQty failed: {e}", exc_info=True)
-                    return
-
+        # 3.4. Place Order
         try:
-            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol}")
+            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol} (approx ${trade_size_usdt})")
             order = client.create_order(
                 symbol=symbol,
                 side=Client.SIDE_BUY,
                 type=Client.ORDER_TYPE_MARKET,
                 quantity=adjusted_quantity
             )
+            
             avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
             final_quantity = float(order.get('executedQty', adjusted_quantity))
             order_id = order.get('orderId', 'N/A')
@@ -935,32 +890,35 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             save_signal_to_db(
                 symbol, avg_fill_price, trade_levels,
                 strategy_name, True, final_quantity,
-                {**signal_details, "avg_fill": avg_fill_price}, order_id
+                {**signal_details, "avg_fill": avg_fill_price, "trade_value_usdt": trade_size_usdt}, order_id
             )
             send_telegram_message(
                 f"✅ *تم فتح صفقة حقيقية*\n"
                 f"*العملة:* `{symbol}`\n"
                 f"*الكمية:* `{final_quantity:.6f}`\n"
-                f"*السعر:* `{avg_fill_price:.4f}`",
+                f"*السعر:* `{avg_fill_price:.4f}`\n"
+                f"*القيمة:* `~${trade_size_usdt:.2f}`",
                 force=True
             )
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
             return
 
         except BinanceAPIException as e:
-            logger.error(f"❌ [Real Trade] Binance API Error: {e}")
-            send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة*\\n`{e}`", force=True)
+            logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
+            send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة {symbol}*\n`{e}`", force=True)
+            return
+        except Exception as e:
+            logger.error(f"❌ [Real Trade] Failed to place order for {symbol}: {e}", exc_info=True)
             return
 
-        except Exception as e:
-            logger.error(f"❌ [Real Trade] Failed to place order: {e}", exc_info=True)
-            return
-    else:
-        quantity = PAPER_TRADE_SIZE_USDT / entry_price
+    else: # Paper Trading
+        with fixed_trade_size_lock: trade_size_usdt = FIXED_TRADE_SIZE_USDT
+        quantity = trade_size_usdt / entry_price
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
-        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*هدف1:* `{trade_levels['target_price_1']:.4f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
+        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*قيمة الصفقة:* `${trade_size_usdt:.2f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
         send_telegram_message(message, force=True)
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
+# ======================== END: [FIX] Refactored Trade Creation Logic ========================
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1127,6 +1085,10 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
               <input type="range" id="qualityFilter" min="30" max="90" value="60" class="slider">
               <span id="qualityValue">60</span>
             </div>
+          </div>
+          <div class="kv" style="margin-top: 12px;">
+            <div>حجم الصفقة (USDT):</div>
+            <input type="number" id="tradeSizeInput" value="5.0" step="0.5" min="1.0" style="width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 6px; border-radius: 8px; text-align: center;">
           </div>
         </div>
       </div>
@@ -1366,6 +1328,7 @@ async function initializeDashboard() {
 
         qs('#qualityFilter').value = baseData.min_signal_quality;
         qs('#qualityValue').textContent = baseData.min_signal_quality;
+        qs('#tradeSizeInput').value = baseData.fixed_trade_size;
 
         updateMarketTrends(baseData.market_state);
         
@@ -1431,6 +1394,10 @@ function setupWebSocket() {
             case 'quality_filter':
                 qs('#qualityFilter').value = data.payload.min_quality;
                 qs('#qualityValue').textContent = data.payload.min_quality;
+                break;
+            case 'trade_size_update':
+                const input = qs('#tradeSizeInput');
+                if (input) input.value = data.payload.trade_size;
                 break;
         }
     };
@@ -1511,6 +1478,18 @@ qs('#qualityFilter').addEventListener('input', function() {
   const value = this.value;
   qs('#qualityValue').textContent = value;
   debouncedQualityUpdate(value);
+});
+
+const debouncedTradeSizeUpdate = debounce((value) => {
+    fetch('/api/trade_size', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({trade_size: parseFloat(value)})
+    }).catch(error => console.error('Error updating trade size:', error));
+}, 800);
+
+qs('#tradeSizeInput').addEventListener('input', function() {
+  debouncedTradeSizeUpdate(this.value);
 });
 
 
@@ -1787,23 +1766,17 @@ def api_health():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# ======================= START: إصلاح استعلام جودة الإشارة =======================
 @app.route('/api/open_signals')
 def get_open_signals():
     if not check_db_connection():
         return jsonify({"error": "Database connection failed"}), 500
     
     sort_by = request.args.get('sort', 'id')
-    # The field for sorting must exist, so we extract it.
-    # The JS code relies on the full `signal_details` object.
     allowed_sort_fields = ['id', 'symbol', 'entry_price', 'strategy_name', 'quality_score']
     if sort_by not in allowed_sort_fields:
         sort_by = 'id'
 
     order_direction = 'DESC' if sort_by in ['id', 'quality_score'] else 'ASC'
-    
-    # We create a temporary column `quality_score` for sorting purposes
-    # but also select the main `signal_details` column for the UI.
     sort_column_expression = sql.SQL("(signal_details->>'quality_score')::numeric")
 
     try:
@@ -1812,8 +1785,8 @@ def get_open_signals():
                 SELECT 
                     id, symbol, entry_price, target_price_1, target_price_2, 
                     stop_loss, strategy_name, is_real_trade, quantity, 
-                    signal_details, -- [FIX] Ensure the full details object is selected
-                    {sort_expression} as quality_score -- Keep this for sorting
+                    signal_details, 
+                    {sort_expression} as quality_score
                 FROM signals 
                 WHERE status IN ('open', 'updated')
                 ORDER BY {sort_col} {direction} NULLS LAST
@@ -1828,7 +1801,6 @@ def get_open_signals():
     except Exception as e:
         logger.error(f"Error fetching open signals: {e}")
         return jsonify({"error": str(e)}), 500
-# ======================== END: إصلاح استعلام جودة الإشارة ========================
 
 @app.route('/api/performance_metrics')
 def get_performance_metrics():
@@ -2033,14 +2005,33 @@ def update_quality_filter():
         logger.error(f"Error updating quality filter: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-# ======================= START: إصلاحات الإغلاق اليدوي =======================
+# ======================= START: [NEW] API Endpoint for Trade Size =======================
+@app.route('/api/trade_size', methods=['POST'])
+def update_trade_size():
+    global FIXED_TRADE_SIZE_USDT
+    try:
+        data = request.json
+        trade_size = data.get('trade_size', 5.0)
+        
+        with fixed_trade_size_lock:
+            FIXED_TRADE_SIZE_USDT = float(trade_size)
+
+        if redis_client:
+            settings_data = redis_client.get('trading_settings')
+            settings = json.loads(settings_data) if settings_data else {}
+            settings['FIXED_TRADE_SIZE_USDT'] = FIXED_TRADE_SIZE_USDT
+            redis_client.set('trading_settings', json.dumps(settings))
+        
+        broadcast({"type": "trade_size_update", "payload": {"trade_size": FIXED_TRADE_SIZE_USDT}})
+        log_and_notify("info", f"Fixed trade size updated to ${FIXED_TRADE_SIZE_USDT}.", "SETTINGS_UPDATE")
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Error updating trade size: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+# ======================== END: [NEW] API Endpoint for Trade Size ========================
+
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
-    """
-    Handles the logic for manually closing a trade by checking the active signal cache first.
-    This ensures consistency with the trade management loop and prevents race conditions.
-    """
     with signal_cache_lock:
-        # Find the signal in the active cache using its ID. This is the source of truth for the bot.
         signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
 
     if not signal_to_close:
@@ -2049,7 +2040,6 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
 
     symbol = signal_to_close['symbol']
 
-    # If no closing price is provided by the API call, fetch the current live price.
     if closing_price is None:
         with live_prices_lock:
             closing_price = live_prices.get(symbol)
@@ -2060,28 +2050,16 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
             return False
 
     logger.info(f"[Manual Close] User initiated manual close for signal {signal_id} ({symbol}) at price {closing_price}")
-
-    # Delegate to the main, reliable closing function.
-    # This function handles the exchange order, DB update, cache removal, and notifications.
     close_signal(signal_to_close, closing_price, "manual_close")
     return True
 
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
-    """
-    API endpoint to manually close a trade.
-    """
-    # Use silent=True to avoid BadRequest error if the request body is empty.
     data = request.get_json(silent=True) or {}
     closing_price = data.get('closing_price')
-
-    # Start the closing process in a new thread to avoid blocking the API response.
     thread = Thread(target=close_trade_manually, args=(signal_id, closing_price))
     thread.start()
-
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
-# ======================== END: إصلاحات الإغلاق اليدوي ========================
-
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -2092,7 +2070,8 @@ def update_settings():
         MAX_OPEN_TRADES = int(data['max_trades'])
         if redis_client:
             with trading_mode_lock: is_paper = paper_trading_mode
-            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
+            with fixed_trade_size_lock: trade_size = FIXED_TRADE_SIZE_USDT
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper, 'FIXED_TRADE_SIZE_USDT': trade_size}
             redis_client.set('trading_settings', json.dumps(settings))
         log_and_notify("info", "Trading settings updated.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات العامة"})
@@ -2387,7 +2366,6 @@ def execute_close_order(symbol: str, quantity: float, reason: str):
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
     
-    # Check if the signal is still open in the cache before proceeding
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal_id:
             logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
@@ -2407,7 +2385,6 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             
     update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
     
-    # Safely remove from cache after all operations
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
     
@@ -2511,16 +2488,10 @@ def trade_management_loop():
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
             time.sleep(2)
 
-# ======================= START: إصلاح خطأ في تحديث حالة السوق =======================
 def update_market_state():
-    """
-    تحديث حالة السوق مع تحسينات
-    """
     global current_market_state
-    
     try:
-        # الحصول على بيانات BTC كمرجع
-        btc_df = fetch_historical_data(BTC_SYMBOL, '1h', days=10) # أيام أكثر لـ ema200
+        btc_df = fetch_historical_data(BTC_SYMBOL, '1h', days=10)
         if btc_df is None or len(btc_df) < 200:
             logger.warning("[Market State] Insufficient BTC data for full analysis")
             return
@@ -2528,24 +2499,20 @@ def update_market_state():
         btc_df = calculate_all_features(btc_df)
         last_btc = btc_df.iloc[-1]
         
-        # تحليل اتجاه BTC
         btc_trend = "sideways"
         if last_btc['close'] > last_btc['ema200'] and last_btc['macd_hist'] > 0:
             btc_trend = "bullish"
         elif last_btc['close'] < last_btc['ema200'] and last_btc['macd_hist'] < 0:
             btc_trend = "bearish"
         
-        # تحليل الفريمات الزمنية المختلفة
         trend_details = {}
         for tf in TIMEFRAMES_FOR_TREND_LIGHTS:
             try:
-                # نستخدم بيانات أكثر للحصول على متوسطات دقيقة
                 tf_df = fetch_historical_data(BTC_SYMBOL, tf, days=15)
                 if tf_df is not None and len(tf_df) >= 50:
                     tf_df = calculate_all_features(tf_df)
                     last_tf = tf_df.iloc[-1]
                     
-                    # تحديد الاتجاه
                     tf_trend = "sideways"
                     if last_tf['close'] > last_tf['ema50'] and last_tf['adx'] > 20:
                         tf_trend = "bullish"
@@ -2561,7 +2528,6 @@ def update_market_state():
             except Exception as e:
                 logger.error(f"[Market State] Error analyzing {tf} timeframe: {e}")
         
-        # تحديث الحالة العامة
         with market_state_lock:
             current_market_state = {
                 "btc_trend": btc_trend,
@@ -2572,21 +2538,17 @@ def update_market_state():
                 "last_updated": datetime.now(timezone.utc).isoformat()
             }
         
-        # إرسال تحديث عبر WebSocket
         broadcast({"type": "market_state_update", "payload": current_market_state})
         
     except Exception as e:
         logger.error(f"[Market State] Error updating market state: {e}", exc_info=True)
 
 def start_market_state_updater():
-    """
-    بدء تحديث حالة السوق بشكل دوري
-    """
     def update_loop():
         while True:
             try:
                 update_market_state()
-                time.sleep(300)  # تحديث كل 5 دقائق
+                time.sleep(300)
             except Exception as e:
                 logger.error(f"[Market State Updater] Error in update loop: {e}")
                 time.sleep(60)
@@ -2594,7 +2556,6 @@ def start_market_state_updater():
     thread = Thread(target=update_loop, daemon=True)
     thread.start()
     logger.info("[Market State] Started market state updater thread")
-# ======================== END: إصلاح خطأ في تحديث حالة السوق ========================
 
 def update_balance():
     try:
@@ -2616,7 +2577,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2 (Comprehensive Fixes) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2.5 (LOT_SIZE Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2639,8 +2600,8 @@ if __name__ == '__main__':
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
     Thread(target=trade_management_loop, daemon=True).start()
-    start_market_state_updater() # بدء تشغيل المحدث الجديد
+    start_market_state_updater()
     Thread(target=update_balance_loop, daemon=True).start()
 
-    logger.info("🌐 [Flask] Starting UI on http://127.0.0.1:5000")
+    logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
