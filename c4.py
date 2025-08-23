@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V23.2.1 (إصلاح الإغلاق اليدوي)
+# ملف c4.py - نسخة V23.2.2 (تحسين واجهة المستخدم لشريط التقدم)
 # --- وصف الإصدار:
-# هذا الإصدار يصلح خطأين حاسمين في وظيفة الإغلاق اليدوي للصفقات.
-# 1.  [إصلاح] معالجة خطأ HTTP 400 عند استدعاء API الإغلاق اليدوي عن طريق جعل تحليل JSON أكثر تسامحًا.
-# 2.  [إصلاح] إعادة هيكلة دالة `close_trade_manually` لتستدعي دالة `close_signal` الموحدة، مما يضمن تنفيذ أمر البيع الفعلي على المنصة بدلاً من مجرد تحديث قاعدة البيانات.
-# 3.  [تحسين] إضافة المزيد من التفاصيل في سجلات الأخطاء لعمليات الإغلاق.
+# هذا الإصدار يحسن من واجهة المستخدم لشريط التقدم في الصفقات المفتوحة.
+# 1.  [تحسين] تعديل منطق JavaScript في لوحة التحكم لعرض شريط التقدم باللون الأحمر عندما يتحرك السعر نحو وقف الخسارة.
+# 2.  [تحسين] عرض الشريط باللون الأخضر كالسابق عندما يتحرك السعر نحو الهدف.
+# 3.  [تحسين] يتم حساب التقدم لكلا الاتجاهين (الربح والخسارة) كنسبة مئوية من المسافة الإجمالية.
 
 import time
 import os
@@ -1198,7 +1198,24 @@ function closeTrade(signalId) {
 
 function renderSignal(signal) {
     const cp = signal.current_price || lastPrices[signal.symbol] || signal.entry_price;
-    const pToTp = signal.progress_to_tp || 0;
+    const entry = signal.entry_price;
+    const tp1 = signal.target_price_1;
+    const sl = signal.stop_loss;
+
+    let progress = 0;
+    let color = 'transparent';
+    let title = 'في انتظار حركة السعر';
+
+    if (cp >= entry && tp1 > entry) {
+        progress = Math.min(100, ((cp - entry) / (tp1 - entry)) * 100);
+        color = 'linear-gradient(90deg, var(--ok), #3fd1b0)';
+        title = `التقدم نحو الهدف: ${progress.toFixed(1)}%`;
+    } else if (cp < entry && entry > sl) {
+        progress = Math.min(100, ((entry - cp) / (entry - sl)) * 100);
+        color = 'linear-gradient(90deg, var(--bad), #ff6b7a)';
+        title = `الاقتراب من وقف الخسارة: ${progress.toFixed(1)}%`;
+    }
+
     const qualityScore = signal.signal_details?.quality_score || 0;
     const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
     
@@ -1213,8 +1230,8 @@ function renderSignal(signal) {
                 <div class="small price-delta"></div>
                 <button class="btn warn small" onclick="closeTrade(${signal.id})">إغلاق</button>
             </div>
-            <div class="progress" title="التقدم نحو الهدف: ${pToTp.toFixed(1)}%">
-                <span class="progress-bar" style="width:${pToTp}%; background:linear-gradient(90deg, var(--ok), #3fd1b0)"></span>
+            <div class="progress" title="${title}">
+                <span class="progress-bar" style="width:${progress.toFixed(2)}%; background:${color};"></span>
             </div>
         </div>`;
 }
@@ -1257,12 +1274,31 @@ function updatePrices(priceData) {
             if (signalData) {
                 const entry = signalData.entry_price;
                 const tp1 = signalData.target_price_1;
+                const sl = signalData.stop_loss;
+
                 let progress = 0;
-                if (price > entry && tp1 > entry) {
+                let color = 'transparent';
+                let title = 'في انتظار حركة السعر';
+
+                if (price >= entry && tp1 > entry) {
                     progress = Math.min(100, ((price - entry) / (tp1 - entry)) * 100);
+                    color = 'linear-gradient(90deg, var(--ok), #3fd1b0)';
+                    title = `التقدم نحو الهدف: ${progress.toFixed(1)}%`;
+                } else if (price < entry && entry > sl) {
+                    progress = Math.min(100, ((entry - price) / (entry - sl)) * 100);
+                    color = 'linear-gradient(90deg, var(--bad), #ff6b7a)';
+                    title = `الاقتراب من وقف الخسارة: ${progress.toFixed(1)}%`;
                 }
+
                 const progressBar = el.querySelector('.progress-bar');
-                if(progressBar) progressBar.style.width = `${progress}%`;
+                const progressContainer = el.querySelector('.progress');
+                if(progressBar) {
+                    progressBar.style.width = `${progress}%`;
+                    progressBar.style.background = color;
+                }
+                if(progressContainer) {
+                    progressContainer.title = title;
+                }
             }
         });
         lastPrices[symbol] = price;
