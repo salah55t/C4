@@ -1,11 +1,9 @@
-# ملف c4.py - نسخة V23.2.0 (تحسينات شاملة)
+# ملف c4.py - نسخة V23.2.1 (إصلاح الإغلاق اليدوي)
 # --- وصف الإصدار:
-# هذا الإصدار يضيف تحسينات جوهرية على إدارة المخاطر، تحليل السوق، وموثوقية النظام.
-# 1.  [تحسين] تحديث دالة `dynamic_risk_management` لمنطق أكثر تفصيلاً في حساب المخاطر بناءً على التقلبات والخسائر.
-# 2.  [تحسين] إعادة بناء آلية تحديث حالة السوق (`update_market_state`) لتوفير تحليل أعمق لاتجاه BTC والفريمات الزمنية المختلفة.
-# 3.  [تحسين] تعزيز متانة معالجة رسائل WebSocket و Telegram.
-# 4.  [إصلاح] تم تحديث واجهة المستخدم وقالب HTML ليعكس بشكل صحيح زر الإغلاق اليدوي المضاف في الإصدار السابق ويعالج الأحداث بشكل صحيح.
-# 5.  [إضافة] بدء تشغيل محدث حالة السوق في thread منفصل لضمان التحديثات الدورية دون التأثير على العمليات الأخرى.
+# هذا الإصدار يصلح خطأين حاسمين في وظيفة الإغلاق اليدوي للصفقات.
+# 1.  [إصلاح] معالجة خطأ HTTP 400 عند استدعاء API الإغلاق اليدوي عن طريق جعل تحليل JSON أكثر تسامحًا.
+# 2.  [إصلاح] إعادة هيكلة دالة `close_trade_manually` لتستدعي دالة `close_signal` الموحدة، مما يضمن تنفيذ أمر البيع الفعلي على المنصة بدلاً من مجرد تحديث قاعدة البيانات.
+# 3.  [تحسين] إضافة المزيد من التفاصيل في سجلات الأخطاء لعمليات الإغلاق.
 
 import time
 import os
@@ -1177,8 +1175,14 @@ function closeTrade(signalId) {
     fetch(`/api/close_trade/${signalId}`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({}) // Send empty JSON body
     })
-    .then(res => res.json())
+    .then(res => {
+        if (!res.ok) {
+            return res.json().then(err => { throw new Error(err.message || 'Server error') });
+        }
+        return res.json();
+    })
     .then(data => {
         if (data.success) {
             showNotification('تم إرسال أمر الإغلاق بنجاح.', 'success');
@@ -1187,7 +1191,7 @@ function closeTrade(signalId) {
         }
     })
     .catch(err => {
-        showNotification('حدث خطأ في الشبكة عند محاولة إغلاق الصفقة.', 'error');
+        showNotification(`حدث خطأ: ${err.message}`, 'error');
         console.error(err);
     });
 }
@@ -1983,9 +1987,15 @@ def update_quality_filter():
         logger.error(f"Error updating quality filter: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+# ======================= START: إصلاحات الإغلاق اليدوي =======================
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
+    """
+    Handles the logic for manually closing a trade. It fetches the signal,
+    determines the closing price, and then calls the main `close_signal` function
+    to ensure the trade is executed on the exchange and the database is updated correctly.
+    """
     if not check_db_connection() or not conn:
-        logger.error("[Close Trade] Database connection not available")
+        logger.error("[Manual Close] Database connection not available for signal %s", signal_id)
         return False
     
     try:
@@ -1993,80 +2003,52 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
             cur.execute("SELECT * FROM signals WHERE id = %s AND status IN ('open', 'updated');", (signal_id,))
             signal = cur.fetchone()
             
-            if not signal:
-                logger.warning(f"[Close Trade] Signal {signal_id} not found or already closed")
-                return False
-            
-            symbol = signal['symbol']
-            entry_price = signal['entry_price']
-            is_real = signal['is_real_trade']
+        if not signal:
+            logger.warning(f"[Manual Close] Signal {signal_id} not found or already closed.")
+            return False
+        
+        signal_dict = dict(signal)
+        symbol = signal_dict['symbol']
+        
+        # If no closing price is provided, fetch the current live price
+        if closing_price is None:
+            with live_prices_lock:
+                closing_price = live_prices.get(symbol)
             
             if closing_price is None:
-                with live_prices_lock:
-                    closing_price = live_prices.get(symbol)
-                
-                if closing_price is None:
-                    logger.error(f"[Close Trade] Current price for {symbol} not available")
-                    return False
-            
-            profit_percentage = ((closing_price - entry_price) / entry_price) * 100
-            
-            cur.execute("""
-                UPDATE signals 
-                SET status = 'closed', closing_price = %s, closed_at = NOW(), 
-                    profit_percentage = %s, closing_reason = 'manual_close'
-                WHERE id = %s;
-            """, (closing_price, profit_percentage, signal_id))
-            
-            if is_real and profit_percentage < 0:
-                with consecutive_losses_lock:
-                    consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
-            
-            with signal_cache_lock:
-                if symbol in open_signals_cache:
-                    del open_signals_cache[symbol]
-            
-            conn.commit()
-            
-            message = f"🔒 *تم إغلاق الصفقة يدوياً*\n" \
-                      f"العملة: `{symbol}`\n" \
-                      f"سعر الدخول: `{entry_price:.4f}`\n" \
-                      f"سعر الإغلاق: `{closing_price:.4f}`\n" \
-                      f"الربح/الخسارة: `{profit_percentage:.2f}%`"
-            
-            send_telegram_message(message, force=True)
-            log_and_notify("info", f"Manually closed trade for {symbol} (ID: {signal_id})", "MANUAL_TRADE_CLOSE")
-            
-            broadcast({
-                "type": "trade_closed",
-                "payload": {
-                    "signal_id": signal_id,
-                    "symbol": symbol,
-                    "closing_price": closing_price,
-                    "profit_percentage": profit_percentage,
-                    "closing_reason": "manual_close"
-                }
-            })
-            
-            return True
+                logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
+                return False
+        
+        logger.info(f"[Manual Close] Attempting to manually close signal {signal_id} for {symbol} at price {closing_price}")
+        
+        # Delegate to the main, reliable closing function
+        close_signal(signal_dict, closing_price, "manual_close")
+        
+        return True
     
     except Exception as e:
-        logger.error(f"[Close Trade] Error closing trade {signal_id}: {e}", exc_info=True)
+        logger.error(f"[Manual Close] Critical error closing trade {signal_id}: {e}", exc_info=True)
         if conn:
             conn.rollback()
         return False
 
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
-    data = request.get_json() or {}
+    """
+    API endpoint to manually close a trade.
+    It now uses `request.get_json(silent=True)` to prevent 400 errors on empty requests.
+    """
+    # Use silent=True to avoid BadRequest error if the request body is empty
+    data = request.get_json(silent=True) or {}
     closing_price = data.get('closing_price')
     
     success = close_trade_manually(signal_id, closing_price)
     
     if success:
-        return jsonify({"success": True, "message": "Trade closed successfully"})
+        return jsonify({"success": True, "message": "Trade close command sent successfully."})
     else:
-        return jsonify({"success": False, "message": "Failed to close trade"}), 400
+        return jsonify({"success": False, "message": "Failed to close trade. Check logs for details."}), 400
+# ======================== END: إصلاحات الإغلاق اليدوي ========================
 
 @app.route('/update_settings', methods=['POST'])
 def update_settings():
@@ -2371,26 +2353,38 @@ def execute_close_order(symbol: str, quantity: float, reason: str):
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
+    
+    # Check if the signal is still open in the cache before proceeding
+    with signal_cache_lock:
+        if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal_id:
+            logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
+            return
+
     remaining_quantity = signal.get('quantity', 0)
     if remaining_quantity > 0:
         execute_close_order(symbol, remaining_quantity, reason)
+    
     profit = ((closing_price - entry_price) / entry_price) * 100
+    
     with consecutive_losses_lock:
         if profit < 0:
             consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
         else:
             consecutive_losses_by_symbol[symbol] = 0
+            
     update_signal_in_db(signal_id, {"status": "closed", "closing_price": closing_price, "closed_at": datetime.now(timezone.utc), "profit_percentage": profit, "closing_reason": reason})
+    
+    # Safely remove from cache after all operations
     with signal_cache_lock:
         if symbol in open_signals_cache: del open_signals_cache[symbol]
     
-    broadcast({"type": "trade_closed", "payload": {"signal_id": signal_id, "symbol": symbol}})
+    broadcast({"type": "trade_closed", "payload": {"signal_id": signal_id, "symbol": symbol, "reason": reason}})
     
     trade_type = "حقيقية" if signal.get('is_real_trade') else "ورقية"
     result_emoji = "✅" if profit >= 0 else "🔻"
     reason_map = {
         "SL_HIT": "ضرب وقف الخسارة", "TP1_HIT": "تحقيق الهدف الأول", "TP2_HIT": "تحقيق الهدف الثاني",
-        "MANUAL_CLOSE": "إغلاق يدوي", "TRAILING_SL_HIT": "ضرب الوقف المتحرك",
+        "manual_close": "إغلاق يدوي", "TRAILING_SL_HIT": "ضرب الوقف المتحرك",
         "stop_loss": "ضرب وقف الخسارة", "target_2_reached": "تحقيق الهدف الثاني",
         "support_broken": "كسر الدعم (إشارة معاكسة)"
     }
@@ -2399,7 +2393,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     settings = get_notification_settings()
     profit_condition = profit >= settings['min_profit_notification']
     loss_condition = profit <= settings['max_loss_notification']
-    if profit_condition or loss_condition:
+    if profit_condition or loss_condition or reason == "manual_close":
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 
 
