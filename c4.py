@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V23.2.6 (إصلاح LOT_SIZE المتقدم)
+# ملف c4.py - نسخة V25.0.0 (دمج إدارة المخاطر من V8.2)
 # --- وصف الإصدار:
-# 1.  [إصلاح جذري] استبدال آلية تعديل حجم الصفقة بأخرى ديناميكية تقرأ قواعد (stepSize, minQty, maxQty) من Binance لكل عملة.
-# 2.  [دقة] استخدام عمليات حسابية من نوع Decimal لضمان أقصى دقة وتجنب أخطاء التقريب.
-# 3.  [شمولية] تطبيق الآلية الجديدة على جميع أوامر الشراء والبيع (فتح صفقة، إغلاق جزئي عند الهدف، إغلاق كلي).
-# 4.  [نتيجة] حل نهائي لمشكلة APIError(code=-1013): Filter failure: LOT_SIZE.
+# 1.  [دمج أساسي] تم استبدال منطق حساب حجم الصفقة ليعتمد على نسبة المخاطرة والمسافة إلى وقف الخسارة (من V8.2).
+# 2.  [هيكلة] تم فصل منطق تنفيذ الأوامر في دالة `place_order` مستقلة.
+# 3.  [دقة] استخدام نوع البيانات `Decimal` في جميع الحسابات المالية لضمان الدقة.
+# 4.  [تحسين مستمر] الحفاظ على ميزة التحقق من الرصيد الفعلي على المنصة قبل تنفيذ أوامر البيع لزيادة الموثوقية.
+# 5.  [نتيجة] نظام تداول يجمع بين إدارة المخاطر المتقدمة من V8.2 مع استقرار وموثوقية الإصلاحات الأخيرة.
 
 import time
 import os
@@ -38,11 +39,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v23_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v25_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV23')
+logger = logging.getLogger('CryptoBotV25')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -81,17 +82,13 @@ COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-RISK_PER_TRADE_PERCENT: float = 0.85 
+RISK_PER_TRADE_PERCENT: float = 1.0
 risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
-FIXED_TRADE_SIZE_USDT: float = 5.0
-fixed_trade_size_lock = Lock()
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
 MIN_SIGNAL_QUALITY: int = 60
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
-
 min_quality_lock = Lock()
-
 
 # --- مفاتيح تفعيل الاستراتيجيات ---
 USE_BB_STOCH_STRATEGY: bool = True
@@ -155,7 +152,8 @@ REJECTION_REASONS_AR = {
     "Volume Filter Failed": "فلتر حجم التداول فشل",
     "MACD Momentum Failed": "فلتر زخم الماكد فشل",
     "Long-term Trend Filter Failed": "فلتر الاتجاه طويل الأجل فشل",
-    "Low Quality Signal": "جودة الإشارة منخفضة"
+    "Low Quality Signal": "جودة الإشارة منخفضة",
+    "Invalid Position Size": "حجم الصفقة غير صالح (الوقف أعلى من الدخول)",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -190,7 +188,7 @@ def get_dashboard_payload() -> Dict:
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    with fixed_trade_size_lock: trade_size = FIXED_TRADE_SIZE_USDT
+    with risk_per_trade_lock: risk_percent = RISK_PER_TRADE_PERCENT
 
     return {
         "trading_enabled": trading_enabled, 
@@ -200,7 +198,7 @@ def get_dashboard_payload() -> Dict:
         "rejections": rejections, 
         "market_state": market_state,
         "min_signal_quality": min_quality,
-        "fixed_trade_size": trade_size,
+        "risk_per_trade": risk_percent,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -504,17 +502,16 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY, FIXED_TRADE_SIZE_USDT
+    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 0.85)
+            with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = settings.get('RISK_PER_TRADE_PERCENT', 1.0)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
-            with fixed_trade_size_lock: FIXED_TRADE_SIZE_USDT = settings.get('FIXED_TRADE_SIZE_USDT', 5.0)
-
+            
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
@@ -536,60 +533,6 @@ def load_settings_from_redis():
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 # --- Risk Management & Filters ---
-
-# ======================= START: [NEW] Advanced Quantity Formatting Function =======================
-def format_quantity_for_binance(symbol: str, quantity: float) -> Optional[float]:
-    """
-    Formats the quantity for a given symbol to match Binance's LOT_SIZE filter rules.
-    This includes adhering to stepSize, minQty, and maxQty.
-    """
-    try:
-        symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.error(f"[Format Quantity] No exchange info found for {symbol}")
-            return None
-
-        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
-        if not lot_size_filter:
-            logger.warning(f"[Format Quantity] LOT_SIZE filter not found for {symbol}. Using raw quantity.")
-            return quantity
-
-        min_qty = float(lot_size_filter['minQty'])
-        max_qty = float(lot_size_filter['maxQty'])
-        step_size_str = lot_size_filter['stepSize']
-        
-        # Check against min and max quantity first
-        if quantity < min_qty:
-            logger.warning(f"[Format Quantity] Desired quantity {quantity} for {symbol} is below minQty {min_qty}. Rejecting trade.")
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": quantity, "min": min_qty})
-            return None
-        if quantity > max_qty:
-            logger.warning(f"[Format Quantity] Desired quantity {quantity} for {symbol} is above maxQty {max_qty}. Capping at max.")
-            quantity = max_qty
-
-        # Adjust quantity according to step_size using Decimal for precision
-        step_size = Decimal(step_size_str)
-        quantity_dec = Decimal(str(quantity))
-        
-        # Formula: floor(quantity / step_size) * step_size
-        adjusted_quantity_dec = (quantity_dec // step_size) * step_size
-        
-        final_quantity = float(adjusted_quantity_dec)
-
-        # Final check to ensure it's not below min_qty after adjustment
-        if final_quantity < min_qty:
-            logger.error(f"[Format Quantity] Adjusted quantity {final_quantity} for {symbol} fell below minQty {min_qty}. Rejecting.")
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": final_quantity, "min": min_qty})
-            return None
-            
-        return final_quantity
-
-    except Exception as e:
-        logger.error(f"❌ [Format Quantity] CRITICAL ERROR formatting quantity for {symbol}: {e}", exc_info=True)
-        return None
-# ======================== END: [NEW] Advanced Quantity Formatting Function ========================
-
-
 def calculate_signal_quality_score(symbol, df, strategy_name):
     score = 0
     if df.empty or len(df) < 50: return 0
@@ -770,13 +713,118 @@ def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
         "trailing_stop_distance": trailing_stop_distance
     }
 
-# ======================= START: [FIX] Refactored Trade Creation Logic =======================
+# ======================= START: [NEW] Logic from v8.2 =======================
+def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
+    """
+    Formats the quantity for a given symbol to match Binance's LOT_SIZE filter rules, using Decimal for precision.
+    """
+    try:
+        symbol_info = exchange_info_map.get(symbol)
+        if not symbol_info:
+            logger.error(f"[{symbol}] No exchange info found for LOT_SIZE adjustment.")
+            return None
+
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        if not lot_size_filter:
+            logger.warning(f"[{symbol}] LOT_SIZE filter not found. Using raw quantity.")
+            return Decimal(str(quantity))
+
+        step_size = Decimal(lot_size_filter['stepSize'])
+        min_qty = Decimal(lot_size_filter['minQty'])
+        
+        quantity_dec = Decimal(str(quantity))
+        
+        if quantity_dec < min_qty:
+            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": f"{quantity_dec}", "min": f"{min_qty}"})
+            return None
+
+        # Adjust quantity to the step size
+        adjusted_quantity = (quantity_dec // step_size) * step_size
+        
+        if adjusted_quantity < min_qty:
+            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": f"{adjusted_quantity}", "min": f"{min_qty}"})
+            return None
+            
+        return adjusted_quantity
+
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
+        return None
+
+def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
+    """
+    Calculates position size based on risk percentage and stop loss distance.
+    """
+    if not client: return None
+    try:
+        with risk_per_trade_lock:
+            current_risk_percent = RISK_PER_TRADE_PERCENT
+
+        balance_response = client.get_asset_balance(asset='USDT')
+        available_balance = Decimal(balance_response['free'])
+        
+        risk_amount_usdt = available_balance * (Decimal(str(current_risk_percent)) / Decimal('100'))
+        
+        risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
+        
+        if risk_per_coin <= 0:
+            log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price"})
+            return None
+            
+        initial_quantity = risk_amount_usdt / risk_per_coin
+        
+        adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
+        
+        if adjusted_quantity is None or adjusted_quantity <= 0:
+            # log_rejection is already called inside adjust_quantity_to_lot_size
+            return None
+            
+        notional_value = adjusted_quantity * Decimal(str(entry_price))
+        
+        symbol_info = exchange_info_map.get(symbol)
+        if symbol_info:
+            for f in symbol_info['filters']:
+                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
+                    min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
+                    if notional_value < min_notional:
+                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+                        return None
+                        
+        if notional_value > available_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance}"})
+            return None
+            
+        return adjusted_quantity
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] Error calculating position size: {e}", exc_info=True)
+        return None
+
+def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
+    """
+    Places a trade order on Binance.
+    """
+    if not client: return None
+    logger.info(f"➡️ [{symbol}] Attempting to place REAL {side} order for quantity {quantity}.")
+    try:
+        # Convert Decimal to string for the API call
+        order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
+        log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
+        return order
+    except BinanceAPIException as e:
+        logger.error(f"❌ [{symbol}] Binance API Error on order placement: {e}")
+        send_telegram_message(f"❌ *خطأ باينانس عند وضع أمر لـ {symbol}*\n`{e}`", force=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] General error on order placement: {e}", exc_info=True)
+        return None
+# ======================== END: [NEW] Logic from v8.2 ========================
+
+# ======================= START: [REFACTORED] Trade Creation Logic =======================
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     # --- 1. Pre-Trade Quality & Cooldown Checks ---
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
-        with min_quality_lock:
-            min_score = MIN_SIGNAL_QUALITY
+        with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
         
         if quality_score < min_score:
             log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
@@ -796,6 +844,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
+    stop_loss_price = trade_levels['stop_loss']
     
     signal_details = {
         "atr": trade_levels['atr'], "trailing_stop_activated": False,
@@ -805,88 +854,51 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
     # --- 3. Execute Trade (Real or Paper) ---
     if is_real:
-        with balance_lock: current_usdt_balance = usdt_balance
-        with fixed_trade_size_lock: trade_size_usdt = FIXED_TRADE_SIZE_USDT
+        # ** تعديل رئيسي: استخدام دالة حساب حجم الصفقة الجديدة **
+        quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price)
 
-        # 3.1. Balance Check
-        if trade_size_usdt > current_usdt_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": trade_size_usdt, "available": round(current_usdt_balance, 2)})
+        if quantity_dec is None or quantity_dec <= 0:
+            # Rejection is already logged inside calculate_position_size
+            logger.error(f"❌ [Real Trade] Position size calculation failed for {symbol}. Trade rejected.")
             return
 
-        symbol_info = exchange_info_map.get(symbol)
-        if not symbol_info:
-            logger.error(f"❌ [Real Trade] Could not find exchange info for {symbol}")
-            return
-
-        # 3.2. MinNotional Check
-        min_notional = 0.0
-        for f in symbol_info.get('filters', []):
-            if f.get('filterType') in ('NOTIONAL', 'MIN_NOTIONAL') and 'minNotional' in f:
-                try:
-                    min_notional = float(f['minNotional'])
-                    break
-                except (ValueError, TypeError): pass
+        # ** تعديل رئيسي: استخدام دالة تنفيذ الأمر الجديدة **
+        order = place_order(symbol, Client.SIDE_BUY, quantity_dec)
         
-        if trade_size_usdt < min_notional:
-            logger.warning(f"⚠️ [Real Trade] Trade size ${trade_size_usdt} for {symbol} is below minNotional of ${min_notional}. Trade rejected.")
-            log_rejection(symbol, "MinNotional Filter Failed", {"trade_size": trade_size_usdt, "min_notional": min_notional})
-            return
-        
-        # 3.3. Quantity Calculation & LOT_SIZE Adjustment
-        quantity = trade_size_usdt / entry_price
-        adjusted_quantity = format_quantity_for_binance(symbol, quantity)
-
-        if adjusted_quantity is None or adjusted_quantity <= 0:
-            logger.error(f"❌ [Real Trade] Quantity for {symbol} is invalid after formatting. Trade rejected.")
-            # Rejection is logged inside format_quantity_for_binance
-            return
-
-        # 3.4. Place Order
-        try:
-            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {adjusted_quantity} of {symbol} (approx ${trade_size_usdt})")
-            order = client.create_order(
-                symbol=symbol,
-                side=Client.SIDE_BUY,
-                type=Client.ORDER_TYPE_MARKET,
-                quantity=adjusted_quantity
-            )
-            
-            avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in order.get('fills', [])) / max(sum(float(f['qty']) for f in order.get('fills', [])), 1e-8) if order.get('fills') else entry_price
-            final_quantity = float(order.get('executedQty', adjusted_quantity))
+        if order:
+            avg_fill_price = sum(Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
+            final_quantity = Decimal(order.get('executedQty', str(quantity_dec)))
             order_id = order.get('orderId', 'N/A')
 
             save_signal_to_db(
-                symbol, avg_fill_price, trade_levels,
-                strategy_name, True, final_quantity,
-                {**signal_details, "avg_fill": avg_fill_price, "trade_value_usdt": trade_size_usdt}, order_id
+                symbol, float(avg_fill_price), trade_levels,
+                strategy_name, True, float(final_quantity),
+                {**signal_details, "avg_fill": float(avg_fill_price)}, order_id
             )
             send_telegram_message(
                 f"✅ *تم فتح صفقة حقيقية*\n"
                 f"*العملة:* `{symbol}`\n"
-                f"*الكمية:* `{final_quantity:.8f}`\n"
-                f"*السعر:* `{avg_fill_price:.4f}`\n"
-                f"*القيمة:* `~${trade_size_usdt:.2f}`",
+                f"*الكمية:* `{final_quantity}`\n"
+                f"*السعر:* `{avg_fill_price:.4f}`",
                 force=True
             )
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
-            return
-
-        except BinanceAPIException as e:
-            logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
-            send_telegram_message(f"❌ *خطأ باينانس أثناء فتح صفقة {symbol}*\n`{e}`", force=True)
-            return
-        except Exception as e:
-            logger.error(f"❌ [Real Trade] Failed to place order for {symbol}: {e}", exc_info=True)
+        else:
+            logger.error(f"❌ [Real Trade] Order placement failed for {symbol}. Trade not opened.")
             return
 
     else: # Paper Trading
-        with fixed_trade_size_lock: trade_size_usdt = FIXED_TRADE_SIZE_USDT
-        quantity = trade_size_usdt / entry_price
+        # في الوضع الورقي، سنحاكي نفس منطق حساب الحجم
+        risk_per_coin = entry_price - stop_loss_price
+        if risk_per_coin <= 0: return
+        risk_amount_usdt = PAPER_TRADE_INITIAL_BALANCE * (RISK_PER_TRADE_PERCENT / 100.0)
+        quantity = risk_amount_usdt / risk_per_coin
+        
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
-        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*قيمة الصفقة:* `${trade_size_usdt:.2f}`\n*وقف:* `{trade_levels['stop_loss']:.4f}`")
+        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*وقف:* `{stop_loss_price:.4f}`")
         send_telegram_message(message, force=True)
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
-# ======================== END: [FIX] Refactored Trade Creation Logic ========================
+# ======================== END: [REFACTORED] Trade Creation Logic ========================
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -921,7 +933,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V23 - تفاعلي)</title>
+<title>لوحة التحكم - بوت التداول (V25 - إدارة المخاطر)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -988,7 +1000,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V23 (تفاعلي)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V25 (إدارة المخاطر)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1056,8 +1068,8 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
             </div>
           </div>
           <div class="kv" style="margin-top: 12px;">
-            <div>حجم الصفقة (USDT):</div>
-            <input type="number" id="tradeSizeInput" value="5.0" step="0.5" min="1.0" style="width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 6px; border-radius: 8px; text-align: center;">
+            <div>نسبة المخاطرة (%):</div>
+            <input type="number" id="riskInput" value="1.0" step="0.1" min="0.1" max="5.0" style="width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 6px; border-radius: 8px; text-align: center;">
           </div>
         </div>
       </div>
@@ -1258,7 +1270,7 @@ async function initializeDashboard() {
         qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي';
         qs('#qualityFilter').value = baseData.min_signal_quality;
         qs('#qualityValue').textContent = baseData.min_signal_quality;
-        qs('#tradeSizeInput').value = baseData.fixed_trade_size;
+        qs('#riskInput').value = baseData.risk_per_trade;
         updateMarketTrends(baseData.market_state);
         openSignals = signalsData.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
         renderAllSignals(signalsData.signals);
@@ -1299,7 +1311,7 @@ function setupWebSocket() {
             case 'market_state_update': updateMarketTrends(data.payload); break;
             case 'trading_mode': const isPaper = data.payload.paper_trading; qs('#tradingModeToggle').checked = !isPaper; qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي'; break;
             case 'quality_filter': qs('#qualityFilter').value = data.payload.min_quality; qs('#qualityValue').textContent = data.payload.min_quality; break;
-            case 'trade_size_update': const input = qs('#tradeSizeInput'); if (input) input.value = data.payload.trade_size; break;
+            case 'risk_update': const input = qs('#riskInput'); if (input) input.value = data.payload.risk_percent; break;
         }
     };
     socket.onclose = () => { console.log("WebSocket connection closed, reconnecting..."); setTimeout(setupWebSocket, 3000); };
@@ -1338,11 +1350,11 @@ const debouncedQualityUpdate = debounce((value) => {
 }, 500);
 qs('#qualityFilter').addEventListener('input', function() { qs('#qualityValue').textContent = this.value; debouncedQualityUpdate(this.value); });
 
-const debouncedTradeSizeUpdate = debounce((value) => {
-    fetch('/api/trade_size', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({trade_size: parseFloat(value)}) })
-    .catch(error => console.error('Error updating trade size:', error));
+const debouncedRiskUpdate = debounce((value) => {
+    fetch('/api/risk_percent', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({risk_percent: parseFloat(value)}) })
+    .catch(error => console.error('Error updating risk percent:', error));
 }, 800);
-qs('#tradeSizeInput').addEventListener('input', function() { debouncedTradeSizeUpdate(this.value); });
+qs('#riskInput').addEventListener('input', function() { debouncedRiskUpdate(this.value); });
 
 function updateAdvancedPerformance(data) {
     if (!performanceChartInstance && data.equity_curve && data.equity_curve.labels.length > 0) { createPerformanceChart(data.equity_curve); } 
@@ -1695,22 +1707,22 @@ def update_quality_filter():
         logger.error(f"Error updating quality filter: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/trade_size', methods=['POST'])
-def update_trade_size():
-    global FIXED_TRADE_SIZE_USDT
+@app.route('/api/risk_percent', methods=['POST'])
+def update_risk_percent():
+    global RISK_PER_TRADE_PERCENT
     try:
         data = request.json
-        trade_size = data.get('trade_size', 5.0)
-        with fixed_trade_size_lock: FIXED_TRADE_SIZE_USDT = float(trade_size)
+        risk_percent = data.get('risk_percent', 1.0)
+        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(risk_percent)
         if redis_client:
             settings = json.loads(redis_client.get('trading_settings') or '{}')
-            settings['FIXED_TRADE_SIZE_USDT'] = FIXED_TRADE_SIZE_USDT
+            settings['RISK_PER_TRADE_PERCENT'] = RISK_PER_TRADE_PERCENT
             redis_client.set('trading_settings', json.dumps(settings))
-        broadcast({"type": "trade_size_update", "payload": {"trade_size": FIXED_TRADE_SIZE_USDT}})
-        log_and_notify("info", f"Fixed trade size updated to ${FIXED_TRADE_SIZE_USDT}.", "SETTINGS_UPDATE")
+        broadcast({"type": "risk_update", "payload": {"risk_percent": RISK_PER_TRADE_PERCENT}})
+        log_and_notify("info", f"Risk per trade updated to {RISK_PER_TRADE_PERCENT}%.", "SETTINGS_UPDATE")
         return jsonify({"success": True})
     except Exception as e:
-        logger.error(f"Error updating trade size: {e}")
+        logger.error(f"Error updating risk percent: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
@@ -1747,8 +1759,7 @@ def update_settings():
         MAX_OPEN_TRADES = int(data['max_trades'])
         if redis_client:
             with trading_mode_lock: is_paper = paper_trading_mode
-            with fixed_trade_size_lock: trade_size = FIXED_TRADE_SIZE_USDT
-            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper, 'FIXED_TRADE_SIZE_USDT': trade_size}
+            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
             redis_client.set('trading_settings', json.dumps(settings))
         log_and_notify("info", "Trading settings updated.", "SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الإعدادات العامة"})
@@ -1863,28 +1874,7 @@ def update_signal_in_db(signal_id, updates):
         if conn: conn.rollback()
         return False
 
-# ======================= START: [UPDATE] execute_close_order with new formatter =======================
-def execute_close_order(symbol: str, quantity: float, reason: str):
-    with trading_mode_lock: is_real = not paper_trading_mode
-    if is_real:
-        try:
-            # Use the new robust formatting function for closing orders as well
-            adjusted_quantity = format_quantity_for_binance(symbol, quantity)
-            
-            if adjusted_quantity is not None and adjusted_quantity > 0:
-                logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity} of {symbol} due to {reason}")
-                client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=adjusted_quantity)
-            else:
-                logger.warning(f"⚠️ [Execute Close] Adjusted quantity for {symbol} is zero or invalid after formatting. Cannot close order via API.")
-        except BinanceAPIException as e:
-            logger.error(f"❌ [Execute Close] Binance API Error for {symbol}: {e}")
-            send_telegram_message(f"❌ *خطأ في تنفيذ إغلاق لـ {symbol}*\n`{e}`", force=True)
-        except Exception as e:
-            logger.error(f"❌ [Execute Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
-    else:
-        logger.info(f"📊 [Paper Close] Simulating close of {quantity} of {symbol} for reason: {reason}")
-# ======================== END: [UPDATE] execute_close_order with new formatter ========================
-
+# ======================= START: [REFACTORED] Trade Closing Logic =======================
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
     
@@ -1893,10 +1883,35 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
             return
 
-    remaining_quantity = signal.get('quantity', 0)
-    if remaining_quantity > 0:
-        execute_close_order(symbol, remaining_quantity, reason)
-    
+    if signal.get('is_real_trade'):
+        try:
+            quantity_in_bot = Decimal(str(signal.get('quantity', 0)))
+            if quantity_in_bot > 0:
+                # ** التحسين المستمر: التحقق من الرصيد الفعلي قبل البيع **
+                asset = symbol.replace("USDT", "")
+                asset_balance_info = client.get_asset_balance(asset=asset)
+                available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
+                
+                logger.info(f"[Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
+                
+                # نبيع الكمية الأصغر بين ما هو مسجل وما هو متاح فعلاً
+                quantity_to_sell = min(quantity_in_bot, available_on_exchange)
+                
+                if quantity_to_sell > 0:
+                    adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                    if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
+                        sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_quantity_to_sell)
+                        if not sell_order:
+                            log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol}. Trade remains open.", "TRADE_ERROR")
+                            return # لا نكمل الإغلاق في قاعدة البيانات إذا فشل الأمر
+                    else:
+                        logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero. Skipping API sell.")
+                else:
+                    logger.warning(f"⚠️ [Real Close] No available quantity of {asset} to sell for {symbol}. Closing in DB only.")
+        except Exception as e:
+            logger.error(f"❌ [{symbol}] Critical error during real trade closure: {e}", exc_info=True)
+            return
+
     profit = ((closing_price - entry_price) / entry_price) * 100
     
     with consecutive_losses_lock:
@@ -1920,6 +1935,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     settings = get_notification_settings()
     if (profit >= settings['min_profit_notification'] or profit <= settings['max_loss_notification'] or reason == "manual_close"):
         send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
+# ======================== END: [REFACTORED] Trade Closing Logic ========================
 
 def trade_management_loop():
     logger.info("🚀 [Trade Manager] Starting advanced trade management loop...")
@@ -1950,10 +1966,26 @@ def trade_management_loop():
                 if tp2 and current_price >= tp2:
                     close_signal(signal, tp2, "TP2_HIT"); continue
                 if tp1 and not details.get('tp1_done') and remaining_qty > 0 and current_price >= tp1:
-                    part_qty = remaining_qty * 0.5
-                    execute_close_order(symbol, part_qty, "TP1_HIT")
+                    # For partial exits, we'll use the new closing logic which is safer
+                    part_qty_to_close = remaining_qty * 0.5
+                    
+                    # Create a temporary signal-like dict for the close function
+                    temp_signal_for_partial_close = signal.copy()
+                    temp_signal_for_partial_close['quantity'] = part_qty_to_close
+                    
+                    # We call a simplified version of close_signal's logic here for the partial close
+                    if temp_signal_for_partial_close.get('is_real_trade'):
+                        asset = symbol.replace("USDT", "")
+                        asset_balance_info = client.get_asset_balance(asset=asset)
+                        available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
+                        quantity_to_sell = min(Decimal(str(part_qty_to_close)), available_on_exchange)
+                        if quantity_to_sell > 0:
+                            adjusted_qty = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                            if adjusted_qty and adjusted_qty > 0:
+                                place_order(symbol, Client.SIDE_SELL, adjusted_qty)
+
                     new_sl = max(stop_loss, entry_price)
-                    updates = {"quantity": remaining_qty - part_qty, "stop_loss": new_sl, "status": "updated", "closing_reason": "TP1_HIT"}
+                    updates = {"quantity": remaining_qty - part_qty_to_close, "stop_loss": new_sl, "status": "updated", "closing_reason": "TP1_HIT"}
                     details['tp1_done'] = True
                     updates['signal_details'] = json.dumps(details)
                     update_signal_in_db(signal['id'], updates)
@@ -2041,7 +2073,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V23.2.6 (Advanced LOT_SIZE Fix) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.0.0 (Risk-Based Sizing) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
