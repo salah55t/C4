@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V25.0.0 (دمج إدارة المخاطر من V8.2)
+# ملف c4.py - نسخة V25.3.0 (منطق محسن)
 # --- وصف الإصدار:
-# 1.  [دمج أساسي] تم استبدال منطق حساب حجم الصفقة ليعتمد على نسبة المخاطرة والمسافة إلى وقف الخسارة (من V8.2).
-# 2.  [هيكلة] تم فصل منطق تنفيذ الأوامر في دالة `place_order` مستقلة.
-# 3.  [دقة] استخدام نوع البيانات `Decimal` في جميع الحسابات المالية لضمان الدقة.
-# 4.  [تحسين مستمر] الحفاظ على ميزة التحقق من الرصيد الفعلي على المنصة قبل تنفيذ أوامر البيع لزيادة الموثوقية.
-# 5.  [نتيجة] نظام تداول يجمع بين إدارة المخاطر المتقدمة من V8.2 مع استقرار وموثوقية الإصلاحات الأخيرة.
+# 1.  [مركزية الفلاتر] تم نقل جميع الفلاتر المتقدمة (الأخبار، السيولة، الارتباط) إلى دالة إنشاء الصفقة (`create_trade_signal`) لضمان تطبيقها مباشرة قبل التنفيذ.
+# 2.  [تحسين المخاطرة] تم تحسين دالة حساب حجم الصفقة (`calculate_position_size`) لتمرير نسبة المخاطرة الديناميكية بشكل مباشر، مما يجعل الكود أكثر وضوحًا وقوة.
+# 3.  [تنظيف الكود] تم إزالة الفلاتر من حلقة الفحص الرئيسية لتجنب التكرار بعد نقلها إلى دالة إنشاء الصفقة.
+# 4.  [نتيجة] بوت تداول ذو منطق أكثر ترابطًا، حيث يتم التحقق من جميع الشروط والفلاتر في نقطة قرار واحدة، مما يزيد من موثوقية النظام.
 
 import time
 import os
@@ -82,7 +81,7 @@ COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-RISK_PER_TRADE_PERCENT: float = 1.0
+RISK_PER_TRADE_PERCENT: float = 1.0 # القيمة الافتراضية، سيتم تعديلها ديناميكياً
 risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
@@ -154,6 +153,9 @@ REJECTION_REASONS_AR = {
     "Long-term Trend Filter Failed": "فلتر الاتجاه طويل الأجل فشل",
     "Low Quality Signal": "جودة الإشارة منخفضة",
     "Invalid Position Size": "حجم الصفقة غير صالح (الوقف أعلى من الدخول)",
+    "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
+    "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
+    "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -335,7 +337,8 @@ def get_notification_settings() -> Dict:
     except Exception as e:
         logger.error(f"❌ [Redis] Failed to get notification settings: {e}"); return defaults
 
-def send_telegram_message(message: str, force: bool = False):
+# --- [IMPROVEMENT V25.2] Renamed for clarity ---
+def send_enhanced_telegram_message(message: str, force: bool = False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     
@@ -362,6 +365,141 @@ def send_telegram_message(message: str, force: bool = False):
             except requests.exceptions.RequestException as e:
                 if attempt == 2: logger.error(f"❌ [Telegram] Failed to send message after retries: {e}")
                 time.sleep(1.5)
+
+# --- [IMPROVEMENT V25.2] New detailed trade notification ---
+def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: float, stop_loss: float, 
+                                target1: float, target2: float, quantity: float, is_real: bool, 
+                                quality_score: int, atr_percent: float):
+    trade_type = "حقيقية" if is_real else "ورقية"
+    emoji = "🔥" if is_real else "📊"
+    
+    message = (
+        f"{emoji} *صفقة {trade_type} جديدة*\n\n"
+        f"*العملة:* `{symbol}`\n"
+        f"*الاستراتيجية:* `{strategy_name}`\n"
+        f"*جودة الإشارة:* `{quality_score}/100`\n"
+        f"*تقلب السوق:* `{atr_percent:.2f}%`\n\n"
+        f"*سعر الدخول:* `{entry_price:.4f}`\n"
+        f"*وقف الخسارة:* `{stop_loss:.4f}`\n"
+        f"*الهدف الأول:* `{target1:.4f}`\n"
+        f"*الهدف الثاني:* `{target2:.4f}`\n\n"
+        f"*الكمية:* `{quantity:.4f}`\n"
+        f"*نسبة المخاطرة:* `{((entry_price - stop_loss) / entry_price * 100):.2f}%`\n"
+        f"*نسبة الربح المحتملة 1:* `{((target1 - entry_price) / entry_price * 100):.2f}%`\n"
+        f"*نسبة الربح المحتملة 2:* `{((target2 - entry_price) / entry_price * 100):.2f}%`"
+    )
+    
+    send_enhanced_telegram_message(message, force=True)
+
+# --- [IMPROVEMENT V25.2] New daily performance report ---
+def send_daily_performance_report():
+    if not check_db_connection() or not conn:
+        return
+    
+    try:
+        with conn.cursor() as cur:
+            today = datetime.now(timezone.utc).date()
+            cur.execute("""
+                SELECT COUNT(*) as total_trades, 
+                       SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as winning_trades,
+                       AVG(profit_percentage) as avg_profit,
+                       SUM(profit_percentage) as total_profit
+                FROM signals 
+                WHERE closed_at::date = %s AND status = 'closed'
+            """, (today,))
+            
+            stats = cur.fetchone()
+            
+            if not stats or stats['total_trades'] == 0:
+                logger.info("[Daily Report] No trades to report for today.")
+                return
+            
+            cur.execute("""
+                SELECT symbol, profit_percentage, strategy_name
+                FROM signals 
+                WHERE closed_at::date = %s AND status = 'closed'
+                ORDER BY profit_percentage DESC LIMIT 1
+            """, (today,))
+            best_trade = cur.fetchone()
+            
+            cur.execute("""
+                SELECT symbol, profit_percentage, strategy_name
+                FROM signals 
+                WHERE closed_at::date = %s AND status = 'closed'
+                ORDER BY profit_percentage ASC LIMIT 1
+            """, (today,))
+            worst_trade = cur.fetchone()
+            
+            message = (
+                f"📈 *تقرير الأداء اليومي*\n\n"
+                f"*التاريخ:* `{today.strftime('%Y-%m-%d')}`\n\n"
+                f"*إجمالي الصفقات:* `{stats['total_trades']}`\n"
+                f"*الصفقات الرابحة:* `{stats.get('winning_trades', 0) or 0}`\n"
+                f"*نسبة الربح:* `{(stats.get('winning_trades', 0) / stats['total_trades'] * 100):.1f}%`\n"
+                f"*متوسط الربح:* `{stats.get('avg_profit', 0):.2f}%`\n"
+                f"*إجمالي الربح:* `{stats.get('total_profit', 0):.2f}%`\n\n"
+            )
+            
+            if best_trade:
+                message += (
+                    f"🏆 *أفضل صفقة:*\n"
+                    f"العملة: `{best_trade['symbol']}` | الربح: `{best_trade['profit_percentage']:.2f}%`\n\n"
+                )
+            
+            if worst_trade:
+                message += (
+                    f"📉 *أسوأ صفقة:*\n"
+                    f"العملة: `{worst_trade['symbol']}` | الخسارة: `{worst_trade['profit_percentage']:.2f}%`\n\n"
+                )
+            
+            send_enhanced_telegram_message(message, force=True)
+            
+    except Exception as e:
+        logger.error(f"❌ [Daily Report] Error generating daily report: {e}", exc_info=True)
+
+# --- [IMPROVEMENT V25.2] New market state notification ---
+def send_market_state_notification():
+    with market_state_lock:
+        state = dict(current_market_state)
+    
+    if not state or not state.get("trend_details_by_tf"):
+        return
+
+    message = f"🌐 *تحديث حالة السوق*\n\n"
+    for tf, details in state["trend_details_by_tf"].items():
+        trend = details.get("trend", "N/A")
+        emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
+        message += f"{emoji} *{tf}:* {trend.capitalize()} (ADX: {details.get('adx', 0):.1f}, RSI: {details.get('rsi', 0):.1f})\n"
+    
+    send_enhanced_telegram_message(message, force=False)
+
+# --- [IMPROVEMENT V25.2] New periodic report scheduler ---
+def schedule_periodic_reports():
+    logger.info("Starting periodic reports scheduler...")
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            
+            # Send daily report at 23:59 UTC
+            if now.hour == 23 and now.minute == 59:
+                send_daily_performance_report()
+                time.sleep(61) # Sleep to avoid sending twice in the same minute
+            
+            # Send market state report every 6 hours
+            if now.hour % 6 == 0 and now.minute == 0:
+                send_market_state_notification()
+                time.sleep(61)
+            
+            time.sleep(30) # Check every 30 seconds
+            
+        except Exception as e:
+            logger.error(f"❌ [Periodic Reports] Error in scheduler: {e}", exc_info=True)
+            time.sleep(60)
+
+def start_periodic_reports():
+    reports_thread = Thread(target=schedule_periodic_reports, daemon=True)
+    reports_thread.start()
+    logger.info("✅ [Periodic Reports] Started periodic reports scheduler thread.")
 
 def handle_socket_message(msg):
     global live_prices
@@ -532,6 +670,100 @@ def load_settings_from_redis():
     except Exception as e:
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
+# --- [IMPROVEMENT V25.2] New Advanced Filters ---
+def add_news_filter() -> bool:
+    """
+    فلتر لتجنب الأخبار الاقتصادية الهامة.
+    ملاحظة: هذا الفلتر يستخدم أوقات ثابتة. للحصول على دقة أعلى، يفضل استخدام API لتقويم اقتصادي.
+    """
+    news_hours = [
+        (12, 30), # 12:30 PM UTC - US CPI/PPI
+        (14, 0),  # 2:00 PM UTC - FOMC
+        (18, 30), # 6:30 PM UTC - US Unemployment
+    ]
+    now = datetime.now(timezone.utc)
+    for hour, minute in news_hours:
+        if now.hour == hour and abs(now.minute - minute) <= 30: # 30 دقيقة قبل وبعد الخبر
+            return False
+    return True
+
+def add_liquidity_filter() -> bool:
+    """
+    فلتر لتجنب ساعات التداول ذات السيولة المنخفضة.
+    """
+    now = datetime.now(timezone.utc)
+    # تجنب عطلة نهاية الأسبوع (السبت والأحد)
+    if now.weekday() >= 5:
+        return False
+    # تجنب ساعات السيولة المنخفضة (تقاطع آسيا ولندن)
+    if now.hour >= 22 or now.hour <= 2:
+        return False
+    return True
+
+def add_correlation_filter(new_symbol: str) -> bool:
+    """
+    فلتر لتجنب فتح صفقات متعددة لعملات مرتبطة ببعضها.
+    ملاحظة: هذه القائمة للمثال فقط ويجب توسيعها.
+    """
+    correlated_groups = [
+        {'BTCUSDT', 'ETHUSDT', 'BCHUSDT'},
+        {'ADAUSDT', 'DOTUSDT', 'LINKUSDT'},
+        {'SOLUSDT', 'AVAXUSDT', 'MATICUSDT'},
+    ]
+    with signal_cache_lock:
+        open_symbols = set(open_signals_cache.keys())
+    
+    if not open_symbols:
+        return True
+
+    for group in correlated_groups:
+        if new_symbol in group:
+            # إذا كانت هناك عملة مفتوحة بالفعل من نفس المجموعة
+            if not open_symbols.isdisjoint(group):
+                return False
+    return True
+
+# --- [IMPROVEMENT V25.2] New Dynamic Risk Calculation ---
+def calculate_dynamic_risk_per_trade() -> float:
+    """
+    حساب نسبة المخاطرة ديناميكياً بناءً على أداء البوت.
+    """
+    if not check_db_connection() or not conn:
+        with risk_per_trade_lock:
+            return RISK_PER_TRADE_PERCENT
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT profit_percentage FROM signals WHERE status = 'closed' ORDER BY closed_at DESC LIMIT 10")
+            recent_trades = cur.fetchall()
+            
+            if len(recent_trades) < 5:
+                with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
+            
+            profits = [trade['profit_percentage'] for trade in recent_trades]
+            avg_profit = sum(profits) / len(profits)
+            win_rate = sum(1 for p in profits if p > 0) / len(profits)
+            
+            with risk_per_trade_lock:
+                base_risk = RISK_PER_TRADE_PERCENT
+            
+            # تعديل نسبة المخاطرة بناءً على الأداء
+            if avg_profit > 1.5 and win_rate >= 0.6:
+                new_risk = min(2.0, base_risk * 1.2) # زيادة المخاطرة بحذر
+                logger.info(f"[Dynamic Risk] Good performance detected. Increasing risk to {new_risk:.2f}%")
+                return new_risk
+            elif avg_profit < -0.5 or win_rate < 0.4:
+                new_risk = max(0.5, base_risk * 0.8) # تقليل المخاطرة
+                logger.warning(f"[Dynamic Risk] Poor performance detected. Reducing risk to {new_risk:.2f}%")
+                return new_risk
+            else:
+                return base_risk
+                
+    except Exception as e:
+        logger.error(f"❌ [Dynamic Risk] Error calculating dynamic risk: {e}", exc_info=True)
+        with risk_per_trade_lock:
+            return RISK_PER_TRADE_PERCENT
+
 # --- Risk Management & Filters ---
 def calculate_signal_quality_score(symbol, df, strategy_name):
     score = 0
@@ -635,26 +867,54 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
+# --- [IMPROVEMENT V25.1] Enhanced Strategy with Multiple Filters (Based on your suggestion) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    if len(df) < 21 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'high', 'low', 'macd', 'macd_signal'}.issubset(df.columns): return False
+    if len(df) < 200 or not {'bb_lower', 'stoch_rsi_k', 'rsi', 'open', 'close', 'high', 'low', 'macd', 'macd_signal', 'ema50', 'ema200', 'volume'}.issubset(df.columns):
+        return False
+    
+    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
+        log_rejection(df.name, "Long-term Trend Filter Failed")
+        return False
+    
     if not flexible_volume_filter(df, min_volume_percentile=30, strictness=0.7):
-        log_rejection(df.name, "Volume Filter Failed"); return False
+        log_rejection(df.name, "Volume Filter Failed")
+        return False
+    
+    if not check_market_volatility_filter(df):
+        return False
+    
     last, prev = df.iloc[-1], df.iloc[-2]
+    
     bounce = (prev['close'] < prev['bb_lower']) and (last['close'] > last['bb_lower'])
     stoch_rising = last['stoch_rsi_k'] > prev['stoch_rsi_k']
     bullish_body = last['close'] > (last['open'] + (last['high'] - last['low']) * 0.3)
     rsi_improving = last['rsi'] > prev['rsi']
     not_overbought = last['rsi'] < 70
     macd_ok = (last['macd'] > last['macd_signal']) or (last['macd'] - last['macd_signal'] > -0.1 * abs(last['macd']))
-    signal = bounce and (stoch_rising or bullish_body) and rsi_improving and not_overbought and macd_ok
-    if not signal: log_rejection(df.name, "Bullish Confirmation Failed")
+    
+    price_above_ema50 = last['close'] > last['ema50']
+    ema50_above_ema200 = last['ema50'] > last['ema200']
+    volume_increasing = last['volume'] > prev['volume']
+    
+    signal = (bounce and (stoch_rising or bullish_body) and rsi_improving and 
+              not_overbought and macd_ok and price_above_ema50 and 
+              ema50_above_ema200 and volume_increasing)
+    
+    if not signal:
+        log_rejection(df.name, "Bullish Confirmation Failed")
+    
     return signal
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'ema9', 'ema21', 'rsi', 'close', 'adx'}
-    if len(df) < 30 or not needed.issubset(df.columns): return False
+    needed = {'macd', 'macd_signal', 'ema9', 'ema21', 'rsi', 'close', 'adx', 'ema200'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
+    
+    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
+        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+
     if df['adx'].iloc[-1] < 22:
         log_rejection(df.name, "Trend Strength Filter Failed"); return False
+
     last, prev = df.iloc[-1], df.iloc[-2]
     macd_cross_up = (prev['macd'] <= prev['macd_signal']) and (last['macd'] > last['macd_signal'])
     hist_now = last['macd'] - last['macd_signal']
@@ -665,8 +925,12 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     return (macd_cross_up or hist_increasing) and ema_ok and rsi_ok
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9','ema21','rsi','low','close'}
-    if len(df) < 25 or not needed.issubset(df.columns): return False
+    needed = {'ema9','ema21','rsi','low','close', 'ema200'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
+
+    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
+        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+
     last3 = df.tail(3)
     ema9_over_21 = (last3['ema9'] > last3['ema21']).sum() >= 2
     last = last3.iloc[-1]
@@ -675,8 +939,12 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     return ema9_over_21 and rsi_ok and pullback_ok
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9','ema21','ema50','open','close','low'}
-    if len(df) < 55 or not needed.issubset(df.columns): return False
+    needed = {'ema9','ema21','ema50','open','close','low', 'ema200'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
+
+    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
+        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+
     last = df.iloc[-1]
     uptrend = (last['ema21'] > last['ema50']) and (last['close'] > last['ema50'])
     if not uptrend: return False
@@ -699,119 +967,95 @@ def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
     ema_ok = (last['ema9'] > last['ema21']) and (last['close'] > last['ema9'])
     return atr_ok and hist_rising and ema_ok
 
+# --- [IMPROVEMENT V25.1] Dynamic Risk Management based on Volatility ---
 def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
     last = df.iloc[-1]
     atr = last['atr']
     entry_price = last['close']
-    stop_loss = entry_price - (atr * 1.5)
-    target_price_1 = entry_price + (atr * 2.0)
-    target_price_2 = entry_price + (atr * 3.5)
-    trailing_stop_distance = atr * 1.5
+    
+    atr_percent = last['atr_percent']
+    
+    if atr_percent > 3.0: stop_loss_multiplier = 2.0
+    elif atr_percent < 1.5: stop_loss_multiplier = 1.2
+    else: stop_loss_multiplier = 1.5
+    stop_loss = entry_price - (atr * stop_loss_multiplier)
+    
+    if atr_percent > 3.0:
+        target1_multiplier, target2_multiplier = 2.5, 4.5
+    elif atr_percent < 1.5:
+        target1_multiplier, target2_multiplier = 1.8, 3.0
+    else:
+        target1_multiplier, target2_multiplier = 2.0, 3.5
+    target_price_1 = entry_price + (atr * target1_multiplier)
+    target_price_2 = entry_price + (atr * target2_multiplier)
+    
+    if atr_percent > 3.0: trailing_stop_multiplier = 2.0
+    elif atr_percent < 1.5: trailing_stop_multiplier = 1.2
+    else: trailing_stop_multiplier = 1.5
+    trailing_stop_distance = atr * trailing_stop_multiplier
+    
     return {
         "entry_price": entry_price, "stop_loss": stop_loss, "target_price_1": target_price_1,
-        "target_price_2": target_price_2, "atr": atr,
-        "trailing_stop_distance": trailing_stop_distance
+        "target_price_2": target_price_2, "atr": atr, "trailing_stop_distance": trailing_stop_distance,
+        "stop_loss_multiplier": stop_loss_multiplier, "target1_multiplier": target1_multiplier,
+        "target2_multiplier": target2_multiplier, "trailing_stop_multiplier": trailing_stop_multiplier
     }
 
-# ======================= START: [NEW] Logic from v8.2 =======================
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
-    """
-    Formats the quantity for a given symbol to match Binance's LOT_SIZE filter rules, using Decimal for precision.
-    """
     try:
         symbol_info = exchange_info_map.get(symbol)
         if not symbol_info:
             logger.error(f"[{symbol}] No exchange info found for LOT_SIZE adjustment.")
             return None
-
         lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
         if not lot_size_filter:
             logger.warning(f"[{symbol}] LOT_SIZE filter not found. Using raw quantity.")
             return Decimal(str(quantity))
-
         step_size = Decimal(lot_size_filter['stepSize'])
         min_qty = Decimal(lot_size_filter['minQty'])
-        
         quantity_dec = Decimal(str(quantity))
-        
         if quantity_dec < min_qty:
             log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": f"{quantity_dec}", "min": f"{min_qty}"})
             return None
-
-        # Adjust quantity to the step size
         adjusted_quantity = (quantity_dec // step_size) * step_size
-        
         if adjusted_quantity < min_qty:
             log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": f"{adjusted_quantity}", "min": f"{min_qty}"})
             return None
-            
         return adjusted_quantity
-
     except Exception as e:
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
-    """
-    Calculates position size based on risk percentage and stop loss distance.
-    (V2 - Enhanced with detailed error logging)
-    """
+# --- [IMPROVEMENT V25.3] Updated to accept dynamic risk percentage ---
+def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float, risk_percent: float = None) -> Optional[Decimal]:
     if not client: return None
     
-    # --- متغيرات لتسجيلها عند حدوث خطأ ---
-    available_balance_str = "N/A"
-    risk_per_coin_str = "N/A"
+    available_balance_str, risk_per_coin_str = "N/A", "N/A"
     
     try:
-        with risk_per_trade_lock:
-            current_risk_percent = RISK_PER_TRADE_PERCENT
+        if risk_percent is None:
+            with risk_per_trade_lock:
+                risk_percent = RISK_PER_TRADE_PERCENT
 
         balance_response = client.get_asset_balance(asset='USDT')
         available_balance = Decimal(balance_response['free'])
-        available_balance_str = str(available_balance) # تسجيل الرصيد
+        available_balance_str = str(available_balance)
         
-        risk_amount_usdt = available_balance * (Decimal(str(current_risk_percent)) / Decimal('100'))
-        
+        risk_amount_usdt = available_balance * (Decimal(str(risk_percent)) / Decimal('100'))
         risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
-        risk_per_coin_str = str(risk_per_coin) # تسجيل المسافة
+        risk_per_coin_str = str(risk_per_coin)
         
         if risk_per_coin <= 0:
             log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price", "entry": entry_price, "sl": stop_loss_price})
             return None
             
         initial_quantity = risk_amount_usdt / risk_per_coin
-        
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
         
         if adjusted_quantity is None or adjusted_quantity <= 0:
-            # log_rejection is already called inside adjust_quantity_to_lot_size
             return None
             
         notional_value = adjusted_quantity * Decimal(str(entry_price))
-        
-        symbol_info = exchange_info_map.get(symbol)
-        if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
-                    min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
-                    if notional_value < min_notional:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
-                        return None
-                        
-        if notional_value > available_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance}"})
-            return None
-            
-        return adjusted_quantity
-    except Exception as e:
-        # --- تعديل هنا: إضافة تسجيل مفصل للأخطاء ---
-        logger.error(f"❌ [{symbol}] Error calculating position size: {e}", exc_info=True)
-        logger.error(f"  └── DEBUG INFO for {symbol}: Entry={entry_price}, SL={stop_loss_price}, Balance={available_balance_str}, RiskPerCoin={risk_per_coin_str}")
-        return None
-
-            
-        notional_value = adjusted_quantity * Decimal(str(entry_price))
-        
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             for f in symbol_info['filters']:
@@ -828,31 +1072,26 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         return adjusted_quantity
     except Exception as e:
         logger.error(f"❌ [{symbol}] Error calculating position size: {e}", exc_info=True)
+        logger.error(f"  └── DEBUG INFO for {symbol}: Entry={entry_price}, SL={stop_loss_price}, Balance={available_balance_str}, RiskPerCoin={risk_per_coin_str}, RiskPercent={risk_percent}")
         return None
 
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
-    """
-    Places a trade order on Binance.
-    """
     if not client: return None
     logger.info(f"➡️ [{symbol}] Attempting to place REAL {side} order for quantity {quantity}.")
     try:
-        # Convert Decimal to string for the API call
         order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
         log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
         return order
     except BinanceAPIException as e:
         logger.error(f"❌ [{symbol}] Binance API Error on order placement: {e}")
-        send_telegram_message(f"❌ *خطأ باينانس عند وضع أمر لـ {symbol}*\n`{e}`", force=True)
+        send_enhanced_telegram_message(f"❌ *خطأ باينانس عند وضع أمر لـ {symbol}*\n`{e}`", force=True)
         return None
     except Exception as e:
         logger.error(f"❌ [{symbol}] General error on order placement: {e}", exc_info=True)
         return None
-# ======================== END: [NEW] Logic from v8.2 ========================
 
-# ======================= START: [REFACTORED] Trade Creation Logic =======================
+# --- [IMPROVEMENT V25.3] Centralized filters and refined logic ---
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    # --- 1. Pre-Trade Quality & Cooldown Checks ---
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
         with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
@@ -867,11 +1106,23 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             if until and datetime.now(timezone.utc) < until:
                 log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()})
                 return
+        
+        if not add_news_filter():
+            log_rejection(symbol, "News Filter Failed")
+            return
+        
+        if not add_liquidity_filter():
+            log_rejection(symbol, "Liquidity Filter Failed")
+            return
+        
+        if not add_correlation_filter(symbol):
+            log_rejection(symbol, "Correlation Filter Failed")
+            return
+            
     except Exception as e:
         logger.error(f"❌ [Signal Creation] Error during pre-checks for {symbol}: {e}", exc_info=True)
         return
 
-    # --- 2. Setup Trade Parameters ---
     with trading_mode_lock: is_real = not paper_trading_mode
     trade_levels = calculate_trade_levels(df)
     entry_price = trade_levels['entry_price']
@@ -880,20 +1131,19 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     signal_details = {
         "atr": trade_levels['atr'], "trailing_stop_activated": False,
         "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False,
-        "quality_score": quality_score
+        "quality_score": quality_score, "stop_loss_multiplier": trade_levels['stop_loss_multiplier'],
+        "target1_multiplier": trade_levels['target1_multiplier'], "target2_multiplier": trade_levels['target2_multiplier'],
+        "trailing_stop_multiplier": trade_levels['trailing_stop_multiplier']
     }
 
-    # --- 3. Execute Trade (Real or Paper) ---
     if is_real:
-        # ** تعديل رئيسي: استخدام دالة حساب حجم الصفقة الجديدة **
-        quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price)
+        dynamic_risk_percent = calculate_dynamic_risk_per_trade()
+        quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, dynamic_risk_percent)
 
         if quantity_dec is None or quantity_dec <= 0:
-            # Rejection is already logged inside calculate_position_size
             logger.error(f"❌ [Real Trade] Position size calculation failed for {symbol}. Trade rejected.")
             return
 
-        # ** تعديل رئيسي: استخدام دالة تنفيذ الأمر الجديدة **
         order = place_order(symbol, Client.SIDE_BUY, quantity_dec)
         
         if order:
@@ -906,30 +1156,39 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
                 strategy_name, True, float(final_quantity),
                 {**signal_details, "avg_fill": float(avg_fill_price)}, order_id
             )
-            send_telegram_message(
-                f"✅ *تم فتح صفقة حقيقية*\n"
-                f"*العملة:* `{symbol}`\n"
-                f"*الكمية:* `{final_quantity}`\n"
-                f"*السعر:* `{avg_fill_price:.4f}`",
-                force=True
+            
+            send_trade_open_notification(
+                symbol, strategy_name, float(avg_fill_price), 
+                trade_levels['stop_loss'], trade_levels['target_price_1'], 
+                trade_levels['target_price_2'], float(final_quantity), 
+                is_real, quality_score, df['atr_percent'].iloc[-1]
             )
+            
             log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
         else:
             logger.error(f"❌ [Real Trade] Order placement failed for {symbol}. Trade not opened.")
             return
 
     else: # Paper Trading
-        # في الوضع الورقي، سنحاكي نفس منطق حساب الحجم
         risk_per_coin = entry_price - stop_loss_price
         if risk_per_coin <= 0: return
-        risk_amount_usdt = PAPER_TRADE_INITIAL_BALANCE * (RISK_PER_TRADE_PERCENT / 100.0)
+        
+        with risk_per_trade_lock:
+            paper_risk = RISK_PER_TRADE_PERCENT
+        
+        risk_amount_usdt = PAPER_TRADE_INITIAL_BALANCE * (paper_risk / 100.0)
         quantity = risk_amount_usdt / risk_per_coin
         
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
-        message = (f"📊 *صفقة ورقية جديدة*\n`{symbol}` | `{strategy_name}`\n*الجودة:* `{quality_score}/100`\n*دخول:* `{entry_price:.4f}`\n*وقف:* `{stop_loss_price:.4f}`")
-        send_telegram_message(message, force=True)
+        
+        send_trade_open_notification(
+            symbol, strategy_name, entry_price, 
+            trade_levels['stop_loss'], trade_levels['target_price_1'], 
+            trade_levels['target_price_2'], quantity, 
+            is_real, quality_score, df['atr_percent'].iloc[-1]
+        )
+        
         log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
-# ======================== END: [REFACTORED] Trade Creation Logic ========================
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1767,7 +2026,7 @@ def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) 
         with live_prices_lock: closing_price = live_prices.get(symbol)
         if closing_price is None:
             logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
-            send_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
+            send_enhanced_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
             return False
     logger.info(f"[Manual Close] User initiated manual close for signal {signal_id} ({symbol}) at price {closing_price}")
     close_signal(signal_to_close, closing_price, "manual_close")
@@ -1857,25 +2116,32 @@ def main_bot_loop():
                 if not is_trading_enabled: time.sleep(10); continue
             with signal_cache_lock:
                 if len(open_signals_cache) >= MAX_OPEN_TRADES: time.sleep(120); continue
+            
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
                 with signal_cache_lock:
                     if symbol in open_signals_cache: continue
+                
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
                     if df is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
                 df_featured = calculate_all_features(df); df_featured.name = symbol
+                
+                # Basic filters that don't depend on strategy
                 if not check_market_volatility_filter(df_featured): continue
                 if not check_trend_strength_filter(df_featured, BASE_FILTER_ADX_THRESHOLD): continue
+                
                 strategy_found = None
                 if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
                 elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
                 elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
                 elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
+                
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
+            
             logger.info("="*20 + " Scan Cycle Completed " + "="*20)
             time.sleep(60 * 5)
         except Exception as e:
@@ -1918,14 +2184,12 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
         try:
             quantity_in_bot = Decimal(str(signal.get('quantity', 0)))
             if quantity_in_bot > 0:
-                # ** التحسين المستمر: التحقق من الرصيد الفعلي قبل البيع **
                 asset = symbol.replace("USDT", "")
                 asset_balance_info = client.get_asset_balance(asset=asset)
                 available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
                 
                 logger.info(f"[Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
                 
-                # نبيع الكمية الأصغر بين ما هو مسجل وما هو متاح فعلاً
                 quantity_to_sell = min(quantity_in_bot, available_on_exchange)
                 
                 if quantity_to_sell > 0:
@@ -1934,7 +2198,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                         sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_quantity_to_sell)
                         if not sell_order:
                             log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol}. Trade remains open.", "TRADE_ERROR")
-                            return # لا نكمل الإغلاق في قاعدة البيانات إذا فشل الأمر
+                            return
                     else:
                         logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero. Skipping API sell.")
                 else:
@@ -1965,7 +2229,7 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     log_and_notify("info", f"Closed {trade_type} trade for {symbol}. Profit: {profit:.2f}%", "TRADE_CLOSED")
     settings = get_notification_settings()
     if (profit >= settings['min_profit_notification'] or profit <= settings['max_loss_notification'] or reason == "manual_close"):
-        send_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
+        send_enhanced_telegram_message(f"{result_emoji} *إغلاق صفقة {trade_type} {symbol}*\n*السبب:* {reason_ar}\n*الربح:* `{profit:.2f}%`")
 # ======================== END: [REFACTORED] Trade Closing Logic ========================
 
 def trade_management_loop():
@@ -1997,14 +2261,11 @@ def trade_management_loop():
                 if tp2 and current_price >= tp2:
                     close_signal(signal, tp2, "TP2_HIT"); continue
                 if tp1 and not details.get('tp1_done') and remaining_qty > 0 and current_price >= tp1:
-                    # For partial exits, we'll use the new closing logic which is safer
                     part_qty_to_close = remaining_qty * 0.5
                     
-                    # Create a temporary signal-like dict for the close function
                     temp_signal_for_partial_close = signal.copy()
                     temp_signal_for_partial_close['quantity'] = part_qty_to_close
                     
-                    # We call a simplified version of close_signal's logic here for the partial close
                     if temp_signal_for_partial_close.get('is_real_trade'):
                         asset = symbol.replace("USDT", "")
                         asset_balance_info = client.get_asset_balance(asset=asset)
@@ -2024,7 +2285,7 @@ def trade_management_loop():
                         if symbol in open_signals_cache:
                             open_signals_cache[symbol].update(updates)
                             open_signals_cache[symbol]['signal_details'] = details
-                    send_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
+                    send_enhanced_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
                     broadcast({"type": "signal_update", "payload": open_signals_cache.get(symbol, {})})
                     continue
                 profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
@@ -2033,14 +2294,14 @@ def trade_management_loop():
                     update_signal_in_db(signal['id'], {"signal_details": json.dumps(details)})
                     with signal_cache_lock:
                         if symbol in open_signals_cache: open_signals_cache[symbol]['signal_details'] = details
-                    send_telegram_message(f"📈 *تفعيل الوقف المتحرك* لـ `{symbol}` عند ربح `{profit_pct:.2f}%`.")
+                    send_enhanced_telegram_message(f"📈 *تفعيل الوقف المتحرك* لـ `{symbol}` عند ربح `{profit_pct:.2f}%`.")
                 if details.get('trailing_active') and trail_dist:
                     new_sl = max(stop_loss, current_price - trail_dist)
                     if new_sl > stop_loss:
                         update_signal_in_db(signal['id'], {"stop_loss": new_sl})
                         with signal_cache_lock:
                             if symbol in open_signals_cache: open_signals_cache[symbol]['stop_loss'] = new_sl
-                        send_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
+                        send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
             time.sleep(1)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
@@ -2104,7 +2365,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.0.0 (Risk-Based Sizing) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.3.0 (Refined Logic) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2125,5 +2386,6 @@ if __name__ == '__main__':
     Thread(target=trade_management_loop, daemon=True).start()
     start_market_state_updater()
     Thread(target=update_balance_loop, daemon=True).start()
+    start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
