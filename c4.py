@@ -754,21 +754,29 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
 def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float) -> Optional[Decimal]:
     """
     Calculates position size based on risk percentage and stop loss distance.
+    (V2 - Enhanced with detailed error logging)
     """
     if not client: return None
+    
+    # --- متغيرات لتسجيلها عند حدوث خطأ ---
+    available_balance_str = "N/A"
+    risk_per_coin_str = "N/A"
+    
     try:
         with risk_per_trade_lock:
             current_risk_percent = RISK_PER_TRADE_PERCENT
 
         balance_response = client.get_asset_balance(asset='USDT')
         available_balance = Decimal(balance_response['free'])
+        available_balance_str = str(available_balance) # تسجيل الرصيد
         
         risk_amount_usdt = available_balance * (Decimal(str(current_risk_percent)) / Decimal('100'))
         
         risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
+        risk_per_coin_str = str(risk_per_coin) # تسجيل المسافة
         
         if risk_per_coin <= 0:
-            log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price"})
+            log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price", "entry": entry_price, "sl": stop_loss_price})
             return None
             
         initial_quantity = risk_amount_usdt / risk_per_coin
@@ -778,6 +786,29 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         if adjusted_quantity is None or adjusted_quantity <= 0:
             # log_rejection is already called inside adjust_quantity_to_lot_size
             return None
+            
+        notional_value = adjusted_quantity * Decimal(str(entry_price))
+        
+        symbol_info = exchange_info_map.get(symbol)
+        if symbol_info:
+            for f in symbol_info['filters']:
+                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
+                    min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
+                    if notional_value < min_notional:
+                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+                        return None
+                        
+        if notional_value > available_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance}"})
+            return None
+            
+        return adjusted_quantity
+    except Exception as e:
+        # --- تعديل هنا: إضافة تسجيل مفصل للأخطاء ---
+        logger.error(f"❌ [{symbol}] Error calculating position size: {e}", exc_info=True)
+        logger.error(f"  └── DEBUG INFO for {symbol}: Entry={entry_price}, SL={stop_loss_price}, Balance={available_balance_str}, RiskPerCoin={risk_per_coin_str}")
+        return None
+
             
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         
