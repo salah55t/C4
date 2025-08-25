@@ -1,10 +1,9 @@
-# ملف c4.py - نسخة V26.0.0 (إضافة استراتيجية موجات إليوت)
+# ملف c4.py - نسخة V26.1.0 (إضافة صفحة الإعدادات)
 # --- وصف الإصدار:
-# 1.  [إضافة استراتيجية] تم دمج استراتيجية موجات إليوت (Elliott Wave) بشكل كامل.
-# 2.  [تفعيل] إضافة مفتاح USE_ELLIOTT_WAVE_STRATEGY لتفعيل/إلغاء الاستراتيجية.
-# 3.  [إعدادات] إضافة إعدادات الفلاتر الديناميكية الخاصة بالاستراتيجية الجديدة.
-# 4.  [منطق] إضافة دالة check_elliott_wave_strategy لتحليل نمط الموجات.
-# 5.  [تكامل] دمج الاستراتيجية في حلقة الفحص الرئيسية، ودوال حساب جودة الإشارة، ومستويات التداول، وأسباب الرفض.
+# 1.  [إضافة واجهة] تم بناء وإضافة صفحة الإعدادات (SETTINGS_TEMPLATE) التي كانت مفقودة.
+# 2.  [تحكم كامل] تتيح الصفحة الجديدة تفعيل/إلغاء كل استراتيجية بشكل منفصل.
+# 3.  [تخصيص الفلاتر] يمكن الآن تعديل ملف الفلتر (Profile)، عتبة ADX، ونمط تأكيد الفريم الأعلى لكل استراتيجية.
+# 4.  [تكامل] ربط الواجهة الأمامية بالمسارات الخلفية (Backend Routes) لحفظ التغييرات بشكل فوري.
 
 import time
 import os
@@ -44,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26')
+logger = logging.getLogger('CryptoBotV26.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -97,7 +96,7 @@ USE_MACD_EMA_STRATEGY: bool = True
 USE_EMA_RSI_STRATEGY: bool = True
 USE_PULLBACK_STRATEGY: bool = True
 USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
-USE_ELLIOTT_WAVE_STRATEGY: bool = True  # إضافة استراتيجية موجات إليوت
+USE_ELLIOTT_WAVE_STRATEGY: bool = True
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
@@ -106,7 +105,7 @@ STRATEGY_NAMES = {
     "EMA_RSI_Strategy": "EMA+RSI (مختلطة)",
     "Pullback_Strategy": "Pullback (انعكاسية)",
     "Momentum_Volatility_Strategy": "Momentum (زخم)",
-    "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"  # إضافة استراتيجية موجات إليوت
+    "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
 }
 STRATEGY_FILTER_CONFIG = {
     "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
@@ -114,7 +113,7 @@ STRATEGY_FILTER_CONFIG = {
     "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 20, "htf_confirmation_mode": "Relaxed"},
     "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
     "Momentum_Volatility_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"},
-    "Elliott_Wave_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"}  # إضافة استراتيجية موجات إليوت
+    "Elliott_Wave_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"}
 }
 strategy_filters_lock = Lock()
 BASE_FILTER_ADX_THRESHOLD = 20
@@ -967,7 +966,7 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
                     if 40 <= last_row['rsi'] <= 60:
                         if (last_row['ema9'] < last_row['ema21'] < last_row['ema50']):
                             # حاليا البوت يدعم الشراء فقط، يمكن تفعيل البيع مستقبلا
-                            return False 
+                            return False
         
         log_rejection(df.name, "Elliott Wave: No clear pattern detected")
         return False
@@ -1200,14 +1199,14 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         logger.error(f"❌ [DB] CRITICAL ERROR saving signal for {symbol}: {e}", exc_info=True)
         if conn: conn.rollback()
 
-# --- قوالب HTML (بدون تغيير) ---
+# --- قوالب HTML ---
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V26.0 - موجات إليوت)</title>
+<title>لوحة التحكم - بوت التداول (V26.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1274,7 +1273,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V26.0 (موجات إليوت)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V26.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1659,14 +1658,189 @@ document.addEventListener('DOMContentLoaded', () => { initializeDashboard(); set
 </body>
 </html>
 """
-BACKTEST_TEMPLATE = "..." # (HTML content is unchanged)
-SETTINGS_TEMPLATE = "..." # (HTML content is unchanged)
+BACKTEST_TEMPLATE = "<h1>Backtest Page - Under Construction</h1>"
+SETTINGS_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>الإعدادات - بوت التداول</title>
+<style>
+:root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
+.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:20px;margin:0;font-weight:700;color:#d7e4ff}
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
+.card-body{padding:16px}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition:all .2s;text-decoration:none}
+.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
+.switch{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px;background:#0d1730;border:1px solid #24335f;cursor:pointer}
+.switch input{display:none}
+.switch .dot{width:16px;height:16px;border-radius:50%;background:#6a7fb2;transition:.2s}
+.switch input:checked + .dot{background:var(--ok);transform:scale(1.1)}
+.switch span{font-weight:600}
+.strategy-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.table{width:100%;border-collapse:collapse;margin-top:12px}
+.table th,.table td{padding:12px;text-align:right;border-bottom:1px solid #1e2c52}
+.table th{font-size:12px;color:var(--muted);font-weight:600}
+.table select, .table input {width:100%;background:#0d1730;border:1px solid #24335f;color:#e8f1ff;padding:8px;border-radius:8px;font-size:14px;}
+.table input[type=number] {text-align: center;}
+.notification { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: #1e2c52; color: white; padding: 12px 20px; border-radius: 8px; z-index: 1000; opacity: 0; transition: opacity 0.3s, transform 0.3s; pointer-events: none; }
+.notification.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.notification.success { background-color: var(--ok); }
+.notification.error { background-color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>إعدادات الاستراتيجيات والفلاتر</h1>
+    <a href="/" class="btn">العودة للوحة التحكم</a>
+  </header>
+  <form id="settingsForm">
+    <div class="card">
+      <h2>تفعيل الاستراتيجيات</h2>
+      <div class="card-body strategy-grid">
+        {% for key, name in STRATEGY_NAMES.items() %}
+        <label class="switch">
+          <input type="checkbox" name="use_{{ key|lower }}" {% if globals()['USE_' + key.upper()] %}checked{% endif %}>
+          <span class="dot"></span>
+          <span>{{ name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <h2>إعدادات الفلاتر الديناميكية</h2>
+      <div class="card-body" style="padding:0;">
+        <div style="overflow-x:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>الاستراتيجية</th>
+                <th>ملف الفلتر (Profile)</th>
+                <th>عتبة ADX</th>
+                <th>تأكيد الفريم الأعلى (HTF)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for key, config in STRATEGY_FILTER_CONFIG.items() %}
+              <tr>
+                <td>{{ STRATEGY_NAMES.get(key, key) }}</td>
+                <td>
+                  <select name="{{ key }}_profile">
+                    <option value="Strict" {% if config.profile == 'Strict' %}selected{% endif %}>صارم (Strict)</option>
+                    <option value="Moderate" {% if config.profile == 'Moderate' %}selected{% endif %}>معتدل (Moderate)</option>
+                    <option value="Reversal" {% if config.profile == 'Reversal' %}selected{% endif %}>انعكاسي (Reversal)</option>
+                    <option value="Disabled" {% if config.profile == 'Disabled' %}selected{% endif %}>معطل (Disabled)</option>
+                  </select>
+                </td>
+                <td><input type="number" name="{{ key }}_adx_threshold" value="{{ config.adx_threshold }}" min="10" max="40"></td>
+                <td>
+                  <select name="{{ key }}_htf_confirmation_mode">
+                    <option value="Strict" {% if config.htf_confirmation_mode == 'Strict' %}selected{% endif %}>صارم (Strict)</option>
+                    <option value="Relaxed" {% if config.htf_confirmation_mode == 'Relaxed' %}selected{% endif %}>متساهل (Relaxed)</option>
+                    <option value="Disabled" {% if config.htf_confirmation_mode == 'Disabled' %}selected{% endif %}>معطل (Disabled)</option>
+                  </select>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
+      <button type="submit" class="btn" style="background: linear-gradient(180deg, #108a4c, #15c46a); border-color: #108a4c; padding: 12px 24px; font-size: 16px;">حفظ التغييرات</button>
+    </div>
+  </form>
+</div>
+<div id="notification" class="notification"></div>
+<script>
+function showNotification(message, type = 'success', duration = 3000) {
+    const notification = document.getElementById('notification');
+    notification.textContent = message;
+    notification.className = 'notification show ' + type;
+    setTimeout(() => {
+        notification.className = 'notification';
+    }, duration);
+}
 
-# --- مسارات Flask (بدون تغيير) ---
+document.getElementById('settingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const formData = new FormData(this);
+    const strategiesData = {};
+    const filtersData = {};
+    const strategyKeys = {{ STRATEGY_NAMES.keys()|list|tojson }};
+
+    strategyKeys.forEach(key => {
+        strategiesData['use_' + key.lower()] = formData.has('use_' + key.lower());
+        filtersData[key + '_profile'] = formData.get(key + '_profile');
+        filtersData[key + '_adx_threshold'] = formData.get(key + '_adx_threshold');
+        filtersData[key + '_htf_confirmation_mode'] = formData.get(key + '_htf_confirmation_mode');
+    });
+
+    const saveButton = this.querySelector('button[type="submit"]');
+    saveButton.disabled = true;
+    saveButton.textContent = 'جاري الحفظ...';
+
+    Promise.all([
+        fetch('/update_strategies', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(strategiesData)
+        }),
+        fetch('/update_filter_settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(filtersData)
+        })
+    ]).then(async (responses) => {
+        const results = await Promise.all(responses.map(res => res.json()));
+        const allOk = results.every(r => r.success);
+        if (allOk) {
+            showNotification('تم حفظ الإعدادات بنجاح!', 'success');
+        } else {
+            const errorMsg = results.find(r => !r.success)?.message || 'Unknown error';
+            showNotification('فشل حفظ بعض الإعدادات: ' + errorMsg, 'error');
+        }
+    }).catch(error => {
+        showNotification('حدث خطأ في الشبكة: ' + error.message, 'error');
+        console.error('Save error:', error);
+    }).finally(() => {
+        saveButton.disabled = false;
+        saveButton.textContent = 'حفظ التغييرات';
+    });
+});
+</script>
+</body>
+</html>
+"""
+
+# --- مسارات Flask ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 @app.route('/backtest')
 def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
+
+@app.route('/settings')
+def settings():
+    return render_template_string(
+        SETTINGS_TEMPLATE, 
+        STRATEGY_NAMES=STRATEGY_NAMES, 
+        STRATEGY_FILTER_CONFIG=STRATEGY_FILTER_CONFIG,
+        USE_BB_STOCH_STRATEGY=USE_BB_STOCH_STRATEGY,
+        USE_MACD_EMA_STRATEGY=USE_MACD_EMA_STRATEGY,
+        USE_EMA_RSI_STRATEGY=USE_EMA_RSI_STRATEGY,
+        USE_PULLBACK_STRATEGY=USE_PULLBACK_STRATEGY,
+        USE_MOMENTUM_VOLATILITY_STRATEGY=USE_MOMENTUM_VOLATILITY_STRATEGY,
+        USE_ELLIOTT_WAVE_STRATEGY=USE_ELLIOTT_WAVE_STRATEGY
+    )
+
 @app.route('/api/dashboard_data')
 def dashboard_data():
     try: return jsonify(get_dashboard_payload())
@@ -1784,9 +1958,7 @@ def advanced_performance_data():
     except Exception as e:
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-@app.route('/settings')
-def settings():
-    return render_template_string(SETTINGS_TEMPLATE, RISK_PER_TRADE_PERCENT=RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES=MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY=USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY=USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY=USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY=USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY=USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY=USE_ELLIOTT_WAVE_STRATEGY, STRATEGY_FILTER_CONFIG=STRATEGY_FILTER_CONFIG, STRATEGY_NAMES=STRATEGY_NAMES)
+
 @app.route('/toggle_trading', methods=['POST'])
 def toggle_trading():
     global is_trading_enabled
@@ -1868,35 +2040,35 @@ def api_close_trade(signal_id):
     thread = Thread(target=close_trade_manually, args=(signal_id, closing_price))
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
-@app.route('/update_settings', methods=['POST'])
-def update_settings():
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES
-    try:
-        data = request.json
-        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(data['risk_per_trade'])
-        MAX_OPEN_TRADES = int(data['max_trades'])
-        if redis_client:
-            with trading_mode_lock: is_paper = paper_trading_mode
-            settings = {'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES, 'paper_trading_mode': is_paper}
-            redis_client.set('trading_settings', json.dumps(settings))
-        log_and_notify("info", "Trading settings updated.", "SETTINGS_UPDATE")
-        return jsonify({"success": True, "message": "تم تحديث الإعدادات العامة"})
-    except Exception as e: return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/update_strategies', methods=['POST'])
 def update_strategies():
     global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
     try:
         data = request.json
-        USE_BB_STOCH_STRATEGY = data.get('use_bb_stoch', False)
-        USE_MACD_EMA_STRATEGY = data.get('use_macd_ema', False)
-        USE_EMA_RSI_STRATEGY = data.get('use_ema_rsi', False)
-        USE_PULLBACK_STRATEGY = data.get('use_pullback', False)
-        USE_MOMENTUM_VOLATILITY_STRATEGY = data.get('use_momentum_volatility', False)
-        USE_ELLIOTT_WAVE_STRATEGY = data.get('use_elliott_wave', False)
-        if redis_client: redis_client.set('strategy_settings', json.dumps({'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY, 'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY, 'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY, 'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY, 'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY, 'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY}))
+        USE_BB_STOCH_STRATEGY = data.get('use_bb_stoch_strategy', False)
+        USE_MACD_EMA_STRATEGY = data.get('use_macd_ema_strategy', False)
+        USE_EMA_RSI_STRATEGY = data.get('use_ema_rsi_strategy', False)
+        USE_PULLBACK_STRATEGY = data.get('use_pullback_strategy', False)
+        USE_MOMENTUM_VOLATILITY_STRATEGY = data.get('use_momentum_volatility_strategy', False)
+        USE_ELLIOTT_WAVE_STRATEGY = data.get('use_elliott_wave_strategy', False)
+        
+        strategy_settings = {
+            'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
+            'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
+            'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
+            'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
+            'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
+            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+        }
+        if redis_client:
+            redis_client.set('strategy_settings', json.dumps(strategy_settings))
         log_and_notify("info", "Strategy settings updated.", "STRATEGY_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث الاستراتيجيات"})
-    except Exception as e: return jsonify({"success": False, "message": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Error updating strategies: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/update_filter_settings', methods=['POST'])
 def update_filter_settings():
     global STRATEGY_FILTER_CONFIG
@@ -1904,12 +2076,21 @@ def update_filter_settings():
         data = request.json
         new_config = {}
         for key in STRATEGY_FILTER_CONFIG.keys():
-            new_config[key] = {"profile": data.get(f"{key}_profile"), "adx_threshold": int(data.get(f"{key}_adx_threshold")), "htf_confirmation_mode": data.get(f"{key}_htf_confirmation_mode")}
-        with strategy_filters_lock: STRATEGY_FILTER_CONFIG = new_config
-        if redis_client: redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
+            new_config[key] = {
+                "profile": data.get(f"{key}_profile"),
+                "adx_threshold": int(data.get(f"{key}_adx_threshold")),
+                "htf_confirmation_mode": data.get(f"{key}_htf_confirmation_mode")
+            }
+        with strategy_filters_lock:
+            STRATEGY_FILTER_CONFIG = new_config
+        if redis_client:
+            redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
         log_and_notify("info", "Filter settings updated.", "FILTER_SETTINGS_UPDATE")
         return jsonify({"success": True, "message": "تم تحديث إعدادات الفلاتر"})
-    except Exception as e: return jsonify({"success": False, "message": str(e)}), 500
+    except Exception as e:
+        logger.error(f"Error updating filter settings: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/api/run_backtest', methods=['POST'])
 def api_run_backtest():
     try:
@@ -2161,7 +2342,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V26.0.0 (Elliott Wave Added) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V26.1.0 (Settings Page Added) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
