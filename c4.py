@@ -645,7 +645,7 @@ def _crossed_below(a, b):
     except Exception:
         return False
 
-\1df: pd.DataFrame) -> pd.DataFrame:
+def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
@@ -1249,7 +1249,7 @@ def refine_risk_with_kelly_and_regime(base_risk_percent: float) -> float:
     rp = max(KELLY_MIN_PERCENT, min(KELLY_CAP_PERCENT, rp))
     return rp
 
-\1symbol: str, df: pd.DataFrame, strategy_name: str):
+symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
         with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
