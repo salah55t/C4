@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V25.3.0 (منطق محسن)
+# ملف c4.py - نسخة V25.4.0 (إصلاحات وتحسينات للموثوقية)
 # --- وصف الإصدار:
-# 1.  [مركزية الفلاتر] تم نقل جميع الفلاتر المتقدمة (الأخبار، السيولة، الارتباط) إلى دالة إنشاء الصفقة (`create_trade_signal`) لضمان تطبيقها مباشرة قبل التنفيذ.
-# 2.  [تحسين المخاطرة] تم تحسين دالة حساب حجم الصفقة (`calculate_position_size`) لتمرير نسبة المخاطرة الديناميكية بشكل مباشر، مما يجعل الكود أكثر وضوحًا وقوة.
-# 3.  [تنظيف الكود] تم إزالة الفلاتر من حلقة الفحص الرئيسية لتجنب التكرار بعد نقلها إلى دالة إنشاء الصفقة.
-# 4.  [نتيجة] بوت تداول ذو منطق أكثر ترابطًا، حيث يتم التحقق من جميع الشروط والفلاتر في نقطة قرار واحدة، مما يزيد من موثوقية النظام.
+# 1.  [إصلاح جوهري] تم إصلاح دالة مؤشرات الأداء (`get_performance_metrics`) لتقوم بالاستعلام من جدول `signals` مباشرة بدلاً من جدول `performance_summary` الفارغ، مما يضمن عرض البيانات الصحيحة في لوحة التحكم.
+# 2.  [توقيت ذكي] تم تحسين حلقة الفحص الرئيسية (`main_bot_loop`) لتنتظر إغلاق شمعة الـ 15 دقيقة التالية، مما يضمن تحليل البيانات عند اكتمال الشمعة وزيادة دقة الإشارات.
+# 3.  [إدارة مخاطر محسنة] تم تعديل دالة `calculate_trade_levels` لتضمن وجود مسافة دنيا لوقف الخسارة، مما يمنع الإغلاق المبكر للصفقات بسبب تقلبات السوق الطفيفة.
+# 4.  [تحسينات الواجهة] تم تحديث كود JavaScript في لوحة التحكم ليتعامل مع التغييرات في الواجهة الخلفية ويعرض جميع المؤشرات بشكل صحيح.
+# 5.  [نتيجة] بوت تداول أكثر موثوقية واستقرارًا، جاهز للاختبار المتقدم والتداول الحقيقي، مع لوحة تحكم تعرض بيانات أداء دقيقة.
 
 import time
 import os
@@ -247,6 +248,8 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
                     );
                 """)
                 cur.execute("CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL, message TEXT NOT NULL);")
+                # The performance_summary table is no longer used for live metrics.
+                # It can be used for daily aggregated data if needed in the future.
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS performance_summary (
                         id SERIAL PRIMARY KEY,
@@ -967,18 +970,31 @@ def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
     ema_ok = (last['ema9'] > last['ema21']) and (last['close'] > last['ema9'])
     return atr_ok and hist_rising and ema_ok
 
-# --- [IMPROVEMENT V25.1] Dynamic Risk Management based on Volatility ---
+# --- [IMPROVEMENT V25.4] Safer Stop-Loss Logic ---
 def calculate_trade_levels(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Calculates entry, stop-loss, and target prices with improved safety logic.
+    Ensures a minimum stop-loss distance to prevent premature exits.
+    """
     last = df.iloc[-1]
     atr = last['atr']
     entry_price = last['close']
     
     atr_percent = last['atr_percent']
     
+    # Dynamic multiplier based on volatility
     if atr_percent > 3.0: stop_loss_multiplier = 2.0
     elif atr_percent < 1.5: stop_loss_multiplier = 1.2
     else: stop_loss_multiplier = 1.5
-    stop_loss = entry_price - (atr * stop_loss_multiplier)
+    
+    stop_loss_from_atr = entry_price - (atr * stop_loss_multiplier)
+    
+    # [NEW] Ensure stop-loss is not too tight (e.g., minimum 0.5% away)
+    min_sl_distance = entry_price * 0.005 
+    stop_loss_from_min_dist = entry_price - min_sl_distance
+    
+    # Use the wider of the two stop-loss calculations
+    stop_loss = min(stop_loss_from_atr, stop_loss_from_min_dist)
     
     if atr_percent > 3.0:
         target1_multiplier, target2_multiplier = 2.5, 4.5
@@ -1217,13 +1233,14 @@ def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strat
         if conn: conn.rollback()
 
 # --- قوالب HTML ---
+# [IMPROVEMENT V25.4] Updated JavaScript to fetch drawdown correctly
 DASHBOARD_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V25 - إدارة المخاطر)</title>
+<title>لوحة التحكم - بوت التداول (V25.4 - نسخة محسنة)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1290,7 +1307,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V25 (إدارة المخاطر)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V25.4 (نسخة محسنة)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1566,10 +1583,13 @@ async function initializeDashboard() {
         renderAllSignals(signalsData.signals);
         qs('#openCount').textContent = signalsData.signals.length;
         qs('#signalCount').textContent = `(${signalsData.signals.length})`;
+        
+        // Update basic metrics
         qs('#winRate').textContent = `${metricsData.win_rate.toFixed(2)}%`;
         qs('#avgProfit').textContent = `${metricsData.avg_profit.toFixed(2)}%`;
-        qs('#maxDrawdown').textContent = `${metricsData.max_drawdown.toFixed(2)}%`;
         qs('#totalTrades').textContent = metricsData.total_trades;
+        
+        // Fetch advanced metrics for drawdown and chart
         loadAdditionalData();
     } catch (error) {
         console.error("فشل تحميل البيانات الأساسية:", error);
@@ -1580,7 +1600,14 @@ async function initializeDashboard() {
 async function loadAdditionalData() {
     try {
         const perfRes = await fetch('/api/advanced_performance_data');
-        if (perfRes.ok) updateAdvancedPerformance(await perfRes.json());
+        if (perfRes.ok) {
+            const advancedData = await perfRes.json();
+            // Update drawdown from the advanced endpoint
+            qs('#maxDrawdown').textContent = `${advancedData.maxDrawdown.toFixed(2)}%`;
+            updateAdvancedPerformance(advancedData);
+        } else {
+            qs('#maxDrawdown').textContent = 'N/A';
+        }
     } catch (error) { console.error("Error loading additional data:", error); }
 }
 
@@ -1874,21 +1901,48 @@ def get_open_signals():
         logger.error(f"Error fetching open signals: {e}")
         return jsonify({"error": str(e)}), 500
 
+# --- [FIX V25.4] Correctly query performance metrics from the 'signals' table ---
 @app.route('/api/performance_metrics')
 def get_performance_metrics():
-    cache_key = "performance_metrics"
+    """
+    This function now correctly calculates performance metrics from the `signals` table
+    for closed trades within the last 30 days.
+    """
+    cache_key = "performance_metrics_30d"
     if redis_client:
         cached_data = redis_client.get(cache_key)
-        if cached_data: return jsonify(json.loads(cached_data))
-    if not check_db_connection(): return jsonify({"error": "Database connection failed"}), 500
+        if cached_data:
+            return jsonify(json.loads(cached_data))
+            
+    if not check_db_connection():
+        return jsonify({"error": "Database connection failed"}), 500
+        
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) as total_trades, SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as winning_trades, AVG(profit_percentage) as avg_profit, MAX(drawdown) as max_drawdown FROM performance_summary WHERE date >= NOW() - INTERVAL '30 days'")
+            # Query the 'signals' table directly
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_trades, 
+                    SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as winning_trades, 
+                    AVG(profit_percentage) as avg_profit
+                FROM signals 
+                WHERE status = 'closed' AND closed_at >= NOW() - INTERVAL '30 days'
+            """)
             metrics = cur.fetchone()
+
         total_trades = metrics['total_trades'] or 0
         winning_trades = metrics['winning_trades'] or 0
-        result = {"total_trades": total_trades, "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0, "avg_profit": metrics['avg_profit'] or 0, "max_drawdown": metrics['max_drawdown'] or 0}
-        if redis_client: redis_client.setex(cache_key, 300, json.dumps(result, cls=NpEncoder))
+        
+        result = {
+            "total_trades": total_trades,
+            "win_rate": (winning_trades / total_trades * 100) if total_trades > 0 else 0,
+            "avg_profit": metrics['avg_profit'] or 0,
+            "max_drawdown": 0 # This will be fetched by the frontend from the advanced endpoint
+        }
+        
+        if redis_client:
+            redis_client.setex(cache_key, 300, json.dumps(result, cls=NpEncoder))
+            
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error calculating performance metrics: {e}")
@@ -1926,25 +1980,40 @@ def advanced_performance_data():
     if not check_db_connection() or not conn: return jsonify({"error": "DB connection failed"}), 500
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT profit_percentage, closed_at FROM signals WHERE status = 'closed' ORDER BY closed_at ASC")
+            # Fetch all closed trades to calculate equity curve and drawdown
+            cur.execute("SELECT profit_percentage, closed_at FROM signals WHERE status = 'closed' AND closed_at >= NOW() - INTERVAL '30 days' ORDER BY closed_at ASC")
             trades = cur.fetchall()
-        if len(trades) < 2: return jsonify({"winRate": 0, "profitFactor": 0, "maxDrawdown": 0, "sharpeRatio": 0, "equity_curve": {"labels": [], "values": []}})
+        
+        if len(trades) < 2: 
+            return jsonify({"winRate": 0, "profitFactor": 0, "maxDrawdown": 0, "sharpeRatio": 0, "equity_curve": {"labels": [], "values": []}})
+        
         profits = [t['profit_percentage'] for t in trades if t['profit_percentage'] is not None]
         wins = [p for p in profits if p > 0]; losses = [p for p in profits if p < 0]
         win_rate = (len(wins) / len(profits) * 100) if profits else 0
         total_profit = sum(wins); total_loss = abs(sum(losses))
         profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+        
+        # Calculate equity curve and max drawdown
         equity_curve_values = [1000]
         for p in profits: equity_curve_values.append(equity_curve_values[-1] * (1 + p / 100))
+        
         peak = equity_curve_values[0]; max_drawdown = 0
         for equity in equity_curve_values:
             if equity > peak: peak = equity
             drawdown = (peak - equity) / peak * 100
             if drawdown > max_drawdown: max_drawdown = drawdown
+            
         returns = np.array(profits) / 100
         sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(len(trades)) if np.std(returns) > 0 else 0
         equity_curve_labels = [t['closed_at'].isoformat() for t in trades]
-        return jsonify({"winRate": win_rate, "profitFactor": profit_factor, "maxDrawdown": max_drawdown, "sharpeRatio": sharpe_ratio, "equity_curve": {"labels": equity_curve_labels, "values": equity_curve_values[1:]}})
+        
+        return jsonify({
+            "winRate": win_rate, 
+            "profitFactor": profit_factor, 
+            "maxDrawdown": max_drawdown, 
+            "sharpeRatio": sharpe_ratio, 
+            "equity_curve": {"labels": equity_curve_labels, "values": equity_curve_values[1:]}
+        })
     except Exception as e:
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -2108,14 +2177,25 @@ def api_run_backtest():
         return jsonify({"error": str(e)}), 500
 
 # --- Main Loop & Threads ---
+# --- [IMPROVEMENT V25.4] Smart Candle-Aligned Scanning Loop ---
 def main_bot_loop():
-    logger.info("🚀 [Main Loop] Starting signal scanning loop...")
+    """
+    Main loop for scanning symbols. Now synchronizes with the close of the 15-minute candle
+    to ensure analysis is performed on complete, fresh data.
+    """
+    logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
             with trading_status_lock:
-                if not is_trading_enabled: time.sleep(10); continue
+                if not is_trading_enabled: 
+                    time.sleep(10)
+                    continue
+            
             with signal_cache_lock:
-                if len(open_signals_cache) >= MAX_OPEN_TRADES: time.sleep(120); continue
+                if len(open_signals_cache) >= MAX_OPEN_TRADES:
+                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing new signal scans.")
+                    time.sleep(120)
+                    continue
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
@@ -2128,10 +2208,6 @@ def main_bot_loop():
                     continue
                 df_featured = calculate_all_features(df); df_featured.name = symbol
                 
-                # Basic filters that don't depend on strategy
-                if not check_market_volatility_filter(df_featured): continue
-                if not check_trend_strength_filter(df_featured, BASE_FILTER_ADX_THRESHOLD): continue
-                
                 strategy_found = None
                 if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
@@ -2142,8 +2218,13 @@ def main_bot_loop():
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
             
-            logger.info("="*20 + " Scan Cycle Completed " + "="*20)
-            time.sleep(60 * 5)
+            # Calculate time to wait for the next 15-minute candle close
+            now = datetime.now(timezone.utc)
+            minutes_to_wait = 15 - (now.minute % 15)
+            seconds_to_wait = (minutes_to_wait * 60) - now.second
+            logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
+            time.sleep(max(1, seconds_to_wait)) # Wait at least 1 second
+
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
@@ -2365,7 +2446,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.3.0 (Refined Logic) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.4.0 (Reliability Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
