@@ -1,8 +1,7 @@
-# ملف c4.py - نسخة V25.5.0 (تعديل الاستراتيجيات)
+# ملف c4.py - نسخة V25.6.0 (تعديل استراتيجية BB)
 # --- وصف الإصدار:
-# 1.  [تعديل استراتيجية BB] تم تعديل استراتيجية Bollinger Bands لتعتمد على ارتداد السعر من الخط السفلي، مع تأكيد إضافي من تقاطع السعر للمتوسط المتحرك (الخط الأوسط) ووجود شمعة صاعدة.
-# 2.  [تعديل استراتيجية MACD] تم تعديل استراتيجية MACD لتدمج مؤشر Stochastic Oscillator. الآن، إشارة تقاطع الماكد الصعودي يتم تأكيدها بوجود مؤشر Stochastic في منطقة التشبع البيعي (Oversold).
-# 3.  [تحديث المؤشرات] تم تحديث دالة `calculate_all_features` لتشمل حساب الخط الأوسط للبولينجر باند (bb_middle) ومؤشر Stochastic Oscillator القياسي (%K و %D).
+# 1.  [تعديل استراتيجية BB] بناءً على الطلب، تم إلغاء فلتر الاتجاه طويل الأجل (شرط أن يكون السعر فوق EMA 200) من استراتيجية Bollinger Bands.
+# 2.  [نتيجة] أصبحت استراتيجية BB الآن استراتيجية انعكاسية بحتة، حيث يمكنها الدخول في صفقات شراء عند الارتداد من الخط السفلي حتى لو كان الاتجاه العام هابطًا، مما يزيد من عدد الإشارات المحتملة.
 
 import time
 import os
@@ -97,7 +96,7 @@ USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
-    "BB_Stoch_Strategy": "BB+MA Cross (معدلة)", "MACD_EMA_Strategy": "MACD+Stochastic (معدلة)",
+    "BB_Stoch_Strategy": "BB+MA Cross (انعكاسية)", "MACD_EMA_Strategy": "MACD+Stochastic (معدلة)",
     "EMA_RSI_Strategy": "EMA+RSI (مختلطة)", "Pullback_Strategy": "Pullback (انعكاسية)",
     "Momentum_Volatility_Strategy": "Momentum (زخم)"
 }
@@ -562,25 +561,18 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-# --- [MODIFIED] دالة حساب المؤشرات ---
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
-    
-    # EMAs
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-    
-    # ATR
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
     df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
     df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close']) * 100
-    
-    # ADX
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -589,8 +581,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
-    
-    # RSI
     delta = df_calc['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -598,27 +588,20 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands (with Middle Band)
     bb_middle = df_calc['close'].rolling(window=20).mean()
     bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_middle'] = bb_middle
     df_calc['bb_lower'] = bb_middle - (bb_std * 2)
     df_calc['bb_upper'] = bb_middle + (bb_std * 2)
-    
-    # MACD
     exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
     exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-    
-    # Stochastic Oscillator (Standard)
     low_14 = df_calc['low'].rolling(14).min()
     high_14 = df_calc['high'].rolling(14).max()
     df_calc['stoch_k'] = 100 * ((df_calc['close'] - low_14) / (high_14 - low_14).replace(0, 1e-9))
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
-
     return df_calc
 
 # --- Data Loading ---
@@ -833,32 +816,25 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
-# --- [MODIFIED] استراتيجية Bollinger Bands المعدلة ---
+# --- [MODIFIED] استراتيجية Bollinger Bands المعدلة (بدون فلتر الاتجاه) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     """
-    اسم الدالة الأصلي: check_bb_stoch_strategy_enhanced
     المنطق الجديد:
-    1.  الدخول عند ملامسة السعر للخط السفلي للبولينجر باند والارتداد منه.
-    2.  تأكيد الإشارة بعبور السعر للخط الأوسط للبولينجر (المتوسط المتحرك).
+    1.  الدخول عند ارتداد السعر من الخط السفلي للبولينجر باند.
+    2.  تأكيد الإشارة بعبور السعر للخط الأوسط للبولينجر.
     3.  تأكيد إضافي بوجود شمعة صاعدة.
+    * تم إلغاء فلتر الاتجاه طويل الأجل (EMA 200) *
     """
-    needed_cols = {'bb_lower', 'bb_middle', 'open', 'close', 'high', 'low', 'ema200'}
-    if len(df) < 200 or not needed_cols.issubset(df.columns):
-        return False
-    
-    # فلتر الاتجاه العام: يجب أن يكون السعر فوق متوسط 200
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed")
+    needed_cols = {'bb_lower', 'bb_middle', 'open', 'close', 'high', 'low'}
+    if len(df) < 21 or not needed_cols.issubset(df.columns): # 21 for rolling window + prev candle
         return False
     
     last, prev = df.iloc[-1], df.iloc[-2]
     
     # الشرط 1: الارتداد من الخط السفلي
-    # كانت الشمعة السابقة تحت أو تلامس الخط السفلي، والشمعة الحالية أغلقت فوقه
     bounce_from_lower_band = (prev['close'] <= prev['bb_lower']) and (last['close'] > last['bb_lower'])
     
     # الشرط 2: تأكيد بعبور الخط الأوسط
-    # يجب أن يغلق السعر الحالي فوق الخط الأوسط لتأكيد قوة الاتجاه الصاعد
     cross_middle_band = last['close'] > last['bb_middle']
     
     if not cross_middle_band:
@@ -866,7 +842,6 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         return False
 
     # الشرط 3: تأكيد الشمعة الصاعدة
-    # جسم الشمعة يجب أن يكون صاعداً بشكل واضح
     is_bullish_candle = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.3
     
     if not is_bullish_candle:
@@ -878,40 +853,28 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     return signal
 
-# --- [MODIFIED] استراتيجية MACD المعدلة ---
+# --- استراتيجية MACD المعدلة (بدون تغيير) ---
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    اسم الدالة الأصلي: check_macd_ema_strategy_enhanced
-    المنطق الجديد:
-    1.  الدخول عند تقاطع خط الماكد مع خط الإشارة صعوداً.
-    2.  تأكيد الإشارة بوجود مؤشر ستوكاستيك في منطقة التشبع البيعي (Oversold).
-    """
     needed = {'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'close', 'adx', 'ema200'}
     if len(df) < 200 or not needed.issubset(df.columns): return False
     
-    # فلتر الاتجاه العام: يجب أن يكون السعر فوق متوسط 200
     if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
         log_rejection(df.name, "Long-term Trend Filter Failed"); return False
 
-    # فلتر قوة الاتجاه: يجب أن يكون هناك اتجاه واضح (ADX > 22)
     if df['adx'].iloc[-1] < 22:
         log_rejection(df.name, "Trend Strength Filter Failed"); return False
 
     last, prev = df.iloc[-1], df.iloc[-2]
     
-    # الشرط 1: تقاطع الماكد الصعودي
     macd_cross_up = (prev['macd'] <= prev['macd_signal']) and (last['macd'] > last['macd_signal'])
     
-    # الشرط 2: تأكيد من مؤشر ستوكاستيك
-    # يجب أن يكون المؤشر في منطقة التشبع البيعي (مثلاً، أقل من 25) ويبدأ بالصعود
     stochastic_in_oversold = last['stoch_k'] < 25 and last['stoch_d'] < 25
-    stochastic_rising = last['stoch_k'] > last['stoch_d'] # خط K يتقاطع مع خط D صعوداً
+    stochastic_rising = last['stoch_k'] > last['stoch_d']
     
     if not (stochastic_in_oversold and stochastic_rising):
         log_rejection(df.name, "MACD: Stochastic not in oversold")
         return False
         
-    # تجميع الشروط النهائية
     return macd_cross_up and stochastic_in_oversold and stochastic_rising
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
@@ -1168,7 +1131,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V25.5 - استراتيجيات معدلة)</title>
+<title>لوحة التحكم - بوت التداول (V25.6 - استراتيجيات معدلة)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1235,7 +1198,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V25.5 (استراتيجيات معدلة)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V25.6 (استراتيجيات معدلة)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2118,7 +2081,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.5.0 (Modified Strategies) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V25.6.0 (Modified Strategies) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
