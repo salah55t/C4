@@ -101,27 +101,9 @@ STRATEGY_NAMES = {
     "BB_Stoch_Strategy": "BB+Stoch (انعكاسية)", "MACD_EMA_Strategy": "MACD+EMA (اتجاهية)",
     "EMA_RSI_Strategy": "EMA+RSI (مختلطة)", "Pullback_Strategy": "Pullback (انعكاسية)",
     "Momentum_Volatility_Strategy": "Momentum (زخم)"
-
-    ,
-    "Turtle_Donchian_Strategy": "دونشيان/ترند (Turtle)",
-    "Supertrend_Breakout_Strategy": "اختراق سوبرترند"
 }
 STRATEGY_FILTER_CONFIG = {
-    "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"
-    ,
-    "Turtle_Donchian_Strategy": {
-        "profile": "Strict",
-        "adx_threshold": 25,
-        "htf_confirmation_mode": "Strict",
-        "min_quality_score": 68
-    },
-    "Supertrend_Breakout_Strategy": {
-        "profile": "Strict",
-        "adx_threshold": 25,
-        "htf_confirmation_mode": "Strict",
-        "min_quality_score": 70
-    }
-},
+    "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
     "MACD_EMA_Strategy": {"profile": "Strict", "adx_threshold": 22, "htf_confirmation_mode": "Strict"},
     "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 20, "htf_confirmation_mode": "Relaxed"},
     "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
@@ -589,61 +571,6 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         return df.dropna().astype(float)
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
-
-
-# === [V25.4] Extra Indicators: Donchian Channels & Supertrend ===
-def _compute_supertrend(df_in, period: int = SUPERTREND_ATR_PERIOD, multiplier: float = SUPERTREND_MULTIPLIER):
-    import numpy as _np
-    import pandas as _pd
-    df = df_in.copy()
-    if "atr" not in df.columns:
-        # basic ATR 14 if not present
-        tr1 = (df['high'] - df['low']).abs()
-        tr2 = (df['high'] - df['close'].shift(1)).abs()
-        tr3 = (df['low'] - df['close'].shift(1)).abs()
-        tr = _np.maximum(_np.maximum(tr1, tr2), tr3)
-        df['atr'] = tr.rolling(14).mean()
-
-    hl2 = (df['high'] + df['low']) / 2.0
-    basic_ub = hl2 + multiplier * df['atr']
-    basic_lb = hl2 - multiplier * df['atr']
-
-    final_ub = basic_ub.copy()
-    final_lb = basic_lb.copy()
-    for i in range(1, len(df)):
-        final_ub.iat[i] = min(basic_ub.iat[i], final_ub.iat[i-1]) if df['close'].iat[i-1] > final_ub.iat[i-1] else basic_ub.iat[i]
-        final_lb.iat[i] = max(basic_lb.iat[i], final_lb.iat[i-1]) if df['close'].iat[i-1] < final_lb.iat[i-1] else basic_lb.iat[i]
-
-    direction = _pd.Series(index=df.index, dtype="int64")
-    supertrend = _pd.Series(index=df.index, dtype="float64")
-    for i in range(len(df)):
-        if i == 0:
-            direction.iat[i] = -1
-            supertrend.iat[i] = final_ub.iat[i]
-            continue
-        if df['close'].iat[i] > final_ub.iat[i-1]:
-            direction.iat[i] = 1
-        elif df['close'].iat[i] < final_lb.iat[i-1]:
-            direction.iat[i] = -1
-        else:
-            direction.iat[i] = direction.iat[i-1]
-        supertrend.iat[i] = final_lb.iat[i] if direction.iat[i] == 1 else final_ub.iat[i]
-
-    df['supertrend'] = supertrend
-    df['supertrend_dir'] = direction
-    return df
-
-def _crossed_above(a, b):
-    try:
-        return a.iloc[-2] <= b.iloc[-2] and a.iloc[-1] > b.iloc[-1]
-    except Exception:
-        return False
-
-def _crossed_below(a, b):
-    try:
-        return a.iloc[-2] >= b.iloc[-2] and a.iloc[-1] < b.iloc[-1]
-    except Exception:
-        return False
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
@@ -1164,92 +1091,7 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 # --- [IMPROVEMENT V25.3] Centralized filters and refined logic ---
-
-# === [V25.4] Kelly-based risk fraction & Portfolio Heat ===
-def _safe_div(a, b, default=0.0):
-    try:
-        return float(a) / float(b) if float(b) != 0 else default
-    except Exception:
-        return default
-
-def estimate_kelly_fraction_from_history(lookback:int = KELLY_LOOKBACK_TRADES) -> float:
-    """Estimate Kelly fraction from recent closed trades in the DB (wins, losses, payoff). Returns fraction in percent of equity."""
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-
-            SELECT status, pnl_percent
-
-            FROM signals
-
-            WHERE status IN ('closed','stopped','tp1','tp2','tp_full','stopped_out')
-
-            ORDER BY created_at DESC
-
-            LIMIT ?
-
-        """, (int(lookback),))
-        rows = cur.fetchall()
-        if not rows:
-            return 0.0
-        wins = [r[1] for r in rows if r[0] in ('tp2','tp_full') or (r[1] or 0) > 0]
-        losses = [abs(r[1]) for r in rows if (r[1] or 0) < 0 or r[0] in ('stopped','stopped_out')]
-        total = len(rows)
-        p = len(wins) / total if total else 0.0
-        avg_win = sum(wins)/len(wins) if wins else 0.0
-        avg_loss = sum(losses)/len(losses) if losses else 0.0
-        b = _safe_div(avg_win, avg_loss, default=1.0)  # payoff ratio
-        kelly_f = p - (1 - p) / b if b > 0 else 0.0
-        kelly_f = max(0.0, min(1.0, kelly_f))  # clamp to [0,1] as fraction of equity
-        return kelly_f * KELLY_FRACTION * 100.0  # return in percent
-    except Exception:
-        return 0.0
-
-def compute_portfolio_heat_percent() -> float:
-    """Sum of $ risk across open signals divided by USDT balance (in %)."""
-    try:
-        from decimal import Decimal
-        total_risk_usdt = Decimal('0')
-        with open_signals_lock:
-            for k, sig in open_signals_cache.items():
-                try:
-                    entry = Decimal(str(sig.get('entry_price', 0)))
-                    sl = Decimal(str(sig.get('stop_loss', 0)))
-                    qty = Decimal(str(sig.get('quantity', 0)))
-                    if entry and sl and qty and entry > sl:
-                        risk = (entry - sl) * qty
-                        total_risk_usdt += max(Decimal('0'), risk)
-                except Exception:
-                    continue
-        with balance_lock:
-            bal = Decimal(str(usdt_balance)) if 'usdt_balance' in globals() and usdt_balance is not None else Decimal('0')
-        if bal <= 0:
-            return 0.0
-        return float((total_risk_usdt / bal) * Decimal('100'))
-    except Exception:
-        return 0.0
-
-def refine_risk_with_kelly_and_regime(base_risk_percent: float) -> float:
-    """Blend existing dynamic risk with Kelly fraction and regime filter caps.""        ""
-    rp = float(base_risk_percent)
-    if USE_KELLY_POSITION_SIZING:
-        kelly_pct = estimate_kelly_fraction_from_history()
-        # simple blend: average of base and Kelly, then clamp
-        rp = (rp + kelly_pct) / 2.0
-    # regime caps (bearish -> reduce)
-    try:
-        with market_state_lock:
-            regime = current_market_state.get('btc_trend', 'sideways')
-        if regime == 'bearish':
-            rp *= 0.7
-        elif regime == 'sideways':
-            rp *= 0.9
-    except Exception:
-        pass
-    rp = max(KELLY_MIN_PERCENT, min(KELLY_CAP_PERCENT, rp))
-    return rp
-
-symbol: str, df: pd.DataFrame, strategy_name: str):
+def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     try:
         quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
         with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
@@ -1292,11 +1134,10 @@ symbol: str, df: pd.DataFrame, strategy_name: str):
         "quality_score": quality_score, "stop_loss_multiplier": trade_levels['stop_loss_multiplier'],
         "target1_multiplier": trade_levels['target1_multiplier'], "target2_multiplier": trade_levels['target2_multiplier'],
         "trailing_stop_multiplier": trade_levels['trailing_stop_multiplier']
-    , 'trailing_hint': 'chandelier' if strategy_name in ('Turtle_Donchian_Strategy','Supertrend_Breakout_Strategy') else 'atr'}
+    }
 
     if is_real:
         dynamic_risk_percent = calculate_dynamic_risk_per_trade()
-        dynamic_risk_percent = refine_risk_with_kelly_and_regime(dynamic_risk_percent)
         quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, dynamic_risk_percent)
 
         if quantity_dec is None or quantity_dec <= 0:
@@ -2261,15 +2102,7 @@ def api_run_backtest():
         if start_dt >= end_dt: return jsonify({"error": "Start date must be before end date"}), 400
         if (end_dt - start_dt).days > 365 * 2: return jsonify({"error": "Backtest period cannot exceed 2 years"}), 400
         # results = run_backtest(symbols, start_date, end_date, initial_balance) # Backtest logic is complex and not shown for brevity
-# V25.4: optional new strategy flags if provided
-global USE_TURTLE_DONCHIAN_STRATEGY, USE_SUPERTREND_BREAKOUT_STRATEGY
-if isinstance(data, dict):
-    if 'use_turtle_donchian' in data:
-        USE_TURTLE_DONCHIAN_STRATEGY = bool(data['use_turtle_donchian'])
-    if 'use_supertrend_breakout' in data:
-        USE_SUPERTREND_BREAKOUT_STRATEGY = bool(data['use_supertrend_breakout'])
-
-    return jsonify({"message": "Backtest endpoint is functional."})
+        return jsonify({"message": "Backtest endpoint is functional."})
     except Exception as e:
         logger.error(f"Error running backtest: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
@@ -2556,32 +2389,3 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
-
-# === [V25.4 UPGRADE] Advanced strategy toggles and risk controls ===
-# New strategies (inspired by professional systems: Donchian/Turtle & Supertrend breakout)
-USE_TURTLE_DONCHIAN_STRATEGY: bool = globals().get("USE_TURTLE_DONCHIAN_STRATEGY", True)
-USE_SUPERTREND_BREAKOUT_STRATEGY: bool = globals().get("USE_SUPERTREND_BREAKOUT_STRATEGY", True)
-
-# Donchian/Turtle defaults (classic pro settings)
-DONCHIAN_FAST: int = globals().get("DONCHIAN_FAST", 20)   # entry lookback
-DONCHIAN_SLOW: int = globals().get("DONCHIAN_SLOW", 55)   # alternative/confirmation lookback
-DONCHIAN_EXIT: int = globals().get("DONCHIAN_EXIT", 10)   # exit lookback for trend strategies
-
-# Supertrend defaults
-SUPERTREND_ATR_PERIOD: int = globals().get("SUPERTREND_ATR_PERIOD", 10)
-SUPERTREND_MULTIPLIER: float = globals().get("SUPERTREND_MULTIPLIER", 3.0)
-
-# Trailing stop (Chandelier-style via ATR)
-CHANDELIER_PERIOD: int = globals().get("CHANDELIER_PERIOD", 22)
-CHANDELIER_MULTIPLIER: float = globals().get("CHANDELIER_MULTIPLIER", 3.0)
-
-# Portfolio heat cap (% of account that would be lost if all active SLs are hit simultaneously)
-MAX_PORTFOLIO_HEAT_PERCENT: float = globals().get("MAX_PORTFOLIO_HEAT_PERCENT", 6.0)
-
-# Kelly-based dynamic risk sizing (capped and halved for prudence)
-USE_KELLY_POSITION_SIZING: bool = globals().get("USE_KELLY_POSITION_SIZING", True)
-KELLY_LOOKBACK_TRADES: int = globals().get("KELLY_LOOKBACK_TRADES", 60)
-KELLY_CAP_PERCENT: float = globals().get("KELLY_CAP_PERCENT", 2.5)   # absolute cap on risk% per trade
-KELLY_MIN_PERCENT: float = globals().get("KELLY_MIN_PERCENT", 0.4)   # floor to keep relevance
-KELLY_FRACTION: float = globals().get("KELLY_FRACTION", 0.5)         # half-Kelly by default
