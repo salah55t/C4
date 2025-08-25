@@ -1,9 +1,8 @@
-# ملف c4.py - نسخة V26.1.0 (إضافة صفحة الإعدادات)
+# ملف c4.py - نسخة V26.1.1 (إصلاح خطأ Internal Server Error)
 # --- وصف الإصدار:
-# 1.  [إضافة واجهة] تم بناء وإضافة صفحة الإعدادات (SETTINGS_TEMPLATE) التي كانت مفقودة.
-# 2.  [تحكم كامل] تتيح الصفحة الجديدة تفعيل/إلغاء كل استراتيجية بشكل منفصل.
-# 3.  [تخصيص الفلاتر] يمكن الآن تعديل ملف الفلتر (Profile)، عتبة ADX، ونمط تأكيد الفريم الأعلى لكل استراتيجية.
-# 4.  [تكامل] ربط الواجهة الأمامية بالمسارات الخلفية (Backend Routes) لحفظ التغييرات بشكل فوري.
+# 1.  [إصلاح خطأ] تم إصلاح خطأ "Internal Server Error" الذي كان يظهر عند فتح صفحة الإعدادات.
+# 2.  [سبب الخطأ] كان الخطأ بسبب عدم تمرير متغيرات تفعيل الاستراتيجيات (e.g., USE_ELLIOTT_WAVE_STRATEGY) بشكل صريح إلى دالة render_template_string.
+# 3.  [نتيجة] أصبحت صفحة الإعدادات الآن تعمل بشكل صحيح وتعرض الحالة الحالية لجميع الاستراتيجيات.
 
 import time
 import os
@@ -43,7 +42,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV26.1')
+logger = logging.getLogger('CryptoBotV26.1.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1206,7 +1205,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V26.1)</title>
+<title>لوحة التحكم - بوت التداول (V26.1.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1273,7 +1272,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V26.1</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V26.1.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1707,7 +1706,7 @@ h1{font-size:20px;margin:0;font-weight:700;color:#d7e4ff}
       <div class="card-body strategy-grid">
         {% for key, name in STRATEGY_NAMES.items() %}
         <label class="switch">
-          <input type="checkbox" name="use_{{ key|lower }}" {% if globals()['USE_' + key.upper()] %}checked{% endif %}>
+          <input type="checkbox" name="use_{{ key|lower }}" {% if strategy_status[key] %}checked{% endif %}>
           <span class="dot"></span>
           <span>{{ name }}</span>
         </label>
@@ -1829,16 +1828,19 @@ def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_N
 
 @app.route('/settings')
 def settings():
+    strategy_status = {
+        "BB_Stoch_Strategy": USE_BB_STOCH_STRATEGY,
+        "MACD_EMA_Strategy": USE_MACD_EMA_STRATEGY,
+        "EMA_RSI_Strategy": USE_EMA_RSI_STRATEGY,
+        "Pullback_Strategy": USE_PULLBACK_STRATEGY,
+        "Momentum_Volatility_Strategy": USE_MOMENTUM_VOLATILITY_STRATEGY,
+        "Elliott_Wave_Strategy": USE_ELLIOTT_WAVE_STRATEGY,
+    }
     return render_template_string(
         SETTINGS_TEMPLATE, 
         STRATEGY_NAMES=STRATEGY_NAMES, 
         STRATEGY_FILTER_CONFIG=STRATEGY_FILTER_CONFIG,
-        USE_BB_STOCH_STRATEGY=USE_BB_STOCH_STRATEGY,
-        USE_MACD_EMA_STRATEGY=USE_MACD_EMA_STRATEGY,
-        USE_EMA_RSI_STRATEGY=USE_EMA_RSI_STRATEGY,
-        USE_PULLBACK_STRATEGY=USE_PULLBACK_STRATEGY,
-        USE_MOMENTUM_VOLATILITY_STRATEGY=USE_MOMENTUM_VOLATILITY_STRATEGY,
-        USE_ELLIOTT_WAVE_STRATEGY=USE_ELLIOTT_WAVE_STRATEGY
+        strategy_status=strategy_status
     )
 
 @app.route('/api/dashboard_data')
@@ -2342,7 +2344,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V26.1.0 (Settings Page Added) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V26.1.1 (Settings Page Fixed) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
