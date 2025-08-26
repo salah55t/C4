@@ -1,10 +1,10 @@
-# ملف c4.py - نسخة V28.0.0 (تحسينات موجات إليوت المتقدمة)
+# ملف c4.py - نسخة V30.1.0 (تحسين استراتيجية موجات إليوت)
 # --- وصف الإصدار:
-# 1.  [تحسين جذري] تم استبدال استراتيجية موجات إليوت بنسخة محسنة مقدمة من الشريك الفكري.
-# 2.  [ميزة جديدة] أصبحت قيمة 'order' لتحديد القمم والقيعان ديناميكية وتعتمد على تقلب السوق (ATR).
-# 3.  [تحسين] تم تطوير منطق اكتشاف الأنماط للبحث بمرونة أكبر عن الموجات الدافعة (Impulse Waves).
-# 4.  [تحسين] أصبحت الاستراتيجية تركز على آخر 30 نقطة محورية لضمان حداثة الإشارة.
-# 5.  [تحسين] تم تعديل قواعد التحقق من نمط إليوت لتكون أكثر دقة وصلابة.
+# 1.  [تحسين دقيق] تم تحسين استراتيجية موجات إليوت للدخول فقط في بداية الموجة الثالثة الصاعدة.
+# 2.  [فلتر جديد] إضافة دالة `is_wave_3_beginning` للتحقق من أن الموجة لم تتقدم أكثر من اللازم.
+# 3.  [فلتر جديد] إضافة دالة `is_entry_timing_suitable` لتجنب الدخول المتأخر بناءً على عدد الشموع والزخم الأخير.
+# 4.  [دقة أعلى] تحسين دالة `find_wave_pattern` لتشمل التحقق من نسب تصحيح فيبوناتشي للموجة الثانية (38.2% - 61.8%).
+# 5.  يحتفظ هذا الإصدار بجميع التحسينات السابقة.
 
 import time
 import os
@@ -40,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v28_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v30_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV28.0.0')
+logger = logging.getLogger('CryptoBotV30.1.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -175,7 +175,9 @@ REJECTION_REASONS_AR = {
     "Elliott Wave: RSI not in optimal range": "موجات إليوت: مؤشر القوة النسبية ليس في النطاق الأمثل",
     "Elliott Wave: MACD not positive": "موجات إليوت: مؤشر الماكد ليس إيجابيًا",
     "Elliott Wave: EMAs not in correct order": "موجات إليوت: المتوسطات المتحركة ليست بالترتيب الصحيح",
-    "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1"
+    "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1",
+    "Elliott Wave: Wave 3 has already advanced too much": "موجات إليوت: الموجة الثالثة تقدمت بالفعل بشكل كبير",
+    "Elliott Wave: Entry timing is not suitable": "موجات إليوت: توقيت الدخول غير مناسب (متأخر)",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -982,29 +984,15 @@ def calculate_dynamic_order(df: pd.DataFrame) -> int:
     """
     حساب قيمة order ديناميكية بناءً على تقلب السوق
     """
-    # استخدام ATR لتحديد التقلب
     atr_percent = df['atr_percent'].iloc[-1]
-    
-    # كلما زاد التقلب، زادت قيمة order لتجنب الإشارات الكاذبة
-    if atr_percent > 4.0:  # تقلب عالي
-        return 8
-    elif atr_percent > 2.5:  # تقلب متوسط
-        return 6
-    elif atr_percent > 1.5:  # تقلب منخفض
-        return 4
-    else:  # تقلب منخفض جدًا
-        return 3
+    if atr_percent > 4.0: return 8
+    elif atr_percent > 2.5: return 6
+    elif atr_percent > 1.5: return 4
+    else: return 3
 
 def find_wave_pattern(points: List, pattern_type: str = "impulse") -> Optional[List]:
     """
-    البحث عن أنماط موجات إليوت بمرونة أكبر
-    
-    Args:
-        points: قائمة النقاط المحورية (index, price, 'high'/'low')
-        pattern_type: نوع النمط المطلوب ("impulse" للموجة الدافعة)
-    
-    Returns:
-        قائمة النقاط التي تشكل النمط المطلوب أو None إذا لم يتم العثور على نمط
+    البحث عن أنماط موجات إليوت بمرونة أكبر مع التركيز على بداية الموجة الثالثة
     """
     if len(points) < 5:
         return None
@@ -1018,34 +1006,107 @@ def find_wave_pattern(points: List, pattern_type: str = "impulse") -> Optional[L
             if not (p0[2] == 'low' and p1[2] == 'high' and p2[2] == 'low' and p3[2] == 'high' and p4[2] == 'low'):
                 continue
             
-            # التحقق من أن النمط يتبع قواعد إليوت الأساسية
             # القاعدة 1: الموجة 2 لا يمكن أن تتجاوز بداية الموجة 1
             if p2[1] < p0[1]:
                 continue
             
-            # القاعدة 2: الموجة 4 لا يمكن أن تتداخل مع قمة الموجة 1
-            if p4[1] < p1[1]:
-                continue
-                
-            # القاعدة 3: الموجة 3 لا يمكن أن تكون الأقصر (هنا نتحقق أنها أطول من الموجة 1 كقاعدة تقريبية قوية)
-            wave1_len = p1[1] - p0[1]
-            wave3_len = p3[1] - p2[1]
-            if wave3_len <= wave1_len:
+            wave1_length = p1[1] - p0[1]
+            if wave1_length <= 0: continue
+
+            # القاعدة 2: الموجة 3 يجب أن تكون أطول من الموجة 1
+            wave3_length = p3[1] - p2[1]
+            if wave3_length < wave1_length:
                 continue
             
-            # فلتر إضافي: تصحيح الموجة 2 يجب أن يكون منطقياً (لا يزيد عن 78.6% كفلتر)
-            wave2_retracement = (p1[1] - p2[1]) / wave1_len
-            if wave2_retracement > 0.786:
+            # القاعدة 3: الموجة 4 لا يمكن أن تتداخل مع الموجة 1
+            if p4[1] < p1[1]:
                 continue
-
-            # إذا تم استيفاء جميع الشروط، وجدنا نمطًا صالحًا
+            
+            # التحقق من أن الموجة 2 هي تصحيح مناسب (38.2%-61.8% من الموجة 1)
+            wave2_retracement = (p1[1] - p2[1]) / wave1_length
+            if not (0.382 <= wave2_retracement <= 0.618):
+                continue
+            
             return points[i:i+5]
             
     return None
 
+def is_wave_3_beginning(impulse_pattern: List, current_price: float) -> bool:
+    """
+    التحقق مما إذا كنا في بداية الموجة الثالثة (نقطة الدخول المثلى)
+    
+    Args:
+        impulse_pattern: نمط الموجة الدافعة المكتشف (5 نقاط)
+        current_price: السعر الحالي
+    
+    Returns:
+        True إذا كنا في بداية الموجة الثالثة، False خلاف ذلك
+    """
+    # استخراج نقاط الموجة
+    wave1_start = impulse_pattern[0][1]  # بداية الموجة 1
+    wave1_end = impulse_pattern[1][1]     # نهاية الموجة 1
+    wave2_end = impulse_pattern[2][1]     # نهاية الموجة 2 (قاع الموجة 2)
+    
+    # حساب طول الموجة 1
+    wave1_length = wave1_end - wave1_start
+    
+    # حساب المسافة التي قطعها السعر من بداية الموجة 3
+    wave3_progress = current_price - wave2_end
+    
+    # حساب النسبة المئوية لتقدم الموجة 3
+    if wave1_length > 0:
+        progress_ratio = wave3_progress / wave1_length
+    else:
+        return False
+    
+    # شروط الدخول في بداية الموجة 3:
+    # 1. يجب أن يكون السعر قد بدأ في الارتفاع من قاع الموجة 2
+    # 2. يجب ألا يكون قد تجاوز 50% من طول الموجة 1 بعد
+    # 3. يجب أن يكون السعر لا يزال تحت قمة الموجة 1 (لضمان أننا في بداية الموجة 3)
+    
+    condition1 = current_price > wave2_end  # بدأ الارتفاع
+    condition2 = progress_ratio < 0.5       # لم يتجاوز 50% من طول الموجة 1
+    condition3 = current_price < wave1_end   # لم يتجاوز قمة الموجة 1 (هذا الشرط قد يكون صارمًا جدًا، يمكن تخفيفه)
+    
+    return condition1 and condition2 and condition3
+
+def is_entry_timing_suitable(df: pd.DataFrame, impulse_pattern: List) -> bool:
+    """
+    التحقق من أن توقيت الدخول مناسب (ليس متأخرًا جدًا في الموجة)
+    
+    Args:
+        df: DataFrame يحتوي على البيانات
+        impulse_pattern: نمط الموجة الدافعة المكتشف
+    
+    Returns:
+        True إذا كان التوقيت مناسبًا، False خلاف ذلك
+    """
+    # استخراج نقاط الموجة
+    wave2_end_idx = impulse_pattern[2][0]  # فهرس نهاية الموجة 2
+    current_idx = len(df) - 1              # فهرس الشمعة الحالية
+    
+    # حساب عدد الشموع منذ بداية الموجة 3
+    candles_since_wave3_start = current_idx - wave2_end_idx
+    
+    # إذا مرت أكثر من 10 شموع منذ بداية الموجة 3، قد يكون الدخول متأخرًا
+    if candles_since_wave3_start > 10:
+        return False
+    
+    # التحقق من أن الزخم لا يزال قويًا
+    if len(df) < 5: return True # لا يمكن التحقق إذا لم تكن هناك بيانات كافية
+    recent_prices = df['close'].iloc[-5:]
+    price_change = (recent_prices.iloc[-1] - recent_prices.iloc[0]) / recent_prices.iloc[0]
+    
+    # إذا كان السعر قد ارتفع أكثر من 3% في آخر 5 شموع، قد يكون متأخرًا
+    if price_change > 0.03:
+        return False
+    
+    return True
+
 def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
     """
     استراتيجية موجات إليوت المحسنة - البحث عن بداية الموجة 3 (للشراء)
+    مع إضافة شرط الدخول في بداية الموجة الصاعدة فقط
     """
     needed_cols = {'high', 'low', 'open', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50', 'macd', 'macd_signal', 'atr_percent'}
     if len(df) < 100 or not needed_cols.issubset(df.columns):
@@ -1055,10 +1116,14 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
     df_copy = df.copy()
     
     try:
-        # 1. حساب قيمة order ديناميكية
+        # حساب مؤشرات إضافية لتحليل الموجات (إذا لم تكن موجودة بالفعل)
+        if 'ema13' not in df_copy.columns:
+            df_copy['ema13'] = df_copy['close'].ewm(span=13, adjust=False).mean()
+        if 'ema34' not in df_copy.columns:
+            df_copy['ema34'] = df_copy['close'].ewm(span=34, adjust=False).mean()
+
         dynamic_order = calculate_dynamic_order(df_copy)
         
-        # استخدام argrelextrema مع القيمة الديناميكية
         high_idx = argrelextrema(df_copy['high'].values, np.greater, order=dynamic_order)[0]
         low_idx = argrelextrema(df_copy['low'].values, np.less, order=dynamic_order)[0]
         
@@ -1066,51 +1131,51 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
             log_rejection(df.name, "Elliott Wave: Insufficient swing points")
             return False
         
-        # ترتيب القمم والقيعان
         all_points = []
-        for idx in high_idx:
-            all_points.append((idx, df_copy['high'].iloc[idx], 'high'))
-        for idx in low_idx:
-            all_points.append((idx, df_copy['low'].iloc[idx], 'low'))
-        
+        for idx in high_idx: all_points.append((idx, df_copy['high'].iloc[idx], 'high'))
+        for idx in low_idx: all_points.append((idx, df_copy['low'].iloc[idx], 'low'))
         all_points.sort(key=lambda x: x[0])
         
-        # 3. التركيز على البيانات الحديثة
         recent_points = all_points[-30:] if len(all_points) > 30 else all_points
         
         if len(recent_points) < 8:
             log_rejection(df.name, "Elliott Wave: Not enough recent points for pattern")
             return False
         
-        # 2. البحث عن نمط موجة دافعة بمرونة أكبر
         impulse_pattern = find_wave_pattern(recent_points, "impulse")
         
         if not impulse_pattern:
             log_rejection(df.name, "Elliott Wave: No clear impulse pattern detected")
             return False
         
-        # استخلاص نقاط النمط للتحقق
-        p0, p1, p2, p3, p4 = impulse_pattern
-        wave_1_high = p1[1]
-        
-        # التحقق من أننا في بداية الموجة 3
         current_price = df_copy['close'].iloc[-1]
         
-        # يجب أن يكون السعر الحالي قد اخترق قمة الموجة 1
-        if current_price <= wave_1_high:
+        # التحقق من اختراق قمة الموجة 1 (إشارة بدء الموجة 3)
+        wave1_high = impulse_pattern[1][1]
+        if current_price <= wave1_high:
             log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance")
             return False
         
+        # التحقق من أننا في بداية الموجة الثالثة ولم تتقدم كثيرًا
+        if not is_wave_3_beginning(impulse_pattern, current_price):
+            log_rejection(df.name, "Elliott Wave: Wave 3 has already advanced too much")
+            return False
+            
+        # التحقق من أن توقيت الدخول مناسب
+        if not is_entry_timing_suitable(df_copy, impulse_pattern):
+            log_rejection(df.name, "Elliott Wave: Entry timing is not suitable")
+            return False
+
         # التحقق من حجم التداول
         current_volume = df_copy['volume'].iloc[-1]
         avg_volume = df_copy['volume'].rolling(20).mean().iloc[-1]
-        if current_volume < avg_volume * 0.5: # نريد زخماً قوياً
+        if current_volume < avg_volume * 0.8:
             log_rejection(df.name, "Elliott Wave: Volume too low")
             return False
         
         # التحقق من RSI
         rsi = df_copy['rsi'].iloc[-1]
-        if not (45 < rsi < 75): # نطاق مثالي للموجة الثالثة
+        if not (40 < rsi < 70):
             log_rejection(df.name, "Elliott Wave: RSI not in optimal range")
             return False
         
@@ -1122,9 +1187,7 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
             return False
         
         # التحقق من المتوسطات المتحركة
-        ema9 = df_copy['ema9'].iloc[-1]
-        ema21 = df_copy['ema21'].iloc[-1]
-        ema50 = df_copy['ema50'].iloc[-1]
+        ema9, ema21, ema50 = df_copy['ema9'].iloc[-1], df_copy['ema21'].iloc[-1], df_copy['ema50'].iloc[-1]
         if not (ema9 > ema21 > ema50):
             log_rejection(df.name, "Elliott Wave: EMAs not in correct order")
             return False
@@ -1369,7 +1432,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V28.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V30.1.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1436,7 +1499,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V28.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V30.1.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2438,39 +2501,59 @@ def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
+            # التحقق من تفعيل التداول
             with trading_status_lock:
                 if not is_trading_enabled:
                     time.sleep(10)
                     continue
+            
             with signal_cache_lock:
-                if len(open_signals_cache) >= MAX_OPEN_TRADES:
-                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing new signal scans.")
-                    time.sleep(120)
-                    continue
-            logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
+                open_trades_count = len(open_signals_cache)
+            
+            logger.info("="*20 + f" Starting New Scan Cycle (Open Trades: {open_trades_count}/{MAX_OPEN_TRADES}) " + "="*20)
+            
             for symbol in validated_symbols_to_scan:
+                # التحقق الدقيق قبل فحص كل عملة
                 with signal_cache_lock:
-                    if symbol in open_signals_cache: continue
+                    if len(open_signals_cache) >= MAX_OPEN_TRADES:
+                        logger.info(f"Max open trades reached ({MAX_OPEN_TRADES}). Ending current scan cycle.")
+                        break # إنهاء دورة الفحص الحالية
+                
+                with signal_cache_lock:
+                    if symbol in open_signals_cache:
+                        continue
+                
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
-                    if df is not None: log_rejection(symbol, "Insufficient Historical Data")
+                    if df is not None:
+                        log_rejection(symbol, "Insufficient Historical Data")
                     continue
-                df_featured = calculate_all_features(df); df_featured.name = symbol
+                df_featured = calculate_all_features(df)
+                df_featured.name = symbol
                 strategy_found = None
-                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
-                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
-                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
-                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
-                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured): strategy_found = "Elliott_Wave_Strategy"
+                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured):
+                    strategy_found = "BB_Stoch_Strategy"
+                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured):
+                    strategy_found = "MACD_EMA_Strategy"
+                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured):
+                    strategy_found = "EMA_RSI_Strategy"
+                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured):
+                    strategy_found = "Pullback_Strategy"
+                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured):
+                    strategy_found = "Momentum_Volatility_Strategy"
+                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured):
+                    strategy_found = "Elliott_Wave_Strategy"
 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
+            
+            # الانتظار حتى بداية الشمعة التالية
             now = datetime.now(timezone.utc)
             minutes_to_wait = 15 - (now.minute % 15)
             seconds_to_wait = (minutes_to_wait * 60) - now.second
             logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
             time.sleep(max(1, seconds_to_wait))
+
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
@@ -2667,7 +2750,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V28.0.0 (Advanced Elliott) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V30.1.0 (Elliott Wave Enh) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
