@@ -18,5 +18,5 @@ optuna
 tenacity
 scipy
 flask_sock
-
+scipy>=1.7.0
 
