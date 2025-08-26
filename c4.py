@@ -1104,7 +1104,7 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         # التحقق من حجم التداول
         current_volume = df_copy['volume'].iloc[-1]
         avg_volume = df_copy['volume'].rolling(20).mean().iloc[-1]
-        if current_volume < avg_volume * 1.2: # نريد زخماً قوياً
+        if current_volume < avg_volume * 1.01: # نريد زخماً قوياً
             log_rejection(df.name, "Elliott Wave: Volume too low")
             return False
         
