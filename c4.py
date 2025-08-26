@@ -1,10 +1,8 @@
-# ملف c4.py - نسخة V30.1.0 (تحسين استراتيجية موجات إليوت)
+# ملف c4.py - نسخة V26.1.1 (إصلاح خطأ Internal Server Error)
 # --- وصف الإصدار:
-# 1.  [تحسين دقيق] تم تحسين استراتيجية موجات إليوت للدخول فقط في بداية الموجة الثالثة الصاعدة.
-# 2.  [فلتر جديد] إضافة دالة `is_wave_3_beginning` للتحقق من أن الموجة لم تتقدم أكثر من اللازم.
-# 3.  [فلتر جديد] إضافة دالة `is_entry_timing_suitable` لتجنب الدخول المتأخر بناءً على عدد الشموع والزخم الأخير.
-# 4.  [دقة أعلى] تحسين دالة `find_wave_pattern` لتشمل التحقق من نسب تصحيح فيبوناتشي للموجة الثانية (38.2% - 61.8%).
-# 5.  يحتفظ هذا الإصدار بجميع التحسينات السابقة.
+# 1.  [إصلاح خطأ] تم إصلاح خطأ "Internal Server Error" الذي كان يظهر عند فتح صفحة الإعدادات.
+# 2.  [سبب الخطأ] كان الخطأ بسبب عدم تمرير متغيرات تفعيل الاستراتيجيات (e.g., USE_ELLIOTT_WAVE_STRATEGY) بشكل صريح إلى دالة render_template_string.
+# 3.  [نتيجة] أصبحت صفحة الإعدادات الآن تعمل بشكل صحيح وتعرض الحالة الحالية لجميع الاستراتيجيات.
 
 import time
 import os
@@ -40,11 +38,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v30_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v26_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV30.1.0')
+logger = logging.getLogger('CryptoBotV26.1.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -165,19 +163,8 @@ REJECTION_REASONS_AR = {
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "BB: Price did not cross middle band": "BB: السعر لم يتقاطع مع الخط الأوسط",
     "MACD: Stochastic not in oversold": "MACD: مؤشر ستوكاستيك ليس في منطقة التشبع البيعي",
-    "Elliott Wave: No clear impulse pattern detected": "موجات إليوت: لم يتم اكتشاف نمط موجة دافعة واضح",
-    "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
-    "Elliott Wave: Not enough recent points for pattern": "موجات إليوت: لا توجد نقاط حديثة كافية للنمط",
-    "Elliott Wave: Incomplete wave pattern": "موجات إليوت: نمط الموجة غير مكتمل",
-    "Elliott Wave: Wave 3 is shorter than wave 1": "موجات إليوت: الموجة 3 أقصر من الموجة 1",
-    "Elliott Wave: Wave 4 overlaps with wave 1": "موجات إليوت: الموجة 4 تتداخل مع الموجة 1",
-    "Elliott Wave: Volume too low": "موجات إليوت: حجم التداول منخفض جدًا",
-    "Elliott Wave: RSI not in optimal range": "موجات إليوت: مؤشر القوة النسبية ليس في النطاق الأمثل",
-    "Elliott Wave: MACD not positive": "موجات إليوت: مؤشر الماكد ليس إيجابيًا",
-    "Elliott Wave: EMAs not in correct order": "موجات إليوت: المتوسطات المتحركة ليست بالترتيب الصحيح",
-    "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1",
-    "Elliott Wave: Wave 3 has already advanced too much": "موجات إليوت: الموجة الثالثة تقدمت بالفعل بشكل كبير",
-    "Elliott Wave: Entry timing is not suitable": "موجات إليوت: توقيت الدخول غير مناسب (متأخر)",
+    "Elliott Wave: No clear pattern detected": "موجات إليوت: لم يتم اكتشاف نمط واضح",
+    "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -586,9 +573,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
-    df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
-    df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     high_low = df_calc['high'] - df_calc['low']
@@ -628,7 +613,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
     return df_calc
 
-# --- Data Loading & Settings Management ---
+# --- Data Loading ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -685,51 +670,6 @@ def load_settings_from_redis():
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
         logger.error(f"❌ [Redis] Error loading settings: {e}")
-
-def save_settings_to_redis():
-    """حفظ الإعدادات الحالية في Redis"""
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
-    
-    if not redis_client:
-        logger.warning("Redis client not available, cannot save settings")
-        return False
-    
-    try:
-        # حفظ الإعدادات العامة
-        trading_settings = {
-            'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
-            'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
-            'paper_trading_mode': paper_trading_mode
-        }
-        redis_client.set('trading_settings', json.dumps(trading_settings))
-        
-        # حفظ إعدادات جودة الإشارة
-        quality_settings = {
-            'min_quality': MIN_SIGNAL_QUALITY
-        }
-        redis_client.set('signal_quality_settings', json.dumps(quality_settings))
-        
-        # حفظ إعدادات الاستراتيجيات
-        strategy_settings = {
-            'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-            'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-            'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-            'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
-            'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
-        }
-        redis_client.set('strategy_settings', json.dumps(strategy_settings))
-        
-        # حفظ إعدادات فلاتر الاستراتيجيات
-        with strategy_filters_lock:
-            redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
-        
-        logger.info("Settings saved to Redis successfully")
-        return True
-    
-    except Exception as e:
-        logger.error(f"Error saving settings to Redis: {e}")
-        return False
 
 def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
@@ -890,7 +830,7 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
-# --- Trading Strategies ---
+# --- [MODIFIED] استراتيجية Bollinger Bands المعدلة (بدون فلتر الاتجاه) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed_cols = {'bb_lower', 'bb_middle', 'open', 'close', 'high', 'low'}
     if len(df) < 21 or not needed_cols.issubset(df.columns):
@@ -913,6 +853,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     return bounce_from_lower_band and cross_middle_band and is_bullish_candle
 
+# --- استراتيجية MACD المعدلة (بدون تغيير) ---
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'close', 'adx', 'ema200'}
     if len(df) < 200 or not needed.issubset(df.columns): return False
@@ -979,226 +920,59 @@ def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
     ema_ok = (last['ema9'] > last['ema21']) and (last['close'] > last['ema9'])
     return atr_ok and hist_rising and ema_ok
 
-# --- START: Elliott Wave Strategy Enhancement ---
-def calculate_dynamic_order(df: pd.DataFrame) -> int:
-    """
-    حساب قيمة order ديناميكية بناءً على تقلب السوق
-    """
-    atr_percent = df['atr_percent'].iloc[-1]
-    if atr_percent > 4.0: return 8
-    elif atr_percent > 2.5: return 6
-    elif atr_percent > 1.5: return 4
-    else: return 3
-
-def find_wave_pattern(points: List, pattern_type: str = "impulse") -> Optional[List]:
-    """
-    البحث عن أنماط موجات إليوت بمرونة أكبر مع التركيز على بداية الموجة الثالثة
-    """
-    if len(points) < 5:
-        return None
-    
-    if pattern_type == "impulse":
-        # البحث عن نمط low-high-low-high-low (للاتجاه الصعودي)
-        for i in range(len(points) - 4):
-            p0, p1, p2, p3, p4 = points[i], points[i+1], points[i+2], points[i+3], points[i+4]
-            
-            # التأكد من تسلسل النقاط (قاع-قمة-قاع-قمة-قاع)
-            if not (p0[2] == 'low' and p1[2] == 'high' and p2[2] == 'low' and p3[2] == 'high' and p4[2] == 'low'):
-                continue
-            
-            # القاعدة 1: الموجة 2 لا يمكن أن تتجاوز بداية الموجة 1
-            if p2[1] < p0[1]:
-                continue
-            
-            wave1_length = p1[1] - p0[1]
-            if wave1_length <= 0: continue
-
-            # القاعدة 2: الموجة 3 يجب أن تكون أطول من الموجة 1
-            wave3_length = p3[1] - p2[1]
-            if wave3_length < wave1_length:
-                continue
-            
-            # القاعدة 3: الموجة 4 لا يمكن أن تتداخل مع الموجة 1
-            if p4[1] < p1[1]:
-                continue
-            
-            # التحقق من أن الموجة 2 هي تصحيح مناسب (38.2%-61.8% من الموجة 1)
-            wave2_retracement = (p1[1] - p2[1]) / wave1_length
-            if not (0.382 <= wave2_retracement <= 0.618):
-                continue
-            
-            return points[i:i+5]
-            
-    return None
-
-def is_wave_3_beginning(impulse_pattern: List, current_price: float) -> bool:
-    """
-    التحقق مما إذا كنا في بداية الموجة الثالثة (نقطة الدخول المثلى)
-    
-    Args:
-        impulse_pattern: نمط الموجة الدافعة المكتشف (5 نقاط)
-        current_price: السعر الحالي
-    
-    Returns:
-        True إذا كنا في بداية الموجة الثالثة، False خلاف ذلك
-    """
-    # استخراج نقاط الموجة
-    wave1_start = impulse_pattern[0][1]  # بداية الموجة 1
-    wave1_end = impulse_pattern[1][1]     # نهاية الموجة 1
-    wave2_end = impulse_pattern[2][1]     # نهاية الموجة 2 (قاع الموجة 2)
-    
-    # حساب طول الموجة 1
-    wave1_length = wave1_end - wave1_start
-    
-    # حساب المسافة التي قطعها السعر من بداية الموجة 3
-    wave3_progress = current_price - wave2_end
-    
-    # حساب النسبة المئوية لتقدم الموجة 3
-    if wave1_length > 0:
-        progress_ratio = wave3_progress / wave1_length
-    else:
-        return False
-    
-    # شروط الدخول في بداية الموجة 3:
-    # 1. يجب أن يكون السعر قد بدأ في الارتفاع من قاع الموجة 2
-    # 2. يجب ألا يكون قد تجاوز 50% من طول الموجة 1 بعد
-    # 3. يجب أن يكون السعر لا يزال تحت قمة الموجة 1 (لضمان أننا في بداية الموجة 3)
-    
-    condition1 = current_price > wave2_end  # بدأ الارتفاع
-    condition2 = progress_ratio < 0.5       # لم يتجاوز 50% من طول الموجة 1
-    condition3 = current_price < wave1_end   # لم يتجاوز قمة الموجة 1 (هذا الشرط قد يكون صارمًا جدًا، يمكن تخفيفه)
-    
-    return condition1 and condition2 and condition3
-
-def is_entry_timing_suitable(df: pd.DataFrame, impulse_pattern: List) -> bool:
-    """
-    التحقق من أن توقيت الدخول مناسب (ليس متأخرًا جدًا في الموجة)
-    
-    Args:
-        df: DataFrame يحتوي على البيانات
-        impulse_pattern: نمط الموجة الدافعة المكتشف
-    
-    Returns:
-        True إذا كان التوقيت مناسبًا، False خلاف ذلك
-    """
-    # استخراج نقاط الموجة
-    wave2_end_idx = impulse_pattern[2][0]  # فهرس نهاية الموجة 2
-    current_idx = len(df) - 1              # فهرس الشمعة الحالية
-    
-    # حساب عدد الشموع منذ بداية الموجة 3
-    candles_since_wave3_start = current_idx - wave2_end_idx
-    
-    # إذا مرت أكثر من 10 شموع منذ بداية الموجة 3، قد يكون الدخول متأخرًا
-    if candles_since_wave3_start > 10:
-        return False
-    
-    # التحقق من أن الزخم لا يزال قويًا
-    if len(df) < 5: return True # لا يمكن التحقق إذا لم تكن هناك بيانات كافية
-    recent_prices = df['close'].iloc[-5:]
-    price_change = (recent_prices.iloc[-1] - recent_prices.iloc[0]) / recent_prices.iloc[0]
-    
-    # إذا كان السعر قد ارتفع أكثر من 3% في آخر 5 شموع، قد يكون متأخرًا
-    if price_change > 0.03:
-        return False
-    
-    return True
-
 def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
     """
-    استراتيجية موجات إليوت المحسنة - البحث عن بداية الموجة 3 (للشراء)
-    مع إضافة شرط الدخول في بداية الموجة الصاعدة فقط
+    استراتيجية موجات إليوت - البحث عن بداية الموجة 3 (للشراء) أو بداية الموجة C (للبيع)
     """
-    needed_cols = {'high', 'low', 'open', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50', 'macd', 'macd_signal', 'atr_percent'}
-    if len(df) < 100 or not needed_cols.issubset(df.columns):
-        log_rejection(df.name, "Insufficient Historical Data")
+    needed_cols = {'high', 'low', 'open', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50'}
+    if len(df) < 50 or not needed_cols.issubset(df.columns):
         return False
     
     df_copy = df.copy()
     
     try:
-        # حساب مؤشرات إضافية لتحليل الموجات (إذا لم تكن موجودة بالفعل)
-        if 'ema13' not in df_copy.columns:
-            df_copy['ema13'] = df_copy['close'].ewm(span=13, adjust=False).mean()
-        if 'ema34' not in df_copy.columns:
-            df_copy['ema34'] = df_copy['close'].ewm(span=34, adjust=False).mean()
-
-        dynamic_order = calculate_dynamic_order(df_copy)
+        # استخدام argrelextrema للعثور على القمم والقيعان
+        high_idx = argrelextrema(df_copy['high'].values, np.greater, order=5)[0]
+        low_idx = argrelextrema(df_copy['low'].values, np.less, order=5)[0]
         
-        high_idx = argrelextrema(df_copy['high'].values, np.greater, order=dynamic_order)[0]
-        low_idx = argrelextrema(df_copy['low'].values, np.less, order=dynamic_order)[0]
-        
-        if len(high_idx) < 3 or len(low_idx) < 3:
+        if len(high_idx) < 2 or len(low_idx) < 2:
             log_rejection(df.name, "Elliott Wave: Insufficient swing points")
             return False
         
-        all_points = []
-        for idx in high_idx: all_points.append((idx, df_copy['high'].iloc[idx], 'high'))
-        for idx in low_idx: all_points.append((idx, df_copy['low'].iloc[idx], 'low'))
-        all_points.sort(key=lambda x: x[0])
+        last_high_idx = high_idx[-1]
+        last_low_idx = low_idx[-1]
         
-        recent_points = all_points[-30:] if len(all_points) > 30 else all_points
-        
-        if len(recent_points) < 8:
-            log_rejection(df.name, "Elliott Wave: Not enough recent points for pattern")
+        if last_high_idx >= len(df_copy) - 3 or last_low_idx >= len(df_copy) - 3:
             return False
         
-        impulse_pattern = find_wave_pattern(recent_points, "impulse")
+        last_rows = df_copy.iloc[-5:]
+        last_row = last_rows.iloc[-1]
         
-        if not impulse_pattern:
-            log_rejection(df.name, "Elliott Wave: No clear impulse pattern detected")
-            return False
+        volume_ma = df_copy['volume'].rolling(20).mean().iloc[-1]
         
-        current_price = df_copy['close'].iloc[-1]
+        # للشراء (بداية الموجة 3)
+        if last_low_idx < last_high_idx:
+            if last_row['close'] > df_copy['high'].iloc[last_high_idx]:
+                if last_row['volume'] > volume_ma * 1.2:
+                    if 40 <= last_row['rsi'] <= 60:
+                        if (last_row['ema9'] > last_row['ema21'] > last_row['ema50']):
+                            return True
         
-        # التحقق من اختراق قمة الموجة 1 (إشارة بدء الموجة 3)
-        wave1_high = impulse_pattern[1][1]
-        if current_price <= wave1_high:
-            log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance")
-            return False
+        # للبيع (بداية الموجة C)
+        if last_high_idx < last_low_idx:
+            if last_row['close'] < df_copy['low'].iloc[last_low_idx]:
+                if last_row['volume'] > volume_ma * 1.2:
+                    if 40 <= last_row['rsi'] <= 60:
+                        if (last_row['ema9'] < last_row['ema21'] < last_row['ema50']):
+                            # حاليا البوت يدعم الشراء فقط، يمكن تفعيل البيع مستقبلا
+                            return False
         
-        # التحقق من أننا في بداية الموجة الثالثة ولم تتقدم كثيرًا
-        if not is_wave_3_beginning(impulse_pattern, current_price):
-            log_rejection(df.name, "Elliott Wave: Wave 3 has already advanced too much")
-            return False
-            
-        # التحقق من أن توقيت الدخول مناسب
-        if not is_entry_timing_suitable(df_copy, impulse_pattern):
-            log_rejection(df.name, "Elliott Wave: Entry timing is not suitable")
-            return False
-
-        # التحقق من حجم التداول
-        current_volume = df_copy['volume'].iloc[-1]
-        avg_volume = df_copy['volume'].rolling(20).mean().iloc[-1]
-        if current_volume < avg_volume * 0.8:
-            log_rejection(df.name, "Elliott Wave: Volume too low")
-            return False
-        
-        # التحقق من RSI
-        rsi = df_copy['rsi'].iloc[-1]
-        if not (40 < rsi < 70):
-            log_rejection(df.name, "Elliott Wave: RSI not in optimal range")
-            return False
-        
-        # التحقق من MACD
-        macd = df_copy['macd'].iloc[-1]
-        macd_signal = df_copy['macd_signal'].iloc[-1]
-        if macd <= macd_signal:
-            log_rejection(df.name, "Elliott Wave: MACD not positive")
-            return False
-        
-        # التحقق من المتوسطات المتحركة
-        ema9, ema21, ema50 = df_copy['ema9'].iloc[-1], df_copy['ema21'].iloc[-1], df_copy['ema50'].iloc[-1]
-        if not (ema9 > ema21 > ema50):
-            log_rejection(df.name, "Elliott Wave: EMAs not in correct order")
-            return False
-        
-        logger.info(f"✅ [Elliott Wave] Found valid Wave 3 setup for {df.name}")
-        return True
+        log_rejection(df.name, "Elliott Wave: No clear pattern detected")
+        return False
     
     except Exception as e:
         logger.error(f"Error in Elliott Wave strategy for {df.name}: {e}")
         return False
-# --- END: Elliott Wave Strategy Enhancement ---
 
 def calculate_trade_levels(df: pd.DataFrame, strategy_name: str = None) -> Dict[str, Any]:
     last = df.iloc[-1]
@@ -1353,8 +1127,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         "atr": trade_levels['atr'], "trailing_stop_activated": False,
         "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False,
         "quality_score": quality_score, "stop_loss_multiplier": trade_levels['stop_loss_multiplier'],
-        "target1_multiplier": trade_levels['target1_multiplier'],
-        "target2_multiplier": trade_levels['target2_multiplier'],
+        "target1_multiplier": trade_levels['target1_multiplier'], "target2_multiplier": trade_levels['target2_multiplier'],
         "trailing_stop_multiplier": trade_levels['trailing_stop_multiplier']
     }
 
@@ -1432,7 +1205,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V30.1.0)</title>
+<title>لوحة التحكم - بوت التداول (V26.1.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1499,7 +1272,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V30.1.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V26.1.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1842,7 +1615,7 @@ qs('#toggleTrading').addEventListener('change', toggleTrading);
 qs('#tradingModeToggle').addEventListener('change', function() {
   const isPaper = !this.checked, modeText = isPaper ? 'ورقي' : 'حقيقي';
   if (!isPaper && !confirm('هل أنت متأكد من التبديل إلى التداول الحقيقي؟ هذا سيستخدم أموالاً حقيقية.')) { this.checked = false; return; }
-  fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paper_trading_mode: isPaper}) })
+  fetch('/api/trading_mode', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({paper_trading: isPaper}) })
   .then(res => res.json()).then(data => {
     if (data.success) { qs('#tradingModeText').textContent = modeText; showNotification(`تم التبديل إلى الوضع ${modeText}`, 'success'); }
     else { showNotification('فشل تغيير وضع التداول', 'error'); this.checked = !this.checked; }
@@ -1850,13 +1623,13 @@ qs('#tradingModeToggle').addEventListener('change', function() {
 });
 
 const debouncedQualityUpdate = debounce((value) => {
-    fetch('/api/signal_quality', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({min_quality: parseInt(value)}) })
+    fetch('/api/quality_filter', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({min_quality: parseInt(value)}) })
     .catch(error => console.error('Error:', error));
 }, 500);
 qs('#qualityFilter').addEventListener('input', function() { qs('#qualityValue').textContent = this.value; debouncedQualityUpdate(this.value); });
 
 const debouncedRiskUpdate = debounce((value) => {
-    fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({RISK_PER_TRADE_PERCENT: parseFloat(value)}) })
+    fetch('/api/risk_percent', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({risk_percent: parseFloat(value)}) })
     .catch(error => console.error('Error updating risk percent:', error));
 }, 800);
 qs('#riskInput').addEventListener('input', function() { debouncedRiskUpdate(this.value); });
@@ -1885,6 +1658,167 @@ document.addEventListener('DOMContentLoaded', () => { initializeDashboard(); set
 </html>
 """
 BACKTEST_TEMPLATE = "<h1>Backtest Page - Under Construction</h1>"
+SETTINGS_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>الإعدادات - بوت التداول</title>
+<style>
+:root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
+.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:20px;margin:0;font-weight:700;color:#d7e4ff}
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:14px;color:#cfe2ff}
+.card-body{padding:16px}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition:all .2s;text-decoration:none}
+.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
+.switch{display:flex;align-items:center;gap:10px;padding:8px;border-radius:10px;background:#0d1730;border:1px solid #24335f;cursor:pointer}
+.switch input{display:none}
+.switch .dot{width:16px;height:16px;border-radius:50%;background:#6a7fb2;transition:.2s}
+.switch input:checked + .dot{background:var(--ok);transform:scale(1.1)}
+.switch span{font-weight:600}
+.strategy-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.table{width:100%;border-collapse:collapse;margin-top:12px}
+.table th,.table td{padding:12px;text-align:right;border-bottom:1px solid #1e2c52}
+.table th{font-size:12px;color:var(--muted);font-weight:600}
+.table select, .table input {width:100%;background:#0d1730;border:1px solid #24335f;color:#e8f1ff;padding:8px;border-radius:8px;font-size:14px;}
+.table input[type=number] {text-align: center;}
+.notification { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: #1e2c52; color: white; padding: 12px 20px; border-radius: 8px; z-index: 1000; opacity: 0; transition: opacity 0.3s, transform 0.3s; pointer-events: none; }
+.notification.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.notification.success { background-color: var(--ok); }
+.notification.error { background-color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>إعدادات الاستراتيجيات والفلاتر</h1>
+    <a href="/" class="btn">العودة للوحة التحكم</a>
+  </header>
+  <form id="settingsForm">
+    <div class="card">
+      <h2>تفعيل الاستراتيجيات</h2>
+      <div class="card-body strategy-grid">
+        {% for key, name in STRATEGY_NAMES.items() %}
+        <label class="switch">
+          <input type="checkbox" name="use_{{ key|lower }}" {% if strategy_status[key] %}checked{% endif %}>
+          <span class="dot"></span>
+          <span>{{ name }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <h2>إعدادات الفلاتر الديناميكية</h2>
+      <div class="card-body" style="padding:0;">
+        <div style="overflow-x:auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>الاستراتيجية</th>
+                <th>ملف الفلتر (Profile)</th>
+                <th>عتبة ADX</th>
+                <th>تأكيد الفريم الأعلى (HTF)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for key, config in STRATEGY_FILTER_CONFIG.items() %}
+              <tr>
+                <td>{{ STRATEGY_NAMES.get(key, key) }}</td>
+                <td>
+                  <select name="{{ key }}_profile">
+                    <option value="Strict" {% if config.profile == 'Strict' %}selected{% endif %}>صارم (Strict)</option>
+                    <option value="Moderate" {% if config.profile == 'Moderate' %}selected{% endif %}>معتدل (Moderate)</option>
+                    <option value="Reversal" {% if config.profile == 'Reversal' %}selected{% endif %}>انعكاسي (Reversal)</option>
+                    <option value="Disabled" {% if config.profile == 'Disabled' %}selected{% endif %}>معطل (Disabled)</option>
+                  </select>
+                </td>
+                <td><input type="number" name="{{ key }}_adx_threshold" value="{{ config.adx_threshold }}" min="10" max="40"></td>
+                <td>
+                  <select name="{{ key }}_htf_confirmation_mode">
+                    <option value="Strict" {% if config.htf_confirmation_mode == 'Strict' %}selected{% endif %}>صارم (Strict)</option>
+                    <option value="Relaxed" {% if config.htf_confirmation_mode == 'Relaxed' %}selected{% endif %}>متساهل (Relaxed)</option>
+                    <option value="Disabled" {% if config.htf_confirmation_mode == 'Disabled' %}selected{% endif %}>معطل (Disabled)</option>
+                  </select>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top: 16px; display: flex; justify-content: flex-end;">
+      <button type="submit" class="btn" style="background: linear-gradient(180deg, #108a4c, #15c46a); border-color: #108a4c; padding: 12px 24px; font-size: 16px;">حفظ التغييرات</button>
+    </div>
+  </form>
+</div>
+<div id="notification" class="notification"></div>
+<script>
+function showNotification(message, type = 'success', duration = 3000) {
+    const notification = document.getElementById('notification');
+    notification.textContent = message;
+    notification.className = 'notification show ' + type;
+    setTimeout(() => {
+        notification.className = 'notification';
+    }, duration);
+}
+
+document.getElementById('settingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const formData = new FormData(this);
+    const strategiesData = {};
+    const filtersData = {};
+    const strategyKeys = {{ STRATEGY_NAMES.keys()|list|tojson }};
+
+    strategyKeys.forEach(key => {
+        strategiesData['use_' + key.lower()] = formData.has('use_' + key.lower());
+        filtersData[key + '_profile'] = formData.get(key + '_profile');
+        filtersData[key + '_adx_threshold'] = formData.get(key + '_adx_threshold');
+        filtersData[key + '_htf_confirmation_mode'] = formData.get(key + '_htf_confirmation_mode');
+    });
+
+    const saveButton = this.querySelector('button[type="submit"]');
+    saveButton.disabled = true;
+    saveButton.textContent = 'جاري الحفظ...';
+
+    Promise.all([
+        fetch('/update_strategies', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(strategiesData)
+        }),
+        fetch('/update_filter_settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(filtersData)
+        })
+    ]).then(async (responses) => {
+        const results = await Promise.all(responses.map(res => res.json()));
+        const allOk = results.every(r => r.success);
+        if (allOk) {
+            showNotification('تم حفظ الإعدادات بنجاح!', 'success');
+        } else {
+            const errorMsg = results.find(r => !r.success)?.message || 'Unknown error';
+            showNotification('فشل حفظ بعض الإعدادات: ' + errorMsg, 'error');
+        }
+    }).catch(error => {
+        showNotification('حدث خطأ في الشبكة: ' + error.message, 'error');
+        console.error('Save error:', error);
+    }).finally(() => {
+        saveButton.disabled = false;
+        saveButton.textContent = 'حفظ التغييرات';
+    });
+});
+</script>
+</body>
+</html>
+"""
 
 # --- مسارات Flask ---
 @app.route('/')
@@ -1893,342 +1827,20 @@ def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
 
 @app.route('/settings')
-def settings_page():
-    """صفحة الإعدادات"""
-    # الحصول على الإعدادات الحالية
-    with risk_per_trade_lock: risk_per_trade = RISK_PER_TRADE_PERCENT
-    with trading_mode_lock: is_paper_mode = paper_trading_mode
-    with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    with strategy_filters_lock: strategy_filters = dict(STRATEGY_FILTER_CONFIG)
-    
-    # تمرير متغيرات تفعيل الاستراتيجيات
-    strategies_status = {
-        'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-        'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-        'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-        'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
-        'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-        'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+def settings():
+    strategy_status = {
+        "BB_Stoch_Strategy": USE_BB_STOCH_STRATEGY,
+        "MACD_EMA_Strategy": USE_MACD_EMA_STRATEGY,
+        "EMA_RSI_Strategy": USE_EMA_RSI_STRATEGY,
+        "Pullback_Strategy": USE_PULLBACK_STRATEGY,
+        "Momentum_Volatility_Strategy": USE_MOMENTUM_VOLATILITY_STRATEGY,
+        "Elliott_Wave_Strategy": USE_ELLIOTT_WAVE_STRATEGY,
     }
-    
-    # إنشاء قالب HTML لصفحة الإعدادات
-    settings_html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>إعدادات البوت</title>
-        <meta charset="utf-8">
-        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-        <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
-        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
-        <style>
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f8f9fa;
-                direction: rtl;
-                text-align: right;
-            }
-            .card {
-                margin-bottom: 20px;
-                border-radius: 10px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }
-            .card-header {
-                background-color: #343a40;
-                color: white;
-                border-radius: 10px 10px 0 0 !important;
-            }
-            .form-group {
-                margin-bottom: 1.5rem;
-            }
-            .btn-primary {
-                background-color: #007bff;
-                border-color: #007bff;
-            }
-            .alert {
-                display: none;
-                border-radius: 5px;
-            }
-            .strategy-switch {
-                margin-bottom: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container mt-4">
-            <h1 class="mb-4">إعدادات البوت</h1>
-            
-            <div class="alert alert-success" id="successAlert">
-                تم حفظ الإعدادات بنجاح!
-            </div>
-            
-            <div class="alert alert-danger" id="errorAlert">
-                حدث خطأ أثناء حفظ الإعدادات. يرجى المحاولة مرة أخرى.
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">الإعدادات العامة</h5>
-                </div>
-                <div class="card-body">
-                    <form id="generalSettingsForm">
-                        <div class="form-group">
-                            <label for="riskPerTrade">نسبة المخاطرة للصفقة الواحدة (%)</label>
-                            <input type="number" class="form-control" id="riskPerTrade" step="0.1" min="0.1" max="10" value="{{ risk_per_trade }}">
-                        </div>
-                        <div class="form-group">
-                            <label for="maxOpenTrades">الحد الأقصى لعدد الصفقات المفتوحة</label>
-                            <input type="number" class="form-control" id="maxOpenTrades" min="1" max="10" value="{{ MAX_OPEN_TRADES }}">
-                        </div>
-                        <div class="form-group">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="paperTradingMode" {{ 'checked' if is_paper_mode else '' }}>
-                                <label class="custom-control-label" for="paperTradingMode">وضع التداول الورقي</label>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ الإعدادات العامة</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">تفعيل الاستراتيجيات</h5>
-                </div>
-                <div class="card-body">
-                    <form id="strategiesForm">
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="bbStochStrategy" {{ 'checked' if strategies_status.USE_BB_STOCH_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="bbStochStrategy">استراتيجية BB+MA Cross (انعكاسية)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="macdEmaStrategy" {{ 'checked' if strategies_status.USE_MACD_EMA_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="macdEmaStrategy">استراتيجية MACD+Stochastic (معدلة)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="emaRsiStrategy" {{ 'checked' if strategies_status.USE_EMA_RSI_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="emaRsiStrategy">استراتيجية EMA+RSI (مختلطة)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="pullbackStrategy" {{ 'checked' if strategies_status.USE_PULLBACK_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="pullbackStrategy">استراتيجية Pullback (انعكاسية)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="momentumVolatilityStrategy" {{ 'checked' if strategies_status.USE_MOMENTUM_VOLATILITY_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="momentumVolatilityStrategy">استراتيجية Momentum (زخم)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="elliottWaveStrategy" {{ 'checked' if strategies_status.USE_ELLIOTT_WAVE_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="elliottWaveStrategy">استراتيجية Elliott Wave (موجات إليوت)</label>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ إعدادات الاستراتيجيات</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">إعدادات جودة الإشارة</h5>
-                </div>
-                <div class="card-body">
-                    <form id="signalQualityForm">
-                        <div class="form-group">
-                            <label for="minSignalQuality">الحد الأدنى لجودة الإشارة (0-100)</label>
-                            <input type="number" class="form-control" id="minSignalQuality" min="0" max="100" value="{{ min_quality }}">
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ إعدادات جودة الإشارة</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">فلاتر الاستراتيجيات</h5>
-                </div>
-                <div class="card-body">
-                    <form id="strategyFiltersForm">
-                        <!-- سيتم ملء هذا الجزء ديناميكيًا باستخدام JavaScript -->
-                        <div id="strategyFiltersContainer">
-                            <!-- سيتم إنشاء المحتوى هنا -->
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ فلاتر الاستراتيجيات</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            // تحميل فلاتر الاستراتيجيات
-            $(document).ready(function() {
-                const strategyFilters = {{ strategy_filters | tojson }};
-                const strategyNames = {{ STRATEGY_NAMES | tojson }};
-                
-                let filtersHtml = '';
-                
-                for (const [strategyKey, config] of Object.entries(strategyFilters)) {
-                    filtersHtml += `
-                        <div class="card mb-3">
-                            <div class="card-header">
-                                <h6 class="mb-0">${strategyNames[strategyKey] || strategyKey}</h6>
-                            </div>
-                            <div class="card-body">
-                                <input type="hidden" name="strategy" value="${strategyKey}">
-                                
-                                <div class="form-group">
-                                    <label>نوع الفلتر</label>
-                                    <select class="form-control" name="profile">
-                                        <option value="Disabled" ${config.profile === 'Disabled' ? 'selected' : ''}>معطل</option>
-                                        <option value="Reversal" ${config.profile === 'Reversal' ? 'selected' : ''}>انعكاسي</option>
-                                        <option value="Moderate" ${config.profile === 'Moderate' ? 'selected' : ''}>معتدل</option>
-                                        <option value="Strict" ${config.profile === 'Strict' ? 'selected' : ''}>صارم</option>
-                                    </select>
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>حد ADX</label>
-                                    <input type="number" class="form-control" name="adx_threshold" value="${config.adx_threshold}" min="0" max="50">
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>وضع تأكيد الاتجاه على الفريم الأعلى</label>
-                                    <select class="form-control" name="htf_confirmation_mode">
-                                        <option value="Disabled" ${config.htf_confirmation_mode === 'Disabled' ? 'selected' : ''}>معطل</option>
-                                        <option value="Relaxed" ${config.htf_confirmation_mode === 'Relaxed' ? 'selected' : ''}>مرن</option>
-                                        <option value="Strict" ${config.htf_confirmation_mode === 'Strict' ? 'selected' : ''}>صارم</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
-                
-                $('#strategyFiltersContainer').html(filtersHtml);
-                
-                // معالجة النماذج
-                $('#generalSettingsForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        RISK_PER_TRADE_PERCENT: parseFloat($('#riskPerTrade').val()),
-                        MAX_OPEN_TRADES: parseInt($('#maxOpenTrades').val()),
-                        paper_trading_mode: $('#paperTradingMode').is(':checked')
-                    };
-                    
-                    $.ajax({
-                        url: '/api/settings',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#strategiesForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        USE_BB_STOCH_STRATEGY: $('#bbStochStrategy').is(':checked'),
-                        USE_MACD_EMA_STRATEGY: $('#macdEmaStrategy').is(':checked'),
-                        USE_EMA_RSI_STRATEGY: $('#emaRsiStrategy').is(':checked'),
-                        USE_PULLBACK_STRATEGY: $('#pullbackStrategy').is(':checked'),
-                        USE_MOMENTUM_VOLATILITY_STRATEGY: $('#momentumVolatilityStrategy').is(':checked'),
-                        USE_ELLIOTT_WAVE_STRATEGY: $('#elliottWaveStrategy').is(':checked')
-                    };
-                    
-                    $.ajax({
-                        url: '/api/strategies',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#signalQualityForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        min_quality: parseInt($('#minSignalQuality').val())
-                    };
-                    
-                    $.ajax({
-                        url: '/api/signal_quality',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#strategyFiltersForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {};
-                    $('#strategyFiltersContainer .card').each(function() {
-                        const strategyKey = $(this).find('input[name="strategy"]').val();
-                        data[strategyKey] = {
-                            profile: $(this).find('select[name="profile"]').val(),
-                            adx_threshold: parseFloat($(this).find('input[name="adx_threshold"]').val()),
-                            htf_confirmation_mode: $(this).find('select[name="htf_confirmation_mode"]').val()
-                        };
-                    });
-                    
-                    $.ajax({
-                        url: '/api/strategy_filters',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-            });
-        </script>
-    </body>
-    </html>
-    """
-    
     return render_template_string(
-        settings_html,
-        risk_per_trade=risk_per_trade,
-        MAX_OPEN_TRADES=MAX_OPEN_TRADES,
-        is_paper_mode=is_paper_mode,
-        min_quality=min_quality,
-        strategy_filters=strategy_filters,
-        strategies_status=strategies_status,
-        STRATEGY_NAMES=STRATEGY_NAMES
+        SETTINGS_TEMPLATE, 
+        STRATEGY_NAMES=STRATEGY_NAMES, 
+        STRATEGY_FILTER_CONFIG=STRATEGY_FILTER_CONFIG,
+        strategy_status=strategy_status
     )
 
 @app.route('/api/dashboard_data')
@@ -2356,105 +1968,57 @@ def toggle_trading():
     status_msg = "enabled" if is_trading_enabled else "disabled"
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
     return jsonify({"status": "success"})
-
-@app.route('/api/settings', methods=['POST'])
-def update_settings():
-    """تحديث الإعدادات العامة"""
+@app.route('/api/trading_mode', methods=['POST'])
+def update_trading_mode():
+    global paper_trading_mode
     try:
         data = request.json
-        
-        # تحديث الإعدادات العامة
-        if 'RISK_PER_TRADE_PERCENT' in data:
-            with risk_per_trade_lock:
-                global RISK_PER_TRADE_PERCENT
-                RISK_PER_TRADE_PERCENT = float(data['RISK_PER_TRADE_PERCENT'])
-        
-        if 'MAX_OPEN_TRADES' in data:
-            global MAX_OPEN_TRADES
-            MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
-        
-        if 'paper_trading_mode' in data:
-            with trading_mode_lock:
-                global paper_trading_mode
-                paper_trading_mode = bool(data['paper_trading_mode'])
-        
-        # حفظ الإعدادات في Redis
-        save_settings_to_redis()
-        
-        return jsonify({"success": True, "message": "Settings updated successfully"})
-    
+        is_paper = data.get('paper_trading', True)
+        with trading_mode_lock: paper_trading_mode = is_paper
+        if redis_client:
+            settings = json.loads(redis_client.get('trading_settings') or '{}')
+            settings['paper_trading_mode'] = is_paper
+            redis_client.set('trading_settings', json.dumps(settings))
+        broadcast({"type": "trading_mode", "payload": {"paper_trading": is_paper}})
+        log_and_notify("info", f"Trading mode switched to {'Paper' if is_paper else 'Real'}.", "TRADING_MODE_SWITCH")
+        return jsonify({"success": True})
     except Exception as e:
-        logger.error(f"Error updating settings: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
-@app.route('/api/strategies', methods=['POST'])
-def update_strategies():
-    """تحديث إعدادات الاستراتيجيات"""
+        logger.error(f"Error updating trading mode: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+@app.route('/api/quality_filter', methods=['POST'])
+def update_quality_filter():
+    global MIN_SIGNAL_QUALITY
     try:
         data = request.json
-        
-        # تحديث إعدادات الاستراتيجيات
-        global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
-        if 'USE_BB_STOCH_STRATEGY' in data: USE_BB_STOCH_STRATEGY = bool(data['USE_BB_STOCH_STRATEGY'])
-        if 'USE_MACD_EMA_STRATEGY' in data: USE_MACD_EMA_STRATEGY = bool(data['USE_MACD_EMA_STRATEGY'])
-        if 'USE_EMA_RSI_STRATEGY' in data: USE_EMA_RSI_STRATEGY = bool(data['USE_EMA_RSI_STRATEGY'])
-        if 'USE_PULLBACK_STRATEGY' in data: USE_PULLBACK_STRATEGY = bool(data['USE_PULLBACK_STRATEGY'])
-        if 'USE_MOMENTUM_VOLATILITY_STRATEGY' in data: USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data['USE_MOMENTUM_VOLATILITY_STRATEGY'])
-        if 'USE_ELLIOTT_WAVE_STRATEGY' in data: USE_ELLIOTT_WAVE_STRATEGY = bool(data['USE_ELLIOTT_WAVE_STRATEGY'])
-        
-        # حفظ الإعدادات في Redis
-        save_settings_to_redis()
-        
-        return jsonify({"success": True, "message": "Strategies updated successfully"})
-    
+        min_quality = data.get('min_quality', 60)
+        with min_quality_lock: MIN_SIGNAL_QUALITY = int(min_quality)
+        if redis_client:
+            settings = json.loads(redis_client.get('signal_quality_settings') or '{}')
+            settings['min_quality'] = MIN_SIGNAL_QUALITY
+            redis_client.set('signal_quality_settings', json.dumps(settings))
+        broadcast({"type": "quality_filter", "payload": {"min_quality": MIN_SIGNAL_QUALITY}})
+        log_and_notify("info", f"Minimum signal quality updated to {MIN_SIGNAL_QUALITY}.", "SETTINGS_UPDATE")
+        return jsonify({"success": True})
     except Exception as e:
-        logger.error(f"Error updating strategies: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
-@app.route('/api/strategy_filters', methods=['POST'])
-def update_strategy_filters():
-    """تحديث فلاتر الاستراتيجيات"""
+        logger.error(f"Error updating quality filter: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+@app.route('/api/risk_percent', methods=['POST'])
+def update_risk_percent():
+    global RISK_PER_TRADE_PERCENT
     try:
         data = request.json
-        
-        # تحديث فلاتر الاستراتيجيات
-        with strategy_filters_lock:
-            global STRATEGY_FILTER_CONFIG
-            # Validate and update the config
-            for key in STRATEGY_FILTER_CONFIG.keys():
-                if key in data:
-                    STRATEGY_FILTER_CONFIG[key] = data[key]
-        
-        # حفظ الإعدادات في Redis
-        save_settings_to_redis()
-        
-        return jsonify({"success": True, "message": "Strategy filters updated successfully"})
-    
+        risk_percent = data.get('risk_percent', 1.0)
+        with risk_per_trade_lock: RISK_PER_TRADE_PERCENT = float(risk_percent)
+        if redis_client:
+            settings = json.loads(redis_client.get('trading_settings') or '{}')
+            settings['RISK_PER_TRADE_PERCENT'] = RISK_PER_TRADE_PERCENT
+            redis_client.set('trading_settings', json.dumps(settings))
+        broadcast({"type": "risk_update", "payload": {"risk_percent": RISK_PER_TRADE_PERCENT}})
+        log_and_notify("info", f"Risk per trade updated to {RISK_PER_TRADE_PERCENT}%.", "SETTINGS_UPDATE")
+        return jsonify({"success": True})
     except Exception as e:
-        logger.error(f"Error updating strategy filters: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
-@app.route('/api/signal_quality', methods=['POST'])
-def update_signal_quality():
-    """تحديث إعدادات جودة الإشارة"""
-    try:
-        data = request.json
-        
-        # تحديث إعدادات جودة الإشارة
-        if 'min_quality' in data:
-            with min_quality_lock:
-                global MIN_SIGNAL_QUALITY
-                MIN_SIGNAL_QUALITY = int(data['min_quality'])
-        
-        # حفظ الإعدادات في Redis
-        save_settings_to_redis()
-        
-        return jsonify({"success": True, "message": "Signal quality settings updated successfully"})
-    
-    except Exception as e:
-        logger.error(f"Error updating signal quality settings: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
+        logger.error(f"Error updating risk percent: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
     with signal_cache_lock:
         signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
@@ -2479,6 +2043,56 @@ def api_close_trade(signal_id):
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
+@app.route('/update_strategies', methods=['POST'])
+def update_strategies():
+    global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
+    try:
+        data = request.json
+        USE_BB_STOCH_STRATEGY = data.get('use_bb_stoch_strategy', False)
+        USE_MACD_EMA_STRATEGY = data.get('use_macd_ema_strategy', False)
+        USE_EMA_RSI_STRATEGY = data.get('use_ema_rsi_strategy', False)
+        USE_PULLBACK_STRATEGY = data.get('use_pullback_strategy', False)
+        USE_MOMENTUM_VOLATILITY_STRATEGY = data.get('use_momentum_volatility_strategy', False)
+        USE_ELLIOTT_WAVE_STRATEGY = data.get('use_elliott_wave_strategy', False)
+        
+        strategy_settings = {
+            'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
+            'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
+            'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
+            'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
+            'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
+            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+        }
+        if redis_client:
+            redis_client.set('strategy_settings', json.dumps(strategy_settings))
+        log_and_notify("info", "Strategy settings updated.", "STRATEGY_UPDATE")
+        return jsonify({"success": True, "message": "تم تحديث الاستراتيجيات"})
+    except Exception as e:
+        logger.error(f"Error updating strategies: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 500
+
+@app.route('/update_filter_settings', methods=['POST'])
+def update_filter_settings():
+    global STRATEGY_FILTER_CONFIG
+    try:
+        data = request.json
+        new_config = {}
+        for key in STRATEGY_FILTER_CONFIG.keys():
+            new_config[key] = {
+                "profile": data.get(f"{key}_profile"),
+                "adx_threshold": int(data.get(f"{key}_adx_threshold")),
+                "htf_confirmation_mode": data.get(f"{key}_htf_confirmation_mode")
+            }
+        with strategy_filters_lock:
+            STRATEGY_FILTER_CONFIG = new_config
+        if redis_client:
+            redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
+        log_and_notify("info", "Filter settings updated.", "FILTER_SETTINGS_UPDATE")
+        return jsonify({"success": True, "message": "تم تحديث إعدادات الفلاتر"})
+    except Exception as e:
+        logger.error(f"Error updating filter settings: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/api/run_backtest', methods=['POST'])
 def api_run_backtest():
     try:
@@ -2501,59 +2115,39 @@ def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
-            # التحقق من تفعيل التداول
             with trading_status_lock:
                 if not is_trading_enabled:
                     time.sleep(10)
                     continue
-            
             with signal_cache_lock:
-                open_trades_count = len(open_signals_cache)
-            
-            logger.info("="*20 + f" Starting New Scan Cycle (Open Trades: {open_trades_count}/{MAX_OPEN_TRADES}) " + "="*20)
-            
+                if len(open_signals_cache) >= MAX_OPEN_TRADES:
+                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing new signal scans.")
+                    time.sleep(120)
+                    continue
+            logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
-                # التحقق الدقيق قبل فحص كل عملة
                 with signal_cache_lock:
-                    if len(open_signals_cache) >= MAX_OPEN_TRADES:
-                        logger.info(f"Max open trades reached ({MAX_OPEN_TRADES}). Ending current scan cycle.")
-                        break # إنهاء دورة الفحص الحالية
-                
-                with signal_cache_lock:
-                    if symbol in open_signals_cache:
-                        continue
-                
+                    if symbol in open_signals_cache: continue
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
-                    if df is not None:
-                        log_rejection(symbol, "Insufficient Historical Data")
+                    if df is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
-                df_featured = calculate_all_features(df)
-                df_featured.name = symbol
+                df_featured = calculate_all_features(df); df_featured.name = symbol
                 strategy_found = None
-                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured):
-                    strategy_found = "BB_Stoch_Strategy"
-                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured):
-                    strategy_found = "MACD_EMA_Strategy"
-                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured):
-                    strategy_found = "EMA_RSI_Strategy"
-                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured):
-                    strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured):
-                    strategy_found = "Momentum_Volatility_Strategy"
-                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured):
-                    strategy_found = "Elliott_Wave_Strategy"
+                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
+                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
+                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
+                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
+                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
+                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured): strategy_found = "Elliott_Wave_Strategy"
 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
-            
-            # الانتظار حتى بداية الشمعة التالية
             now = datetime.now(timezone.utc)
             minutes_to_wait = 15 - (now.minute % 15)
             seconds_to_wait = (minutes_to_wait * 60) - now.second
             logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
             time.sleep(max(1, seconds_to_wait))
-
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
@@ -2750,7 +2344,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V30.1.0 (Elliott Wave Enh) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V26.1.1 (Settings Page Fixed) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
