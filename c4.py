@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V30.0.0 (تحسين آلية التحقق من عدد الصفقات)
+# ملف c4.py - نسخة V28.0.0 (تحسينات موجات إليوت المتقدمة)
 # --- وصف الإصدار:
-# 1.  [تحسين دقيق] تم نقل آلية التحقق من الحد الأقصى للصفقات المفتوحة لتتم قبل فحص كل عملة على حدة.
-# 2.  [كفاءة أعلى] إذا تم الوصول للحد الأقصى، سيقوم البوت بإنهاء دورة الفحص الحالية فورًا والانتقال إلى دورة الانتظار للشمعة التالية.
-# 3.  هذا التعديل يزيد من سرعة استجابة البوت للفرص الجديدة التي تظهر بعد إغلاق إحدى الصفقات.
-# 4.  يحتفظ هذا الإصدار بجميع التحسينات السابقة، بما في ذلك موجات إليوت المتقدمة.
+# 1.  [تحسين جذري] تم استبدال استراتيجية موجات إليوت بنسخة محسنة مقدمة من الشريك الفكري.
+# 2.  [ميزة جديدة] أصبحت قيمة 'order' لتحديد القمم والقيعان ديناميكية وتعتمد على تقلب السوق (ATR).
+# 3.  [تحسين] تم تطوير منطق اكتشاف الأنماط للبحث بمرونة أكبر عن الموجات الدافعة (Impulse Waves).
+# 4.  [تحسين] أصبحت الاستراتيجية تركز على آخر 30 نقطة محورية لضمان حداثة الإشارة.
+# 5.  [تحسين] تم تعديل قواعد التحقق من نمط إليوت لتكون أكثر دقة وصلابة.
 
 import time
 import os
@@ -39,11 +40,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v30_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v28_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV30.0.0')
+logger = logging.getLogger('CryptoBotV28.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1368,7 +1369,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V30.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V28.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1435,7 +1436,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V30.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V28.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2437,59 +2438,39 @@ def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
-            # التحقق من تفعيل التداول
             with trading_status_lock:
                 if not is_trading_enabled:
                     time.sleep(10)
                     continue
-            
             with signal_cache_lock:
-                open_trades_count = len(open_signals_cache)
-            
-            logger.info("="*20 + f" Starting New Scan Cycle (Open Trades: {open_trades_count}/{MAX_OPEN_TRADES}) " + "="*20)
-            
+                if len(open_signals_cache) >= MAX_OPEN_TRADES:
+                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing new signal scans.")
+                    time.sleep(120)
+                    continue
+            logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
-                # التحقق الدقيق قبل فحص كل عملة
                 with signal_cache_lock:
-                    if len(open_signals_cache) >= MAX_OPEN_TRADES:
-                        logger.info(f"Max open trades reached ({MAX_OPEN_TRADES}). Ending current scan cycle.")
-                        break # إنهاء دورة الفحص الحالية
-                
-                with signal_cache_lock:
-                    if symbol in open_signals_cache:
-                        continue
-                
+                    if symbol in open_signals_cache: continue
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
-                    if df is not None:
-                        log_rejection(symbol, "Insufficient Historical Data")
+                    if df is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
-                df_featured = calculate_all_features(df)
-                df_featured.name = symbol
+                df_featured = calculate_all_features(df); df_featured.name = symbol
                 strategy_found = None
-                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured):
-                    strategy_found = "BB_Stoch_Strategy"
-                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured):
-                    strategy_found = "MACD_EMA_Strategy"
-                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured):
-                    strategy_found = "EMA_RSI_Strategy"
-                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured):
-                    strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured):
-                    strategy_found = "Momentum_Volatility_Strategy"
-                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured):
-                    strategy_found = "Elliott_Wave_Strategy"
+                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
+                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
+                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
+                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
+                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
+                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured): strategy_found = "Elliott_Wave_Strategy"
 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
-            
-            # الانتظار حتى بداية الشمعة التالية
             now = datetime.now(timezone.utc)
             minutes_to_wait = 15 - (now.minute % 15)
             seconds_to_wait = (minutes_to_wait * 60) - now.second
             logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
             time.sleep(max(1, seconds_to_wait))
-
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
@@ -2686,7 +2667,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V30.0.0 (Precise Check) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V28.0.0 (Advanced Elliott) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
