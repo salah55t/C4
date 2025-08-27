@@ -2,6 +2,11 @@
 # --- وصف الإصدار:
 # 1.  [إصلاح] تصحيح خطأ `NameError` ناتج عن خطأ إملائي في `argrelextrema` داخل دالة `find_swing_points`.
 # 2.  يحتفظ هذا الإصدار بجميع التحسينات السابقة من V32.0.0.
+# --- التعديلات الجديدة (حسب طلب المستخدم):
+# 1.  تعديل إعدادات Bollinger Bands لتناسب الإطار الزمني 15 دقيقة (10, 1.5).
+# 2.  تعديل إعدادات Stochastic لتناسب الإطار الزمني 15 دقيقة (9, 3, 3) مع مستويات 80/20.
+# 3.  تخفيف صرامة استراتيجية Elliott Wave عبر تعديل ELLIOTT_WAVE_SETTINGS.
+# 4.  تخفيف فلتر استراتيجية Elliott Wave عبر تعديل STRATEGY_FILTER_CONFIG.
 
 import time
 import os
@@ -95,22 +100,28 @@ USE_BB_STOCH_STRATEGY: bool = True
 USE_ELLIOTT_WAVE_STRATEGY: bool = True
 
 # --- إعدادات استراتيجية موجات إليوت القابلة للتعديل ---
+# تم تخفيف الإعدادات لزيادة عدد الإشارات وتقليل الصرامة
 ELLIOTT_WAVE_SETTINGS = {
-    "min_pattern_score": 0.65,      # الحد الأدنى لجودة النمط (تم رفعه لزيادة الدقة)
-    "swing_point_order": 5,        # عدد الشموع على كل جانب لتحديد النقطة المحورية
-    "swing_point_strength": 0.3,   # الحد الأدنى لقوة النقطة المحورية
-    "volatility_filter_threshold": 3.0 # حد فلتر التقلبات لتجاهل الضوضاء
+    "min_pattern_score": 0.55,      # تخفيض من 0.65 لزيادة عدد الإشارات
+    "swing_point_order": 3,         # تخفيض من 5 لزيادة الحساسية
+    "swing_point_strength": 0.2,    # تخفيض من 0.3 لقبول أنماط أضعف
+    "volatility_filter_threshold": 8.0 # رفع من 7.0 لقبول المزيد من التقلبات
 }
 
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
-    "BB_Stoch_Strategy": "BB+MA Cross (انعكاسية)",
+    "BB_Stoch_Strategy": "BB+Stoch (انعكاسية)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
 }
+# تم تعديل فلتر موجات إليوت ليكون أقل صرامة
 STRATEGY_FILTER_CONFIG = {
     "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
-    "Elliott_Wave_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"}
+    "Elliott_Wave_Strategy": {
+        "profile": "Relaxed",           # تغيير من "Strict"
+        "adx_threshold": 20,            # تخفيض من 25
+        "htf_confirmation_mode": "Relaxed" # تغيير من "Strict"
+    }
 }
 strategy_filters_lock = Lock()
 BASE_FILTER_ADX_THRESHOLD = 20
@@ -158,6 +169,7 @@ REJECTION_REASONS_AR = {
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "BB: Price did not cross middle band": "BB: السعر لم يتقاطع مع الخط الأوسط",
+    "Stoch: Not in oversold area": "Stoch: المؤشر ليس في منطقة ذروة البيع",
     "Elliott Wave: No valid patterns detected": "موجات إليوت: لم يتم العثور على أنماط صالحة",
     "Elliott Wave: Pattern score too low": "موجات إليوت: درجة جودة النمط منخفضة جدًا",
     "Elliott Wave: Invalid Impulse Wave Rules": "موجات إليوت: النمط لا يتبع القواعد الصارمة",
@@ -607,11 +619,14 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
     
-    bb_middle = df_calc['Close'].rolling(window=20).mean()
-    bb_std = df_calc['Close'].rolling(window=20).std()
+    # --- تعديل إعدادات البولينجر باندز ---
+    bb_window = 10
+    bb_std_dev = 1.5
+    bb_middle = df_calc['Close'].rolling(window=bb_window).mean()
+    bb_std = df_calc['Close'].rolling(window=bb_window).std()
     df_calc['bb_middle'] = bb_middle
-    df_calc['bb_lower'] = bb_middle - (bb_std * 2)
-    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
+    df_calc['bb_lower'] = bb_middle - (bb_std * bb_std_dev)
+    df_calc['bb_upper'] = bb_middle + (bb_std * bb_std_dev)
     
     exp1 = df_calc['Close'].ewm(span=12, adjust=False).mean()
     exp2 = df_calc['Close'].ewm(span=26, adjust=False).mean()
@@ -619,9 +634,11 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
-    low_14 = df_calc['Low'].rolling(14).min()
-    high_14 = df_calc['High'].rolling(14).max()
-    df_calc['stoch_k'] = 100 * ((df_calc['Close'] - low_14) / (high_14 - low_14).replace(0, 1e-9))
+    # --- تعديل إعدادات الستوكاستيك ---
+    stoch_window = 9
+    low_stoch = df_calc['Low'].rolling(stoch_window).min()
+    high_stoch = df_calc['High'].rolling(stoch_window).max()
+    df_calc['stoch_k'] = 100 * ((df_calc['Close'] - low_stoch) / (high_stoch - low_stoch).replace(0, 1e-9))
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
     
     return df_calc
@@ -893,26 +910,38 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
 # --- Trading Strategies ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, symbol: str) -> bool:
     df_c = df.rename(columns=str.capitalize)
-    needed_cols = {'bb_lower', 'bb_middle', 'Open', 'Close', 'High', 'Low'}
+    needed_cols = {'bb_lower', 'bb_middle', 'stoch_k', 'stoch_d', 'Open', 'Close'}
     if len(df_c) < 21 or not needed_cols.issubset(df_c.columns):
         return False
     
     last, prev = df_c.iloc[-1], df_c.iloc[-2]
     
-    bounce_from_lower_band = (prev['Close'] <= prev['bb_lower']) and (last['Close'] > last['bb_lower'])
-    cross_middle_band = last['Close'] > last['bb_middle']
+    # --- تعديل مستويات الشراء المفرط ---
+    oversold_level = 20
     
-    if not cross_middle_band:
-        log_rejection(symbol, "BB: Price did not cross middle band")
+    # الشرط 1: الستوكاستيك في منطقة ذروة البيع ويتقاطع للأعلى
+    stoch_in_oversold = prev['stoch_k'] < oversold_level and prev['stoch_d'] < oversold_level
+    stoch_crossed_up = last['stoch_k'] > last['stoch_d'] and prev['stoch_k'] <= prev['stoch_d']
+    
+    if not (stoch_in_oversold and stoch_crossed_up):
+        log_rejection(symbol, "Stoch: Not in oversold area")
         return False
 
-    is_bullish_candle = last['Close'] > last['Open'] and (last['Close'] - last['Open']) > (last['High'] - last['Low']) * 0.3
+    # الشرط 2: السعر يرتد من البولينجر باند السفلي
+    bounce_from_lower_band = (prev['Low'] <= prev['bb_lower']) and (last['Close'] > last['bb_lower'])
+    
+    if not bounce_from_lower_band:
+        log_rejection(symbol, "BB: Price did not bounce from lower band")
+        return False
+
+    # الشرط 3: شمعة تأكيد صعودية
+    is_bullish_candle = last['Close'] > last['Open']
     
     if not is_bullish_candle:
         log_rejection(symbol, "Bullish Confirmation Failed")
         return False
 
-    return bounce_from_lower_band and cross_middle_band and is_bullish_candle
+    return True
 
 # --- START: Elliott Wave Strategy Enhancement (V32.0.1) ---
 
@@ -2483,5 +2512,3 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
-
