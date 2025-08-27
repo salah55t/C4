@@ -1,11 +1,8 @@
-# ملف c4.py - نسخة V31.0.0 (تحسين استراتيجية موجات إليوت)
+# ملف c4.py - نسخة V31.0.1 (إصلاح خطأ AttributeError)
 # --- وصف الإصدار:
-# 1.  [إزالة] تم حذف جميع استراتيجيات توليد الإشارات باستثناء Bollinger Bands وموجات إليوت.
-# 2.  [تحسين] تطوير استراتيجية موجات إليوت لتكون أكثر دقة ومرونة.
-# 3.  [إضافة] إضافة إعدادات قابلة للتعديل عبر API للتحكم الكامل في معايير استراتيجية موجات إليوت.
-# 4.  [تحسين] تحسين دالة اكتشاف نقاط التذبذب (Swing Points) لتكون أكثر قوة.
-# 5.  [إضافة] إضافة دالة لحساب درجة تطابق النمط (Pattern Score) لتقييم جودة إشارة موجات إليوت.
-# 6.  [تحديث] تحديث دالة الفحص الرئيسية لتعكس الاستراتيجيات المتبقية والمحسّنة.
+# 1.  [إصلاح] معالجة خطأ `AttributeError: 'DataFrame' object has no attribute 'name'` الذي كان يحدث في استراتيجية موجات إليوت.
+# 2.  [تحسين] تم تعديل الدوال لتمرير رمز العملة (symbol) بشكل صريح بدلاً من الاعتماد على سمة `.name` في DataFrame، مما يجعل الكود أكثر استقرارًا.
+# 3.  يحتفظ هذا الإصدار بجميع التحسينات السابقة، بما في ذلك التركيز على استراتيجيات BB وموجات إليوت المحسّنة.
 
 import time
 import os
@@ -45,7 +42,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV31.0.0')
+logger = logging.getLogger('CryptoBotV31.0.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -840,26 +837,26 @@ def flexible_volume_filter(df, min_volume_percentile=30, strictness=0.8):
     volume_threshold = (volume_ma * strictness) + (volume_percentile * (1 - strictness))
     return current_volume > volume_threshold
 
-def check_market_volatility_filter(df: pd.DataFrame) -> bool:
+def check_market_volatility_filter(df: pd.DataFrame, symbol: str) -> bool:
     if 'atr_percent' not in df.columns or len(df) < 30:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
+        log_rejection(symbol, "Market Volatility Filter Failed"); return False
     recent = df['atr_percent'].tail(96).dropna()
     last = float(df.iloc[-1].get('atr_percent', 0))
     if recent.empty:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
+        log_rejection(symbol, "Market Volatility Filter Failed"); return False
     q25 = float(np.percentile(recent, 25)); q90 = float(np.percentile(recent, 90))
     lower = max(0.35, q25 * 0.9); upper = min(8.0, q90 * 1.1)
     if last < lower or last > upper:
-        log_rejection(df.name, "Market Volatility Filter Failed"); return False
+        log_rejection(symbol, "Market Volatility Filter Failed"); return False
     return True
 
-def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
+def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int, symbol: str) -> bool:
     if 'adx' not in df.columns or len(df) < 5:
-        log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed"); return False
+        log_rejection(symbol, "Trend Strength Filter Failed"); return False
     recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
-    dynamic_threshold = dynamic_adx_threshold(df.name, df, base_threshold=adx_threshold)
+    dynamic_threshold = dynamic_adx_threshold(symbol, df, base_threshold=adx_threshold)
     if recent_adx < (dynamic_threshold * 0.95):
-        log_rejection(df.name, "Trend Strength Filter Failed"); return False
+        log_rejection(symbol, "Trend Strength Filter Failed"); return False
     return True
 
 def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', mode: str = 'Strict') -> bool:
@@ -883,14 +880,14 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
     with strategy_filters_lock: config = STRATEGY_FILTER_CONFIG.get(strategy_name)
     if not config or config.get("profile") == "Disabled": return True
     adx_threshold = config.get("adx_threshold", 22)
-    if not check_trend_strength_filter(df, adx_threshold): return False
+    if not check_trend_strength_filter(df, adx_threshold, symbol): return False
     htf_mode = config.get("htf_confirmation_mode", "Strict")
     if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME, htf_mode):
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
 # --- Trading Strategies ---
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, symbol: str) -> bool:
     needed_cols = {'bb_lower', 'bb_middle', 'open', 'close', 'high', 'low'}
     if len(df) < 21 or not needed_cols.issubset(df.columns):
         return False
@@ -901,13 +898,13 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     cross_middle_band = last['close'] > last['bb_middle']
     
     if not cross_middle_band:
-        log_rejection(df.name, "BB: Price did not cross middle band")
+        log_rejection(symbol, "BB: Price did not cross middle band")
         return False
 
     is_bullish_candle = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.3
     
     if not is_bullish_candle:
-        log_rejection(df.name, "Bullish Confirmation Failed")
+        log_rejection(symbol, "Bullish Confirmation Failed")
         return False
 
     return bounce_from_lower_band and cross_middle_band and is_bullish_candle
@@ -1094,12 +1091,13 @@ def calculate_pattern_score(points: List, df: pd.DataFrame, settings: dict) -> f
     
     return min(1.0, score)
 
-def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) -> Optional[Dict]:
+def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, symbol: str, settings: dict = None) -> Optional[Dict]:
     """
     البحث عن أنماط موجات إليوت بشكل محسّن
     
     Args:
         df: إطار البيانات
+        symbol: رمز العملة لتسجيل الرفض
         settings: إعدادات استراتيجية موجات إليوت
     
     Returns:
@@ -1112,7 +1110,7 @@ def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) 
     swing_points = find_swing_points_enhanced(df, order=5, min_strength=0.3)
     
     if len(swing_points) < settings["min_swing_points"]:
-        log_rejection(df.name, "Elliott Wave: Insufficient swing points")
+        log_rejection(symbol, "Elliott Wave: Insufficient swing points")
         return None
     
     # البحث عن أنماط الموجات الدافعة (5 موجات)
@@ -1168,7 +1166,7 @@ def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) 
             wave3_volume = df['volume'].iloc[points[2][0]:points[3][0]].mean()
             
             if wave3_volume < avg_volume * settings["min_volume_ratio"]:
-                log_rejection(df.name, "Elliott Wave: Volume too low")
+                log_rejection(symbol, "Elliott Wave: Volume too low")
                 continue
         
         # التحقق من المؤشرات الفنية
@@ -1177,14 +1175,14 @@ def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) 
         # التحقق من RSI
         rsi_value = last_row.get('rsi', 50)
         if not (settings["rsi_range"][0] <= rsi_value <= settings["rsi_range"][1]):
-            log_rejection(df.name, "Elliott Wave: RSI not in optimal range")
+            log_rejection(symbol, "Elliott Wave: RSI not in optimal range")
             continue
         
         # التحقق من MACD
         if settings["macd_positive"]:
             macd_hist = last_row.get('macd_hist', 0)
             if macd_hist <= 0:
-                log_rejection(df.name, "Elliott Wave: MACD not positive")
+                log_rejection(symbol, "Elliott Wave: MACD not positive")
                 continue
         
         # التحقق من ترتيب المتوسطات المتحركة
@@ -1194,13 +1192,13 @@ def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) 
             ema50 = last_row.get('ema50', 0)
             
             if not (ema9 > ema21 > ema50):
-                log_rejection(df.name, "Elliott Wave: EMAs not in correct order")
+                log_rejection(symbol, "Elliott Wave: EMAs not in correct order")
                 continue
         
         # التحقق من ATR
         atr_percent = last_row.get('atr_percent', 0)
         if not (settings["atr_min"] <= atr_percent <= settings["atr_max"]):
-            log_rejection(df.name, "Elliott Wave: ATR not in optimal range")
+            log_rejection(symbol, "Elliott Wave: ATR not in optimal range")
             continue
         
         # حساب درجة مطابقة النمط
@@ -1236,57 +1234,53 @@ def find_elliott_wave_pattern_enhanced(df: pd.DataFrame, settings: dict = None) 
     # لم يتم العثور على نمط
     return None
 
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     التحقق من استراتيجية موجات إليوت بشكل محسّن
     
     Args:
         df: إطار البيانات
+        symbol: رمز العملة
     
     Returns:
-        True إذا تم العثور على نمط موجات إليوت صالح، False خلاف ذلك
+        قاموس النمط إذا تم العثور على نمط صالح، None خلاف ذلك
     """
     # التحقق من وجود البيانات المطلوبة
     required_columns = ['high', 'low', 'close', 'volume']
     if not all(col in df.columns for col in required_columns):
-        log_rejection(df.name, "Elliott Wave: Insufficient data")
-        return False
+        log_rejection(symbol, "Elliott Wave: Insufficient data")
+        return None
     
     # التحقق من كفاية البيانات
     if len(df) < 100:
-        log_rejection(df.name, "Elliott Wave: Insufficient historical data")
-        return False
+        log_rejection(symbol, "Elliott Wave: Insufficient historical data")
+        return None
     
     # حساب المؤشرات الفنية المطلوبة
     df_calc = calculate_all_features(df)
     
     # البحث عن نمط موجات إليوت
-    pattern = find_elliott_wave_pattern_enhanced(df_calc)
+    pattern = find_elliott_wave_pattern_enhanced(df_calc, symbol)
     
     if pattern is None:
-        return False
+        return None
     
     # التحقق من أن السعر الحالي فوق مستوى الدخول
     last_price = df_calc['close'].iloc[-1]
     entry_level = pattern['entry_level']
     
     if last_price < entry_level:
-        log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance")
-        return False
+        log_rejection(symbol, "Elliott Wave: Price hasn't broken wave 1 resistance")
+        return None
     
     # التحقق من أن السعر الحالي فوق وقف الخسارة
     stop_loss = pattern['stop_loss']
     
     if last_price <= stop_loss:
-        log_rejection(df.name, "Elliott Wave: Price below stop loss level")
-        return False
+        log_rejection(symbol, "Elliott Wave: Price below stop loss level")
+        return None
     
-    # تخزين النمط المكتشف للاستخدام لاحقًا
-    df.name = df_calc.name
-    # استخدام setattr لتعيين السمة ديناميكيًا
-    setattr(df, 'elliott_wave_pattern', pattern)
-    
-    return True
+    return pattern
 # --- END: Elliott Wave Strategy Enhancement ---
 
 def calculate_trade_levels(df: pd.DataFrame, strategy_name: str = None) -> Dict[str, Any]:
@@ -1465,14 +1459,11 @@ def generate_elliott_wave_signal(symbol: str, df: pd.DataFrame) -> Optional[Dict
     Returns:
         قاموس يحتوي على معلومات الإشارة أو None إذا لم يتم توليد إشارة
     """
-    # التحقق من استراتيجية موجات إليوت
-    if not check_elliott_wave_strategy_enhanced(df):
+    # التحقق من استراتيجية موجات إليوت والحصول على النمط
+    pattern = check_elliott_wave_strategy_enhanced(df, symbol)
+    if not pattern:
         return None
     
-    # الحصول على النمط المكتشف
-    pattern = getattr(df, 'elliott_wave_pattern', None)
-    if not pattern: return None
-
     # حساب جودة الإشارة
     quality_score = int(pattern['confidence'] * 100)
     
@@ -1619,7 +1610,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V31.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V31.0.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1686,7 +1677,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V31.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V31.0.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2724,14 +2715,11 @@ def scan_symbol_for_signals(symbol: str) -> Optional[Dict]:
         log_rejection(symbol, "Insufficient Historical Data")
         return None
     
-    # تعيين اسم العملة لإطار البيانات
-    df.name = symbol
-    
     # حساب المؤشرات الفنية
     df = calculate_all_features(df)
     
     # تطبيق الفلاتر العامة
-    if not check_market_volatility_filter(df):
+    if not check_market_volatility_filter(df, symbol):
         return None
     
     # التحقق من استراتيجيات التداول المفعلة
@@ -2739,7 +2727,7 @@ def scan_symbol_for_signals(symbol: str) -> Optional[Dict]:
     
     # استراتيجية BB + Stochastic
     if USE_BB_STOCH_STRATEGY and apply_strategy_filters(symbol, df, "BB_Stoch_Strategy"):
-        if check_bb_stoch_strategy_enhanced(df):
+        if check_bb_stoch_strategy_enhanced(df, symbol):
             signal = generate_bb_stoch_signal(symbol, df)
             if signal:
                 signals.append(signal)
@@ -2998,7 +2986,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V31.0.0 (Enhanced Elliott Wave) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V31.0.1 (AttributeError Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
