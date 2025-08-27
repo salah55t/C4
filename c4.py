@@ -839,7 +839,7 @@ def check_market_volatility_filter(df: pd.DataFrame, symbol: str) -> bool:
     if recent.empty:
         log_rejection(symbol, "Market Volatility Filter Failed"); return False
     q25 = float(np.percentile(recent, 25)); q90 = float(np.percentile(recent, 90))
-    lower = max(0.35, q25 * 0.9); upper = min(8.0, q90 * 1.1)
+    lower = max(0.25, q25 * 0.8); upper = min(10.0, q90 * 1.25)
     if last < lower or last > upper:
         log_rejection(symbol, "Market Volatility Filter Failed"); return False
     return True
