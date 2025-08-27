@@ -1,11 +1,9 @@
-# ملف c4.py - نسخة V30.0.0 (إصلاحات منطقية للمؤشرات)
+# ملف c4.py - نسخة V31.0.0 (تحقق ديناميكي للصفقات)
 # --- وصف الإصدار:
-# 1.  [إصلاح منطقي] مراجعة شاملة لجميع الاستراتيجيات وإصلاح الأخطاء المنطقية.
-# 2.  [تحسين] تعديل مؤشرات كل استراتيجية لتكون أكثر ملاءمة وفعالية لإطار 15 دقيقة.
-# 3.  [BB+Stoch] إصلاح منطق الدخول المتأخر، والاعتماد على الارتداد المبكر مع تأكيد ستوكاستيك.
-# 4.  [Pullback] إضافة فلتر حجم التداول لتأكيد قوة الارتداد من المتوسطات.
-# 5.  [Momentum] تحسين فلتر التقلب (ATR) لتجنب الإشارات الكاذبة.
-# 6.  [MACD+EMA] تعديل الشروط المتضاربة بين MACD و Stochastic لجعل الإشارة أكثر موثوقية.
+# 1.  [ميزة جديدة] تعديل آلية التحقق من الحد الأقصى للصفقات لتكون ديناميكية.
+# 2.  [تحسين] الآن يتم التحقق من عدد الصفقات المفتوحة قبل فحص كل عملة بشكل فردي.
+# 3.  [تحسين] يتوقف البوت مؤقتًا عن الفحص عند الوصول للحد الأقصى ويستأنف تلقائيًا عند إغلاق صفقة.
+# 4.  هذا التعديل يضمن عدم إضاعة أي فرص تداول قد تظهر مباشرة بعد توفر مكان لصفقة جديدة.
 
 import time
 import os
@@ -41,11 +39,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v30_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v31_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV30.0.0')
+logger = logging.getLogger('CryptoBotV31.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1377,7 +1375,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V30.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V31.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1444,7 +1442,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V30.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V31.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2446,26 +2444,40 @@ def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
+            # Wait for the next 15-minute candle alignment before starting the scan cycle
+            now = datetime.now(timezone.utc)
+            minutes_to_wait = 15 - (now.minute % 15)
+            seconds_to_wait = (minutes_to_wait * 60) - now.second
+            logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
+            time.sleep(max(1, seconds_to_wait))
+
             with trading_status_lock:
                 if not is_trading_enabled:
-                    time.sleep(10)
-                    continue
-            
-            with signal_cache_lock:
-                if len(open_signals_cache) >= MAX_OPEN_TRADES:
-                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing new signal scans.")
-                    time.sleep(120)
                     continue
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
+                # --- [التحقق الديناميكي من الحد الأقصى للصفقات] ---
+                # يتم التحقق هنا قبل فحص كل عملة
+                while True:
+                    with signal_cache_lock:
+                        if len(open_signals_cache) < MAX_OPEN_TRADES:
+                            break # يوجد مكان متاح، استمر في الفحص
+                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan until a trade is closed...")
+                    time.sleep(10) # انتظر 10 ثوان ثم أعد التحقق
+
                 with signal_cache_lock:
-                    if symbol in open_signals_cache: continue
+                    if symbol in open_signals_cache:
+                        continue
+                
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
                     if df is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
-                df_featured = calculate_all_features(df); df_featured.name = symbol
+                
+                df_featured = calculate_all_features(df)
+                df_featured.name = symbol
+                
                 strategy_found = None
                 if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
@@ -2476,11 +2488,7 @@ def main_bot_loop():
 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
                     create_trade_signal(symbol, df_featured, strategy_found)
-            now = datetime.now(timezone.utc)
-            minutes_to_wait = 15 - (now.minute % 15)
-            seconds_to_wait = (minutes_to_wait * 60) - now.second
-            logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
-            time.sleep(max(1, seconds_to_wait))
+
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
             time.sleep(60)
@@ -2677,7 +2685,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V30.0.0 (Logic & 15m Tuning) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V31.0.0 (Dynamic Trade Slot Check) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
