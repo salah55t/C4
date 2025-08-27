@@ -99,7 +99,7 @@ ELLIOTT_WAVE_SETTINGS = {
     "min_pattern_score": 0.65,      # الحد الأدنى لجودة النمط (تم رفعه لزيادة الدقة)
     "swing_point_order": 5,        # عدد الشموع على كل جانب لتحديد النقطة المحورية
     "swing_point_strength": 0.3,   # الحد الأدنى لقوة النقطة المحورية
-    "volatility_filter_threshold": 10.0 # حد فلتر التقلبات لتجاهل الضوضاء
+    "volatility_filter_threshold": 3.0 # حد فلتر التقلبات لتجاهل الضوضاء
 }
 
 
@@ -2483,4 +2483,5 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
 
