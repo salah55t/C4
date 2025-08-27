@@ -1,11 +1,7 @@
-# ملف c4.py - نسخة V32.0.0 (تحسين دقة موجات إليوت)
+# ملف c4.py - نسخة V32.0.1 (إصلاح خطأ مطبعي)
 # --- وصف الإصدار:
-# 1.  [تحسين كبير] تم دمج القواعد الصارمة والجديدة التي قدمها المستخدم للتحقق من صحة موجات إليوت.
-# 2.  [ميزة جديدة] إضافة دالة `validate_impulse_wave_rules` متكاملة للتحقق من جميع قواعد موجات إليوت الدافعة، بما في ذلك نسب فيبوناتشي وتداخل الموجات.
-# 3.  [تحسين] تعديل دوال `detect_bullish_impulse` و `detect_bearish_impulse` لتستخدم دالة التحقق الجديدة، مما يزيد من دقة الأنماط المكتشفة.
-# 4.  [تحسين] مراجعة وتصحيح منطق حساب نسب الموجات في دالة `calculate_impulse_score` لضمان التوافق مع القواعد الجديدة.
-# 5.  [هيكلة] إعادة تنظيم قسم استراتيجية موجات إليوت لسهولة القراءة والصيانة.
-# 6.  يحتفظ هذا الإصدار بجميع التحسينات السابقة، بما في ذلك الفلاتر المتقدمة وإدارة المخاطر الديناميكية.
+# 1.  [إصلاح] تصحيح خطأ `NameError` ناتج عن خطأ إملائي في `argrelextrema` داخل دالة `find_swing_points`.
+# 2.  يحتفظ هذا الإصدار بجميع التحسينات السابقة من V32.0.0.
 
 import time
 import os
@@ -47,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.0.0')
+logger = logging.getLogger('CryptoBotV32.0.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -918,7 +914,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, symbol: str) -> bool:
 
     return bounce_from_lower_band and cross_middle_band and is_bullish_candle
 
-# --- START: Elliott Wave Strategy Enhancement (V32.0.0) ---
+# --- START: Elliott Wave Strategy Enhancement (V32.0.1) ---
 
 class PatternWeights:
     """فئة لإدارة أوزان تقييم الأنماط بشكل ديناميكي"""
@@ -932,8 +928,8 @@ class PatternWeights:
     def _calculate_volume_score(self, points: List, df: pd.DataFrame) -> float:
         df_c = df.rename(columns=str.capitalize)
         try:
-            avg_volume = df_c['Volume'].iloc[:points[0][0]].mean()
-            wave3_volume = df_c['Volume'].iloc[points[2][0]:points[3][0]].mean()
+            avg_volume = df_c['Volume'].iloc[:points[0]['index']].mean()
+            wave3_volume = df_c['Volume'].iloc[points[2]['index']:points[3]['index']].mean()
             if avg_volume > 0:
                 volume_ratio = wave3_volume / avg_volume
                 return min(1.0, volume_ratio / 2.0)
@@ -966,12 +962,12 @@ class PatternWeights:
 
     def calculate_impulse_score(self, points: List, df: pd.DataFrame, direction: str = 'up') -> float:
         score = 0.0
-        p0, p1, p2, p3, p4, p5 = [p[1] for p in points]
+        p = [item['price'] for item in points]
         
         if direction == 'up':
-            wave1 = p1 - p0; wave3 = p3 - p2; wave5 = p5 - p4
+            wave1 = p[1] - p[0]; wave3 = p[3] - p[2]; wave5 = p[5] - p[4]
         else:
-            wave1 = p0 - p1; wave3 = p2 - p3; wave5 = p4 - p5
+            wave1 = p[0] - p[1]; wave3 = p[2] - p[3]; wave5 = p[4] - p[5]
         
         if wave1 <= 0 or wave3 <= 0 or wave5 <= 0: return 0.0
 
@@ -997,7 +993,8 @@ pattern_weights = PatternWeights()
 def find_swing_points(df, order=5):
     df_c = df.rename(columns=str.capitalize)
     high_indices = argrelextrema(df_c['High'].values, np.greater, order=order)[0]
-    low_indices = argrelelextrema(df_c['Low'].values, np.less, order=order)[0]
+    # *** FIX: Corrected typo from argrelelextrema to argrelextrema ***
+    low_indices = argrelextrema(df_c['Low'].values, np.less, order=order)[0]
     
     points = []
     for i in high_indices: points.append({'index': i, 'type': 'high', 'price': df_c['High'].iloc[i]})
@@ -1022,15 +1019,8 @@ def validate_impulse_wave_rules(points: List, df: pd.DataFrame, wave_type: str =
     if len(points) != 6: return False
     
     p = [item['price'] for item in points]
-    p_idx = [item['index'] for item in points]
-    
-    # استخراج أسعار القمم والقيعان من الداتا فريم لضمان الدقة
-    # p0, p1, p2, p3, p4, p5
-    # 0,  1,  2,  3,  4,  5
-    # L,  H,  L,  H,  L,  H (for up wave)
     
     if wave_type == 'up':
-        # تحقق من أن التسلسل هو قاع-قمة-قاع...
         if not all(points[i]['type'] == ('low' if i % 2 == 0 else 'high') for i in range(6)):
             return False
             
@@ -1040,36 +1030,30 @@ def validate_impulse_wave_rules(points: List, df: pd.DataFrame, wave_type: str =
         wave4_len = p[3] - p[4]
         wave5_len = p[5] - p[4]
 
-        # 1. الموجة 2 لا يمكن أن تتجاوز بداية الموجة 1
+        if wave1_len <= 0 or wave3_len <= 0: return False
+
         if p[2] < p[0]: return False
-        # 2. الموجة 3 لا يمكن أن تكون الأقصر
         if wave3_len < wave1_len and wave3_len < wave5_len: return False
-        # 3. الموجة 4 لا تتداخل مع قمة الموجة 1
         if p[4] < p[1]: return False
         
-        # 4. قواعد فيبوناتشي (كما طلب المستخدم)
-        wave2_retracement = wave2_len / wave1_len if wave1_len > 0 else 1
+        wave2_retracement = wave2_len / wave1_len
         if not (0.382 <= wave2_retracement <= 0.618): return False
         
-        wave4_retracement = wave4_len / wave3_len if wave3_len > 0 else 1
+        wave4_retracement = wave4_len / wave3_len
         if not (0.382 <= wave4_retracement <= 0.5): return False
         
     else: # down wave
-        # تحقق من أن التسلسل هو قمة-قاع-قمة...
         if not all(points[i]['type'] == ('high' if i % 2 == 0 else 'low') for i in range(6)):
             return False
             
         wave1_len = p[0] - p[1]
-        wave2_len = p[2] - p[1]
         wave3_len = p[2] - p[3]
-        wave4_len = p[4] - p[3]
         wave5_len = p[4] - p[5]
-        
-        # 1. الموجة 2 لا يمكن أن تتجاوز بداية الموجة 1
+
+        if wave1_len <= 0 or wave3_len <= 0: return False
+
         if p[2] > p[0]: return False
-        # 2. الموجة 3 لا يمكن أن تكون الأقصر
         if wave3_len < wave1_len and wave3_len < wave5_len: return False
-        # 3. الموجة 4 لا تتداخل مع قاع الموجة 1
         if p[4] > p[1]: return False
         
     return True
@@ -1082,11 +1066,9 @@ def detect_elliott_wave_patterns(df: pd.DataFrame, symbol: str) -> Dict:
         
     valid_patterns = []
     
-    # البحث عن أنماط دافعة (5 موجات)
     for i in range(len(swing_points) - 5):
         potential_pattern = swing_points[i:i+6]
         
-        # البحث عن نمط صاعد
         if potential_pattern[0]['type'] == 'low':
             if validate_impulse_wave_rules(potential_pattern, df, 'up'):
                 score = pattern_weights.calculate_impulse_score(potential_pattern, df, 'up')
@@ -1096,7 +1078,6 @@ def detect_elliott_wave_patterns(df: pd.DataFrame, symbol: str) -> Dict:
                         'score': score, 'direction': 'up'
                     })
         
-        # البحث عن نمط هابط
         if potential_pattern[0]['type'] == 'high':
             if validate_impulse_wave_rules(potential_pattern, df, 'down'):
                 score = pattern_weights.calculate_impulse_score(potential_pattern, df, 'down')
@@ -1109,7 +1090,6 @@ def detect_elliott_wave_patterns(df: pd.DataFrame, symbol: str) -> Dict:
     if not valid_patterns:
         return {}
         
-    # إرجاع أفضل نمط تم العثور عليه
     best_pattern = max(valid_patterns, key=lambda p: p['score'])
     return {best_pattern['type']: best_pattern}
 
@@ -1140,7 +1120,7 @@ def apply_elliott_wave_quality_filters(pattern: Dict, df: pd.DataFrame, symbol: 
         
     return True
 
-# --- END: Elliott Wave Strategy Enhancement (V32.0.0) ---
+# --- END: Elliott Wave Strategy Enhancement ---
 
 def calculate_trade_levels(df: pd.DataFrame, strategy_name: str = None) -> Dict[str, Any]:
     df_c = df.rename(columns=str.capitalize)
@@ -1316,7 +1296,6 @@ def generate_elliott_wave_signal(symbol: str, df: pd.DataFrame) -> Optional[Dict
         log_rejection(symbol, "Elliott Wave: No valid patterns detected")
         return None
         
-    # استخراج أفضل نمط من القاموس
     best_pattern_key = next(iter(patterns))
     best_pattern = patterns[best_pattern_key]
 
@@ -1331,14 +1310,12 @@ def generate_elliott_wave_signal(symbol: str, df: pd.DataFrame) -> Optional[Dict
     points = best_pattern['points']
     entry_price = df_with_features['Close'].iloc[-1]
     
-    # وقف الخسارة يكون تحت قاع الموجة 4 لصفقات أكثر أماناً
-    stop_loss = points[4]['price'] * 0.998 # 0.2% buffer below wave 4 low
+    stop_loss = points[4]['price'] * 0.998
 
-    # حساب الأهداف بناءً على امتدادات فيبوناتشي للموجة 5
     wave1_len = points[1]['price'] - points[0]['price']
     wave3_len = points[3]['price'] - points[2]['price']
-    target1 = points[5]['price'] + (wave1_len * 0.618) # هدف متحفظ
-    target2 = points[5]['price'] + (wave3_len * 0.618) # هدف متفائل
+    target1 = points[5]['price'] + (wave1_len * 0.618)
+    target2 = points[5]['price'] + (wave3_len * 0.618)
 
     if entry_price <= stop_loss:
         log_rejection(symbol, "Invalid Position Size", {"reason": "Calculated SL is above entry"})
@@ -1473,7 +1450,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.0.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1540,7 +1517,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.0.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2482,7 +2459,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.0 (Precision Elliott Wave) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.1 (Bugfix Release) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
