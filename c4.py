@@ -1,10 +1,11 @@
-# ملف c4.py - نسخة V29.0.0 (فلاتر إليوت متقدمة)
+# ملف c4.py - نسخة V30.0.0 (إصلاحات منطقية للمؤشرات)
 # --- وصف الإصدار:
-# 1.  [ميزة جديدة] إضافة فلاتر متقدمة لاستراتيجية موجات إليوت لزيادة دقة الإشارات.
-# 2.  [فلتر فيبوناتشي] التحقق من أن تصحيح الموجة الثانية يقع ضمن مستويات فيبوناتشي المنطقية.
-# 3.  [فلتر الزخم] التأكد من وجود شمعة اختراق قوية عند بداية الموجة الثالثة.
-# 4.  [فلتر ADX مخصص] إضافة فحص لقوة الاتجاه (ADX > 25) داخل استراتيجية إليوت نفسها.
-# 5.  [تحسين] تحديث قاموس أسباب الرفض ليشمل الفلاتر الجديدة.
+# 1.  [إصلاح منطقي] مراجعة شاملة لجميع الاستراتيجيات وإصلاح الأخطاء المنطقية.
+# 2.  [تحسين] تعديل مؤشرات كل استراتيجية لتكون أكثر ملاءمة وفعالية لإطار 15 دقيقة.
+# 3.  [BB+Stoch] إصلاح منطق الدخول المتأخر، والاعتماد على الارتداد المبكر مع تأكيد ستوكاستيك.
+# 4.  [Pullback] إضافة فلتر حجم التداول لتأكيد قوة الارتداد من المتوسطات.
+# 5.  [Momentum] تحسين فلتر التقلب (ATR) لتجنب الإشارات الكاذبة.
+# 6.  [MACD+EMA] تعديل الشروط المتضاربة بين MACD و Stochastic لجعل الإشارة أكثر موثوقية.
 
 import time
 import os
@@ -40,11 +41,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v29_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v30_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV29.0.0')
+logger = logging.getLogger('CryptoBotV30.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -101,11 +102,11 @@ USE_ELLIOTT_WAVE_STRATEGY: bool = True
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
-    "BB_Stoch_Strategy": "BB+MA Cross (انعكاسية)",
-    "MACD_EMA_Strategy": "MACD+Stochastic (معدلة)",
-    "EMA_RSI_Strategy": "EMA+RSI (مختلطة)",
-    "Pullback_Strategy": "Pullback (انعكاسية)",
-    "Momentum_Volatility_Strategy": "Momentum (زخم)",
+    "BB_Stoch_Strategy": "BB+Stoch (ارتداد مبكر)",
+    "MACD_EMA_Strategy": "MACD+EMA (زخم مؤكد)",
+    "EMA_RSI_Strategy": "EMA+RSI (ارتداد)",
+    "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
+    "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
 }
 STRATEGY_FILTER_CONFIG = {
@@ -163,12 +164,13 @@ REJECTION_REASONS_AR = {
     "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
-    "BB: Price did not cross middle band": "BB: السعر لم يتقاطع مع الخط الأوسط",
-    "MACD: Stochastic not in oversold": "MACD: مؤشر ستوكاستيك ليس في منطقة التشبع البيعي",
+    "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
+    "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
+    "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
+    "Pullback: Low volume on pullback recovery": "Pullback: حجم تداول منخفض عند الارتداد",
     "Elliott Wave: No clear impulse pattern detected": "موجات إليوت: لم يتم اكتشاف نمط موجة دافعة واضح",
     "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
     "Elliott Wave: Not enough recent points for pattern": "موجات إليوت: لا توجد نقاط حديثة كافية للنمط",
-    "Elliott Wave: Incomplete wave pattern": "موجات إليوت: نمط الموجة غير مكتمل",
     "Elliott Wave: Wave 2 Fibonacci retracement invalid": "موجات إليوت: تصحيح فيبوناتشي للموجة 2 غير صالح",
     "Elliott Wave: Weak breakout momentum": "موجات إليوت: زخم الاختراق ضعيف",
     "Elliott Wave: Trend is not strong enough (ADX)": "موجات إليوت: الاتجاه ليس قوياً (ADX)",
@@ -589,6 +591,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
+    df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
@@ -889,94 +892,147 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
     return True
 
-# --- Trading Strategies ---
+# --- Trading Strategies (Optimized for 15m Timeframe) ---
+
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed_cols = {'bb_lower', 'bb_middle', 'open', 'close', 'high', 'low'}
-    if len(df) < 21 or not needed_cols.issubset(df.columns):
-        return False
+    """
+    Optimized for 15m: Enters on the bounce from the lower BB, confirmed by Stochastic crossing up from oversold.
+    This provides an earlier and potentially more profitable entry than waiting for a middle-band cross.
+    """
+    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close'}
+    if len(df) < 21 or not needed.issubset(df.columns): return False
     
-    last, prev = df.iloc[-1], df.iloc[-2]
-    
-    bounce_from_lower_band = (prev['close'] <= prev['bb_lower']) and (last['close'] > last['bb_lower'])
-    cross_middle_band = last['close'] > last['bb_middle']
-    
-    if not cross_middle_band:
-        log_rejection(df.name, "BB: Price did not cross middle band")
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # Condition 1: Price touched or went below the lower band recently and closed back inside.
+    bounced_from_lower = (prev['low'] <= prev['bb_lower']) and (last['close'] > last['bb_lower'])
+    if not bounced_from_lower:
+        log_rejection(df.name, "BB: Price not bouncing from lower band")
         return False
 
-    is_bullish_candle = last['close'] > last['open'] and (last['close'] - last['open']) > (last['high'] - last['low']) * 0.3
-    
+    # Condition 2: Stochastic is showing upward momentum from an oversold/low area.
+    stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
+    if not stoch_confirm:
+        log_rejection(df.name, "BB: Stochastic not confirming upward momentum")
+        return False
+        
+    # Condition 3: The entry candle is a decisive bullish candle.
+    is_bullish_candle = last['close'] > last['open']
     if not is_bullish_candle:
         log_rejection(df.name, "Bullish Confirmation Failed")
         return False
 
-    return bounce_from_lower_band and cross_middle_band and is_bullish_candle
+    return True
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'stoch_k', 'stoch_d', 'close', 'adx', 'ema200'}
-    if len(df) < 200 or not needed.issubset(df.columns): return False
+    """
+    Optimized for 15m: Focuses on confirmed, building momentum. Instead of a simple MACD cross, it checks for
+    an accelerating histogram, ensuring we enter a strengthening move, not a fake-out.
+    """
+    needed = {'macd_hist', 'close', 'ema50', 'ema100', 'adx'}
+    if len(df) < 100 or not needed.issubset(df.columns): return False
     
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+    # Condition 1: Medium-term trend must be bullish (50 EMA > 100 EMA).
+    if df['ema50'].iloc[-1] < df['ema100'].iloc[-1]:
+        log_rejection(df.name, "Long-term Trend Filter Failed")
+        return False
 
-    if df['adx'].iloc[-1] < 22:
-        log_rejection(df.name, "Trend Strength Filter Failed"); return False
+    # Condition 2: Trend strength must be present.
+    if df['adx'].iloc[-1] < 20:
+        log_rejection(df.name, "Trend Strength Filter Failed")
+        return False
 
-    last, prev = df.iloc[-1], df.iloc[-2]
+    # Condition 3: Confirmed upward momentum shown by accelerating MACD histogram.
+    last_hist = df['macd_hist'].iloc[-1]
+    prev_hist = df['macd_hist'].iloc[-2]
     
-    macd_cross_up = (prev['macd'] <= prev['macd_signal']) and (last['macd'] > last['macd_signal'])
-    
-    stochastic_in_oversold = last['stoch_k'] < 25 and last['stoch_d'] < 25
-    stochastic_rising = last['stoch_k'] > last['stoch_d']
-    
-    if not (stochastic_in_oversold and stochastic_rising):
-        log_rejection(df.name, "MACD: Stochastic not in oversold")
+    momentum_confirmed = last_hist > 0 and prev_hist < last_hist
+    if not momentum_confirmed:
+        log_rejection(df.name, "MACD: Momentum not confirmed")
         return False
         
-    return macd_cross_up and stochastic_in_oversold and stochastic_rising
+    return True
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9','ema21','rsi','low','close', 'ema200'}
-    if len(df) < 200 or not needed.issubset(df.columns): return False
-
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
-
-    last3 = df.tail(3)
-    ema9_over_21 = (last3['ema9'] > last3['ema21']).sum() >= 2
-    last = last3.iloc[-1]
-    rsi_ok = 50 <= float(last['rsi']) <= 65
-    pullback_ok = (float(last['low']) <= float(last['ema9'])) and (float(last['close']) > float(last['ema9']))
-    return ema9_over_21 and rsi_ok and pullback_ok
-
-def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9','ema21','ema50','open','close','low', 'ema200'}
-    if len(df) < 200 or not needed.issubset(df.columns): return False
-
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
+    """
+    Optimized for 15m: A classic pullback strategy. It looks for a dip towards fast-moving averages in an
+    established uptrend, with RSI confirming the trend is still healthy (not overbought).
+    """
+    needed = {'ema9', 'ema21', 'rsi', 'low', 'close', 'volume'}
+    if len(df) < 50 or not needed.issubset(df.columns): return False
 
     last = df.iloc[-1]
-    uptrend = (last['ema21'] > last['ema50']) and (last['close'] > last['ema50'])
-    if not uptrend: return False
-    recent = df.tail(4)
-    dipped = ((recent['low'] <= recent['ema21']) | (recent['low'] <= recent['ema9'])).any()
-    bullish_close = last['close'] > last['open'] and last['close'] > last['ema9']
-    return dipped and bullish_close
+    
+    # Condition 1: Short-term trend is clearly up.
+    if not (last['ema9'] > last['ema21']): return False
+
+    # Condition 2: RSI is in a healthy bullish zone.
+    if not (50 < last['rsi'] < 70): return False
+    
+    # Condition 3: Price has recently pulled back to a dynamic support level (EMA).
+    pulled_back = False
+    for i in range(1, 4): # Check last 3 candles
+        if df['low'].iloc[-i] <= df['ema21'].iloc[-i]:
+            pulled_back = True
+            break
+    if not pulled_back: return False
+    
+    # Condition 4: The recovery candle is a strong bullish candle closing above the faster EMA.
+    if not (last['close'] > last['open'] and last['close'] > last['ema9']):
+        return False
+        
+    return True
+
+def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
+    """
+    Optimized for 15m: Similar to EMA/RSI but uses slightly slower EMAs for trend context and adds
+    a crucial volume confirmation filter. A real recovery from a pullback should have strong volume.
+    """
+    needed = {'ema21', 'ema50', 'open', 'close', 'low', 'volume'}
+    if len(df) < 50 or not needed.issubset(df.columns): return False
+
+    last = df.iloc[-1]
+    
+    # Condition 1: Medium-term trend is up.
+    if not (last['ema21'] > last['ema50'] and last['close'] > last['ema50']): return False
+    
+    # Condition 2: Price has recently dipped to a support zone.
+    if not ((df['low'].tail(4)) <= (df['ema21'].tail(4))).any(): return False
+    
+    # Condition 3: The recovery is confirmed by a bullish candle.
+    if not (last['close'] > last['open']): return False
+    
+    # Condition 4 (Crucial for 15m): Volume on the recovery candle is above average, confirming buying interest.
+    avg_volume = df['volume'].rolling(window=10).mean().iloc[-2] # Average volume before the current candle
+    if last['volume'] < avg_volume * 1.2:
+        log_rejection(df.name, "Pullback: Low volume on pullback recovery")
+        return False
+        
+    return True
 
 def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
-    needed = {'atr_percent','ema9','ema21','macd','macd_signal','close', 'ema200'}
-    if len(df) < 200 or not needed.issubset(df.columns): return False
-    if df['close'].iloc[-1] < df['ema200'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed"); return False
-    last, prev = df.iloc[-1], df.iloc[-2]
-    atr_mean = float(pd.Series(df['atr_percent'].tail(14)).mean())
-    atr_ok = float(last['atr_percent']) >= (1.2 * atr_mean)
-    hist_now = float(last['macd'] - last['macd_signal'])
-    hist_prev = float(prev['macd'] - prev['macd_signal'])
-    hist_rising = hist_now > hist_prev
-    ema_ok = (last['ema9'] > last['ema21']) and (last['close'] > last['ema9'])
-    return atr_ok and hist_rising and ema_ok
+    """
+    Optimized for 15m: Catches strong breakout moves. Instead of a single ATR spike, it looks for a
+    sustained increase in volatility, combined with strong trend and momentum indicators.
+    """
+    needed = {'atr_percent', 'ema9', 'ema21', 'macd_hist', 'close', 'adx'}
+    if len(df) < 50 or not needed.issubset(df.columns): return False
+    
+    last = df.iloc[-1]
+    
+    # Condition 1: A strong trend must be established.
+    if last['adx'] < 25: return False
+    
+    # Condition 2: Volatility is expanding (sustained, not a single spike).
+    avg_atr_3 = df['atr_percent'].tail(3).mean()
+    avg_atr_14 = df['atr_percent'].tail(14).mean()
+    if avg_atr_3 < avg_atr_14 * 1.3: return False
+    
+    # Condition 3: Strong bullish momentum.
+    if not (last['macd_hist'] > 0 and last['close'] > last['ema9'] > last['ema21']): return False
+    
+    return True
 
 # --- START: Elliott Wave Strategy (With Advanced Filters) ---
 def calculate_dynamic_order(df: pd.DataFrame) -> int:
@@ -1011,72 +1067,50 @@ def check_wave_2_fibonacci_retracement(p0, p1, p2) -> bool:
 def check_breakout_candle_momentum(df: pd.DataFrame, breakout_level: float) -> bool:
     """Checks for a strong bullish candle breaking the resistance level."""
     last_candle = df.iloc[-1]
-    # Check if the close is above the breakout and it's a bullish candle
-    if last_candle['close'] <= breakout_level or last_candle['close'] <= last_candle['open']:
-        return False
-    # Check if the body of the candle is significant
+    if last_candle['close'] <= breakout_level or last_candle['close'] <= last_candle['open']: return False
     candle_body = last_candle['close'] - last_candle['open']
     candle_range = last_candle['high'] - last_candle['low']
-    if candle_range > 0 and (candle_body / candle_range) < 0.5:
-        return False # Body is less than 50% of the total candle range, indicating indecision
+    if candle_range > 0 and (candle_body / candle_range) < 0.5: return False
     return True
 
 def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
-    """
-    Advanced Elliott Wave strategy focusing on Wave 3 entry with multiple confirmation filters.
-    """
-    needed_cols = {'high', 'low', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50', 'macd', 'adx', 'atr_percent'}
-    if len(df) < 100 or not needed_cols.issubset(df.columns):
-        log_rejection(df.name, "Insufficient Historical Data")
-        return False
+    """Advanced Elliott Wave strategy focusing on Wave 3 entry with multiple confirmation filters."""
+    needed = {'high', 'low', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50', 'macd', 'adx', 'atr_percent'}
+    if len(df) < 100 or not needed.issubset(df.columns):
+        log_rejection(df.name, "Insufficient Historical Data"); return False
     
     try:
-        # 1. Find swing points dynamically
         dynamic_order = calculate_dynamic_order(df)
         high_idx = argrelextrema(df['high'].values, np.greater, order=dynamic_order)[0]
         low_idx = argrelextrema(df['low'].values, np.less, order=dynamic_order)[0]
         if len(high_idx) < 2 or len(low_idx) < 3:
-            log_rejection(df.name, "Elliott Wave: Insufficient swing points")
-            return False
+            log_rejection(df.name, "Elliott Wave: Insufficient swing points"); return False
         
-        # 2. Combine and sort points
         all_points = []
         for idx in high_idx: all_points.append((idx, df['high'].iloc[idx], 'high'))
         for idx in low_idx: all_points.append((idx, df['low'].iloc[idx], 'low'))
         all_points.sort(key=lambda x: x[0])
         
-        # 3. Search for the impulse pattern in recent data
         recent_points = all_points[-30:]
         impulse_pattern = find_wave_pattern(recent_points)
         if not impulse_pattern:
-            log_rejection(df.name, "Elliott Wave: No clear impulse pattern detected")
-            return False
+            log_rejection(df.name, "Elliott Wave: No clear impulse pattern detected"); return False
         
         p0, p1, p2, _, _ = impulse_pattern
         wave_1_high = p1[1]
 
-        # 4. === ADVANCED FILTERS START HERE ===
-        # Filter 1: Check Wave 2 Fibonacci Retracement
         if not check_wave_2_fibonacci_retracement(p0, p1, p2):
-            log_rejection(df.name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
-            return False
+            log_rejection(df.name, "Elliott Wave: Wave 2 Fibonacci retracement invalid"); return False
             
-        # Filter 2: Check Trend Strength with ADX
         if df['adx'].iloc[-1] < 25:
-            log_rejection(df.name, "Elliott Wave: Trend is not strong enough (ADX)")
-            return False
+            log_rejection(df.name, "Elliott Wave: Trend is not strong enough (ADX)"); return False
 
-        # 5. Check for breakout above Wave 1's peak
         if df['close'].iloc[-1] <= wave_1_high:
-            log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance")
-            return False
+            log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance"); return False
             
-        # Filter 3: Check Breakout Candle Momentum
         if not check_breakout_candle_momentum(df, wave_1_high):
-            log_rejection(df.name, "Elliott Wave: Weak breakout momentum")
-            return False
+            log_rejection(df.name, "Elliott Wave: Weak breakout momentum"); return False
 
-        # 6. Standard confirmation filters (Volume, RSI, MACD, EMAs)
         if not check_elliott_wave_volume_filter(df): return False
         if not check_elliott_wave_rsi_filter(df): return False
         if not check_elliott_wave_macd_filter(df): return False
@@ -1089,34 +1123,25 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         logger.error(f"Error in Elliott Wave strategy for {df.name}: {e}", exc_info=True)
         return False
 
-# --- Helper functions for Elliott Wave filters (already defined in the main function)
 def check_elliott_wave_volume_filter(df: pd.DataFrame) -> bool:
-    """Volume filter for Elliott Wave."""
     if df['volume'].iloc[-1] < df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-        log_rejection(df.name, "Elliott Wave: Volume too low")
-        return False
+        log_rejection(df.name, "Elliott Wave: Volume too low"); return False
     return True
 
 def check_elliott_wave_rsi_filter(df: pd.DataFrame) -> bool:
-    """RSI filter for Elliott Wave."""
     if not (45 < df['rsi'].iloc[-1] < 75):
-        log_rejection(df.name, "Elliott Wave: RSI not in optimal range")
-        return False
+        log_rejection(df.name, "Elliott Wave: RSI not in optimal range"); return False
     return True
 
 def check_elliott_wave_macd_filter(df: pd.DataFrame) -> bool:
-    """MACD filter for Elliott Wave."""
     if df['macd'].iloc[-1] <= df['macd_signal'].iloc[-1]:
-        log_rejection(df.name, "Elliott Wave: MACD not positive")
-        return False
+        log_rejection(df.name, "Elliott Wave: MACD not positive"); return False
     return True
 
 def check_elliott_wave_ema_filter(df: pd.DataFrame) -> bool:
-    """EMA filter for Elliott Wave."""
     last = df.iloc[-1]
     if not (last['close'] > last['ema9'] > last['ema21'] > last['ema50']):
-        log_rejection(df.name, "Elliott Wave: EMAs not in correct order")
-        return False
+        log_rejection(df.name, "Elliott Wave: EMAs not in correct order"); return False
     return True
 # --- END: Elliott Wave Strategy ---
 
@@ -1352,7 +1377,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V29.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V30.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1419,7 +1444,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V29.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V30.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2652,7 +2677,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V29.0.0 (Advanced Elliott Filters) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V30.0.0 (Logic & 15m Tuning) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
