@@ -99,7 +99,7 @@ ELLIOTT_WAVE_SETTINGS = {
     "min_pattern_score": 0.65,      # الحد الأدنى لجودة النمط (تم رفعه لزيادة الدقة)
     "swing_point_order": 5,        # عدد الشموع على كل جانب لتحديد النقطة المحورية
     "swing_point_strength": 0.3,   # الحد الأدنى لقوة النقطة المحورية
-    "volatility_filter_threshold": 5.0 # حد فلتر التقلبات لتجاهل الضوضاء
+    "volatility_filter_threshold": 7.0 # حد فلتر التقلبات لتجاهل الضوضاء
 }
 
 
