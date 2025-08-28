@@ -1,10 +1,8 @@
-# ملف c4.py - نسخة V32.2.0 (إصلاحات وتحسينات شاملة)
+# ملف c4.py - نسخة V32.3.0 (إصلاحات الاستجابة والإعدادات)
 # --- وصف الإصدار:
-# 1.  [إصلاح شامل] تطبيق جميع الإصلاحات المقترحة لضمان تسجيل جميع أسباب الرفض في الاستراتيجيات.
-# 2.  [إكمال الدوال] إكمال منطق استراتيجيات Momentum_Volatility و Elliott_Wave.
-# 3.  [تحسين الاستقرار] إصلاح الأخطاء المحتملة في دالة حساب وقف الخسارة (Elliott_Wave).
-# 4.  [تحسين الفلاتر] تعديل فلتر التقلبات ليعمل بشكل أكثر قوة وموثوقية.
-# 5.  [توحيد المعايير] ضمان أن جميع الدوال تتبع نفس النمط في التحقق وتسجيل الرفض.
+# 1.  [إصلاح الاستجابة] تعديل حلقة الفحص الرئيسية لتكون أكثر استجابة لزر تشغيل/إيقاف التداول.
+# 2.  [إكمال الواجهة] إضافة صفحة إعدادات كاملة ومفقودة للتحكم في الاستراتيجيات والفلاتر.
+# 3.  [تحسينات طفيفة] ضمان استقرار الكود وتحسين تجربة المستخدم في لوحة التحكم.
 
 import time
 import os
@@ -45,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.2.0')
+logger = logging.getLogger('CryptoBotV32.3.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -162,8 +160,6 @@ REJECTION_REASONS_AR = {
     "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
-    
-    # EMA_RSI Rejections
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
     "EMA_RSI: Short-term EMAs not bullish": "EMA_RSI: المتوسطات قصيرة الأجل ليست صاعدة",
     "EMA_RSI: RSI not in optimal range": "EMA_RSI: مؤشر القوة النسبية خارج النطاق الأمثل",
@@ -171,37 +167,27 @@ REJECTION_REASONS_AR = {
     "EMA_RSI: No pullback detected": "EMA_RSI: لم يتم اكتشاف ارتداد",
     "EMA_RSI: Price not recovering": "EMA_RSI: السعر لا يتعافى",
     "EMA_RSI: Volume below average": "EMA_RSI: حجم التداول أقل من المتوسط",
-
-    # BB_Stoch Rejections
     "BB: Price below EMA50 (bearish trend)": "BB: السعر تحت EMA50 (اتجاه هابط)",
     "BB: Weak trend (ADX < 20)": "BB: اتجاه ضعيف (ADX < 20)",
     "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
     "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
     "BB: Weak bullish candle or low volume": "BB: شمعة صاعدة ضعيفة أو حجم تداول منخفض",
-
-    # MACD_EMA Rejections
     "MACD: Bearish long-term trend": "MACD: اتجاه هابط طويل الأجل",
     "MACD: Weak trend (ADX < 22)": "MACD: اتجاه ضعيف (ADX < 22)",
     "MACD: Insufficient data for momentum check": "MACD: بيانات غير كافية لفحص الزخم",
     "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
     "MACD: Volume below average": "MACD: حجم التداول أقل من المتوسط",
-
-    # Pullback Rejections
     "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه ليس صاعدًا بقوة",
     "Pullback: Weak trend (ADX < 18)": "Pullback: اتجاه ضعيف (ADX < 18)",
     "Pullback: No pullback detected": "Pullback: لم يتم اكتشاف ارتداد",
     "Pullback: Price not recovering": "Pullback: السعر لا يتعافى",
     "Pullback: Low volume on recovery": "Pullback: حجم تداول منخفض عند التعافي",
-
-    # Momentum_Volatility Rejections
     "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
     "Momentum: Weak trend (ADX < 25)": "Momentum: اتجاه ضعيف (ADX < 25)",
     "Momentum: Volatility not in optimal range": "Momentum: التقلب ليس في النطاق الأمثل",
     "Momentum: MACD momentum not positive": "Momentum: زخم الماكد ليس إيجابيًا",
     "Momentum: RSI not in optimal range": "Momentum: مؤشر القوة النسبية ليس في النطاق الأمثل",
     "Momentum: Volume below average": "Momentum: حجم التداول أقل من المتوسط",
-
-    # Elliott_Wave Rejections
     "Elliott Wave: Trend is not bullish": "موجات إليوت: الاتجاه ليس صاعدًا",
     "Elliott Wave: Trend is not strong enough (ADX)": "موجات إليوت: الاتجاه ليس قوياً (ADX)",
     "Elliott Wave: Volume too low": "موجات إليوت: حجم التداول منخفض جدًا",
@@ -814,7 +800,6 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     q10 = float(np.percentile(recent, 10))
     q90 = float(np.percentile(recent, 90))
     
-    # The strategy attribute is attached to df in create_trade_signal
     strategy_name = getattr(df, "strategy", "Unknown")
     
     if strategy_name in ["BB_Stoch_Strategy", "EMA_RSI_Strategy", "Pullback_Strategy"]:
@@ -918,7 +903,6 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
                 recent_support = lows[support_idx[-1]]
                 stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
             else:
-                # إذا لم يتم العثور على نقاط دعم، استخدم EMA21
                 stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
         except Exception as e:
             logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
@@ -926,7 +910,6 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
     else:
         stop_loss = entry_price - (atr_value * 2.0)
     
-    # التأكد من أن وقف الخسارة ليس بعيدًا جدًا
     max_stop_distance = entry_price * 0.05
     if entry_price - stop_loss > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
@@ -1017,22 +1000,18 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Weak trend (ADX < 20)")
         return False
     
-    # تحقق من أن السعر لمس النطاق السفلي في إحدى الشمعات الثلاث الأخيرة
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
-    # تحقق من أن السعر الحالي أعلى من النطاق السفلي
     above_lower_band = last['close'] > last['bb_lower']
     
     if not (touched_lower_band and above_lower_band):
         log_rejection(symbol_name, "BB: Price not bouncing from lower band")
         return False
     
-    # تحقق من إشارة Stochastic
     stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
         log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
         return False
         
-    # تحقق من الشمعة الصاعدة وحجم التداول
     is_bullish_candle = last['close'] > last['open']
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.8
     if not (is_bullish_candle and volume_ok):
@@ -1050,17 +1029,14 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     last = df.iloc[-1]
     
-    # تحقق من الاتجاه طويل الأجل
     if not (last['ema50'] > last['ema100'] > last['ema200']):
         log_rejection(symbol_name, "MACD: Bearish long-term trend")
         return False
 
-    # تحقق من قوة الاتجاه
     if last['adx'] < 22:
         log_rejection(symbol_name, "MACD: Weak trend (ADX < 22)")
         return False
 
-    # تحقق من زخم MACD
     hist = df['macd_hist'].tail(4).values
     if len(hist) < 4:
         log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
@@ -1073,7 +1049,6 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "MACD: Momentum not confirmed")
         return False
         
-    # تحقق من حجم التداول
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 0.9
     if not volume_ok:
         log_rejection(symbol_name, "MACD: Volume below average")
@@ -1090,28 +1065,23 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    # تحقق من الاتجاه الصاعد
     if not (last['ema21'] > last['ema50'] > last['ema200']):
         log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
         return False
     
-    # تحقق من قوة الاتجاه
     if last['adx'] < 18:
         log_rejection(symbol_name, "Pullback: Weak trend (ADX < 18)")
         return False
     
-    # تحقق من وجود ارتداد
     pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
     if not pulled_back:
         log_rejection(symbol_name, "Pullback: No pullback detected")
         return False
     
-    # تحقق من أن السعر يتعافى
     if not (last['close'] > last['open']):
         log_rejection(symbol_name, "Pullback: Price not recovering")
         return False
     
-    # تحقق من حجم التداول عند التعافي
     avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
     if last['volume'] < avg_volume * 1.1:
         log_rejection(symbol_name, "Pullback: Low volume on recovery")
@@ -1128,33 +1098,27 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    # تحقق من ترتيب EMAs
     if not (last['ema9'] > last['ema21'] > last['ema50']):
         log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
         return False
     
-    # تحقق من قوة الاتجاه
     if last['adx'] < 25:
         log_rejection(symbol_name, "Momentum: Weak trend (ADX < 25)")
         return False
     
-    # تحقق من نطاق التقلب
     atr_percent = last['atr_percent']
     if not (1.8 <= atr_percent <= 6.0):
         log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
         return False
     
-    # تحقق من زخم MACD
     if last['macd_hist'] <= 0:
         log_rejection(symbol_name, "Momentum: MACD momentum not positive")
         return False
         
-    # تحقق من RSI
     if not (50 <= last['rsi'] <= 70):
         log_rejection(symbol_name, "Momentum: RSI not in optimal range")
         return False
         
-    # تحقق من حجم التداول
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.2
     if not volume_ok:
         log_rejection(symbol_name, "Momentum: Volume below average")
@@ -1171,36 +1135,29 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    # تحقق من الاتجاه العام
     if not (last['ema21'] > last['ema50'] > last['ema200']):
         log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
         return False
     
-    # تحقق من قوة الاتجاه
     if last['adx'] < 25:
         log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
         return False
     
-    # تحقق من حجم التداول
     if last['volume'] < df['volume'].rolling(20).mean().iloc[-1] * 1.2:
         log_rejection(symbol_name, "Elliott Wave: Volume too low")
         return False
     
-    # تحقق من RSI
     if not (40 <= last['rsi'] <= 65):
         log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
         return False
     
-    # تحقق من MACD
     if last['macd'] <= 0:
         log_rejection(symbol_name, "Elliott Wave: MACD not positive")
         return False
     
-    # البحث عن نقاط التذبذب
     highs = df['high'].values
     lows = df['low'].values
     
-    # إيجاد قمم وقيعان محلية
     try:
         peaks_idx = argrelextrema(highs, np.greater, order=5)[0]
         troughs_idx = argrelextrema(lows, np.less, order=5)[0]
@@ -1209,8 +1166,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
             log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
             return False
         
-        # التحقق من نمط الموجة الدافعة (1-2-3-4-5)
-        # هنا نتحقق من أن الموجة 2 لم تتجاوز نقطة بداية الموجة 1
         wave1_start_idx = troughs_idx[-3] if len(troughs_idx) >= 3 else troughs_idx[-2]
         wave1_end_idx = peaks_idx[-2] if len(peaks_idx) >= 2 else peaks_idx[-1]
         wave2_end_idx = troughs_idx[-2] if len(troughs_idx) >= 2 else troughs_idx[-1]
@@ -1219,9 +1174,8 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         wave1_end_price = highs[wave1_end_idx]
         wave2_end_price = lows[wave2_end_idx]
         
-        # التحقق من أن الموجة 2 لم تتراجع أكثر من 61.8% من الموجة 1
         wave1_height = wave1_end_price - wave1_start_price
-        if wave1_height <= 0: # تجنب القسمة على صفر
+        if wave1_height <= 0:
              log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
              return False
         wave2_retracement = wave1_end_price - wave2_end_price
@@ -1231,7 +1185,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
             log_rejection(symbol_name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
             return False
         
-        # التحقق من أن السعر الحالي أعلى من قمة الموجة 1
         if last['close'] <= wave1_end_price:
             log_rejection(symbol_name, "Elliott Wave: Price hasn't broken wave 1 resistance")
             return False
@@ -1318,7 +1271,6 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    # Attach strategy name to df for use in dynamic filters
     df.strategy = strategy_name 
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
@@ -1326,8 +1278,6 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    # This function is not provided, assuming it exists elsewhere
-    # quality_score = calculate_signal_quality_score(symbol, df, strategy_name) 
     quality_score = 75 # Placeholder value
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
@@ -1421,7 +1371,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.2.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.3.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1488,7 +1438,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.2.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.3.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1577,7 +1527,6 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
   </div>
 </div>
 <script>
-// JavaScript code for the dashboard remains unchanged
 const qs = s => document.querySelector(s);
 let lastPrices = {};
 let performanceChartInstance = null;
@@ -1761,7 +1710,6 @@ async function initializeDashboard() {
         const signalsData = await signalsRes.json();
         const metricsData = await metricsRes.json();
         
-        // Populate initial data
         qs('#serverTime').textContent = new Date(baseData.server_time).toLocaleTimeString('ar-EG');
         qs('#toggleTrading').checked = !!baseData.trading_enabled;
         qs('#balance').textContent = fmt(baseData.usdt_balance);
@@ -1773,7 +1721,6 @@ async function initializeDashboard() {
         qs('#riskInput').value = baseData.risk_per_trade;
         updateMarketTrends(baseData.market_state);
         
-        // Render initial rejections and notifications
         qs('#rejections tbody').innerHTML = '';
         baseData.rejections.forEach(r => addRejection(r, false));
         qs('#events tbody').innerHTML = '';
@@ -1892,6 +1839,172 @@ document.addEventListener('DOMContentLoaded', () => { initializeDashboard(); set
 </body>
 </html>
 """
+
+SETTINGS_TEMPLATE = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>الإعدادات - بوت التداول (V32.3.0)</title>
+<style>
+:root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:#e8f1ff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",Arial}
+.container{max-width:900px;margin:0 auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between; margin-bottom: 16px;}
+h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
+.card{background:var(--panel);border:1px solid #1e2c52;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);overflow:hidden}
+.card h2{margin:0;padding:12px 14px;border-bottom:1px solid #1e2c52;font-size:16px;color:#cfe2ff;}
+.card-body{padding:16px}
+.form-grid{display:grid;grid-template-columns:1fr;gap:24px;}
+@media(min-width: 600px){.form-grid{grid-template-columns:1fr 1fr;}}
+.form-group{display:flex;flex-direction:column;gap:8px}
+.form-group label{font-weight:600;color:var(--muted);font-size:14px}
+.form-group input, .form-group select {
+    background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px; font-size: 14px;
+}
+.switch{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;border:1px solid #2a3a68;background:#0f1b3b;cursor:pointer;user-select:none}
+.switch input{display:none}
+.switch .dot{width:14px;height:14px;border-radius:50%;background:#6a7fb2;transition:.2s}
+.switch input:checked + .dot{background:#24d08a;transform:translateX(2px) scale(1.1)}
+.btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: background-color 0.2s, transform 0.2s; text-decoration: none;}
+.btn:hover{transform:translateY(-1px);border-color:#3a58a6}
+.btn.primary{background: linear-gradient(180deg, var(--accent), #2a80d3); border-color: #4aaeff;}
+.footer-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:24px;border-top:1px solid #1e2c52;padding-top:16px;}
+.notification { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background-color: #1e2c52; color: #e8f1ff; padding: 12px 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); z-index: 1000; opacity: 0; transition: opacity 0.3s, transform 0.3s; }
+.notification.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>الإعدادات</h1>
+        <a href="/" class="btn">العودة للوحة التحكم</a>
+    </header>
+
+    <form id="settingsForm">
+        <div class="card">
+            <h2>إعدادات التداول العامة</h2>
+            <div class="card-body form-grid">
+                <div class="form-group">
+                    <label for="riskInput">نسبة المخاطرة لكل صفقة (%)</label>
+                    <input type="number" id="riskInput" name="RISK_PER_TRADE_PERCENT" value="{{ risk_per_trade }}" step="0.1" min="0.1" max="5.0">
+                </div>
+                <div class="form-group">
+                    <label for="maxTradesInput">الحد الأقصى للصفقات المفتوحة</label>
+                    <input type="number" id="maxTradesInput" name="MAX_OPEN_TRADES" value="{{ MAX_OPEN_TRADES }}" step="1" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label for="qualityFilter">الحد الأدنى لجودة الإشارة</label>
+                    <input type="number" id="qualityFilter" name="min_quality" value="{{ min_quality }}" step="1" min="30" max="90">
+                </div>
+                <div class="form-group">
+                    <label>وضع التداول</label>
+                    <label class="switch">
+                        <input type="checkbox" name="paper_trading_mode" {% if not is_paper_mode %}checked{% endif %}>
+                        <span class="dot"></span>
+                        <span id="tradingModeText">{% if is_paper_mode %}ورقي (Paper){% else %}حقيقي (Real){% endif %}</span>
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" style="margin-top: 16px;">
+            <h2>إعدادات الاستراتيجيات</h2>
+            <div class="card-body">
+                {% for key, name in STRATEGY_NAMES.items() %}
+                <div class="form-group" style="flex-direction: row; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e2c52; padding-bottom: 12px; margin-bottom: 12px;">
+                    <label>{{ name }}</label>
+                    <label class="switch">
+                        <input type="checkbox" name="{{ key }}" {% if strategies_status[key] %}checked{% endif %}>
+                        <span class="dot"></span>
+                    </label>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div class="footer-actions">
+            <button type="submit" class="btn primary">حفظ التغييرات</button>
+        </div>
+    </form>
+</div>
+<div id="notification" class="notification"></div>
+
+<script>
+document.getElementById('settingsForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const formData = new FormData(this);
+    const settings = {};
+    const strategies = {};
+
+    for (const [key, value] of formData.entries()) {
+        if (key.startsWith('USE_')) {
+            strategies[key] = true;
+        } else if (key === 'paper_trading_mode') {
+            // The value is 'on' if checked, we need to convert it to boolean for real/paper
+            settings[key] = false; // if checked, it's NOT paper mode
+        } else {
+            settings[key] = value;
+        }
+    }
+    
+    // Handle unchecked checkboxes for strategies
+    document.querySelectorAll('input[type="checkbox"][name^="USE_"]').forEach(cb => {
+        if (!cb.checked) strategies[cb.name] = false;
+    });
+    
+    // Handle unchecked trading mode
+    if (!formData.has('paper_trading_mode')) {
+        settings['paper_trading_mode'] = true; // if not checked, it IS paper mode
+    }
+
+    Promise.all([
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(settings)
+        }),
+        fetch('/api/strategies', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(strategies)
+        }),
+        fetch('/api/signal_quality', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({min_quality: settings.min_quality})
+        })
+    ]).then(responses => {
+        if (responses.every(res => res.ok)) {
+            showNotification('تم حفظ الإعدادات بنجاح!');
+        } else {
+            showNotification('حدث خطأ أثناء حفظ الإعدادات.');
+        }
+    }).catch(err => {
+        console.error(err);
+        showNotification('فشل الاتصال بالخادم.');
+    });
+});
+
+document.querySelector('input[name="paper_trading_mode"]').addEventListener('change', function() {
+    document.getElementById('tradingModeText').textContent = this.checked ? 'حقيقي (Real)' : 'ورقي (Paper)';
+});
+
+function showNotification(message) {
+    const notification = document.getElementById('notification');
+    notification.textContent = message;
+    notification.classList.add('show');
+    setTimeout(() => {
+        notification.classList.remove('show');
+    }, 3000);
+}
+</script>
+</body>
+</html>
+"""
+
 BACKTEST_TEMPLATE = "<h1>Backtest Page - Under Construction</h1>"
 
 # --- مسارات Flask ---
@@ -1905,7 +2018,6 @@ def settings_page():
     with risk_per_trade_lock: risk_per_trade = RISK_PER_TRADE_PERCENT
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    with strategy_filters_lock: strategy_filters = dict(STRATEGY_FILTER_CONFIG)
     
     strategies_status = {
         'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
@@ -1916,8 +2028,13 @@ def settings_page():
         'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
     }
     
-    settings_html = "..." # The full HTML is omitted for brevity
-    return render_template_string(settings_html, **locals())
+    return render_template_string(SETTINGS_TEMPLATE, 
+                                  risk_per_trade=risk_per_trade,
+                                  MAX_OPEN_TRADES=MAX_OPEN_TRADES,
+                                  min_quality=min_quality,
+                                  is_paper_mode=is_paper_mode,
+                                  STRATEGY_NAMES=STRATEGY_NAMES,
+                                  strategies_status=strategies_status)
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
@@ -2043,7 +2160,7 @@ def toggle_trading():
     with trading_status_lock: is_trading_enabled = not is_trading_enabled
     status_msg = "enabled" if is_trading_enabled else "disabled"
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
-    return jsonify({"status": "success"})
+    return jsonify({"status": "success", "trading_enabled": is_trading_enabled})
 
 @app.route('/api/settings', methods=['POST'])
 def update_settings():
@@ -2180,17 +2297,31 @@ def api_run_backtest():
 
 # --- Main Loop & Threads ---
 def main_bot_loop():
-    logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
+    logger.info("🚀 [Main Loop] Starting signal scanning loop...")
     while True:
         try:
-            now = datetime.now(timezone.utc)
-            minutes_to_wait = 15 - (now.minute % 15)
-            seconds_to_wait = (minutes_to_wait * 60) - now.second
-            logger.info(f"Scan cycle complete. Waiting {seconds_to_wait:.0f} seconds for the next 15m candle.")
-            time.sleep(max(1, seconds_to_wait))
+            # حلقة انتظار محسّنة وأكثر استجابة
+            while True:
+                now = datetime.now(timezone.utc)
+                # حساب الثواني المتبقية حتى إغلاق شمعة الـ 15 دقيقة التالية
+                seconds_until_next_candle = (15 - (now.minute % 15)) * 60 - now.second
+                
+                is_enabled_now = False
+                with trading_status_lock:
+                    is_enabled_now = is_trading_enabled
 
+                # إذا كان التداول مفعّلاً وحان وقت الفحص (قبل ثانية واحدة من إغلاق الشمعة)
+                if is_enabled_now and seconds_until_next_candle <= 1:
+                    time.sleep(1) # انتظر ثانية إضافية لضمان إغلاق الشمعة تمامًا
+                    break # اخرج من حلقة الانتظار وابدأ الفحص
+
+                # إذا لم يحن الوقت بعد، انتظر ثانية واحدة ثم تحقق مرة أخرى
+                time.sleep(1)
+
+            # إعادة التحقق من حالة التداول بعد انتهاء الانتظار، تحسباً لإيقافه من قبل المستخدم
             with trading_status_lock:
                 if not is_trading_enabled:
+                    logger.info("Trading was disabled during the wait. Skipping scan cycle.")
                     continue
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
@@ -2208,11 +2339,9 @@ def main_bot_loop():
                     continue
                 
                 df_featured = calculate_all_features(df)
-                df_featured.name = symbol # Attach symbol name for logging
+                df_featured.name = symbol
                 
                 strategy_found = None
-                # The 'apply_strategy_filters' function is not defined in the provided code.
-                # Assuming it should exist or the logic is integrated elsewhere.
                 if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
                 elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
@@ -2406,7 +2535,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.2.0 (Comprehensive Fixes) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.3.0 (Responsiveness & UI Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
