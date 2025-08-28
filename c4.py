@@ -1,11 +1,8 @@
-# ملف c4.py - نسخة V32.3.0 (إصلاحات شاملة واستقرار)
+# ملف c4.py - نسخة V32.3.1 (إصلاح التحقق من المدخلات)
 # --- وصف الإصدار:
-# 1.  [إصلاح حاسم] تم تعريف دالة `apply_strategy_filters` المفقودة، مما يعيد تفعيل حلقة الفحص الرئيسية بالكامل.
-# 2.  [إصلاح حاسم] تم استعادة كود HTML الكامل لصفحة الإعدادات (`/settings`)، مما يجعلها تعمل بشكل صحيح.
-# 3.  [تحسين استقرار] إضافة آلية قفل (`closing_locks`) عند إغلاق الصفقات لمنع حالات السباق (Race Conditions).
-# 4.  [تحسين منطقي] التأكد من التحقق من `MIN_NOTIONAL` بعد تعديل `LOT_SIZE` في دالة حساب حجم الصفقة.
-# 5.  [تحسين استقرار] إضافة مهلة زمنية (`statement_timeout`) لاتصالات قاعدة البيانات لمنع تعليق البرنامج.
-# 6.  [تحسين واجهة المستخدم] إضافة رسائل تأكيد عند حفظ الإعدادات في صفحة الإعدادات.
+# 1.  [إصلاح حاسم] تم إصلاح خطأ `TypeError` في مسارات API الخاصة بالإعدادات (`/api/settings`, `/api/signal_quality`).
+# 2.  [تحسين استقرار] إضافة تحقق قوي من جانب الخادم للتعامل مع المدخلات الفارغة أو غير الصحيحة من صفحة الإعدادات.
+# 3.  [تحسين استقرار] منع تعطل الخادم عند حفظ قيم رقمية فارغة.
 
 import time
 import os
@@ -46,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.3.0')
+logger = logging.getLogger('CryptoBotV32.3.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -81,7 +78,7 @@ cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
-closing_locks = {} # [تحسين استقرار] لمنع حالات السباق عند الإغلاق
+closing_locks = {}
 closing_locks_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
@@ -260,7 +257,6 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
         db_url_to_use += f"{'?' if '?' not in db_url_to_use else '&'}sslmode=require"
     for attempt in range(retries):
         try:
-            # [تحسين استقرار] إضافة مهلة زمنية للاستعلامات لمنع التعليق
             conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor, options=f"-c statement_timeout={15 * 1000}")
             conn.autocommit = False
             with conn.cursor() as cur:
@@ -1156,12 +1152,7 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         logger.error(f"Error in Elliott Wave strategy for {df.name}: {e}", exc_info=True)
         return False
 
-# [إصلاح حاسم] تعريف الدالة المفقودة التي كانت تسبب توقف حلقة الفحص
 def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) -> bool:
-    """
-    Applies global filters based on the strategy's configuration.
-    This function was missing, causing the main loop to crash.
-    """
     with strategy_filters_lock:
         config = STRATEGY_FILTER_CONFIG.get(strategy_name)
     
@@ -1169,14 +1160,12 @@ def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) ->
         logger.warning(f"No filter configuration found for strategy '{strategy_name}'. Allowing signal to pass.")
         return True
 
-    # 1. ADX Trend Strength Filter
     adx_threshold = config.get("adx_threshold", BASE_FILTER_ADX_THRESHOLD)
     last_adx = df.iloc[-1].get('adx')
     if last_adx is not None and last_adx < adx_threshold:
         log_rejection(symbol, "Trend Strength Filter Failed", {"strategy": strategy_name, "adx": f"{last_adx:.1f}", "required": f">{adx_threshold}"})
         return False
 
-    # 2. Higher Timeframe (HTF) Trend Confirmation
     htf_mode = config.get("htf_confirmation_mode", "Disabled")
     if htf_mode != "Disabled":
         htf_df = fetch_historical_data(symbol, HIGHER_TIMEFRAME, days=30)
@@ -1241,7 +1230,6 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
         if adjusted_quantity is None or adjusted_quantity <= 0: return None
 
-        # [تحسين منطقي] التحقق من MIN_NOTIONAL بعد تعديل LOT_SIZE
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
@@ -1277,7 +1265,7 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    df.strategy = strategy_name # Attach strategy name for dynamic filters
+    df.strategy = strategy_name
     
     if not check_market_volatility_filter_enhanced(df): return
     if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
@@ -1377,7 +1365,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.3.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.3.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1444,7 +1432,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.3.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.3.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1847,15 +1835,13 @@ document.addEventListener('DOMContentLoaded', () => { initializeDashboard(); set
 </body>
 </html>
 """
-BACKTEST_TEMPLATE = "<h1>Backtest Page - Under Construction</h1>"
-# [إصلاح حاسم] استعادة كود HTML الكامل لصفحة الإعدادات
 SETTINGS_TEMPLATE = """
 <!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.3.0)</title>
+<title>الإعدادات - بوت التداول (V32.3.1)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1950,25 +1936,31 @@ function showToast(message, type = 'success') {
 }
 
 document.getElementById('saveAllBtn').addEventListener('click', async () => {
-    // 1. General Settings
     const generalForm = document.getElementById('generalSettingsForm');
+    const riskInput = generalForm.querySelector('[name="RISK_PER_TRADE_PERCENT"]');
+    const tradesInput = generalForm.querySelector('[name="MAX_OPEN_TRADES"]');
+    const qualityInput = generalForm.querySelector('[name="min_quality"]');
+
+    // Client-side validation
+    if (!riskInput.value || !tradesInput.value || !qualityInput.value) {
+        showToast('الرجاء تعبئة جميع الحقول الرقمية.', 'error');
+        return;
+    }
+
     const generalData = {
-        RISK_PER_TRADE_PERCENT: parseFloat(generalForm.querySelector('[name="RISK_PER_TRADE_PERCENT"]').value),
-        MAX_OPEN_TRADES: parseInt(generalForm.querySelector('[name="MAX_OPEN_TRADES"]').value),
-        // Handle checkbox for trading mode
+        RISK_PER_TRADE_PERCENT: parseFloat(riskInput.value),
+        MAX_OPEN_TRADES: parseInt(tradesInput.value),
         paper_trading_mode: !generalForm.querySelector('[name="paper_trading_mode"]').checked
     };
-    const minQuality = parseInt(generalForm.querySelector('[name="min_quality"]').value);
+    const minQuality = parseInt(qualityInput.value);
 
-    // Confirmation for real trading
     if (generalData.paper_trading_mode === false) {
         if (!confirm('تحذير: أنت على وشك التبديل إلى وضع التداول الحقيقي بأموال حقيقية. هل أنت متأكد؟')) {
             generalForm.querySelector('[name="paper_trading_mode"]').checked = false;
-            return; // Stop saving if user cancels
+            return;
         }
     }
 
-    // 2. Strategy Toggles
     const strategyForm = document.getElementById('strategyToggleForm');
     const strategyData = {};
     strategyForm.querySelectorAll('input[type="checkbox"]').forEach(input => {
@@ -1976,7 +1968,6 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
     });
 
     try {
-        // Send all requests in parallel
         const responses = await Promise.all([
             fetch('/api/settings', {
                 method: 'POST',
@@ -1995,16 +1986,14 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
             })
         ]);
 
-        // Check if all responses are OK
         const allOk = responses.every(res => res.ok);
 
         if (allOk) {
             showToast('تم حفظ جميع الإعدادات بنجاح!', 'success');
         } else {
-            // Find the first failed response to show an error
             const failedResponse = responses.find(res => !res.ok);
             const errorData = await failedResponse.json();
-            showToast(`فشل حفظ بعض الإعدادات: ${errorData.message || 'خطأ غير معروف'}`, 'error');
+            showToast(`فشل الحفظ: ${errorData.message || 'خطأ غير معروف'}`, 'error');
         }
     } catch (error) {
         showToast(`حدث خطأ في الشبكة: ${error.message}`, 'error');
@@ -2037,7 +2026,6 @@ def settings_page():
         'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
     }
     
-    # [إصلاح حاسم] استخدام قالب HTML الكامل بدلاً من النص المؤقت
     return render_template_string(SETTINGS_TEMPLATE, **locals(), STRATEGY_NAMES=STRATEGY_NAMES)
 
 @app.route('/api/dashboard_data')
@@ -2166,21 +2154,40 @@ def toggle_trading():
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
     return jsonify({"status": "success"})
 
+# [إصلاح حاسم] إضافة تحقق قوي من المدخلات لمنع الأخطاء
 @app.route('/api/settings', methods=['POST'])
 def update_settings():
     try:
         data = request.json
-        if 'RISK_PER_TRADE_PERCENT' in data:
-            with risk_per_trade_lock:
-                global RISK_PER_TRADE_PERCENT
-                RISK_PER_TRADE_PERCENT = float(data['RISK_PER_TRADE_PERCENT'])
-        if 'MAX_OPEN_TRADES' in data:
-            global MAX_OPEN_TRADES
-            MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
+        
+        if 'RISK_PER_TRADE_PERCENT' in data and data['RISK_PER_TRADE_PERCENT'] is not None:
+            try:
+                risk_val = float(data['RISK_PER_TRADE_PERCENT'])
+                if 0.1 <= risk_val <= 5.0:
+                    with risk_per_trade_lock:
+                        global RISK_PER_TRADE_PERCENT
+                        RISK_PER_TRADE_PERCENT = risk_val
+                else:
+                    return jsonify({"success": False, "message": "Risk per trade must be between 0.1 and 5.0."}), 400
+            except (ValueError, TypeError):
+                return jsonify({"success": False, "message": "Invalid risk per trade value."}), 400
+
+        if 'MAX_OPEN_TRADES' in data and data['MAX_OPEN_TRADES'] is not None:
+            try:
+                trades_val = int(data['MAX_OPEN_TRADES'])
+                if 1 <= trades_val <= 10:
+                    global MAX_OPEN_TRADES
+                    MAX_OPEN_TRADES = trades_val
+                else:
+                    return jsonify({"success": False, "message": "Max open trades must be between 1 and 10."}), 400
+            except (ValueError, TypeError):
+                 return jsonify({"success": False, "message": "Invalid max open trades value."}), 400
+
         if 'paper_trading_mode' in data:
             with trading_mode_lock:
                 global paper_trading_mode
                 paper_trading_mode = bool(data['paper_trading_mode'])
+        
         save_settings_to_redis()
         return jsonify({"success": True, "message": "Settings updated successfully"})
     except Exception as e:
@@ -2219,16 +2226,25 @@ def update_strategy_filters():
         logger.error(f"Error updating strategy filters: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
+# [إصلاح حاسم] إضافة تحقق قوي من المدخلات لمنع الأخطاء
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
     try:
         data = request.json
-        if 'min_quality' in data:
-            with min_quality_lock:
-                global MIN_SIGNAL_QUALITY
-                MIN_SIGNAL_QUALITY = int(data['min_quality'])
-        save_settings_to_redis()
-        return jsonify({"success": True, "message": "Signal quality settings updated successfully"})
+        if 'min_quality' in data and data['min_quality'] is not None:
+            try:
+                quality_value = int(data['min_quality'])
+                if 30 <= quality_value <= 90:
+                    with min_quality_lock:
+                        global MIN_SIGNAL_QUALITY
+                        MIN_SIGNAL_QUALITY = quality_value
+                    save_settings_to_redis()
+                    return jsonify({"success": True, "message": "Signal quality settings updated successfully"})
+                else:
+                    return jsonify({"success": False, "message": "Signal quality must be between 30 and 90."}), 400
+            except (ValueError, TypeError):
+                return jsonify({"success": False, "message": "Invalid signal quality value."}), 400
+        return jsonify({"success": False, "message": "min_quality field is missing or empty."}), 400
     except Exception as e:
         logger.error(f"Error updating signal quality settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
@@ -2372,7 +2388,6 @@ def update_signal_in_db(signal_id, updates):
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
     
-    # [تحسين استقرار] استخدام قفل مخصص لمنع الإغلاق المزدوج
     with closing_locks_lock:
         if signal_id in closing_locks:
             logger.warning(f"إغلاق الصفقة {signal_id} قيد التنفيذ بالفعل. تم تجاهل الطلب الجديد.")
@@ -2543,7 +2558,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.3.0 (Critical Fixes) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.3.1 (Input Validation Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
