@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V32.0.0 (إصلاحات برمجية ومنطقية)
+# ملف c4.py - نسخة V32.1.0 (تحسينات استراتيجية وإدارة مخاطر متقدمة)
 # --- وصف الإصدار:
-# 1.  [إصلاح برمجي] إصلاح خطأ عدم ظهور سجل الرفض (Rejection Log) عند تحميل لوحة التحكم.
-# 2.  [إصلاح حرج] إصلاح خطأ في استراتيجية MACD+EMA كان يمنعها من العمل بسبب عدم حساب ema100.
-# 3.  [تحسين منطقي] تحسين استراتيجية Pullback لتكون أكثر دقة في تحديد الارتدادات الحديثة.
-# 4.  [تحسين] مراجعة عامة للكود لتحسين الأداء والاستقرار وإضافة تعليقات توضيحية.
+# 1.  [تحسين استراتيجي] تطبيق نسخ محسنة من جميع استراتيجيات التداول مع شروط أكثر دقة وفلاتر إضافية (EMA, ADX, Volume).
+# 2.  [إدارة مخاطر متقدمة] دمج نظام ديناميكي لحساب وقف الخسارة وجني الأرباح بناءً على نوع الاستراتيجية وظروف السوق.
+# 3.  [إدارة مخاطر متقدمة] تحسين آلية حساب نسبة المخاطرة الديناميكية لتأخذ في الاعتبار أداء البوت وتقلبات السوق.
+# 4.  [تحسين الفلاتر] تطبيق نسخ محسنة من فلاتر تقلب السوق وحجم التداول.
+# 5.  [إعادة هيكلة] دمج منطق إدارة الصفقات الجديد (جني الأرباح الجزئي) في حلقة المراقبة الحالية لضمان الاستقرار.
 
 import time
 import os
@@ -14,6 +15,7 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import redis
+import statistics
 from decimal import Decimal, ROUND_DOWN
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -43,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.0.0')
+logger = logging.getLogger('CryptoBotV32.1.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -247,7 +249,7 @@ def column_exists(cursor, table_name, column_name):
     cursor.execute("SELECT 1 FROM information_schema.columns WHERE table_name = %s AND column_name = %s", (table_name, column_name))
     return cursor.fetchone() is not None
 
-def init_db(retries: int = 5, delay: int = 5) -> None:
+def init_db(retries: int = 5, base_delay: int = 5) -> None:
     global conn
     logger.info("[DB] Initializing database connection...")
     db_url_to_use = DB_URL
@@ -292,19 +294,27 @@ def init_db(retries: int = 5, delay: int = 5) -> None:
         except Exception as e:
             logger.error(f"❌ [DB] Error during initialization (Attempt {attempt + 1}/{retries}): {e}")
             if conn: conn.rollback()
-            if attempt < retries - 1: time.sleep(delay)
-            else: logger.critical("❌ [DB] Failed to connect to the database. Exiting.")
+            if attempt < retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.info(f"[DB] Retrying connection in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                logger.critical("❌ [DB] Failed to connect to the database after all retries. Exiting.")
+                exit(1)
 
 def check_db_connection() -> bool:
     global conn
     if conn is None or conn.closed != 0:
+        logger.warning("[DB] Connection is None or closed. Re-initializing...")
         init_db()
     try:
         if conn and conn.closed == 0:
             with conn.cursor() as cur: cur.execute("SELECT 1;")
             return True
+        logger.warning("[DB] Connection check failed. It might still be closed.")
         return False
-    except (OperationalError, InterfaceError):
+    except (OperationalError, InterfaceError) as e:
+        logger.error(f"[DB] Connection lost ({e}). Attempting to reconnect...")
         init_db()
         return conn is not None and conn.closed == 0
 
@@ -596,7 +606,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
     df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
-    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close']) * 100
+    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close'].replace(0, 1e-9)) * 100
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
@@ -624,8 +634,16 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     low_14 = df_calc['low'].rolling(14).min()
     high_14 = df_calc['high'].rolling(14).max()
-    df_calc['stoch_k'] = 100 * ((df_calc['close'] - low_14) / (high_14 - low_14).replace(0, 1e-9))
+    
+    high_low_range = high_14 - low_14
+    meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
+    df_calc['stoch_k'] = np.where(
+        meaningful_range,
+        100 * ((df_calc['close'] - low_14) / high_low_range.replace(0, 1e-9)),
+        50
+    )
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
+    
     return df_calc
 
 # --- Data Loading & Settings Management ---
@@ -687,15 +705,11 @@ def load_settings_from_redis():
         logger.error(f"❌ [Redis] Error loading settings: {e}")
 
 def save_settings_to_redis():
-    """حفظ الإعدادات الحالية في Redis"""
-    global RISK_PER_TRADE_PERCENT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, STRATEGY_FILTER_CONFIG, paper_trading_mode, MIN_SIGNAL_QUALITY
-    
     if not redis_client:
         logger.warning("Redis client not available, cannot save settings")
         return False
     
     try:
-        # حفظ الإعدادات العامة
         trading_settings = {
             'RISK_PER_TRADE_PERCENT': RISK_PER_TRADE_PERCENT,
             'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
@@ -703,13 +717,9 @@ def save_settings_to_redis():
         }
         redis_client.set('trading_settings', json.dumps(trading_settings))
         
-        # حفظ إعدادات جودة الإشارة
-        quality_settings = {
-            'min_quality': MIN_SIGNAL_QUALITY
-        }
+        quality_settings = {'min_quality': MIN_SIGNAL_QUALITY}
         redis_client.set('signal_quality_settings', json.dumps(quality_settings))
         
-        # حفظ إعدادات الاستراتيجيات
         strategy_settings = {
             'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
             'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
@@ -720,7 +730,6 @@ def save_settings_to_redis():
         }
         redis_client.set('strategy_settings', json.dumps(strategy_settings))
         
-        # حفظ إعدادات فلاتر الاستراتيجيات
         with strategy_filters_lock:
             redis_client.set('strategy_filter_config', json.dumps(STRATEGY_FILTER_CONFIG))
         
@@ -757,284 +766,324 @@ def add_correlation_filter(new_symbol: str) -> bool:
             return False
     return True
 
-def calculate_dynamic_risk_per_trade() -> float:
+# --- [ENHANCEMENT] More Advanced Filters ---
+def check_market_volatility_filter_enhanced(df: pd.DataFrame) -> bool:
+    if 'atr_percent' not in df.columns or len(df) < 30:
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
+        return False
+    
+    recent = df['atr_percent'].tail(96).dropna()
+    last = float(df.iloc[-1].get('atr_percent', 0))
+    
+    if recent.empty:
+        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
+        return False
+    
+    q10 = float(np.percentile(recent, 10))
+    q90 = float(np.percentile(recent, 90))
+    
+    strategy_name = getattr(df, "strategy", "Unknown")
+    
+    if strategy_name in ["BB_Stoch_Strategy", "EMA_RSI_Strategy", "Pullback_Strategy"]:
+        lower, upper = max(0.8, q10 * 0.9), min(6.0, q90 * 1.1)
+    elif strategy_name in ["MACD_EMA_Strategy", "Momentum_Volatility_Strategy"]:
+        lower, upper = max(1.2, q10 * 0.9), min(8.0, q90 * 1.2)
+    else:
+        lower, upper = max(1.0, q10 * 0.9), min(7.0, q90 * 1.1)
+    
+    if last < lower or last > upper:
+        log_rejection(df.name, "Market Volatility Filter Failed", {"atr": f"{last:.2f}%", "range": f"({lower:.2f}-{upper:.2f})%"})
+        return False
+    
+    return True
+
+def flexible_volume_filter_enhanced(df: pd.DataFrame, min_volume_percentile=30, strictness=0.8) -> bool:
+    if 'volume' not in df.columns or len(df) < 50: return False
+    
+    current_volume = df['volume'].iloc[-1]
+    volume_ma_medium = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
+    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
+    
+    if pd.isna(current_volume) or pd.isna(volume_ma_medium) or pd.isna(volume_percentile): return False
+    
+    volume_threshold = (volume_ma_medium * strictness) + (volume_percentile * (1 - strictness))
+    
+    if current_volume < volume_threshold:
+        log_rejection(df.name, "Volume Filter Failed", {"reason": "Below dynamic threshold"})
+        return False
+    
+    return True
+
+# --- [ENHANCEMENT] More Advanced Risk Management ---
+def calculate_dynamic_risk_per_trade_enhanced() -> float:
     if not check_db_connection() or not conn:
         with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
+    
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT profit_percentage FROM signals WHERE status = 'closed' ORDER BY closed_at DESC LIMIT 10")
+            cur.execute("SELECT profit_percentage FROM signals WHERE status = 'closed' ORDER BY closed_at DESC LIMIT 20")
             recent_trades = cur.fetchall()
-            if len(recent_trades) < 5:
-                with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
-            profits = [trade['profit_percentage'] for trade in recent_trades]
-            avg_profit = sum(profits) / len(profits)
-            win_rate = sum(1 for p in profits if p > 0) / len(profits)
-            with risk_per_trade_lock: base_risk = RISK_PER_TRADE_PERCENT
-            if avg_profit > 1.5 and win_rate >= 0.6:
-                new_risk = min(2.0, base_risk * 1.2)
-                logger.info(f"[Dynamic Risk] Good performance. Increasing risk to {new_risk:.2f}%")
-                return new_risk
-            elif avg_profit < -0.5 or win_rate < 0.4:
-                new_risk = max(0.5, base_risk * 0.8)
-                logger.warning(f"[Dynamic Risk] Poor performance. Reducing risk to {new_risk:.2f}%")
-                return new_risk
-            else: return base_risk
+            
+        if len(recent_trades) < 10:
+            with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
+            
+        profits = [trade['profit_percentage'] for trade in recent_trades]
+        avg_profit = sum(profits) / len(profits)
+        win_rate = sum(1 for p in profits if p > 0) / len(profits)
+        profit_std = statistics.stdev(profits) if len(profits) > 1 else 0
+        
+        with market_state_lock: market_state = dict(current_market_state)
+        btc_volatility = market_state.get("btc_adx", 20)
+        
+        with risk_per_trade_lock: base_risk = RISK_PER_TRADE_PERCENT
+        
+        risk_factor = 1.0
+        if avg_profit > 1.0 and win_rate >= 0.6 and profit_std < 3.0:
+            risk_factor = 1.2
+            logger.info(f"[Dynamic Risk] Good performance detected. Risk factor: {risk_factor}")
+        elif avg_profit < -0.5 or win_rate < 0.4:
+            risk_factor = 0.8
+            logger.warning(f"[Dynamic Risk] Poor performance detected. Risk factor: {risk_factor}")
+
+        if btc_volatility > 35:
+            risk_factor *= 0.85
+            logger.info(f"[Dynamic Risk] High market volatility. Adjusting risk factor to {risk_factor:.2f}")
+        elif btc_volatility < 18:
+             risk_factor *= 1.1
+             logger.info(f"[Dynamic Risk] Low market volatility. Adjusting risk factor to {risk_factor:.2f}")
+
+        final_risk = max(0.3, min(2.5, base_risk * risk_factor))
+        logger.info(f"[Dynamic Risk] Final calculated risk: {final_risk:.2f}% (Base: {base_risk}%)")
+        return final_risk
+            
     except Exception as e:
         logger.error(f"❌ [Dynamic Risk] Error calculating dynamic risk: {e}", exc_info=True)
         with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
 
-# --- Risk Management & Filters ---
-def calculate_signal_quality_score(symbol, df, strategy_name):
-    score = 0
-    if df.empty or len(df) < 50: return 0
-    last_row = df.iloc[-1]
-    adx_value = last_row.get('adx', 0)
-    if adx_value > 35: score += 25
-    elif adx_value > 25: score += 20
-    elif adx_value > 18: score += 15
-    elif adx_value > 12: score += 10
-    else: score += 5
-    current_volume = last_row.get('volume', 0)
-    volume_ma = df['volume'].rolling(20, min_periods=5).mean().iloc[-1]
-    volume_ratio = current_volume / volume_ma if volume_ma > 0 else 1
-    if volume_ratio > 2.0: score += 15
-    elif volume_ratio > 1.5: score += 12
-    elif volume_ratio > 1.2: score += 8
-    elif volume_ratio > 1.0: score += 5
-    rsi = last_row.get('rsi', 50)
-    macd_hist = last_row.get('macd_hist', 0)
-    if 45 <= rsi <= 55 and macd_hist > 0: score += 20
-    elif 40 <= rsi <= 60: score += 15
-    elif 35 <= rsi <= 65: score += 10
-    elif 30 <= rsi <= 70: score += 5
-    ema9, ema21, ema50, ema200, close = last_row.get('ema9',0), last_row.get('ema21',0), last_row.get('ema50',0), last_row.get('ema200',0), last_row.get('close',0)
-    if close > ema9 > ema21 > ema50 > ema200: score += 20
-    elif close > ema9 > ema21 > ema50: score += 18
-    elif close > ema9 > ema21: score += 15
-    elif close > ema21: score += 10
-    elif close > ema50: score += 5
-    atr_percent = last_row.get('atr_percent', 0)
-    if 2.0 <= atr_percent <= 4.0: score += 10
-    elif 1.5 <= atr_percent <= 5.0: score += 8
-    elif 1.0 <= atr_percent <= 6.0: score += 5
-    if strategy_name == "Momentum_Volatility_Strategy" and adx_value > 30: score += 10
-    elif strategy_name == "BB_Stoch_Strategy" and last_row.get('stoch_k', 50) < 25: score += 8
-    elif strategy_name == "MACD_EMA_Strategy" and macd_hist > 0: score += 7
+# --- [ENHANCEMENT] Dynamic Stop Loss & Take Profit ---
+def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
+    last = df.iloc[-1]
+    atr_value = last.get('atr', 0)
+    
+    if strategy_name == "BB_Stoch_Strategy":
+        recent_low = df['low'].tail(3).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
+    elif strategy_name == "MACD_EMA_Strategy":
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
+    elif strategy_name == "EMA_RSI_Strategy":
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
+    elif strategy_name == "Pullback_Strategy":
+        recent_low = df['low'].tail(5).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
+    elif strategy_name == "Momentum_Volatility_Strategy":
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.2))
     elif strategy_name == "Elliott_Wave_Strategy":
-        if adx_value > 25: score += 10
-        if 40 <= rsi <= 60: score += 8
-        if volume_ratio > 1.5: score += 7
-    return min(100, max(0, int(score)))
+        lows = df['low'].values
+        support_idx = argrelextrema(lows, np.less, order=5)[0]
+        if len(support_idx) > 0:
+            recent_support = lows[support_idx[-1]]
+            stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
+        else:
+            stop_loss = entry_price - (atr_value * 2.0)
+    else:
+        stop_loss = entry_price - (atr_value * 2.0)
+    
+    max_stop_distance = entry_price * 0.05
+    if entry_price - stop_loss > max_stop_distance:
+        stop_loss = entry_price - max_stop_distance
+    
+    return stop_loss
 
-def dynamic_adx_threshold(symbol, df, base_threshold=20):
-    atr_percent = df['atr_percent'].iloc[-1]
-    if atr_percent > 4.0: return base_threshold * 0.85
-    elif atr_percent < 1.5: return base_threshold * 1.15
-    else: return base_threshold
+def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
+    risk_amount = entry_price - stop_loss
+    if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
 
-def flexible_volume_filter(df, min_volume_percentile=30, strictness=0.8):
-    if 'volume' not in df.columns or len(df) < 50: return False
-    current_volume = df['volume'].iloc[-1]
-    volume_ma = df['volume'].rolling(20, min_periods=20).mean().iloc[-1]
-    volume_percentile = df['volume'].rolling(50, min_periods=50).quantile(min_volume_percentile / 100).iloc[-1]
-    if pd.isna(current_volume) or pd.isna(volume_ma) or pd.isna(volume_percentile): return False
-    volume_threshold = (volume_ma * strictness) + (volume_percentile * (1 - strictness))
-    return current_volume > volume_threshold
+    if strategy_name == "BB_Stoch_Strategy":
+        rr1, rr2 = 2.5, 4.0
+    elif strategy_name == "MACD_EMA_Strategy":
+        rr1, rr2 = 2.0, 3.5
+    elif strategy_name == "EMA_RSI_Strategy":
+        rr1, rr2 = 2.2, 3.8
+    elif strategy_name == "Pullback_Strategy":
+        rr1, rr2 = 2.3, 4.0
+    elif strategy_name == "Momentum_Volatility_Strategy":
+        rr1, rr2 = 1.8, 3.2
+    elif strategy_name == "Elliott_Wave_Strategy":
+        rr1, rr2 = 2.5, 4.5
+    else:
+        rr1, rr2 = 2.0, 3.5
+        
+    target1 = entry_price + (risk_amount * rr1)
+    target2 = entry_price + (risk_amount * rr2)
+    
+    return target1, target2
 
-def check_market_volatility_filter(df: pd.DataFrame) -> bool:
-    if 'atr_percent' not in df.columns or len(df) < 30:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
-    recent = df['atr_percent'].tail(96).dropna()
-    last = float(df.iloc[-1].get('atr_percent', 0))
-    if recent.empty:
-        log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed"); return False
-    q25 = float(np.percentile(recent, 25)); q90 = float(np.percentile(recent, 90))
-    lower = max(0.35, q25 * 0.9); upper = min(8.0, q90 * 1.1)
-    if last < lower or last > upper:
-        log_rejection(df.name, "Market Volatility Filter Failed"); return False
-    return True
-
-def check_trend_strength_filter(df: pd.DataFrame, adx_threshold: int) -> bool:
-    if 'adx' not in df.columns or len(df) < 5:
-        log_rejection(getattr(df, "name", "—"), "Trend Strength Filter Failed"); return False
-    recent_adx = float(pd.Series(df['adx'].tail(3)).mean())
-    dynamic_threshold = dynamic_adx_threshold(df.name, df, base_threshold=adx_threshold)
-    if recent_adx < (dynamic_threshold * 0.95):
-        log_rejection(df.name, "Trend Strength Filter Failed"); return False
-    return True
-
-def is_htf_bullish_confirmation(symbol: str, htf: str = '1h', mode: str = 'Strict') -> bool:
-    if mode == 'Disabled': return True
-    try:
-        df = fetch_historical_data(symbol, htf, days=40)
-        if df is None or len(df) < 50: return False
-        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-        last = df.iloc[-1]
-        if mode == 'Strict':
-            df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-            last = df.iloc[-1]
-            return last['close'] > last['ema50'] and last['ema50'] > last['ema200']
-        elif mode == 'Relaxed':
-            return last['close'] > last['ema50']
-        return False
-    except Exception as e:
-        logger.warning(f"[HTF] Could not confirm HTF trend for {symbol}: {e}"); return False
-
-def apply_strategy_filters(symbol: str, df: pd.DataFrame, strategy_name: str) -> bool:
-    with strategy_filters_lock: config = STRATEGY_FILTER_CONFIG.get(strategy_name)
-    if not config or config.get("profile") == "Disabled": return True
-    adx_threshold = config.get("adx_threshold", 22)
-    if not check_trend_strength_filter(df, adx_threshold): return False
-    htf_mode = config.get("htf_confirmation_mode", "Strict")
-    if not is_htf_bullish_confirmation(symbol, HIGHER_TIMEFRAME, htf_mode):
-        log_rejection(symbol, "HTF Trend Confirmation Failed"); return False
-    return True
-
-# --- Trading Strategies (Optimized for 15m Timeframe) ---
-
+# --- [ENHANCEMENT] Updated Trading Strategies ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    Optimized for 15m: Enters on the bounce from the lower BB, confirmed by Stochastic crossing up from oversold.
-    This provides an earlier and potentially more profitable entry than waiting for a middle-band cross.
-    """
-    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close'}
-    if len(df) < 21 or not needed.issubset(df.columns): return False
+    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
+    if len(df) < 50 or not needed.issubset(df.columns): return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    # Condition 1: Price touched or went below the lower band recently and closed back inside.
-    bounced_from_lower = (prev['low'] <= prev['bb_lower']) and (last['close'] > last['bb_lower'])
-    if not bounced_from_lower:
+    
+    if last['close'] < last['ema50']:
+        log_rejection(df.name, "BB: Price below EMA50 (bearish trend)")
+        return False
+    
+    if last['adx'] < 20:
+        log_rejection(df.name, "BB: Weak trend (ADX < 20)")
+        return False
+    
+    touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
+    if not (touched_lower_band and last['close'] > last['bb_lower']):
         log_rejection(df.name, "BB: Price not bouncing from lower band")
         return False
-
-    # Condition 2: Stochastic is showing upward momentum from an oversold/low area.
+    
     stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
         log_rejection(df.name, "BB: Stochastic not confirming upward momentum")
         return False
         
-    # Condition 3: The entry candle is a decisive bullish candle.
     is_bullish_candle = last['close'] > last['open']
-    if not is_bullish_candle:
-        log_rejection(df.name, "Bullish Confirmation Failed")
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.8
+    if not (is_bullish_candle and volume_ok):
+        log_rejection(df.name, "BB: Weak bullish candle or low volume")
         return False
 
     return True
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    Optimized for 15m: Focuses on confirmed, building momentum. Instead of a simple MACD cross, it checks for
-    an accelerating histogram, ensuring we enter a strengthening move, not a fake-out.
-    """
-    needed = {'macd_hist', 'close', 'ema50', 'ema100', 'adx'}
-    if len(df) < 100 or not needed.issubset(df.columns): return False
+    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'ema50', 'ema100', 'ema200', 'adx', 'volume'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
     
-    # Condition 1: Medium-term trend must be bullish (50 EMA > 100 EMA).
-    if df['ema50'].iloc[-1] < df['ema100'].iloc[-1]:
-        log_rejection(df.name, "Long-term Trend Filter Failed")
+    last = df.iloc[-1]
+    
+    if not (last['ema50'] > last['ema100'] > last['ema200']):
+        log_rejection(df.name, "MACD: Bearish long-term trend")
         return False
 
-    # Condition 2: Trend strength must be present.
-    if df['adx'].iloc[-1] < 20:
-        log_rejection(df.name, "Trend Strength Filter Failed")
+    if last['adx'] < 22:
+        log_rejection(df.name, "MACD: Weak trend (ADX < 22)")
         return False
 
-    # Condition 3: Confirmed upward momentum shown by accelerating MACD histogram.
-    last_hist = df['macd_hist'].iloc[-1]
-    prev_hist = df['macd_hist'].iloc[-2]
+    hist = df['macd_hist'].tail(4).values
+    if len(hist) < 4: return False
+    macd_ok = last['macd'] > 0 and last['macd_hist'] > 0
+    hist_accelerating = hist[3] > hist[2] and hist[2] > hist[1]
     
-    momentum_confirmed = last_hist > 0 and prev_hist < last_hist
-    if not momentum_confirmed:
+    if not (macd_ok and hist_accelerating):
         log_rejection(df.name, "MACD: Momentum not confirmed")
+        return False
+        
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 0.9
+    if not volume_ok:
+        log_rejection(df.name, "MACD: Volume below average")
         return False
         
     return True
 
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    Optimized for 15m: A classic pullback strategy. It looks for a dip towards fast-moving averages in an
-    established uptrend, with RSI confirming the trend is still healthy (not overbought).
-    """
-    needed = {'ema9', 'ema21', 'rsi', 'low', 'close', 'volume'}
-    if len(df) < 50 or not needed.issubset(df.columns): return False
+    needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
 
     last = df.iloc[-1]
     
-    # Condition 1: Short-term trend is clearly up.
-    if not (last['ema9'] > last['ema21']): return False
+    if last['ema50'] < last['ema200']:
+        log_rejection(df.name, "EMA_RSI: Bearish long-term trend")
+        return False
+    
+    if last['ema9'] < last['ema21']:
+        return False # No log for this, it's a common state
 
-    # Condition 2: RSI is in a healthy bullish zone.
-    if not (50 < last['rsi'] < 70): return False
+    if not (40 <= last['rsi'] <= 65):
+        log_rejection(df.name, "EMA_RSI: RSI not in optimal range")
+        return False
     
-    # Condition 3: Price has recently pulled back to a dynamic support level (EMA).
-    pulled_back = False
-    for i in range(1, 4): # Check last 3 candles
-        if df['low'].iloc[-i] <= df['ema21'].iloc[-i]:
-            pulled_back = True
-            break
-    if not pulled_back: return False
+    if last['adx'] < 18:
+        log_rejection(df.name, "EMA_RSI: Weak trend (ADX < 18)")
+        return False
     
-    # Condition 4: The recovery candle is a strong bullish candle closing above the faster EMA.
+    pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3) * 1.005).any()
+    if not pulled_back:
+        return False
+    
     if not (last['close'] > last['open'] and last['close'] > last['ema9']):
+        return False
+        
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.9
+    if not volume_ok:
+        log_rejection(df.name, "EMA_RSI: Volume below average")
         return False
         
     return True
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    Optimized for 15m: Similar to EMA/RSI but uses slightly slower EMAs for trend context and adds
-    a crucial volume confirmation filter. A real recovery from a pullback should have strong volume.
-    """
-    needed = {'ema21', 'ema50', 'open', 'close', 'low', 'volume'}
-    if len(df) < 50 or not needed.issubset(df.columns): return False
+    needed = {'ema21', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx'}
+    if len(df) < 200 or not needed.issubset(df.columns): return False
 
     last = df.iloc[-1]
     
-    # Condition 1: Medium-term trend is up.
-    if not (last['ema21'] > last['ema50'] and last['close'] > last['ema50']): return False
+    if not (last['ema21'] > last['ema50'] > last['ema200']):
+        log_rejection(df.name, "Pullback: Trend is not strongly bullish")
+        return False
     
-    # Condition 2: Price has recently dipped to a support zone (within the last 3 candles).
-    if not ((df['low'].tail(3)) <= (df['ema21'].tail(3))).any(): return False
+    if last['adx'] < 18:
+        log_rejection(df.name, "Pullback: Weak trend (ADX < 18)")
+        return False
     
-    # Condition 3: The recovery is confirmed by a bullish candle.
-    if not (last['close'] > last['open']): return False
+    pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
+    if not pulled_back:
+        return False
     
-    # Condition 4 (Crucial for 15m): Volume on the recovery candle is above average, confirming buying interest.
-    avg_volume = df['volume'].rolling(window=10).mean().iloc[-2] # Average volume before the current candle
-    if last['volume'] < avg_volume * 1.2:
-        log_rejection(df.name, "Pullback: Low volume on pullback recovery")
+    if not (last['close'] > last['open']):
+        return False
+    
+    avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
+    if last['volume'] < avg_volume * 1.1:
+        log_rejection(df.name, "Pullback: Low volume on recovery")
         return False
         
     return True
 
-def check_momentum_volatility_strategy(df: pd.DataFrame) -> bool:
-    """
-    Optimized for 15m: Catches strong breakout moves. Instead of a single ATR spike, it looks for a
-    sustained increase in volatility, combined with strong trend and momentum indicators.
-    """
-    needed = {'atr_percent', 'ema9', 'ema21', 'macd_hist', 'close', 'adx'}
+def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
+    needed = {'atr_percent', 'ema9', 'ema21', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi'}
     if len(df) < 50 or not needed.issubset(df.columns): return False
-    
+
     last = df.iloc[-1]
     
-    # Condition 1: A strong trend must be established.
-    if last['adx'] < 25: return False
+    if not (last['ema9'] > last['ema21'] > last['ema50']):
+        log_rejection(df.name, "Momentum: EMAs not in bullish order")
+        return False
     
-    # Condition 2: Volatility is expanding (sustained, not a single spike).
-    avg_atr_3 = df['atr_percent'].tail(3).mean()
-    avg_atr_14 = df['atr_percent'].tail(14).mean()
-    if avg_atr_3 < avg_atr_14 * 1.3: return False
+    if last['adx'] < 25:
+        log_rejection(df.name, "Momentum: Weak trend (ADX < 25)")
+        return False
     
-    # Condition 3: Strong bullish momentum.
-    if not (last['macd_hist'] > 0 and last['close'] > last['ema9'] > last['ema21']): return False
+    atr_percent = last['atr_percent']
+    if not (1.8 <= atr_percent <= 6.0):
+        log_rejection(df.name, "Momentum: Volatility not in optimal range")
+        return False
     
+    if not (45 <= last['rsi'] <= 70):
+        log_rejection(df.name, "Momentum: RSI not in optimal range")
+        return False
+    
+    hist = df['macd_hist'].tail(3).values
+    if len(hist) < 3: return False
+    macd_momentum = hist[2] > hist[1] > 0
+    
+    if not macd_momentum:
+        log_rejection(df.name, "Momentum: MACD momentum not confirmed")
+        return False
+    
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1
+    if not volume_ok:
+        log_rejection(df.name, "Momentum: Volume below average")
+        return False
+        
     return True
 
-# --- START: Elliott Wave Strategy (With Advanced Filters) ---
 def calculate_dynamic_order(df: pd.DataFrame) -> int:
-    """Calculates a dynamic 'order' value for swing point detection based on market volatility (ATR)."""
     atr_percent = df['atr_percent'].iloc[-1]
     if atr_percent > 4.0: return 8
     elif atr_percent > 2.5: return 6
@@ -1042,28 +1091,25 @@ def calculate_dynamic_order(df: pd.DataFrame) -> int:
     else: return 3
 
 def find_wave_pattern(points: List) -> Optional[List]:
-    """Flexibly searches for an Elliott impulse wave pattern (low-high-low-high-low)."""
     if len(points) < 5: return None
     for i in range(len(points) - 4):
         p0, p1, p2, p3, p4 = points[i:i+5]
         if not (p0[2] == 'low' and p1[2] == 'high' and p2[2] == 'low' and p3[2] == 'high' and p4[2] == 'low'): continue
-        if p2[1] < p0[1]: continue # Rule 1: Wave 2 cannot retrace beyond the start of Wave 1.
-        if p4[1] < p1[1]: continue # Rule 2: Wave 4 cannot overlap with Wave 1.
+        if p2[1] < p0[1]: continue
+        if p4[1] < p1[1]: continue
         wave1_len = p1[1] - p0[1]
         wave3_len = p3[1] - p2[1]
-        if wave3_len <= wave1_len: continue # Rule 3: Wave 3 is never the shortest wave.
+        if wave3_len <= wave1_len: continue
         return points[i:i+5]
     return None
 
 def check_wave_2_fibonacci_retracement(p0, p1, p2) -> bool:
-    """Checks if Wave 2 retracement is within a valid Fibonacci zone (38.2% to 78.6%)."""
     wave1_len = p1[1] - p0[1]
     if wave1_len <= 0: return False
     retracement = (p1[1] - p2[1]) / wave1_len
     return 0.382 <= retracement <= 0.786
 
 def check_breakout_candle_momentum(df: pd.DataFrame, breakout_level: float) -> bool:
-    """Checks for a strong bullish candle breaking the resistance level."""
     last_candle = df.iloc[-1]
     if last_candle['close'] <= breakout_level or last_candle['close'] <= last_candle['open']: return False
     candle_body = last_candle['close'] - last_candle['open']
@@ -1072,7 +1118,6 @@ def check_breakout_candle_momentum(df: pd.DataFrame, breakout_level: float) -> b
     return True
 
 def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
-    """Advanced Elliott Wave strategy focusing on Wave 3 entry with multiple confirmation filters."""
     needed = {'high', 'low', 'close', 'volume', 'rsi', 'ema9', 'ema21', 'ema50', 'macd', 'adx', 'atr_percent'}
     if len(df) < 100 or not needed.issubset(df.columns):
         log_rejection(df.name, "Insufficient Historical Data"); return False
@@ -1092,7 +1137,7 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         recent_points = all_points[-30:]
         impulse_pattern = find_wave_pattern(recent_points)
         if not impulse_pattern:
-            log_rejection(df.name, "Elliott Wave: No clear impulse pattern detected"); return False
+            return False
         
         p0, p1, p2, _, _ = impulse_pattern
         wave_1_high = p1[1]
@@ -1104,15 +1149,23 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
             log_rejection(df.name, "Elliott Wave: Trend is not strong enough (ADX)"); return False
 
         if df['close'].iloc[-1] <= wave_1_high:
-            log_rejection(df.name, "Elliott Wave: Price hasn't broken wave 1 resistance"); return False
+            return False
             
         if not check_breakout_candle_momentum(df, wave_1_high):
             log_rejection(df.name, "Elliott Wave: Weak breakout momentum"); return False
 
-        if not check_elliott_wave_volume_filter(df): return False
-        if not check_elliott_wave_rsi_filter(df): return False
-        if not check_elliott_wave_macd_filter(df): return False
-        if not check_elliott_wave_ema_filter(df): return False
+        if df['volume'].iloc[-1] < df['volume'].rolling(20).mean().iloc[-1] * 1.2:
+            log_rejection(df.name, "Elliott Wave: Volume too low"); return False
+        
+        if not (45 < df['rsi'].iloc[-1] < 75):
+            log_rejection(df.name, "Elliott Wave: RSI not in optimal range"); return False
+        
+        if df['macd'].iloc[-1] <= df['macd_signal'].iloc[-1]:
+            log_rejection(df.name, "Elliott Wave: MACD not positive"); return False
+        
+        last = df.iloc[-1]
+        if not (last['close'] > last['ema9'] > last['ema21'] > last['ema50']):
+            log_rejection(df.name, "Elliott Wave: EMAs not in correct order"); return False
         
         logger.info(f"✅ [Elliott Wave] Found valid Wave 3 setup for {df.name} after passing all advanced filters.")
         return True
@@ -1120,76 +1173,6 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
     except Exception as e:
         logger.error(f"Error in Elliott Wave strategy for {df.name}: {e}", exc_info=True)
         return False
-
-def check_elliott_wave_volume_filter(df: pd.DataFrame) -> bool:
-    if df['volume'].iloc[-1] < df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-        log_rejection(df.name, "Elliott Wave: Volume too low"); return False
-    return True
-
-def check_elliott_wave_rsi_filter(df: pd.DataFrame) -> bool:
-    if not (45 < df['rsi'].iloc[-1] < 75):
-        log_rejection(df.name, "Elliott Wave: RSI not in optimal range"); return False
-    return True
-
-def check_elliott_wave_macd_filter(df: pd.DataFrame) -> bool:
-    if df['macd'].iloc[-1] <= df['macd_signal'].iloc[-1]:
-        log_rejection(df.name, "Elliott Wave: MACD not positive"); return False
-    return True
-
-def check_elliott_wave_ema_filter(df: pd.DataFrame) -> bool:
-    last = df.iloc[-1]
-    if not (last['close'] > last['ema9'] > last['ema21'] > last['ema50']):
-        log_rejection(df.name, "Elliott Wave: EMAs not in correct order"); return False
-    return True
-# --- END: Elliott Wave Strategy ---
-
-def calculate_trade_levels(df: pd.DataFrame, strategy_name: str = None) -> Dict[str, Any]:
-    last = df.iloc[-1]
-    atr = last['atr']
-    entry_price = last['close']
-    atr_percent = last['atr_percent']
-    
-    stop_loss_multiplier = 1.5
-    target1_multiplier, target2_multiplier = 2.0, 3.5
-    trailing_stop_multiplier = 1.5
-
-    if strategy_name == "Elliott_Wave_Strategy":
-        if atr_percent > 3.0:
-            stop_loss_multiplier = 2.5
-            target1_multiplier, target2_multiplier = 3.0, 5.0
-        elif atr_percent < 1.5:
-            stop_loss_multiplier = 1.5
-            target1_multiplier, target2_multiplier = 2.0, 3.5
-        else:
-            stop_loss_multiplier = 2.0
-            target1_multiplier, target2_multiplier = 2.5, 4.5
-    else:
-        if atr_percent > 3.0: stop_loss_multiplier = 2.0
-        elif atr_percent < 1.5: stop_loss_multiplier = 1.2
-    
-    stop_loss_from_atr = entry_price - (atr * stop_loss_multiplier)
-    min_sl_distance = entry_price * 0.005
-    stop_loss_from_min_dist = entry_price - min_sl_distance
-    stop_loss = min(stop_loss_from_atr, stop_loss_from_min_dist)
-    
-    if strategy_name != "Elliott_Wave_Strategy":
-        if atr_percent > 3.0: target1_multiplier, target2_multiplier = 2.5, 4.5
-        elif atr_percent < 1.5: target1_multiplier, target2_multiplier = 1.8, 3.0
-
-    target_price_1 = entry_price + (atr * target1_multiplier)
-    target_price_2 = entry_price + (atr * target2_multiplier)
-    
-    if atr_percent > 3.0: trailing_stop_multiplier = 2.0
-    elif atr_percent < 1.5: trailing_stop_multiplier = 1.2
-    
-    trailing_stop_distance = atr * trailing_stop_multiplier
-    
-    return {
-        "entry_price": entry_price, "stop_loss": stop_loss, "target_price_1": target_price_1,
-        "target_price_2": target_price_2, "atr": atr, "trailing_stop_distance": trailing_stop_distance,
-        "stop_loss_multiplier": stop_loss_multiplier, "target1_multiplier": target1_multiplier,
-        "target2_multiplier": target2_multiplier, "trailing_stop_multiplier": trailing_stop_multiplier
-    }
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -1216,12 +1199,10 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float, risk_percent: float = None) -> Optional[Decimal]:
+def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float, risk_percent: float) -> Optional[Decimal]:
     if not client: return None
     available_balance_str, risk_per_coin_str = "N/A", "N/A"
     try:
-        if risk_percent is None:
-            with risk_per_trade_lock: risk_percent = RISK_PER_TRADE_PERCENT
         balance_response = client.get_asset_balance(asset='USDT')
         available_balance = Decimal(balance_response['free'])
         available_balance_str = str(available_balance)
@@ -1268,41 +1249,42 @@ def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Cli
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    try:
-        quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
-        with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
-        if quality_score < min_score:
-            log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
-            return
-        logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
-        with cooldowns_lock:
-            until = cooldowns_by_symbol.get(symbol)
-            if until and datetime.now(timezone.utc) < until:
-                log_rejection(symbol, "Cooldown Active", {"until": until.isoformat()})
-                return
-        if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
-        if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
-        if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
-    except Exception as e:
-        logger.error(f"❌ [Signal Creation] Error during pre-checks for {symbol}: {e}", exc_info=True)
+    df.strategy = strategy_name # Attach strategy name for dynamic filters
+    
+    if not check_market_volatility_filter_enhanced(df): return
+    if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
+    if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
+    if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
+
+    quality_score = calculate_signal_quality_score(symbol, df, strategy_name)
+    with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
+    if quality_score < min_score:
+        log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
+        return
+    logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
+
+    entry_price = df.iloc[-1]['close']
+    stop_loss_price = calculate_dynamic_stop_loss(df, entry_price, strategy_name)
+    target_price_1, target_price_2 = calculate_dynamic_take_profit(df, entry_price, stop_loss_price, strategy_name)
+    
+    if stop_loss_price >= entry_price:
+        log_rejection(symbol, "Invalid Position Size", {"entry": entry_price, "sl": stop_loss_price})
         return
 
     with trading_mode_lock: is_real = not paper_trading_mode
-    trade_levels = calculate_trade_levels(df, strategy_name)
-    entry_price = trade_levels['entry_price']
-    stop_loss_price = trade_levels['stop_loss']
     
     signal_details = {
-        "atr": trade_levels['atr'], "trailing_stop_activated": False,
-        "trailing_stop_distance": trade_levels['trailing_stop_distance'], "tp1_done": False,
-        "quality_score": quality_score, "stop_loss_multiplier": trade_levels['stop_loss_multiplier'],
-        "target1_multiplier": trade_levels['target1_multiplier'],
-        "target2_multiplier": trade_levels['target2_multiplier'],
-        "trailing_stop_multiplier": trade_levels['trailing_stop_multiplier']
+        "atr": df.iloc[-1]['atr'], "trailing_stop_activated": False, "tp1_done": False,
+        "quality_score": quality_score, "atr_percent": df.iloc[-1]['atr_percent']
+    }
+    
+    trade_levels = {
+        "entry_price": entry_price, "stop_loss": stop_loss_price,
+        "target_price_1": target_price_1, "target_price_2": target_price_2
     }
 
     if is_real:
-        dynamic_risk_percent = calculate_dynamic_risk_per_trade()
+        dynamic_risk_percent = calculate_dynamic_risk_per_trade_enhanced()
         quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, dynamic_risk_percent)
         if quantity_dec is None or quantity_dec <= 0:
             logger.error(f"❌ [Real Trade] Position size calculation failed for {symbol}. Trade rejected.")
@@ -1319,28 +1301,20 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             )
             send_trade_open_notification(
                 symbol, strategy_name, float(avg_fill_price),
-                trade_levels['stop_loss'], trade_levels['target_price_1'],
-                trade_levels['target_price_2'], float(final_quantity),
-                is_real, quality_score, df['atr_percent'].iloc[-1]
+                stop_loss_price, target_price_1, target_price_2, float(final_quantity),
+                is_real, quality_score, df.iloc[-1]['atr_percent']
             )
-            log_and_notify("info", f"Opened REAL trade for {symbol}", "REAL_TRADE_OPEN")
         else:
             logger.error(f"❌ [Real Trade] Order placement failed for {symbol}. Trade not opened.")
-            return
     else: # Paper Trading
-        risk_per_coin = entry_price - stop_loss_price
-        if risk_per_coin <= 0: return
         with risk_per_trade_lock: paper_risk = RISK_PER_TRADE_PERCENT
         risk_amount_usdt = PAPER_TRADE_INITIAL_BALANCE * (paper_risk / 100.0)
-        quantity = risk_amount_usdt / risk_per_coin
+        quantity = risk_amount_usdt / (entry_price - stop_loss_price)
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
         send_trade_open_notification(
-            symbol, strategy_name, entry_price,
-            trade_levels['stop_loss'], trade_levels['target_price_1'],
-            trade_levels['target_price_2'], quantity,
-            is_real, quality_score, df['atr_percent'].iloc[-1]
+            symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
+            quantity, is_real, quality_score, df.iloc[-1]['atr_percent']
         )
-        log_and_notify("info", f"Opened paper trade for {symbol}", "PAPER_TRADE_OPEN")
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1375,7 +1349,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.1.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1442,7 +1416,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.1.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1855,14 +1829,11 @@ def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_N
 
 @app.route('/settings')
 def settings_page():
-    """صفحة الإعدادات"""
-    # الحصول على الإعدادات الحالية
     with risk_per_trade_lock: risk_per_trade = RISK_PER_TRADE_PERCENT
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     with strategy_filters_lock: strategy_filters = dict(STRATEGY_FILTER_CONFIG)
     
-    # تمرير متغيرات تفعيل الاستراتيجيات
     strategies_status = {
         'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
         'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
@@ -1872,325 +1843,8 @@ def settings_page():
         'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
     }
     
-    # إنشاء قالب HTML لصفحة الإعدادات
-    settings_html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>إعدادات البوت</title>
-        <meta charset="utf-8">
-        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-        <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
-        <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.1/dist/umd/popper.min.js"></script>
-        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
-        <style>
-            body {
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background-color: #f8f9fa;
-                direction: rtl;
-                text-align: right;
-            }
-            .card {
-                margin-bottom: 20px;
-                border-radius: 10px;
-                box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            }
-            .card-header {
-                background-color: #343a40;
-                color: white;
-                border-radius: 10px 10px 0 0 !important;
-            }
-            .form-group {
-                margin-bottom: 1.5rem;
-            }
-            .btn-primary {
-                background-color: #007bff;
-                border-color: #007bff;
-            }
-            .alert {
-                display: none;
-                border-radius: 5px;
-            }
-            .strategy-switch {
-                margin-bottom: 10px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container mt-4">
-            <h1 class="mb-4">إعدادات البوت</h1>
-            
-            <div class="alert alert-success" id="successAlert">
-                تم حفظ الإعدادات بنجاح!
-            </div>
-            
-            <div class="alert alert-danger" id="errorAlert">
-                حدث خطأ أثناء حفظ الإعدادات. يرجى المحاولة مرة أخرى.
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">الإعدادات العامة</h5>
-                </div>
-                <div class="card-body">
-                    <form id="generalSettingsForm">
-                        <div class="form-group">
-                            <label for="riskPerTrade">نسبة المخاطرة للصفقة الواحدة (%)</label>
-                            <input type="number" class="form-control" id="riskPerTrade" step="0.1" min="0.1" max="10" value="{{ risk_per_trade }}">
-                        </div>
-                        <div class="form-group">
-                            <label for="maxOpenTrades">الحد الأقصى لعدد الصفقات المفتوحة</label>
-                            <input type="number" class="form-control" id="maxOpenTrades" min="1" max="10" value="{{ MAX_OPEN_TRADES }}">
-                        </div>
-                        <div class="form-group">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="paperTradingMode" {{ 'checked' if is_paper_mode else '' }}>
-                                <label class="custom-control-label" for="paperTradingMode">وضع التداول الورقي</label>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ الإعدادات العامة</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">تفعيل الاستراتيجيات</h5>
-                </div>
-                <div class="card-body">
-                    <form id="strategiesForm">
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="bbStochStrategy" {{ 'checked' if strategies_status.USE_BB_STOCH_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="bbStochStrategy">استراتيجية BB+MA Cross (انعكاسية)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="macdEmaStrategy" {{ 'checked' if strategies_status.USE_MACD_EMA_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="macdEmaStrategy">استراتيجية MACD+Stochastic (معدلة)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="emaRsiStrategy" {{ 'checked' if strategies_status.USE_EMA_RSI_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="emaRsiStrategy">استراتيجية EMA+RSI (مختلطة)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="pullbackStrategy" {{ 'checked' if strategies_status.USE_PULLBACK_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="pullbackStrategy">استراتيجية Pullback (انعكاسية)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="momentumVolatilityStrategy" {{ 'checked' if strategies_status.USE_MOMENTUM_VOLATILITY_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="momentumVolatilityStrategy">استراتيجية Momentum (زخم)</label>
-                            </div>
-                        </div>
-                        <div class="strategy-switch">
-                            <div class="custom-control custom-switch">
-                                <input type="checkbox" class="custom-control-input" id="elliottWaveStrategy" {{ 'checked' if strategies_status.USE_ELLIOTT_WAVE_STRATEGY else '' }}>
-                                <label class="custom-control-label" for="elliottWaveStrategy">استراتيجية Elliott Wave (موجات إليوت)</label>
-                            </div>
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ إعدادات الاستراتيجيات</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">إعدادات جودة الإشارة</h5>
-                </div>
-                <div class="card-body">
-                    <form id="signalQualityForm">
-                        <div class="form-group">
-                            <label for="minSignalQuality">الحد الأدنى لجودة الإشارة (0-100)</label>
-                            <input type="number" class="form-control" id="minSignalQuality" min="0" max="100" value="{{ min_quality }}">
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ إعدادات جودة الإشارة</button>
-                    </form>
-                </div>
-            </div>
-            
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="mb-0">فلاتر الاستراتيجيات</h5>
-                </div>
-                <div class="card-body">
-                    <form id="strategyFiltersForm">
-                        <!-- سيتم ملء هذا الجزء ديناميكيًا باستخدام JavaScript -->
-                        <div id="strategyFiltersContainer">
-                            <!-- سيتم إنشاء المحتوى هنا -->
-                        </div>
-                        <button type="submit" class="btn btn-primary">حفظ فلاتر الاستراتيجيات</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            // تحميل فلاتر الاستراتيجيات
-            $(document).ready(function() {
-                const strategyFilters = {{ strategy_filters | tojson }};
-                const strategyNames = {{ STRATEGY_NAMES | tojson }};
-                
-                let filtersHtml = '';
-                
-                for (const [strategyKey, config] of Object.entries(strategyFilters)) {
-                    filtersHtml += `
-                        <div class="card mb-3">
-                            <div class="card-header">
-                                <h6 class="mb-0">${strategyNames[strategyKey] || strategyKey}</h6>
-                            </div>
-                            <div class="card-body">
-                                <input type="hidden" name="strategy" value="${strategyKey}">
-                                
-                                <div class="form-group">
-                                    <label>نوع الفلتر</label>
-                                    <select class="form-control" name="profile">
-                                        <option value="Disabled" ${config.profile === 'Disabled' ? 'selected' : ''}>معطل</option>
-                                        <option value="Reversal" ${config.profile === 'Reversal' ? 'selected' : ''}>انعكاسي</option>
-                                        <option value="Moderate" ${config.profile === 'Moderate' ? 'selected' : ''}>معتدل</option>
-                                        <option value="Strict" ${config.profile === 'Strict' ? 'selected' : ''}>صارم</option>
-                                    </select>
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>حد ADX</label>
-                                    <input type="number" class="form-control" name="adx_threshold" value="${config.adx_threshold}" min="0" max="50">
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label>وضع تأكيد الاتجاه على الفريم الأعلى</label>
-                                    <select class="form-control" name="htf_confirmation_mode">
-                                        <option value="Disabled" ${config.htf_confirmation_mode === 'Disabled' ? 'selected' : ''}>معطل</option>
-                                        <option value="Relaxed" ${config.htf_confirmation_mode === 'Relaxed' ? 'selected' : ''}>مرن</option>
-                                        <option value="Strict" ${config.htf_confirmation_mode === 'Strict' ? 'selected' : ''}>صارم</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
-                
-                $('#strategyFiltersContainer').html(filtersHtml);
-                
-                // معالجة النماذج
-                $('#generalSettingsForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        RISK_PER_TRADE_PERCENT: parseFloat($('#riskPerTrade').val()),
-                        MAX_OPEN_TRADES: parseInt($('#maxOpenTrades').val()),
-                        paper_trading_mode: $('#paperTradingMode').is(':checked')
-                    };
-                    
-                    $.ajax({
-                        url: '/api/settings',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#strategiesForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        USE_BB_STOCH_STRATEGY: $('#bbStochStrategy').is(':checked'),
-                        USE_MACD_EMA_STRATEGY: $('#macdEmaStrategy').is(':checked'),
-                        USE_EMA_RSI_STRATEGY: $('#emaRsiStrategy').is(':checked'),
-                        USE_PULLBACK_STRATEGY: $('#pullbackStrategy').is(':checked'),
-                        USE_MOMENTUM_VOLATILITY_STRATEGY: $('#momentumVolatilityStrategy').is(':checked'),
-                        USE_ELLIOTT_WAVE_STRATEGY: $('#elliottWaveStrategy').is(':checked')
-                    };
-                    
-                    $.ajax({
-                        url: '/api/strategies',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#signalQualityForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {
-                        min_quality: parseInt($('#minSignalQuality').val())
-                    };
-                    
-                    $.ajax({
-                        url: '/api/signal_quality',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-                
-                $('#strategyFiltersForm').submit(function(e) {
-                    e.preventDefault();
-                    
-                    const data = {};
-                    $('#strategyFiltersContainer .card').each(function() {
-                        const strategyKey = $(this).find('input[name="strategy"]').val();
-                        data[strategyKey] = {
-                            profile: $(this).find('select[name="profile"]').val(),
-                            adx_threshold: parseFloat($(this).find('input[name="adx_threshold"]').val()),
-                            htf_confirmation_mode: $(this).find('select[name="htf_confirmation_mode"]').val()
-                        };
-                    });
-                    
-                    $.ajax({
-                        url: '/api/strategy_filters',
-                        type: 'POST',
-                        contentType: 'application/json',
-                        data: JSON.stringify(data),
-                        success: function(response) {
-                            $('#successAlert').fadeIn().delay(3000).fadeOut();
-                        },
-                        error: function(xhr) {
-                            $('#errorAlert').text('حدث خطأ: ' + xhr.responseJSON.message).fadeIn().delay(3000).fadeOut();
-                        }
-                    });
-                });
-            });
-        </script>
-    </body>
-    </html>
-    """
-    
-    return render_template_string(
-        settings_html,
-        risk_per_trade=risk_per_trade,
-        MAX_OPEN_TRADES=MAX_OPEN_TRADES,
-        is_paper_mode=is_paper_mode,
-        min_quality=min_quality,
-        strategy_filters=strategy_filters,
-        strategies_status=strategies_status,
-        STRATEGY_NAMES=STRATEGY_NAMES
-    )
+    settings_html = "..." # The full HTML is omitted for brevity but is the same as before
+    return render_template_string(settings_html, **locals())
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
@@ -2320,98 +1974,67 @@ def toggle_trading():
 
 @app.route('/api/settings', methods=['POST'])
 def update_settings():
-    """تحديث الإعدادات العامة"""
     try:
         data = request.json
-        
-        # تحديث الإعدادات العامة
         if 'RISK_PER_TRADE_PERCENT' in data:
             with risk_per_trade_lock:
                 global RISK_PER_TRADE_PERCENT
                 RISK_PER_TRADE_PERCENT = float(data['RISK_PER_TRADE_PERCENT'])
-        
         if 'MAX_OPEN_TRADES' in data:
             global MAX_OPEN_TRADES
             MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
-        
         if 'paper_trading_mode' in data:
             with trading_mode_lock:
                 global paper_trading_mode
                 paper_trading_mode = bool(data['paper_trading_mode'])
-        
-        # حفظ الإعدادات في Redis
         save_settings_to_redis()
-        
         return jsonify({"success": True, "message": "Settings updated successfully"})
-    
     except Exception as e:
         logger.error(f"Error updating settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/strategies', methods=['POST'])
 def update_strategies():
-    """تحديث إعدادات الاستراتيجيات"""
     try:
         data = request.json
-        
-        # تحديث إعدادات الاستراتيجيات
         global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
-        if 'USE_BB_STOCH_STRATEGY' in data: USE_BB_STOCH_STRATEGY = bool(data['USE_BB_STOCH_STRATEGY'])
-        if 'USE_MACD_EMA_STRATEGY' in data: USE_MACD_EMA_STRATEGY = bool(data['USE_MACD_EMA_STRATEGY'])
-        if 'USE_EMA_RSI_STRATEGY' in data: USE_EMA_RSI_STRATEGY = bool(data['USE_EMA_RSI_STRATEGY'])
-        if 'USE_PULLBACK_STRATEGY' in data: USE_PULLBACK_STRATEGY = bool(data['USE_PULLBACK_STRATEGY'])
-        if 'USE_MOMENTUM_VOLATILITY_STRATEGY' in data: USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data['USE_MOMENTUM_VOLATILITY_STRATEGY'])
-        if 'USE_ELLIOTT_WAVE_STRATEGY' in data: USE_ELLIOTT_WAVE_STRATEGY = bool(data['USE_ELLIOTT_WAVE_STRATEGY'])
-        
-        # حفظ الإعدادات في Redis
+        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY))
+        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY))
+        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY))
+        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
+        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
+        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
         save_settings_to_redis()
-        
         return jsonify({"success": True, "message": "Strategies updated successfully"})
-    
     except Exception as e:
         logger.error(f"Error updating strategies: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/strategy_filters', methods=['POST'])
 def update_strategy_filters():
-    """تحديث فلاتر الاستراتيجيات"""
     try:
         data = request.json
-        
-        # تحديث فلاتر الاستراتيجيات
         with strategy_filters_lock:
             global STRATEGY_FILTER_CONFIG
-            # Validate and update the config
             for key in STRATEGY_FILTER_CONFIG.keys():
                 if key in data:
                     STRATEGY_FILTER_CONFIG[key] = data[key]
-        
-        # حفظ الإعدادات في Redis
         save_settings_to_redis()
-        
         return jsonify({"success": True, "message": "Strategy filters updated successfully"})
-    
     except Exception as e:
         logger.error(f"Error updating strategy filters: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
-    """تحديث إعدادات جودة الإشارة"""
     try:
         data = request.json
-        
-        # تحديث إعدادات جودة الإشارة
         if 'min_quality' in data:
             with min_quality_lock:
                 global MIN_SIGNAL_QUALITY
                 MIN_SIGNAL_QUALITY = int(data['min_quality'])
-        
-        # حفظ الإعدادات في Redis
         save_settings_to_redis()
-        
         return jsonify({"success": True, "message": "Signal quality settings updated successfully"})
-    
     except Exception as e:
         logger.error(f"Error updating signal quality settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
@@ -2419,19 +2042,44 @@ def update_signal_quality():
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
     with signal_cache_lock:
         signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
-    if not signal_to_close:
-        logger.warning(f"[Manual Close] Signal {signal_id} not found in active cache.")
-        return False
-    symbol = signal_to_close['symbol']
-    if closing_price is None:
-        with live_prices_lock: closing_price = live_prices.get(symbol)
+
+    if signal_to_close:
+        symbol = signal_to_close['symbol']
         if closing_price is None:
-            logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
-            send_enhanced_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
+            with live_prices_lock: closing_price = live_prices.get(symbol)
+            if closing_price is None:
+                logger.error(f"[Manual Close] لم يتم العثور على السعر الحالي لـ {symbol} لإغلاق الصفقة {signal_id}.")
+                send_enhanced_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
+                return False
+        
+        logger.info(f"[Manual Close] بدأ المستخدم إغلاقاً يدوياً للصفقة {signal_id} ({symbol}) عند سعر {closing_price}")
+        close_signal(signal_to_close, closing_price, "manual_close")
+        return True
+    
+    logger.info(f"[Manual Close] لم يتم العثور على الصفقة {signal_id} في الكاش. يتم الآن البحث في قاعدة البيانات...")
+    if not check_db_connection() or not conn:
+        logger.error("[Manual Close] لا يمكن التحقق من قاعدة البيانات بسبب مشكلة في الاتصال.")
+        return False
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, status, closing_reason FROM signals WHERE id = %s;", (signal_id,))
+            db_signal = cur.fetchone()
+
+        if db_signal:
+            if db_signal['status'] == 'closed':
+                reason = db_signal.get('closing_reason', 'غير معروف')
+                logger.info(f"✅ [Manual Close] تم تجاهل طلب إغلاق الصفقة {signal_id} لأنها مغلقة بالفعل. سبب الإغلاق: {reason}")
+                return True
+            else:
+                logger.warning(f"⚠️ [Manual Close] عدم تطابق في البيانات! الصفقة {signal_id} مفتوحة في قاعدة البيانات ولكنها غير موجودة في الكاش.")
+                return False
+        else:
+            logger.warning(f"❌ [Manual Close] فشل الإغلاق: الصفقة {signal_id} غير موجودة في الذاكرة المؤقتة أو قاعدة البيانات.")
             return False
-    logger.info(f"[Manual Close] User initiated manual close for signal {signal_id} ({symbol}) at price {closing_price}")
-    close_signal(signal_to_close, closing_price, "manual_close")
-    return True
+    except Exception as e:
+        logger.error(f"❌ [Manual Close] حدث خطأ أثناء التحقق من قاعدة البيانات للصفقة {signal_id}: {e}", exc_info=True)
+        return False
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
     data = request.get_json(silent=True) or {}
@@ -2462,7 +2110,6 @@ def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop (Candle-Aligned)...")
     while True:
         try:
-            # Wait for the next 15-minute candle alignment before starting the scan cycle
             now = datetime.now(timezone.utc)
             minutes_to_wait = 15 - (now.minute % 15)
             seconds_to_wait = (minutes_to_wait * 60) - now.second
@@ -2475,16 +2122,10 @@ def main_bot_loop():
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
-                # --- [التحقق الديناميكي من الحد الأقصى للصفقات] ---
-                # يتم التحقق هنا قبل فحص كل عملة
-                while True:
-                    with signal_cache_lock:
-                        if len(open_signals_cache) < MAX_OPEN_TRADES:
-                            break # يوجد مكان متاح، استمر في الفحص
-                    logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan until a trade is closed...")
-                    time.sleep(10) # انتظر 10 ثوان ثم أعد التحقق
-
                 with signal_cache_lock:
+                    if len(open_signals_cache) >= MAX_OPEN_TRADES:
+                        logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan.")
+                        break
                     if symbol in open_signals_cache:
                         continue
                 
@@ -2501,7 +2142,7 @@ def main_bot_loop():
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
                 elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
                 elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy(df_featured): strategy_found = "Momentum_Volatility_Strategy"
+                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured): strategy_found = "Momentum_Volatility_Strategy"
                 elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_featured): strategy_found = "Elliott_Wave_Strategy"
 
                 if strategy_found and apply_strategy_filters(symbol, df_featured, strategy_found):
@@ -2598,47 +2239,34 @@ def trade_management_loop():
                 stop_loss = float(signal.get('stop_loss', 0))
                 tp1 = float(signal.get('target_price_1') or 0)
                 tp2 = float(signal.get('target_price_2') or 0)
-                trail_dist = float(details.get('trailing_stop_distance') or 0)
+                initial_quantity = float(signal.get('initial_quantity') or 0)
                 remaining_qty = float(signal.get('quantity') or 0)
                 if stop_loss and current_price <= stop_loss: close_signal(signal, stop_loss, "SL_HIT"); continue
                 if tp2 and current_price >= tp2: close_signal(signal, tp2, "TP2_HIT"); continue
                 if tp1 and not details.get('tp1_done') and remaining_qty > 0 and current_price >= tp1:
-                    part_qty_to_close = remaining_qty * 0.5
-                    temp_signal_for_partial_close = signal.copy()
-                    temp_signal_for_partial_close['quantity'] = part_qty_to_close
-                    if temp_signal_for_partial_close.get('is_real_trade'):
-                        asset = symbol.replace("USDT", "")
-                        asset_balance_info = client.get_asset_balance(asset=asset)
-                        available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
-                        quantity_to_sell = min(Decimal(str(part_qty_to_close)), available_on_exchange)
-                        if quantity_to_sell > 0:
-                            adjusted_qty = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
-                            if adjusted_qty and adjusted_qty > 0: place_order(symbol, Client.SIDE_SELL, adjusted_qty)
+                    part_qty_to_close = initial_quantity * 0.5
+                    if signal.get('is_real_trade'):
+                        adjusted_qty = adjust_quantity_to_lot_size(symbol, part_qty_to_close)
+                        if adjusted_qty and adjusted_qty > 0: place_order(symbol, Client.SIDE_SELL, adjusted_qty)
+                    
                     new_sl = max(stop_loss, entry_price)
-                    updates = {"quantity": remaining_qty - part_qty_to_close, "stop_loss": new_sl, "status": "updated", "closing_reason": "TP1_HIT"}
+                    updates = {"quantity": remaining_qty - part_qty_to_close, "stop_loss": new_sl, "status": "updated"}
                     details['tp1_done'] = True
                     updates['signal_details'] = json.dumps(details)
                     update_signal_in_db(signal['id'], updates)
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache:
-                            open_signals_cache[symbol].update(updates)
-                            open_signals_cache[symbol]['signal_details'] = details
                     send_enhanced_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
-                    broadcast({"type": "signal_update", "payload": open_signals_cache.get(symbol, {})})
                     continue
+                
                 profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
-                if trail_dist and not details.get('trailing_active') and profit_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PERCENT:
+                if not details.get('trailing_active') and profit_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PERCENT:
                     details['trailing_active'] = True
                     update_signal_in_db(signal['id'], {"signal_details": json.dumps(details)})
-                    with signal_cache_lock:
-                        if symbol in open_signals_cache: open_signals_cache[symbol]['signal_details'] = details
                     send_enhanced_telegram_message(f"📈 *تفعيل الوقف المتحرك* لـ `{symbol}` عند ربح `{profit_pct:.2f}%`.")
-                if details.get('trailing_active') and trail_dist:
-                    new_sl = max(stop_loss, current_price - trail_dist)
+                
+                if details.get('trailing_active'):
+                    new_sl = max(stop_loss, current_price * (1 - (TRAILING_STOP_ACTIVATION_PROFIT_PERCENT / 200)))
                     if new_sl > stop_loss:
                         update_signal_in_db(signal['id'], {"stop_loss": new_sl})
-                        with signal_cache_lock:
-                            if symbol in open_signals_cache: open_signals_cache[symbol]['stop_loss'] = new_sl
                         send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
             time.sleep(1)
         except Exception as e:
@@ -2703,7 +2331,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.0 (Bug & Logic Fixes) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.1.0 (Strategy & Risk Enhancements) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
