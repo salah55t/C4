@@ -1,9 +1,8 @@
-# ملف c4.py - نسخة V32.4.0 (تخفيف شروط الاستراتيجيات)
+# ملف c4.py - نسخة V32.5.0 (تحسين منطق حساب الحجم)
 # --- وصف الإصدار:
-# 1.  [تخفيف الشروط] تخفيض متطلبات مؤشر ADX لجميع الاستراتيجيات لزيادة عدد الإشارات.
-# 2.  [تخفيف الشروط] تقليل متطلبات حجم التداول لتكون أكثر مرونة.
-# 3.  [تخفيف الشروط] توسيع النطاقات المقبولة لمؤشر RSI بشكل طفيف.
-# 4.  [تحسين التوازن] موازنة الشروط لزيادة الفرص دون التضحية المفرطة بجودة الإشارة.
+# 1.  [إصلاح جذري] إعادة هيكلة دالة `calculate_position_size` لتوفير سجلات مفصلة للغاية عند حدوث أي خطأ.
+# 2.  [تحسين الموثوقية] فصل منطق جلب الرصيد عن منطق الحساب لزيادة استقرار الكود.
+# 3.  [تحسين التشخيص] إضافة سجلات توضيحية لكل خطوة داخل دالة حساب الحجم لتسهيل تتبع الأخطاء المستقبلية.
 
 import time
 import os
@@ -15,7 +14,7 @@ import pandas as pd
 import psycopg2
 import redis
 import statistics
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, getcontext
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
 from binance.client import Client
@@ -36,6 +35,9 @@ from scipy.signal import argrelextrema
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
+# ضبط دقة النوع Decimal
+getcontext().prec = 18
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.4.0')
+logger = logging.getLogger('CryptoBotV32.5.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1222,23 +1224,34 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float, risk_percent: float) -> Optional[Decimal]:
-    if not client: return None
-    available_balance_str, risk_per_coin_str = "N/A", "N/A"
+def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: float, available_balance: float, risk_percent: float) -> Optional[Decimal]:
     try:
-        balance_response = client.get_asset_balance(asset='USDT')
-        available_balance = Decimal(balance_response['free'])
-        available_balance_str = str(available_balance)
-        risk_amount_usdt = available_balance * (Decimal(str(risk_percent)) / Decimal('100'))
-        risk_per_coin = Decimal(str(entry_price)) - Decimal(str(stop_loss_price))
-        risk_per_coin_str = str(risk_per_coin)
+        dec_balance = Decimal(str(available_balance))
+        dec_entry = Decimal(str(entry_price))
+        dec_sl = Decimal(str(stop_loss_price))
+        dec_risk_pct = Decimal(str(risk_percent))
+
+        logger.info(f"[{symbol}] Calculating position size with Balance: {dec_balance:.2f}, Entry: {dec_entry}, SL: {dec_sl}, Risk: {dec_risk_pct}%")
+
+        risk_amount_usdt = dec_balance * (dec_risk_pct / Decimal('100'))
+        risk_per_coin = dec_entry - dec_sl
+
         if risk_per_coin <= 0:
-            log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price", "entry": entry_price, "sl": stop_loss_price})
+            log_rejection(symbol, "Invalid Position Size", {"reason": "Stop loss is not below entry price", "entry": f"{dec_entry}", "sl": f"{dec_sl}"})
             return None
+
         initial_quantity = risk_amount_usdt / risk_per_coin
+        logger.info(f"[{symbol}] Initial calculated quantity: {initial_quantity}")
+
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
-        if adjusted_quantity is None or adjusted_quantity <= 0: return None
-        notional_value = adjusted_quantity * Decimal(str(entry_price))
+        
+        if adjusted_quantity is None or adjusted_quantity <= 0:
+            logger.error(f"[{symbol}] Quantity became zero or None after LOT_SIZE adjustment.")
+            return None
+        
+        logger.info(f"[{symbol}] Quantity after LOT_SIZE adjustment: {adjusted_quantity}")
+
+        notional_value = adjusted_quantity * dec_entry
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             for f in symbol_info['filters']:
@@ -1247,13 +1260,16 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
                     if notional_value < min_notional:
                         log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
                         return None
-        if notional_value > available_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance}"})
+        
+        if notional_value > dec_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{dec_balance:.2f}"})
             return None
+            
+        logger.info(f"[{symbol}] Final valid quantity: {adjusted_quantity}")
         return adjusted_quantity
+
     except Exception as e:
-        logger.error(f"❌ [{symbol}] Error calculating position size: {e}", exc_info=True)
-        logger.error(f"  └── DEBUG INFO for {symbol}: Entry={entry_price}, SL={stop_loss_price}, Balance={available_balance_str}, RiskPerCoin={risk_per_coin_str}, RiskPercent={risk_percent}")
+        logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
 def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
@@ -1306,12 +1322,26 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         "target_price_1": target_price_1, "target_price_2": target_price_2
     }
 
+    quantity_dec = None
     if is_real:
-        dynamic_risk_percent = calculate_dynamic_risk_per_trade_enhanced()
-        quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, dynamic_risk_percent)
-        if quantity_dec is None or quantity_dec <= 0:
-            logger.error(f"❌ [Real Trade] Position size calculation failed for {symbol}. Trade rejected.")
+        try:
+            balance_response = client.get_asset_balance(asset='USDT')
+            available_balance = float(balance_response['free'])
+            dynamic_risk_percent = calculate_dynamic_risk_per_trade_enhanced()
+            quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, available_balance, dynamic_risk_percent)
+        except Exception as e:
+            logger.error(f"❌ [{symbol}] Failed to fetch REAL USDT balance: {e}. Trade rejected.")
             return
+    else: # Paper Trading
+        available_balance = PAPER_TRADE_INITIAL_BALANCE
+        with risk_per_trade_lock: paper_risk = RISK_PER_TRADE_PERCENT
+        quantity_dec = calculate_position_size(symbol, entry_price, stop_loss_price, available_balance, paper_risk)
+
+    if quantity_dec is None or quantity_dec <= 0:
+        logger.error(f"❌ [{symbol}] Position size calculation failed. Trade rejected.")
+        return
+
+    if is_real:
         order = place_order(symbol, Client.SIDE_BUY, quantity_dec)
         if order:
             avg_fill_price = sum(Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
@@ -1330,13 +1360,10 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         else:
             logger.error(f"❌ [Real Trade] Order placement failed for {symbol}. Trade not opened.")
     else: # Paper Trading
-        with risk_per_trade_lock: paper_risk = RISK_PER_TRADE_PERCENT
-        risk_amount_usdt = PAPER_TRADE_INITIAL_BALANCE * (paper_risk / 100.0)
-        quantity = risk_amount_usdt / (entry_price - stop_loss_price)
-        save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, quantity, signal_details)
+        save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
-            quantity, is_real, quality_score, df.iloc[-1].get('atr_percent', 0)
+            float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0)
         )
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
@@ -1372,7 +1399,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.4.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.5.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1439,7 +1466,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.4.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.5.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1847,7 +1874,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.4.0)</title>
+<title>الإعدادات - بوت التداول (V32.5.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2528,7 +2555,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.4.0 (Relaxed Conditions) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.5.0 (Sizing Logic Hotfix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
