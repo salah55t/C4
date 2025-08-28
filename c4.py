@@ -1,10 +1,10 @@
-# ملف c4.py - نسخة V32.1.0 (تحسينات استراتيجية وإدارة مخاطر متقدمة)
+# ملف c4.py - نسخة V32.2.0 (تخفيف الفلاتر لزيادة الفرص)
 # --- وصف الإصدار:
-# 1.  [تحسين استراتيجي] تطبيق نسخ محسنة من جميع استراتيجيات التداول مع شروط أكثر دقة وفلاتر إضافية (EMA, ADX, Volume).
-# 2.  [إدارة مخاطر متقدمة] دمج نظام ديناميكي لحساب وقف الخسارة وجني الأرباح بناءً على نوع الاستراتيجية وظروف السوق.
-# 3.  [إدارة مخاطر متقدمة] تحسين آلية حساب نسبة المخاطرة الديناميكية لتأخذ في الاعتبار أداء البوت وتقلبات السوق.
-# 4.  [تحسين الفلاتر] تطبيق نسخ محسنة من فلاتر تقلب السوق وحجم التداول.
-# 5.  [إعادة هيكلة] دمج منطق إدارة الصفقات الجديد (جني الأرباح الجزئي) في حلقة المراقبة الحالية لضمان الاستقرار.
+# 1.  [تخفيف الفلاتر] تم تعديل إعدادات الفلاتر لتكون أكثر اعتدالًا للسماح بمرور المزيد من إشارات التداول.
+# 2.  [تخفيف الفلاتر] خفض الحد الأدنى لجودة الإشارة (MIN_SIGNAL_QUALITY).
+# 3.  [تخفيف الفلاتر] خفض متطلبات مؤشر ADX لمعظم الاستراتيجيات للسماح بالتداول في الأسواق الأقل اتجاهًا.
+# 4.  [تخفيف الفلاتر] توسيع النطاق المسموح به في فلتر تقلب السوق (ATR Percentile).
+# 5.  [تخفيف الفلاتر] تخفيف فلتر حجم التداول للسماح بالدخول مع حجم تداول أقل نسبيًا.
 
 import time
 import os
@@ -45,7 +45,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.1.0')
+logger = logging.getLogger('CryptoBotV32.2.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -88,7 +88,8 @@ RISK_PER_TRADE_PERCENT: float = 1.0
 risk_per_trade_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
-MIN_SIGNAL_QUALITY: int = 60
+# [تخفيف الفلاتر] تم خفض الحد الأدنى لجودة الإشارة للسماح بمرور المزيد من الفرص
+MIN_SIGNAL_QUALITY: int = 55
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 
@@ -109,13 +110,14 @@ STRATEGY_NAMES = {
     "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
 }
+# [تخفيف الفلاتر] تم خفض متطلبات ADX لكل الاستراتيجيات
 STRATEGY_FILTER_CONFIG = {
-    "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Disabled"},
-    "MACD_EMA_Strategy": {"profile": "Strict", "adx_threshold": 22, "htf_confirmation_mode": "Strict"},
-    "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 20, "htf_confirmation_mode": "Relaxed"},
-    "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
-    "Momentum_Volatility_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"},
-    "Elliott_Wave_Strategy": {"profile": "Strict", "adx_threshold": 25, "htf_confirmation_mode": "Strict"}
+    "BB_Stoch_Strategy": {"profile": "Reversal", "adx_threshold": 17, "htf_confirmation_mode": "Disabled"},
+    "MACD_EMA_Strategy": {"profile": "Strict", "adx_threshold": 20, "htf_confirmation_mode": "Strict"},
+    "EMA_RSI_Strategy": {"profile": "Moderate", "adx_threshold": 18, "htf_confirmation_mode": "Relaxed"},
+    "Pullback_Strategy": {"profile": "Reversal", "adx_threshold": 17, "htf_confirmation_mode": "Relaxed"},
+    "Momentum_Volatility_Strategy": {"profile": "Strict", "adx_threshold": 22, "htf_confirmation_mode": "Strict"},
+    "Elliott_Wave_Strategy": {"profile": "Strict", "adx_threshold": 23, "htf_confirmation_mode": "Strict"}
 }
 strategy_filters_lock = Lock()
 BASE_FILTER_ADX_THRESHOLD = 20
@@ -257,7 +259,8 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
         db_url_to_use += f"{'?' if '?' not in db_url_to_use else '&'}sslmode=require"
     for attempt in range(retries):
         try:
-            conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor)
+            # [تحسين تقني] إضافة مهلة زمنية للاستعلامات لمنع التعليق
+            conn = psycopg2.connect(db_url_to_use, connect_timeout=15, cursor_factory=RealDictCursor, options=f"-c statement_timeout={15 * 1000}")
             conn.autocommit = False
             with conn.cursor() as cur:
                 cur.execute("""
@@ -686,7 +689,7 @@ def load_settings_from_redis():
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
-            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 60)
+            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 55) # [تخفيف الفلاتر] تحديث القيمة الافتراضية
 
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
@@ -779,17 +782,18 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(getattr(df, "name", "—"), "Market Volatility Filter Failed")
         return False
     
-    q10 = float(np.percentile(recent, 10))
-    q90 = float(np.percentile(recent, 90))
+    # [تخفيف الفلاتر] توسيع نطاقات التقلب المسموح بها
+    q10 = float(np.percentile(recent, 8)) # Lowered from 10
+    q90 = float(np.percentile(recent, 92)) # Increased from 90
     
     strategy_name = getattr(df, "strategy", "Unknown")
     
     if strategy_name in ["BB_Stoch_Strategy", "EMA_RSI_Strategy", "Pullback_Strategy"]:
-        lower, upper = max(0.8, q10 * 0.9), min(6.0, q90 * 1.1)
+        lower, upper = max(0.7, q10 * 0.85), min(6.5, q90 * 1.15)
     elif strategy_name in ["MACD_EMA_Strategy", "Momentum_Volatility_Strategy"]:
-        lower, upper = max(1.2, q10 * 0.9), min(8.0, q90 * 1.2)
+        lower, upper = max(1.1, q10 * 0.85), min(8.5, q90 * 1.25)
     else:
-        lower, upper = max(1.0, q10 * 0.9), min(7.0, q90 * 1.1)
+        lower, upper = max(0.9, q10 * 0.85), min(7.5, q90 * 1.15)
     
     if last < lower or last > upper:
         log_rejection(df.name, "Market Volatility Filter Failed", {"atr": f"{last:.2f}%", "range": f"({lower:.2f}-{upper:.2f})%"})
@@ -797,7 +801,7 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame) -> bool:
     
     return True
 
-def flexible_volume_filter_enhanced(df: pd.DataFrame, min_volume_percentile=30, strictness=0.8) -> bool:
+def flexible_volume_filter_enhanced(df: pd.DataFrame, min_volume_percentile=25, strictness=0.8) -> bool: # [تخفيف الفلاتر] خفض النسبة المئوية من 30 إلى 25
     if 'volume' not in df.columns or len(df) < 50: return False
     
     current_volume = df['volume'].iloc[-1]
@@ -930,8 +934,9 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(df.name, "BB: Price below EMA50 (bearish trend)")
         return False
     
-    if last['adx'] < 20:
-        log_rejection(df.name, "BB: Weak trend (ADX < 20)")
+    # [تخفيف الفلاتر]
+    if last['adx'] < 18:
+        log_rejection(df.name, "BB: Weak trend (ADX < 18)")
         return False
     
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
@@ -962,8 +967,9 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(df.name, "MACD: Bearish long-term trend")
         return False
 
-    if last['adx'] < 22:
-        log_rejection(df.name, "MACD: Weak trend (ADX < 22)")
+    # [تخفيف الفلاتر]
+    if last['adx'] < 20:
+        log_rejection(df.name, "MACD: Weak trend (ADX < 20)")
         return False
 
     hist = df['macd_hist'].tail(4).values
@@ -999,8 +1005,9 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(df.name, "EMA_RSI: RSI not in optimal range")
         return False
     
-    if last['adx'] < 18:
-        log_rejection(df.name, "EMA_RSI: Weak trend (ADX < 18)")
+    # [تخفيف الفلاتر]
+    if last['adx'] < 17:
+        log_rejection(df.name, "EMA_RSI: Weak trend (ADX < 17)")
         return False
     
     pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3) * 1.005).any()
@@ -1027,8 +1034,9 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(df.name, "Pullback: Trend is not strongly bullish")
         return False
     
-    if last['adx'] < 18:
-        log_rejection(df.name, "Pullback: Weak trend (ADX < 18)")
+    # [تخفيف الفلاتر]
+    if last['adx'] < 17:
+        log_rejection(df.name, "Pullback: Weak trend (ADX < 17)")
         return False
     
     pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
@@ -1055,8 +1063,9 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(df.name, "Momentum: EMAs not in bullish order")
         return False
     
-    if last['adx'] < 25:
-        log_rejection(df.name, "Momentum: Weak trend (ADX < 25)")
+    # [تخفيف الفلاتر]
+    if last['adx'] < 22:
+        log_rejection(df.name, "Momentum: Weak trend (ADX < 22)")
         return False
     
     atr_percent = last['atr_percent']
@@ -1145,7 +1154,8 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         if not check_wave_2_fibonacci_retracement(p0, p1, p2):
             log_rejection(df.name, "Elliott Wave: Wave 2 Fibonacci retracement invalid"); return False
             
-        if df['adx'].iloc[-1] < 25:
+        # [تخفيف الفلاتر]
+        if df['adx'].iloc[-1] < 23:
             log_rejection(df.name, "Elliott Wave: Trend is not strong enough (ADX)"); return False
 
         if df['close'].iloc[-1] <= wave_1_high:
@@ -1215,15 +1225,18 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss_price: fl
         initial_quantity = risk_amount_usdt / risk_per_coin
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
         if adjusted_quantity is None or adjusted_quantity <= 0: return None
+
+        # [تحسين منطقي] التحقق من MIN_NOTIONAL بعد تعديل LOT_SIZE
         notional_value = adjusted_quantity * Decimal(str(entry_price))
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
-                    min_notional = Decimal(f.get('minNotional', f.get('notional', '0')))
-                    if notional_value < min_notional:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
-                        return None
+            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+            if min_notional_filter:
+                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '0')))
+                if notional_value < min_notional:
+                    log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}", "reason": "Post LOT_SIZE adjustment"})
+                    return None
+
         if notional_value > available_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"{available_balance}"})
             return None
@@ -1349,7 +1362,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.1.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.2.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1416,7 +1429,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.1.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.2.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1479,8 +1492,8 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
           <div class="kv">
             <div>الحد الأدنى لجودة الإشارة:</div>
             <div>
-              <input type="range" id="qualityFilter" min="30" max="90" value="60" class="slider">
-              <span id="qualityValue">60</span>
+              <input type="range" id="qualityFilter" min="30" max="90" value="55" class="slider">
+              <span id="qualityValue">55</span>
             </div>
           </div>
           <div class="kv" style="margin-top: 12px;">
@@ -2331,7 +2344,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.1.0 (Strategy & Risk Enhancements) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.2.0 (Relaxed Filters) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
