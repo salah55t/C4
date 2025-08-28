@@ -1,8 +1,8 @@
-# ملف c4.py - نسخة V32.3.1 (إصلاح التحقق من المدخلات)
+# ملف c4.py - نسخة V32.3.2 (تحسين شفافية سجل الرفض)
 # --- وصف الإصدار:
-# 1.  [إصلاح حاسم] تم إصلاح خطأ `TypeError` في مسارات API الخاصة بالإعدادات (`/api/settings`, `/api/signal_quality`).
-# 2.  [تحسين استقرار] إضافة تحقق قوي من جانب الخادم للتعامل مع المدخلات الفارغة أو غير الصحيحة من صفحة الإعدادات.
-# 3.  [تحسين استقرار] منع تعطل الخادم عند حفظ قيم رقمية فارغة.
+# 1.  [تحسين الشفافية] تم تعديل جميع دوال فحص الاستراتيجيات (`check_..._strategy_enhanced`) لتسجيل أسباب الرفض للشروط الأساسية.
+# 2.  [تحسين الشفافية] بدلاً من الفشل الصامت، سيقوم البوت الآن بتسجيل سبب الرفض في لوحة التحكم لمعظم حالات الفشل.
+# 3.  [تحسين الشفافية] إضافة أسباب رفض جديدة إلى القاموس `REJECTION_REASONS_AR` لتغطية الحالات التي كانت صامتة سابقًا.
 
 import time
 import os
@@ -43,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.3.1')
+logger = logging.getLogger('CryptoBotV32.3.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -147,6 +147,7 @@ current_market_state: Dict[str, Any] = {"trend_details_by_tf": {}}
 market_state_lock = Lock()
 
 # --- قاموس أسباب الرفض باللغة العربية ---
+# [تحسين الشفافية] إضافة أسباب رفض جديدة
 REJECTION_REASONS_AR = {
     "Market Volatility Filter Failed": "فلتر تقلب السوق رفض الدخول",
     "Trend Strength Filter Failed": "فلتر قوة الاتجاه رفض الدخول",
@@ -166,8 +167,23 @@ REJECTION_REASONS_AR = {
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
     "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
+    "BB: Price below EMA50": "BB: السعر تحت متوسط 50 (اتجاه هابط)",
+    "BB: Weak trend (ADX)": "BB: اتجاه ضعيف (ADX)",
     "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
+    "MACD: Bearish long-term trend": "MACD: اتجاه عام هابط (EMA)",
+    "MACD: Weak trend (ADX)": "MACD: اتجاه ضعيف (ADX)",
+    "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه عام هابط (EMA)",
+    "EMA_RSI: EMAs in bearish order": "EMA_RSI: المتوسطات قصيرة المدى هابطة",
+    "EMA_RSI: RSI not in optimal range": "EMA_RSI: مؤشر القوة النسبية خارج النطاق",
+    "EMA_RSI: Weak trend (ADX)": "EMA_RSI: اتجاه ضعيف (ADX)",
+    "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه العام ليس صاعدًا بقوة",
+    "Pullback: Weak trend (ADX)": "Pullback: اتجاه ضعيف (ADX)",
     "Pullback: Low volume on pullback recovery": "Pullback: حجم تداول منخفض عند الارتداد",
+    "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
+    "Momentum: Weak trend (ADX)": "Momentum: اتجاه ضعيف (ADX)",
+    "Momentum: Volatility not in optimal range": "Momentum: التقلب خارج النطاق الأمثل",
+    "Momentum: RSI not in optimal range": "Momentum: مؤشر القوة النسبية خارج النطاق",
+    "Momentum: MACD momentum not confirmed": "Momentum: زخم الماكد غير مؤكد",
     "Elliott Wave: No clear impulse pattern detected": "موجات إليوت: لم يتم اكتشاف نمط موجة دافعة واضح",
     "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
     "Elliott Wave: Not enough recent points for pattern": "موجات إليوت: لا توجد نقاط حديثة كافية للنمط",
@@ -919,6 +935,7 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     return target1, target2
 
 # --- [ENHANCEMENT] Updated Trading Strategies ---
+# [تحسين الشفافية] تم تعديل جميع دوال الفحص لتسجيل الرفض بدلاً من الفشل الصامت
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
     if len(df) < 50 or not needed.issubset(df.columns): return False
@@ -927,23 +944,26 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     prev = df.iloc[-2]
     
     if last['close'] < last['ema50']:
+        log_rejection(df.name, "BB: Price below EMA50")
         return False
     
     if last['adx'] < 18:
+        log_rejection(df.name, "BB: Weak trend (ADX)")
         return False
     
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
     if not (touched_lower_band and last['close'] > last['bb_lower']):
-        return False
+        return False # This is a very frequent condition, keep it silent
     
     stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
+        log_rejection(df.name, "BB: Stochastic not confirming upward momentum")
         return False
         
     is_bullish_candle = last['close'] > last['open']
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.8
     if not (is_bullish_candle and volume_ok):
-        return False
+        return False # Frequent condition, keep silent
 
     return True
 
@@ -954,9 +974,11 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     
     if not (last['ema50'] > last['ema100'] > last['ema200']):
+        log_rejection(df.name, "MACD: Bearish long-term trend")
         return False
 
     if last['adx'] < 20:
+        log_rejection(df.name, "MACD: Weak trend (ADX)")
         return False
 
     hist = df['macd_hist'].tail(4).values
@@ -965,10 +987,11 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     hist_accelerating = hist[3] > hist[2] and hist[2] > hist[1]
     
     if not (macd_ok and hist_accelerating):
-        return False
+        return False # Frequent, keep silent
         
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 0.9
     if not volume_ok:
+        log_rejection(df.name, "Volume Filter Failed")
         return False
         
     return True
@@ -980,26 +1003,31 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     
     if last['ema50'] < last['ema200']:
+        log_rejection(df.name, "EMA_RSI: Bearish long-term trend")
         return False
     
     if last['ema9'] < last['ema21']:
+        log_rejection(df.name, "EMA_RSI: EMAs in bearish order")
         return False
 
     if not (40 <= last['rsi'] <= 65):
+        log_rejection(df.name, "EMA_RSI: RSI not in optimal range", {"rsi": f"{last['rsi']:.1f}"})
         return False
     
     if last['adx'] < 17:
+        log_rejection(df.name, "EMA_RSI: Weak trend (ADX)")
         return False
     
     pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3) * 1.005).any()
     if not pulled_back:
-        return False
+        return False # Frequent, keep silent
     
     if not (last['close'] > last['open'] and last['close'] > last['ema9']):
-        return False
+        return False # Frequent, keep silent
         
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.9
     if not volume_ok:
+        log_rejection(df.name, "Volume Filter Failed")
         return False
         
     return True
@@ -1011,20 +1039,23 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     
     if not (last['ema21'] > last['ema50'] > last['ema200']):
+        log_rejection(df.name, "Pullback: Trend is not strongly bullish")
         return False
     
     if last['adx'] < 17:
+        log_rejection(df.name, "Pullback: Weak trend (ADX)")
         return False
     
     pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
     if not pulled_back:
-        return False
+        return False # Frequent, keep silent
     
     if not (last['close'] > last['open']):
-        return False
+        return False # Frequent, keep silent
     
     avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
     if last['volume'] < avg_volume * 1.1:
+        log_rejection(df.name, "Pullback: Low volume on pullback recovery")
         return False
         
     return True
@@ -1036,16 +1067,20 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     
     if not (last['ema9'] > last['ema21'] > last['ema50']):
+        log_rejection(df.name, "Momentum: EMAs not in bullish order")
         return False
     
     if last['adx'] < 22:
+        log_rejection(df.name, "Momentum: Weak trend (ADX)")
         return False
     
     atr_percent = last['atr_percent']
     if not (1.8 <= atr_percent <= 6.0):
+        log_rejection(df.name, "Momentum: Volatility not in optimal range", {"atr": f"{atr_percent:.2f}%"})
         return False
     
     if not (45 <= last['rsi'] <= 70):
+        log_rejection(df.name, "Momentum: RSI not in optimal range", {"rsi": f"{last['rsi']:.1f}"})
         return False
     
     hist = df['macd_hist'].tail(3).values
@@ -1053,10 +1088,11 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
     macd_momentum = hist[2] > hist[1] > 0
     
     if not macd_momentum:
-        return False
+        return False # Frequent, keep silent
     
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1
     if not volume_ok:
+        log_rejection(df.name, "Volume Filter Failed")
         return False
         
     return True
@@ -1121,29 +1157,29 @@ def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
         wave_1_high = p1[1]
 
         if not check_wave_2_fibonacci_retracement(p0, p1, p2):
-            return False
+            log_rejection(df.name, "Elliott Wave: Wave 2 Fibonacci retracement invalid"); return False
             
         if df['adx'].iloc[-1] < 23:
-            return False
+            log_rejection(df.name, "Elliott Wave: Trend is not strong enough (ADX)"); return False
 
         if df['close'].iloc[-1] <= wave_1_high:
             return False
             
         if not check_breakout_candle_momentum(df, wave_1_high):
-            return False
+            log_rejection(df.name, "Elliott Wave: Weak breakout momentum"); return False
 
         if df['volume'].iloc[-1] < df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-            return False
+            log_rejection(df.name, "Elliott Wave: Volume too low"); return False
         
         if not (45 < df['rsi'].iloc[-1] < 75):
-            return False
+            log_rejection(df.name, "Elliott Wave: RSI not in optimal range"); return False
         
         if df['macd'].iloc[-1] <= df['macd_signal'].iloc[-1]:
-            return False
+            log_rejection(df.name, "Elliott Wave: MACD not positive"); return False
         
         last = df.iloc[-1]
         if not (last['close'] > last['ema9'] > last['ema21'] > last['ema50']):
-            return False
+            log_rejection(df.name, "Elliott Wave: EMAs not in correct order"); return False
         
         logger.info(f"✅ [Elliott Wave] Found valid Wave 3 setup for {df.name} after passing all advanced filters.")
         return True
@@ -1365,7 +1401,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.3.1)</title>
+<title>لوحة التحكم - بوت التداول (V32.3.2)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1432,7 +1468,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.3.1</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.3.2</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1841,7 +1877,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.3.1)</title>
+<title>الإعدادات - بوت التداول (V32.3.2)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1941,7 +1977,6 @@ document.getElementById('saveAllBtn').addEventListener('click', async () => {
     const tradesInput = generalForm.querySelector('[name="MAX_OPEN_TRADES"]');
     const qualityInput = generalForm.querySelector('[name="min_quality"]');
 
-    // Client-side validation
     if (!riskInput.value || !tradesInput.value || !qualityInput.value) {
         showToast('الرجاء تعبئة جميع الحقول الرقمية.', 'error');
         return;
@@ -2154,7 +2189,6 @@ def toggle_trading():
     log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
     return jsonify({"status": "success"})
 
-# [إصلاح حاسم] إضافة تحقق قوي من المدخلات لمنع الأخطاء
 @app.route('/api/settings', methods=['POST'])
 def update_settings():
     try:
@@ -2226,7 +2260,6 @@ def update_strategy_filters():
         logger.error(f"Error updating strategy filters: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-# [إصلاح حاسم] إضافة تحقق قوي من المدخلات لمنع الأخطاء
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
     try:
@@ -2558,7 +2591,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.3.1 (Input Validation Fix) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.3.2 (Rejection Logging Fix) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
