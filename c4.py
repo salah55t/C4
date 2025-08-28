@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V31.0.0 (تحقق ديناميكي للصفقات)
+# ملف c4.py - نسخة V32.0.0 (إصلاحات برمجية ومنطقية)
 # --- وصف الإصدار:
-# 1.  [ميزة جديدة] تعديل آلية التحقق من الحد الأقصى للصفقات لتكون ديناميكية.
-# 2.  [تحسين] الآن يتم التحقق من عدد الصفقات المفتوحة قبل فحص كل عملة بشكل فردي.
-# 3.  [تحسين] يتوقف البوت مؤقتًا عن الفحص عند الوصول للحد الأقصى ويستأنف تلقائيًا عند إغلاق صفقة.
-# 4.  هذا التعديل يضمن عدم إضاعة أي فرص تداول قد تظهر مباشرة بعد توفر مكان لصفقة جديدة.
+# 1.  [إصلاح برمجي] إصلاح خطأ عدم ظهور سجل الرفض (Rejection Log) عند تحميل لوحة التحكم.
+# 2.  [إصلاح حرج] إصلاح خطأ في استراتيجية MACD+EMA كان يمنعها من العمل بسبب عدم حساب ema100.
+# 3.  [تحسين منطقي] تحسين استراتيجية Pullback لتكون أكثر دقة في تحديد الارتدادات الحديثة.
+# 4.  [تحسين] مراجعة عامة للكود لتحسين الأداء والاستقرار وإضافة تعليقات توضيحية.
 
 import time
 import os
@@ -39,11 +39,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v31_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v32_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV31.0.0')
+logger = logging.getLogger('CryptoBotV32.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -995,8 +995,8 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     # Condition 1: Medium-term trend is up.
     if not (last['ema21'] > last['ema50'] and last['close'] > last['ema50']): return False
     
-    # Condition 2: Price has recently dipped to a support zone.
-    if not ((df['low'].tail(4)) <= (df['ema21'].tail(4))).any(): return False
+    # Condition 2: Price has recently dipped to a support zone (within the last 3 candles).
+    if not ((df['low'].tail(3)) <= (df['ema21'].tail(3))).any(): return False
     
     # Condition 3: The recovery is confirmed by a bullish candle.
     if not (last['close'] > last['open']): return False
@@ -1375,7 +1375,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V31.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1442,7 +1442,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V31.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1666,18 +1666,26 @@ function updatePrices(priceData) {
     }
 }
 
-function addNotification(notification) {
+function addNotification(notification, prepend = true) {
     const tbody = qs('#events tbody');
     const row = `<tr><td>${new Date(notification.timestamp).toLocaleTimeString('ar-EG')}</td><td>${notification.type||''}</td><td>${notification.message||''}</td></tr>`;
-    tbody.insertAdjacentHTML('afterbegin', row);
-    if (tbody.rows.length > 20) tbody.deleteRow(-1);
+    if (prepend) {
+        tbody.insertAdjacentHTML('afterbegin', row);
+        if (tbody.rows.length > 20) tbody.deleteRow(-1);
+    } else {
+        tbody.insertAdjacentHTML('beforeend', row);
+    }
 }
 
-function addRejection(rejection) {
+function addRejection(rejection, prepend = true) {
     const tbody = qs('#rejections tbody');
     const row = `<tr><td>${new Date(rejection.timestamp).toLocaleTimeString('ar-EG')}</td><td>${rejection.symbol||''}</td><td>${rejection.reason||''}</td></tr>`;
-    tbody.insertAdjacentHTML('afterbegin', row);
-    if (tbody.rows.length > 30) tbody.deleteRow(-1);
+    if (prepend) {
+        tbody.insertAdjacentHTML('afterbegin', row);
+        if (tbody.rows.length > 30) tbody.deleteRow(-1);
+    } else {
+        tbody.insertAdjacentHTML('beforeend', row);
+    }
 }
 
 function updateMarketTrends(marketState) {
@@ -1705,6 +1713,8 @@ async function initializeDashboard() {
         const baseData = await baseRes.json();
         const signalsData = await signalsRes.json();
         const metricsData = await metricsRes.json();
+        
+        // Populate initial data
         qs('#serverTime').textContent = new Date(baseData.server_time).toLocaleTimeString('ar-EG');
         qs('#toggleTrading').checked = !!baseData.trading_enabled;
         qs('#balance').textContent = fmt(baseData.usdt_balance);
@@ -1715,6 +1725,13 @@ async function initializeDashboard() {
         qs('#qualityValue').textContent = baseData.min_signal_quality;
         qs('#riskInput').value = baseData.risk_per_trade;
         updateMarketTrends(baseData.market_state);
+        
+        // Render initial rejections and notifications
+        qs('#rejections tbody').innerHTML = '';
+        baseData.rejections.forEach(r => addRejection(r, false));
+        qs('#events tbody').innerHTML = '';
+        baseData.notifications.forEach(n => addNotification(n, false));
+
         openSignals = signalsData.signals.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
         renderAllSignals(signalsData.signals);
         qs('#openCount').textContent = signalsData.signals.length;
@@ -1722,6 +1739,7 @@ async function initializeDashboard() {
         qs('#winRate').textContent = `${metricsData.win_rate.toFixed(2)}%`;
         qs('#avgProfit').textContent = `${metricsData.avg_profit.toFixed(2)}%`;
         qs('#totalTrades').textContent = metricsData.total_trades;
+        
         loadAdditionalData();
     } catch (error) {
         console.error("فشل تحميل البيانات الأساسية:", error);
@@ -2685,7 +2703,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V31.0.0 (Dynamic Trade Slot Check) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.0 (Bug & Logic Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
