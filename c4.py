@@ -1,9 +1,9 @@
-# ملف c4.py - نسخة V32.0.1 (إصلاح منطقي وتحسينات)
+# ملف c4.py - نسخة V32.0.0 (إصلاحات برمجية ومنطقية)
 # --- وصف الإصدار:
-# 1.  [إصلاح منطقي] إصلاح مشكلة "Signal not found" عند الإغلاق اليدوي عن طريق إضافة فحص احتياطي في قاعدة البيانات.
-# 2.  [تحسين] إضافة تعليقات توضيحية مفصلة باللغة العربية لشرح آلية الإغلاق اليدوي الجديدة.
-# 3.  [إصلاح برمجي] معالجة حالة قسمة على صفر محتملة في حساب مؤشر ستوكاستيك (Stochastic).
-# 4.  [تحسين] مراجعة عامة للكود لتحسين الأداء والاستقرار.
+# 1.  [إصلاح برمجي] إصلاح خطأ عدم ظهور سجل الرفض (Rejection Log) عند تحميل لوحة التحكم.
+# 2.  [إصلاح حرج] إصلاح خطأ في استراتيجية MACD+EMA كان يمنعها من العمل بسبب عدم حساب ema100.
+# 3.  [تحسين منطقي] تحسين استراتيجية Pullback لتكون أكثر دقة في تحديد الارتدادات الحديثة.
+# 4.  [تحسين] مراجعة عامة للكود لتحسين الأداء والاستقرار وإضافة تعليقات توضيحية.
 
 import time
 import os
@@ -43,7 +43,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.0.1')
+logger = logging.getLogger('CryptoBotV32.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -624,9 +624,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     low_14 = df_calc['low'].rolling(14).min()
     high_14 = df_calc['high'].rolling(14).max()
-    # [FIX] Add a small epsilon to avoid division by zero
-    high_low_range = (high_14 - low_14).replace(0, 1e-9)
-    df_calc['stoch_k'] = 100 * ((df_calc['close'] - low_14) / high_low_range)
+    df_calc['stoch_k'] = 100 * ((df_calc['close'] - low_14) / (high_14 - low_14).replace(0, 1e-9))
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
     return df_calc
 
@@ -1377,7 +1375,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.0.1)</title>
+<title>لوحة التحكم - بوت التداول (V32.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1444,7 +1442,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.0.1</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -2418,67 +2416,22 @@ def update_signal_quality():
         logger.error(f"Error updating signal quality settings: {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-# --- [START] دالة الإغلاق اليدوي المُحسَّنة ---
 def close_trade_manually(signal_id: int, closing_price: Optional[float] = None) -> bool:
-    """
-    محاولة إغلاق صفقة يدوياً مع معالجة محسنة للحالات المتزامنة.
-    1.  تبحث أولاً عن الصفقة في الذاكرة المؤقتة (cache) للوصول السريع.
-    2.  إذا لم تجدها، فهذا يعني أنها قد تكون أُغلقت للتو بواسطة عملية أخرى.
-    3.  للتأكد، تقوم بالبحث عنها في قاعدة البيانات.
-    4.  إذا كانت حالتها في قاعدة البيانات "مغلقة"، تسجل رسالة إعلامية وتتجاهل الطلب.
-    5.  إذا لم تكن موجودة حتى في قاعدة البيانات، تسجل تحذيراً بأن المعرّف غير صالح.
-    """
-    # الخطوة 1: البحث في الذاكرة المؤقتة أولاً
     with signal_cache_lock:
         signal_to_close = next((dict(s) for s in open_signals_cache.values() if s['id'] == signal_id), None)
-
-    if signal_to_close:
-        # تم العثور على الصفقة في الكاش، لنقم بإغلاقها
-        symbol = signal_to_close['symbol']
+    if not signal_to_close:
+        logger.warning(f"[Manual Close] Signal {signal_id} not found in active cache.")
+        return False
+    symbol = signal_to_close['symbol']
+    if closing_price is None:
+        with live_prices_lock: closing_price = live_prices.get(symbol)
         if closing_price is None:
-            with live_prices_lock: closing_price = live_prices.get(symbol)
-            if closing_price is None:
-                logger.error(f"[Manual Close] لم يتم العثور على السعر الحالي لـ {symbol} لإغلاق الصفقة {signal_id}.")
-                send_enhanced_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
-                return False
-        
-        logger.info(f"[Manual Close] بدأ المستخدم إغلاقاً يدوياً للصفقة {signal_id} ({symbol}) عند سعر {closing_price}")
-        close_signal(signal_to_close, closing_price, "manual_close")
-        return True
-    
-    # --- [المنطق الجديد] ---
-    # الخطوة 2: إذا لم يتم العثور على الصفقة في الكاش، ابحث في قاعدة البيانات
-    logger.info(f"[Manual Close] لم يتم العثور على الصفقة {signal_id} في الكاش. يتم الآن البحث في قاعدة البيانات...")
-    if not check_db_connection() or not conn:
-        logger.error("[Manual Close] لا يمكن التحقق من قاعدة البيانات بسبب مشكلة في الاتصال.")
-        return False
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, status, closing_reason FROM signals WHERE id = %s;", (signal_id,))
-            db_signal = cur.fetchone()
-
-        if db_signal:
-            # الخطوة 3: تم العثور على الصفقة في قاعدة البيانات، تحقق من حالتها
-            if db_signal['status'] == 'closed':
-                # الصفقة مغلقة بالفعل، لا داعي لاتخاذ أي إجراء
-                reason = db_signal.get('closing_reason', 'غير معروف')
-                logger.info(f"✅ [Manual Close] تم تجاهل طلب إغلاق الصفقة {signal_id} لأنها مغلقة بالفعل. سبب الإغلاق: {reason}")
-                return True # نعتبر العملية ناجحة لأن الحالة المطلوبة (الإغلاق) متحققة
-            else:
-                # هذه حالة نادرة جداً (وجودها في قاعدة البيانات كـ "مفتوحة" ولكن ليس في الكاش)
-                logger.warning(f"⚠️ [Manual Close] عدم تطابق في البيانات! الصفقة {signal_id} مفتوحة في قاعدة البيانات ولكنها غير موجودة في الكاش. سيتم محاولة الإغلاق على أي حال.")
-                # يمكن إضافة منطق لإعادة بناء الصفقة وإغلاقها هنا إذا لزم الأمر
-                return False # حالياً، نعتبر هذا فشلاً يتطلب تدخلاً
-        else:
-            # الخطوة 4: الصفقة غير موجودة حتى في قاعدة البيانات
-            logger.warning(f"❌ [Manual Close] فشل الإغلاق: الصفقة {signal_id} غير موجودة في الذاكرة المؤقتة أو قاعدة البيانات.")
+            logger.error(f"[Manual Close] Could not get live price for {symbol} to close signal {signal_id}.")
+            send_enhanced_telegram_message(f"⚠️ *فشل الإغلاق اليدوي لـ {symbol}* \nلم يتمكن البوت من الحصول على السعر الحالي.", force=True)
             return False
-    except Exception as e:
-        logger.error(f"❌ [Manual Close] حدث خطأ أثناء التحقق من قاعدة البيانات للصفقة {signal_id}: {e}", exc_info=True)
-        return False
-# --- [END] دالة الإغلاق اليدوي المُحسَّنة ---
-
+    logger.info(f"[Manual Close] User initiated manual close for signal {signal_id} ({symbol}) at price {closing_price}")
+    close_signal(signal_to_close, closing_price, "manual_close")
+    return True
 @app.route('/api/close_trade/<int:signal_id>', methods=['POST'])
 def api_close_trade(signal_id):
     data = request.get_json(silent=True) or {}
@@ -2750,7 +2703,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.1 (Logic Fix) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.0.0 (Bug & Logic Fixes) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
