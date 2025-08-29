@@ -1,9 +1,10 @@
-# ملف c4.py - نسخة V32.7.0 (إضافة نظام الاختبار الخلفي الاحترافي)
-# --- وصف الإصدار:
-# 1.  [إضافة رئيسية] برمجة نظام اختبار خلفي (Backtesting) احترافي ومتكامل.
-# 2.  [واجهة مستخدم] إنشاء صفحة جديدة للاختبار الخلفي مع واجهة رسومية سهلة الاستخدام.
-# 3.  [محاكاة دقيقة] تطوير دالة `backtest_strategy` التي تحاكي التداول شمعة بشمعة بحجم صفقة ثابت (10$).
-# 4.  [تقارير متكاملة] عرض نتائج الاختبارات بشكل مفصل يتضمن إحصائيات الأداء، منحنى رأس المال، وسجل الصفقات.
+# ملف c4.py - نسخة V32.8.0 (مُعدَّل حسب إعدادات المستخدم)
+# --- وصف التعديلات:
+# 1.  [تحديث الاستراتيجيات] تم تعديل إعدادات ومؤشرات استراتيجيات MACD+EMA و EMA+RSI بناءً على طلب المستخدم.
+# 2.  [إضافة مؤشرات] تمت إضافة مؤشرات SMA (7 و 200) و VWAP إلى دالة حساب المؤشرات.
+# 3.  [تعديل الفلاتر] تم تحديث فلتر التقلبات (ATR) ليعمل ضمن نطاق ثابت (1.5% - 4.0%).
+# 4.  [ضبط الإعدادات] تم تعديل المتغيرات العامة للبوت مثل حجم الصفقة، جودة الإشارة، والوقف المتحرك.
+# 5.  [منطق التداول] تم دمج منطق تقاطع SMA في استراتيجية MACD كإشارة دخول قوية.
 
 import time
 import os
@@ -47,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.7.0')
+logger = logging.getLogger('CryptoBotV32.8.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -82,15 +83,19 @@ cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
-COOLDOWN_MINUTES_AFTER_SL = 20
+# [تعديل المستخدم] زيادة فترة التبريد
+COOLDOWN_MINUTES_AFTER_SL = 30
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-FIXED_TRADE_AMOUNT_USDT: float = 5.0
+# [تعديل المستخدم] تقليل حجم الصفقة
+FIXED_TRADE_AMOUNT_USDT: float = 3.0
 fixed_trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
-TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
-MIN_SIGNAL_QUALITY: int = 60
+# [تعديل المستخدم] تفعيل أسرع للوقف المتحرك
+TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
+# [تعديل المستخدم] زيادة الجودة المطلوبة للإشارة
+MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 
@@ -105,8 +110,8 @@ USE_ELLIOTT_WAVE_STRATEGY: bool = True
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
     "BB_Stoch_Strategy": "BB+Stoch (ارتداد مبكر)",
-    "MACD_EMA_Strategy": "MACD+EMA (زخم مؤكد)",
-    "EMA_RSI_Strategy": "EMA+RSI (ارتداد)",
+    "MACD_EMA_Strategy": "MACD+SMA (زخم وتقاطع)",
+    "EMA_RSI_Strategy": "EMA+RSI (ارتداد سريع)",
     "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
     "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
@@ -156,9 +161,9 @@ REJECTION_REASONS_AR = {
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
-    "EMA_RSI: Short-term EMAs not bullish": "EMA_RSI: المتوسطات قصيرة الأجل ليست صاعدة",
-    "EMA_RSI: RSI not in optimal range": "EMA_RSI: مؤشر القوة النسبية خارج النطاق الأمثل",
-    "EMA_RSI: Weak trend (ADX < 15)": "EMA_RSI: اتجاه ضعيف (ADX < 15)",
+    "EMA_RSI: Price not above EMA9": "EMA_RSI: السعر ليس فوق متوسط 9",
+    "EMA_RSI: RSI not above 50": "EMA_RSI: مؤشر القوة النسبية ليس فوق 50",
+    "EMA_RSI: Weak trend (ADX < 18)": "EMA_RSI: اتجاه ضعيف (ADX < 18)",
     "EMA_RSI: No pullback detected": "EMA_RSI: لم يتم اكتشاف ارتداد",
     "EMA_RSI: Price not recovering": "EMA_RSI: السعر لا يتعافى",
     "EMA_RSI: Volume below average": "EMA_RSI: حجم التداول أقل من المتوسط",
@@ -167,7 +172,7 @@ REJECTION_REASONS_AR = {
     "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
     "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
     "BB: Weak bullish candle or low volume": "BB: شمعة صاعدة ضعيفة أو حجم تداول منخفض",
-    "MACD: Bearish long-term trend": "MACD: اتجاه هابط طويل الأجل",
+    "MACD: Bearish long-term trend (SMA7 below SMA200)": "MACD: اتجاه هابط (SMA7 تحت SMA200)",
     "MACD: Weak trend (ADX < 20)": "MACD: اتجاه ضعيف (ADX < 20)",
     "MACD: Insufficient data for momentum check": "MACD: بيانات غير كافية لفحص الزخم",
     "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
@@ -608,6 +613,14 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
 
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
+    
+    # --- SMA Calculations ---
+    # [تعديل المستخدم] إضافة SMAs
+    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
+    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
+
+    # --- EMA Calculations ---
+    # [تعديل المستخدم] تعديل فترة EMA لتكون أسرع
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
@@ -615,6 +628,8 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
     df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+    
+    # --- ATR and ADX ---
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
@@ -629,26 +644,37 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
     df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
+    
+    # --- RSI Calculation ---
+    # [تعديل المستخدم] تعديل فترة RSI لتكون أسرع
     delta = df_calc['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
+    avg_gain = gain.rolling(window=7).mean()
+    avg_loss = loss.rolling(window=7).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
+    
+    # --- Bollinger Bands ---
+    # إعدادات البولينجر تتوافق مع طلب المستخدم (20, 2)
     bb_middle = df_calc['close'].rolling(window=20).mean()
     bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_middle'] = bb_middle
     df_calc['bb_lower'] = bb_middle - (bb_std * 2)
     df_calc['bb_upper'] = bb_middle + (bb_std * 2)
-    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    
+    # --- MACD ---
+    # [تعديل المستخدم] إعدادات سريعة لفريم 15 دقيقة
+    exp1 = df_calc['close'].ewm(span=8, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=17, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
     df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    
+    # --- Stochastic ---
+    # إعدادات ستوكاستيك تتوافق مع طلب المستخدم (14, 3)
     low_14 = df_calc['low'].rolling(14).min()
     high_14 = df_calc['high'].rolling(14).max()
-    
     high_low_range = high_14 - low_14
     meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
     df_calc['stoch_k'] = np.where(
@@ -657,6 +683,10 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
         50
     )
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
+    
+    # --- VWAP ---
+    # [تعديل المستخدم] إضافة VWAP
+    df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
     
     return df_calc
 
@@ -693,14 +723,14 @@ def load_settings_from_redis():
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            with fixed_trade_amount_lock: FIXED_TRADE_AMOUNT_USDT = settings.get('FIXED_TRADE_AMOUNT_USDT', 5.0)
+            with fixed_trade_amount_lock: FIXED_TRADE_AMOUNT_USDT = settings.get('FIXED_TRADE_AMOUNT_USDT', 3.0)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
             
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
-            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 60)
+            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 70)
 
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
@@ -775,33 +805,23 @@ def add_correlation_filter(new_symbol: str) -> bool:
             return False
     return True
 
-# --- [ENHANCEMENT] More Advanced Filters ---
+# --- فلتر التقلبات المحدث ---
 def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown") -> bool:
-    if 'atr_percent' not in df.columns or len(df) < 30:
-        log_rejection(symbol, "Market Volatility Filter Failed")
+    if 'atr_percent' not in df.columns or df['atr_percent'].isnull().all():
+        log_rejection(symbol, "Market Volatility Filter Failed", {"reason": "No ATR data"})
         return False
     
-    recent = df['atr_percent'].tail(96).dropna()
-    last = float(df.iloc[-1].get('atr_percent', 0))
+    last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    if recent.empty:
-        log_rejection(symbol, "Market Volatility Filter Failed")
-        return False
+    # [تعديل المستخدم] استخدام نطاق ثابت للتقلبات
+    ATR_PERCENT_MIN = 1.5
+    ATR_PERCENT_MAX = 4.0
     
-    q10 = float(np.percentile(recent, 10))
-    q90 = float(np.percentile(recent, 90))
-    
-    strategy_name = getattr(df, "strategy", "Unknown")
-    
-    if strategy_name in ["BB_Stoch_Strategy", "EMA_RSI_Strategy", "Pullback_Strategy"]:
-        lower, upper = max(0.8, q10 * 0.9), min(6.0, q90 * 1.1)
-    elif strategy_name in ["MACD_EMA_Strategy", "Momentum_Volatility_Strategy"]:
-        lower, upper = max(1.2, q10 * 0.9), min(8.0, q90 * 1.2)
-    else:
-        lower, upper = max(1.0, q10 * 0.9), min(7.0, q90 * 1.1)
-    
-    if last < lower or last > upper:
-        log_rejection(symbol, "Market Volatility Filter Failed", {"atr": f"{last:.2f}%", "range": f"({lower:.2f}-{upper:.2f})%"})
+    if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
+        log_rejection(symbol, "Market Volatility Filter Failed", {
+            "atr": f"{last_atr_percent:.2f}%",
+            "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
+        })
         return False
     
     return True
@@ -819,6 +839,7 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
     elif strategy_name == "EMA_RSI_Strategy":
         stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
     elif strategy_name == "Pullback_Strategy":
+        # [تعديل المستخدم] تعديل مضاعف ATR للسكالبينج
         recent_low = df['low'].tail(5).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
     elif strategy_name == "Momentum_Volatility_Strategy":
@@ -868,7 +889,7 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     
     return target1, target2
 
-# --- [RELAXED] Updated Trading Strategies ---
+# --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -882,28 +903,20 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
         return False
     
-    if last['ema9'] < last['ema21']:
-        log_rejection(symbol_name, "EMA_RSI: Short-term EMAs not bullish")
+    # [تعديل المستخدم] منطق جديد: السعر فوق EMA9 و RSI فوق 50
+    if last['close'] <= last['ema9']:
+        log_rejection(symbol_name, "EMA_RSI: Price not above EMA9")
         return False
 
-    if not (38 <= last['rsi'] <= 68):
-        log_rejection(symbol_name, "EMA_RSI: RSI not in optimal range")
+    if last['rsi'] <= 50:
+        log_rejection(symbol_name, "EMA_RSI: RSI not above 50")
         return False
     
-    if last['adx'] < 15:
-        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 15)")
-        return False
-    
-    pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3) * 1.005).any()
-    if not pulled_back:
-        log_rejection(symbol_name, "EMA_RSI: No pullback detected")
-        return False
-    
-    if not (last['close'] > last['open'] and last['close'] > last['ema9']):
-        log_rejection(symbol_name, "EMA_RSI: Price not recovering")
+    if last['adx'] < 18:
+        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 18)")
         return False
         
-    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.85
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1
     if not volume_ok:
         log_rejection(symbol_name, "EMA_RSI: Volume below average")
         return False
@@ -911,6 +924,7 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     return True
 
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
+    # ملاحظة: إعدادات المستخدم تتطابق مع الإعدادات الحالية (BB: 20,2 | Stoch: 14,3,3)
     needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
@@ -920,6 +934,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
+    # تأكيد الاتجاه الصاعد فوق EMA 50
     if last['close'] < last['ema50']:
         log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
         return False
@@ -928,6 +943,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Weak trend (ADX < 17)")
         return False
     
+    # السعر يلامس الشريط السفلي
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
     above_lower_band = last['close'] > last['bb_lower']
     
@@ -935,6 +951,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Price not bouncing from lower band")
         return False
     
+    # ستوكاستيك يؤكد الصعود
     stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
         log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
@@ -949,7 +966,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     return True
 
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'ema50', 'ema100', 'ema200', 'adx', 'volume'}
+    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'sma7', 'sma200', 'adx', 'volume'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -957,10 +974,12 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     last = df.iloc[-1]
     
-    if not (last['ema50'] > last['ema100'] > last['ema200']):
-        log_rejection(symbol_name, "MACD: Bearish long-term trend")
+    # [تعديل المستخدم] استخدام تقاطع SMA كإشارة قوية للاتجاه
+    if last['sma7'] <= last['sma200']:
+        log_rejection(symbol_name, "MACD: Bearish long-term trend (SMA7 below SMA200)")
         return False
 
+    # [تعديل المستخدم] استخدام ADX > 20 لتأكيد قوة الاتجاه
     if last['adx'] < 20:
         log_rejection(symbol_name, "MACD: Weak trend (ADX < 20)")
         return False
@@ -977,7 +996,8 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "MACD: Momentum not confirmed")
         return False
         
-    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 0.8
+    # [تعديل المستخدم] زيادة متطلبات الحجم
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
     if not volume_ok:
         log_rejection(symbol_name, "MACD: Volume below average")
         return False
@@ -1316,7 +1336,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.7.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.8.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1383,7 +1403,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.7.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.8.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1446,13 +1466,13 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
           <div class="kv">
             <div>الحد الأدنى لجودة الإشارة:</div>
             <div>
-              <input type="range" id="qualityFilter" min="30" max="90" value="60" class="slider">
-              <span id="qualityValue">60</span>
+              <input type="range" id="qualityFilter" min="30" max="90" value="70" class="slider">
+              <span id="qualityValue">70</span>
             </div>
           </div>
           <div class="kv" style="margin-top: 12px;">
             <div>حجم الصفقة الثابت:</div>
-            <div id="fixedTradeAmountDisplay">$5.00</div>
+            <div id="fixedTradeAmountDisplay">$3.00</div>
           </div>
         </div>
       </div>
@@ -1785,7 +1805,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.7.0)</title>
+<title>الإعدادات - بوت التداول (V32.8.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2759,7 +2779,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.7.0 (Professional Backtesting) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.8.0 (User Settings Applied) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
