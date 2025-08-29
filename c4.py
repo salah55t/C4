@@ -1,9 +1,8 @@
-# ملف c4.py - نسخة V32.5.0 (تطبيق حجم الصفقة الثابت)
+# ملف c4.py - نسخة V32.6.0 (دمج منطق الشراء والبيع)
 # --- وصف الإصدار:
-# 1.  [إصلاح جذري] استبدال منطق المخاطرة المئوية بحجم صفقة ثابت بالدولار (USDT) لتجنب أخطاء MIN_NOTIONAL.
-# 2.  [تحديث الواجهة] إضافة حقل جديد في صفحة الإعدادات للتحكم في حجم الصفقة الثابت.
-# 3.  [تحسين الموثوقية] إعادة كتابة دالة `calculate_position_size` لتكون أكثر قوة وتوفر سجلات واضحة.
-# 4.  [إزالة التعقيد] إزالة منطق حساب المخاطرة الديناميكي الذي لم يعد مستخدماً.
+# 1.  [دمج الهيكل] تم دمج منطق الشراء والبيع من النسخة المرجعية (V21) في النسخة الحالية.
+# 2.  [إعادة هيكلة] إزالة دالة `place_order` ودمج أوامر الشراء والبيع مباشرة في دوال `create_trade_signal` و `close_signal` لتحاكي الهيكل القديم.
+# 3.  [الحفاظ على التحسينات] تم الإبقاء على منطق "حجم الصفقة الثابت" الذي تم إضافته مؤخراً لضمان التوافق مع الأرصدة الصغيرة وتجنب أخطاء MIN_NOTIONAL.
 
 import time
 import os
@@ -47,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.5.0')
+logger = logging.getLogger('CryptoBotV32.6.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -86,7 +85,7 @@ COOLDOWN_MINUTES_AFTER_SL = 20
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-FIXED_TRADE_AMOUNT_USDT: float = 5.0 # ** متغير جديد لحجم الصفقة الثابت **
+FIXED_TRADE_AMOUNT_USDT: float = 5.0
 fixed_trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.4
@@ -687,7 +686,7 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -1199,21 +1198,6 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
-def place_order(symbol: str, side: str, quantity: Decimal, order_type: str = Client.ORDER_TYPE_MARKET) -> Optional[Dict]:
-    if not client: return None
-    logger.info(f"➡️ [{symbol}] Attempting to place REAL {side} order for quantity {quantity}.")
-    try:
-        order = client.create_order(symbol=symbol, side=side, type=order_type, quantity=str(quantity))
-        log_and_notify('info', f"TRADE REAL: Placed {side} order for {quantity} {symbol}.", "REAL_TRADE")
-        return order
-    except BinanceAPIException as e:
-        logger.error(f"❌ [{symbol}] Binance API Error on order placement: {e}")
-        send_enhanced_telegram_message(f"❌ *خطأ باينانس عند وضع أمر لـ {symbol}*\n`{e}`", force=True)
-        return None
-    except Exception as e:
-        logger.error(f"❌ [{symbol}] General error on order placement: {e}", exc_info=True)
-        return None
-
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     df.strategy = strategy_name 
     
@@ -1270,8 +1254,9 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     notional_value = float(quantity_dec) * entry_price
 
     if is_real:
-        order = place_order(symbol, Client.SIDE_BUY, quantity_dec)
-        if order:
+        try:
+            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {quantity_dec} of {symbol}")
+            order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=str(quantity_dec))
             avg_fill_price = sum(Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
             final_quantity = Decimal(order.get('executedQty', str(quantity_dec)))
             order_id = order.get('orderId', 'N/A')
@@ -1285,8 +1270,11 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
                 stop_loss_price, target_price_1, target_price_2, float(final_quantity),
                 is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
             )
-        else:
-            logger.error(f"❌ [Real Trade] Order placement failed for {symbol}. Trade not opened.")
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Trade] Binance API Error for {symbol}: {e}")
+            send_enhanced_telegram_message(f"❌ *خطأ في صفقة حقيقية لـ {symbol}*\n`{e}`", force=True)
+        except Exception as e:
+            logger.error(f"❌ [Real Trade] CRITICAL ERROR creating real trade for {symbol}: {e}", exc_info=True)
     else: # Paper Trading
         save_signal_to_db(symbol, entry_price, trade_levels, strategy_name, False, float(quantity_dec), signal_details)
         send_trade_open_notification(
@@ -1327,7 +1315,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.5.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.6.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1394,7 +1382,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.5.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.6.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1796,7 +1784,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.5.0)</title>
+<title>الإعدادات - بوت التداول (V32.6.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2309,10 +2297,12 @@ def update_signal_in_db(signal_id, updates):
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
+    
     with signal_cache_lock:
         if symbol not in open_signals_cache or open_signals_cache[symbol]['id'] != signal_id:
             logger.warning(f"[Close Signal] Attempted to close already closed or non-existent signal {signal_id} for {symbol}.")
             return
+
     if signal.get('is_real_trade'):
         try:
             quantity_in_bot = Decimal(str(signal.get('quantity', 0)))
@@ -2321,19 +2311,25 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                 asset_balance_info = client.get_asset_balance(asset=asset)
                 available_on_exchange = Decimal(asset_balance_info.get('free', '0.0'))
                 logger.info(f"[Real Close] For {symbol}: Bot wants to sell {quantity_in_bot}, Available on Binance: {available_on_exchange}")
+                
                 quantity_to_sell = min(quantity_in_bot, available_on_exchange)
+                
                 if quantity_to_sell > 0:
                     adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
+                    
                     if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
-                        sell_order = place_order(symbol, Client.SIDE_SELL, adjusted_quantity_to_sell)
-                        if not sell_order:
-                            log_and_notify('error', f"CRITICAL: Final sell order placement failed for {symbol}. Trade remains open.", "TRADE_ERROR")
-                            return
-                    else: logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero. Skipping API sell.")
-                else: logger.warning(f"⚠️ [Real Close] No available quantity of {asset} to sell for {symbol}. Closing in DB only.")
+                        logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity_to_sell} of {symbol} due to {reason}")
+                        client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=str(adjusted_quantity_to_sell))
+                    else:
+                        logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero. Skipping API sell.")
+                else:
+                    logger.warning(f"⚠️ [Real Close] No available quantity of {asset} to sell for {symbol}. Closing in DB only.")
+        except BinanceAPIException as e:
+            logger.error(f"❌ [Real Close] Binance API Error for {symbol}: {e}")
+            send_enhanced_telegram_message(f"❌ *خطأ في تنفيذ إغلاق لـ {symbol}*\n`{e}`", force=True)
         except Exception as e:
-            logger.error(f"❌ [{symbol}] Critical error during real trade closure: {e}", exc_info=True)
-            return
+            logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
+
     profit = ((closing_price - entry_price) / entry_price) * 100
     with consecutive_losses_lock:
         if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
@@ -2379,7 +2375,12 @@ def trade_management_loop():
                     part_qty_to_close = initial_quantity * 0.5
                     if signal.get('is_real_trade'):
                         adjusted_qty = adjust_quantity_to_lot_size(symbol, part_qty_to_close)
-                        if adjusted_qty and adjusted_qty > 0: place_order(symbol, Client.SIDE_SELL, adjusted_qty)
+                        if adjusted_qty and adjusted_qty > 0:
+                             try:
+                                logger.info(f"💰 [Real Close] Executing PARTIAL MARKET SELL for {adjusted_qty} of {symbol} at TP1")
+                                client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=str(adjusted_qty))
+                             except Exception as e:
+                                logger.error(f"❌ [Partial Close] Error for {symbol}: {e}")
                     
                     new_sl = max(stop_loss, entry_price)
                     updates = {"quantity": remaining_qty - part_qty_to_close, "stop_loss": new_sl, "status": "updated"}
@@ -2463,7 +2464,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.5.0 (Fixed Sizing Logic) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.6.0 (Integrated Order Logic) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
