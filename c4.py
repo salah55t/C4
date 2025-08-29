@@ -2805,7 +2805,7 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
 
 
-# ========== Elliott Wave Strategy (Integrated) ==========
+# ========== Elliott Wave Strategy (Integrated, fixed) ==========
 
 
 # -*- coding: utf-8 -*-
@@ -2819,7 +2819,6 @@ Elliott Wave Strategy Module
 يمكن استخدامها كوحدة مستقلة أو دمجها في بوت التداول.
 """
 
-from __future__ import annotations
 
 import json
 import math
