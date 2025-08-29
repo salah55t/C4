@@ -2803,3 +2803,586 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+
+# ========== Elliott Wave Strategy (Integrated) ==========
+
+
+# -*- coding: utf-8 -*-
+"""
+Elliott Wave Strategy Module
+============================
+وحدة متكاملة لتطبيق وتحسين نهج موجات إليوت على بيانات الأسعار.
+- تشمل: حساب المؤشرات (RSI/ATR/ADX)، اكتشاف نقاط التذبذب، تحليل أنماط إليوت (اندفاعية/تصحيحية)،
+  التحقق من صحة الأنماط، حساب درجة الثقة، إدارة المخاطر (وقف الخسارة الديناميكي)،
+  التسجيل والمراقبة، واختبارات بسيطة.
+يمكن استخدامها كوحدة مستقلة أو دمجها في بوت التداول.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import lru_cache
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+# إعداد مسجل الرسائل
+logger = logging.getLogger("elliott_wave")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+
+# دعم Redis (اختياري)
+try:
+    import redis  # type: ignore
+    redis_client = redis.Redis(host="localhost", port=6379, db=0)
+    # محاولة PING للتأكد من الاتصال
+    try:
+        redis_client.ping()
+    except Exception:
+        redis_client = None
+except Exception:
+    redis_client = None
+
+
+# ترميز JSON يدعم NumPy
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):  # noqa: N802
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super().default(obj)
+
+
+# دالة تسجيل رفض إشارة
+def log_rejection(symbol: str, reason: str) -> None:
+    logger.info(f"[Reject] {symbol}: {reason}")
+
+
+# ==============================
+# حساب المؤشرات الفنية الأساسية
+# ==============================
+
+def _ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+
+def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    # تجنب القسمة على صفر
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50.0)
+
+
+def calc_atr(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series]:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(period).mean()
+    atr_percent = (atr / close) * 100.0
+    return atr.fillna(method="bfill"), atr_percent.fillna(0.0)
+
+
+def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    tr_s = tr.rolling(period).sum()
+    plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(period).sum() / tr_s
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(period).sum() / tr_s
+
+    dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0)
+    adx = dx.rolling(period).mean().fillna(0)
+    return adx
+
+
+# ==============================
+# مميزات إضافية خاصة بموجات إليوت
+# ==============================
+
+def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    حساب جميع الخصائص/المؤشرات المطلوبة، مع إضافة حقول داعمة لموجات إليوت.
+    يتوقع وجود أعمدة: ['high','low','close','volume'] على الأقل.
+    """
+    df_calc = df.copy()
+
+    # مؤشرات أساسية
+    if "rsi" not in df_calc:
+        df_calc["rsi"] = calc_rsi(df_calc["close"])
+    if "atr" not in df_calc or "atr_percent" not in df_calc:
+        atr, atr_pct = calc_atr(df_calc)
+        df_calc["atr"] = atr
+        df_calc["atr_percent"] = atr_pct
+    if "adx" not in df_calc:
+        df_calc["adx"] = calc_adx(df_calc)
+
+    # نقاط التذبذب البسيطة (مساعدة)
+    win = 5
+    df_calc["swing_high"] = (
+        df_calc["high"].rolling(window=win, center=True).max() == df_calc["high"]
+    )
+    df_calc["swing_low"] = (
+        df_calc["low"].rolling(window=win, center=True).min() == df_calc["low"]
+    )
+
+    # نسب فيبوناتشي المرجعية
+    df_calc["fib_38_2"] = df_calc["close"] * 0.382
+    df_calc["fib_61_8"] = df_calc["close"] * 0.618
+
+    return df_calc
+
+
+# ==============================
+# اكتشاف نقاط التذبذب (Swing Points)
+# ==============================
+
+def detect_swing_points(df: pd.DataFrame, window: int = 5) -> List[Dict]:
+    """
+    اكتشاف القمم والقيعان المحلية بأسلوب مشابه لـ ZigZag.
+    يعيد قائمة من القواميس: {'index','price','type','timestamp'}.
+    """
+    swing_points: List[Dict] = []
+    if len(df) < (2 * window + 1):
+        return swing_points
+
+    highs = df["high"].values
+    lows = df["low"].values
+
+    for i in range(window, len(df) - window):
+        current_high = highs[i]
+        current_low = lows[i]
+
+        # قمة محلية
+        is_high = True
+        for j in range(i - window, i + window + 1):
+            if j != i and highs[j] > current_high:
+                is_high = False
+                break
+
+        # قاع محلي
+        is_low = True
+        for j in range(i - window, i + window + 1):
+            if j != i and lows[j] < current_low:
+                is_low = False
+                break
+
+        if is_high or is_low:
+            swing_points.append(
+                {
+                    "index": i,
+                    "price": float(current_high if is_high else current_low),
+                    "type": "high" if is_high else "low",
+                    "timestamp": df.index[i],
+                }
+            )
+    # إزالة التكرارات المتجاورة من نفس النوع
+    deduped: List[Dict] = []
+    for sp in swing_points:
+        if deduped and deduped[-1]["type"] == sp["type"]:
+            # احتفظ بالأبعد سعرياً
+            if (sp["type"] == "high" and sp["price"] >= deduped[-1]["price"]) or (
+                sp["type"] == "low" and sp["price"] <= deduped[-1]["price"]
+            ):
+                deduped[-1] = sp
+        else:
+            deduped.append(sp)
+    return deduped
+
+
+# =====================================
+# البحث عن أنماط الموجات وتحليلها/تقييمها
+# =====================================
+
+def find_impulse_pattern(points: List[Dict]) -> Optional[List[Dict]]:
+    """
+    البحث عن نمط اندفاعي 1-2-3-4-5 بشكل مبسّط.
+    نتوقع تسلسلاً: low -> high -> higher low -> higher high -> higher low (اتجاه صاعد).
+    (يوجد تبسيط لتجنّب التعقيد المفرط).
+    """
+    if len(points) < 5:
+        return None
+
+    for i in range(len(points) - 4):
+        w1, w2, w3, w4, w5 = points[i : i + 5]
+
+        if not (w1["type"] == "low" and w2["type"] == "high" and w3["type"] == "low" and w4["type"] == "high" and w5["type"] == "low"):
+            continue
+
+        # قواعد أساسية مبسطة لنمط صاعد
+        if not (w2["price"] > w1["price"]):  # موجة 1 -> 2 صاعدة
+            continue
+        if not (w3["price"] > w1["price"] * 0.9):  # لا تعود أقل بكثير من بداية 1 (تخفيف)
+            continue
+        if not (w4["price"] > w2["price"]):  # قمة أعلى (موجة 3)
+            continue
+        if not (w5["price"] > w3["price"]):  # قاع أعلى (موجة 4)
+            continue
+
+        return [w1, w2, w3, w4, w5]
+    return None
+
+
+def find_corrective_pattern(points: List[Dict]) -> Optional[List[Dict]]:
+    """
+    البحث عن نمط تصحيحي ABC مبسّط:
+    نتوقع: high -> low -> lower high  (في سياق هابط) أو العكس لسياق صاعد.
+    سنكتفي بمخطط: A (انعكاس) ثم B (ارتداد) ثم C (استكمال التصحيح).
+    """
+    if len(points) < 3:
+        return None
+
+    for i in range(len(points) - 2):
+        a, b, c = points[i : i + 3]
+        # نمط تصحيحي هابط: high -> low -> lower high
+        if a["type"] == "high" and b["type"] == "low" and c["type"] == "high":
+            if b["price"] < a["price"] and c["price"] < a["price"] and c["price"] < (a["price"] - (a["price"] - b["price"]) * 0.618):
+                return [a, b, c]
+        # نمط تصحيحي صاعد: low -> high -> higher low
+        if a["type"] == "low" and b["type"] == "high" and c["type"] == "low":
+            if b["price"] > a["price"] and c["price"] > a["price"] and c["price"] > (a["price"] + (b["price"] - a["price"]) * 0.382):
+                return [a, b, c]
+    return None
+
+
+def calculate_pattern_confidence(pattern: List[Dict], df: pd.DataFrame) -> float:
+    """
+    حساب ثقة النمط بناءً على الحجم/ADX/RSI بشكل مضاعِف (0-100).
+    """
+    confidence = 50.0  # خط أساس
+    volume_factor = 1.0
+    for wave in pattern:
+        idx = int(wave["index"])
+        if 0 <= idx < len(df):
+            current_volume = float(df.iloc[idx].get("volume", np.nan))
+            avg_volume = float(df["volume"].rolling(20).mean().iloc[idx])
+            if not np.isnan(current_volume) and not np.isnan(avg_volume) and current_volume > avg_volume * 1.2:
+                volume_factor *= 1.1
+
+    adx_factor = 1.0
+    if len(df) > 0 and "adx" in df.columns:
+        last_adx = float(df.iloc[-1].get("adx", 0.0))
+        if last_adx > 25:
+            adx_factor = 1.2
+        elif last_adx > 20:
+            adx_factor = 1.1
+
+    rsi_factor = 1.0
+    if len(df) > 0 and "rsi" in df.columns:
+        last_rsi = float(df.iloc[-1].get("rsi", 50.0))
+        if 45 <= last_rsi <= 65:
+            rsi_factor = 1.1
+
+    confidence = min(100.0, confidence * volume_factor * adx_factor * rsi_factor)
+    return float(confidence)
+
+
+def analyze_elliott_wave_pattern(df: pd.DataFrame, swing_points: List[Dict]) -> Optional[Dict]:
+    """
+    تحليل نقاط التذبذب للعثور على أنماط موجات إليوت (اندفاعية أو تصحيحية).
+    يعيد قاموساً يحوي النوع والموجات ودرجة الثقة، أو None.
+    """
+    if len(swing_points) < 3:
+        return None
+
+    points = sorted(swing_points, key=lambda x: x["index"])
+
+    impulse = find_impulse_pattern(points)
+    if impulse:
+        return {
+            "type": "impulse",
+            "waves": impulse,
+            "confidence": calculate_pattern_confidence(impulse, df),
+        }
+
+    corrective = find_corrective_pattern(points)
+    if corrective:
+        return {
+            "type": "corrective",
+            "waves": corrective,
+            "confidence": calculate_pattern_confidence(corrective, df),
+        }
+
+    return None
+
+
+def validate_elliott_wave_pattern(pattern: Dict) -> bool:
+    """
+    التحقق من صحة نمط موجات إليوت بالقواعد الأساسية المبسطة.
+    """
+    ptype = pattern.get("type", "")
+    waves = pattern.get("waves", [])
+
+    if ptype == "impulse" and len(waves) == 5:
+        # قاعدة: الموجة 3 ليست الأقصر
+        wave1_len = abs(waves[1]["price"] - waves[0]["price"])
+        wave3_len = abs(waves[3]["price"] - waves[2]["price"])
+        wave5_len = abs(waves[4]["price"] - waves[3]["price"])
+        if wave3_len <= min(wave1_len, wave5_len):
+            return False
+
+        # قاعدة: الموجة 4 لا تدخل منطقة الموجة 1 (تقريباً)
+        # في تسلسلنا: w1(low)->w2(high)->w3(low)->w4(high)->w5(low)
+        # منطقة الموجة 1 تقريباً بين w1 و w2، نتحقق أن w4 (قاع/قمة سابقة) لا تُبطِلها
+        if waves[3]["price"] < waves[1]["price"] * 0.95:
+            return False
+
+        # نسب فيبوناتشي بسيطة لاسترجاع الموجة 2 (بين 38.2% و 61.8%)
+        denom = (waves[1]["price"] - waves[0]["price"])
+        if denom == 0:
+            return False
+        retr2 = (waves[1]["price"] - waves[2]["price"]) / denom
+        if not (0.382 <= retr2 <= 0.786):  # سعة أوسع عملياً
+            return False
+
+        return True
+
+    if ptype == "corrective" and len(waves) >= 3:
+        a, b, c = waves[:3]
+        # قاعدة عامة: B لا تتجاوز بداية A في النمط القياسي
+        if a["type"] == "high" and b["type"] == "low" and c["type"] == "high":
+            if b["price"] >= a["price"]:
+                return False
+            return True
+        if a["type"] == "low" and b["type"] == "high" and c["type"] == "low":
+            if b["price"] <= a["price"]:
+                return False
+            return True
+
+    return False
+
+
+# ==============================
+# إدارة المخاطر وتسجيل التحليل
+# ==============================
+
+def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
+    """
+    حساب وقف خسارة ديناميكي. يُفضَّل strategy_name == "Elliott_Wave_Strategy"
+    """
+    if strategy_name == "Elliott_Wave_Strategy":
+        swing_points = detect_swing_points(df)
+        recent_lows = [sp for sp in swing_points if sp["type"] == "low"]
+        if recent_lows:
+            last_low = float(recent_lows[-1]["price"])
+            atr_value = float(df.iloc[-1].get("atr", 0.0))
+            stop_loss = min(last_low * 0.995, entry_price - (atr_value * 1.8))
+            return float(stop_loss)
+
+    last = df.iloc[-1]
+    atr_value = float(last.get("atr", 0.0))
+    return float(entry_price - (atr_value * 2.0))
+
+
+def log_elliott_wave_analysis(symbol: str, pattern: Dict) -> None:
+    """
+    تسجيل تحليل موجات إليوت للتصحيح والتحسين.
+    """
+    try:
+        analysis_log = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol,
+            "pattern_type": pattern["type"],
+            "confidence": float(pattern.get("confidence", 0.0)),
+            "waves_count": int(len(pattern.get("waves", []))),
+        }
+
+        if redis_client:
+            redis_client.lpush("elliott_wave_analysis", json.dumps(analysis_log, cls=NpEncoder))
+
+        logger.info(
+            f"[Elliott Wave] Analysis for {symbol}: "
+            f"{analysis_log['pattern_type']} pattern with {analysis_log['confidence']:.1f}% confidence"
+        )
+    except Exception as e:
+        logger.error(f"\u274c [Elliott Wave] Error logging analysis: {e}")
+
+
+# ==============================
+# الاستراتيجية الرئيسية (التحقق)
+# ==============================
+
+def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
+    """
+    استراتيجية متقدمة لاكتشاف موجات إليوت.
+    تطبق أفضل الممارسات من المصادر المفتوحة والمجتمع.
+    ترجع True عند توافر إشارة تداول محتملة.
+    """
+    needed = {"high", "low", "close", "volume", "adx", "rsi", "atr_percent"}
+    symbol_name = getattr(df, "name", "Unknown")
+
+    if len(df) < 100 or not needed.issubset(df.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    # 1) قوة الاتجاه العام
+    if float(last["adx"]) < 20:
+        log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
+        return False
+
+    # 2) حجم التداول
+    if float(last["volume"]) < float(df["volume"].rolling(20).mean().iloc[-1]) * 0.8:
+        log_rejection(symbol_name, "Elliott Wave: Volume too low")
+        return False
+
+    # 3) نطاق RSI
+    if not (40 <= float(last["rsi"]) <= 70):
+        log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
+        return False
+
+    # 4) اكتشاف الأطراف
+    swing_points = detect_swing_points(df)
+    if len(swing_points) < 5:
+        log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
+        return False
+
+    # 5) تحليل موجات إليوت
+    wave_pattern = analyze_elliott_wave_pattern(df, swing_points)
+    if wave_pattern is None:
+        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+        return False
+
+    # 6) التحقق من صحة النمط
+    if not validate_elliott_wave_pattern(wave_pattern):
+        log_rejection(symbol_name, "Elliott Wave: Invalid pattern structure")
+        return False
+
+    # 7) التحقق من التقلبات
+    atr_percent = float(last.get("atr_percent", 0.0))
+    if not (1.5 <= atr_percent <= 5.0):
+        log_rejection(symbol_name, "Elliott Wave: Volatility not in optimal range")
+        return False
+
+    # ثقة النمط
+    if float(wave_pattern.get("confidence", 0.0)) <= 60.0:
+        log_rejection(symbol_name, "Elliott Wave: Confidence too low")
+        return False
+
+    # تسجيل التحليل
+    log_elliott_wave_analysis(symbol_name, wave_pattern)
+    return True
+
+
+# ==============================
+# التخزين المؤقت والمراقبة والاختبارات
+# ==============================
+
+def _hash_df_for_cache(df: pd.DataFrame, cols: Tuple[str, ...] = ("high","low","close","volume")) -> str:
+    """إنشاء تجزئة بسيطة للبيانات لاستخدامها كمفتاح كاش."""
+    sub = df.loc[:, [c for c in cols if c in df.columns]].copy()
+    # استخدم آخر 500 صف لتقليل الحجم
+    sub = sub.tail(500)
+    # تحويل إلى bytes مستقرة
+    arr = np.ascontiguousarray(sub.values)
+    return str(hash(arr.tobytes())) + f"|{len(sub)}"
+
+
+@lru_cache(maxsize=256)
+def cached_swing_points_detection(df_key: str, window: int = 5) -> List[Dict]:
+    """
+    دالة كاش تعتمد على مفتاح تجزئة للـ DataFrame.
+    ملاحظة: يجب تمرير df_key الناتج من _hash_df_for_cache.
+    (الغرض توضيحي؛ في النظام الحقيقي سنربط المفتاح بالبيانات خارجاً).
+    """
+    # في هذا المثال لا يمكننا إعادة بناء DataFrame من المفتاح فقط،
+    # لذلك هذه الدالة تُستخدم فقط كمثال هيكلي.
+    # يمكن ربطها بمخزن بيانات مشترك إذا لزم.
+    return []
+
+
+def monitor_elliott_wave_performance(threshold: float = 70.0) -> Optional[float]:
+    """
+    قراءة سجل التحليلات من Redis (إن وجد) وحساب معدل النجاح التقريبي.
+    """
+    if not redis_client:
+        logger.info("Redis not available; skipping performance monitor.")
+        return None
+    analyses = redis_client.lrange("elliott_wave_analysis", 0, -1)
+    if not analyses:
+        logger.info("No analyses recorded yet.")
+        return None
+    success = sum(1 for a in analyses if json.loads(a)["confidence"] > threshold)
+    rate = success / len(analyses)
+    logger.info(f"[Elliott Wave] Success rate: {rate:.2%}")
+    return rate
+
+
+# ==============================
+# اختبارات مبسطة
+# ==============================
+
+def test_swing_points_detection() -> None:
+    test_data = pd.DataFrame(
+        {
+            "high": [10, 12, 15, 13, 11, 14, 16, 14, 12],
+            "low": [8, 10, 12, 10, 9, 11, 13, 11, 10],
+            "close": [9, 11, 14, 12, 10, 13, 15, 13, 11],
+            "volume": [100]*9,
+        }
+    )
+    test_data = calculate_all_features(test_data)
+    swing_points = detect_swing_points(test_data)
+    assert len(swing_points) > 0, "Swing points should not be empty"
+    print("✅ Swing points detection test passed (", len(swing_points), "points)")
+
+
+def _quick_sanity_check() -> None:
+    # توليد بيانات عشوائية لسلامة التنفيذ
+    np.random.seed(42)
+    n = 300
+    base = np.cumsum(np.random.randn(n)) + 100
+    high = base + np.random.rand(n) * 2
+    low = base - np.random.rand(n) * 2
+    close = base + (np.random.rand(n) - 0.5) * 1.0
+    volume = (np.random.rand(n) * 1000 + 500).astype(int)
+    df = pd.DataFrame({"high": high, "low": low, "close": close, "volume": volume})
+    df.name = "SANITY_SYMBOL"
+    df = calculate_all_features(df)
+
+    ok = check_elliott_wave_strategy_enhanced(df)
+    print("Strategy decision:", ok)
+
+
+if __name__ == "__main__":
+    test_swing_points_detection()
+    _quick_sanity_check()
