@@ -649,6 +649,7 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
 
+
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     """حساب المؤشرات المطلوبة لجميع الاستراتيجيات (5م و15م)."""
     df_calc = df.copy()
@@ -722,6 +723,33 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
         df_calc['orb_low'] = np.nan
 
     return df_calc
+
+
+def load_open_signals_to_cache():
+    """Load open signals from DB into the in-memory cache 'open_signals_cache'."""
+    if not check_db_connection() or not conn: 
+        logger.warning("Skipping load_open_signals_to_cache: DB not available")
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM signals WHERE status IN ('open','updated');")
+            rows = cur.fetchall()
+            with signal_cache_lock:
+                open_signals_cache.clear()
+                for r in rows:
+                    try:
+                        # normalize timestamps if present
+                        if 'created_at' in r and hasattr(r['created_at'], 'isoformat'):
+                            r['created_at'] = r['created_at'].isoformat()
+                        if 'updated_at' in r and hasattr(r['updated_at'], 'isoformat'):
+                            r['updated_at'] = r['updated_at'].isoformat()
+                    except Exception:
+                        pass
+                    # use symbol as key if available, else id
+                    key = r.get('symbol') or str(r.get('id'))
+                    open_signals_cache[key] = dict(r)
+    except Exception as e:
+        logger.error(f"❌ [Cache] Failed to load open signals: {e}")
 
 
 def load_notifications_to_cache():
