@@ -880,46 +880,7 @@ def calculate_dynamic_risk_per_trade_enhanced() -> float:
         with risk_per_trade_lock: return RISK_PER_TRADE_PERCENT
 
 # --- [ENHANCEMENT] Dynamic Stop Loss & Take Profit ---
-def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
-    last = df.iloc[-1]
-    atr_value = last.get('atr', 0)
-    
-    if strategy_name == "BB_Stoch_Strategy":
-        recent_low = df['low'].tail(3).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
-    elif strategy_name == "MACD_EMA_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
-    elif strategy_name == "EMA_RSI_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
-    elif strategy_name == "Pullback_Strategy":
-        recent_low = df['low'].tail(5).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
-    elif strategy_name == "Momentum_Volatility_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.2))
-    elif strategy_name == "Elliott_Wave_Strategy":
-        lows = df['low'].values
-        try:
-            support_idx = argrelextrema(lows, np.less, order=5)[0]
-            if len(support_idx) > 0:
-                recent_support = lows[support_idx[-1]]
-                stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
-            else:
-                stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
-        except Exception as e:
-            logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
-            stop_loss = entry_price - (atr_value * 2.0)
-    else:
-        stop_loss = entry_price - (atr_value * 2.0)
-    
-    max_stop_distance = entry_price * 0.05
-    if entry_price - stop_loss > max_stop_distance:
-        stop_loss = entry_price - max_stop_distance
-    
-    return stop_loss
 
-def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
-    risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
 
     if strategy_name == "BB_Stoch_Strategy":
         rr1, rr2 = 2.5, 4.0
@@ -942,12 +903,6 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     return target1, target2
 
 # --- [RELAXED] Updated Trading Strategies ---
-def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
 
     last = df.iloc[-1]
     
@@ -983,12 +938,6 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -1021,12 +970,6 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     return True
 
-def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'ema50', 'ema100', 'ema200', 'adx', 'volume'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
     
     last = df.iloc[-1]
     
@@ -1057,12 +1000,6 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema21', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
 
     last = df.iloc[-1]
     
@@ -1090,12 +1027,6 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'atr_percent', 'ema9', 'ema21', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
 
     last = df.iloc[-1]
     
@@ -1127,12 +1058,6 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'high', 'low', 'close', 'ema21', 'ema50', 'ema200', 'adx', 'volume', 'rsi', 'macd'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 100 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
 
     last = df.iloc[-1]
     
@@ -2552,3 +2477,444 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
+
+
+# ---------- BEGIN TUNING PATCH (appended) ----------
+# This patch applies improved filters and replaces strategy check functions.
+# To use: import this module or run apply_tuning() after importing.
+import logging
+from decimal import Decimal
+
+try:
+    import c4 as _c4_original  # uses the original module if available in the same directory
+except Exception:
+    _c4_original = None
+
+logger = logging.getLogger("c4_tuning_patch")
+
+RECOMMENDED_FILTERS = {
+    "BB_Stoch_Strategy": {
+        "profile": "Reversal",
+        "adx_threshold": 18,
+        "min_history": 50,
+        "lower_band_lookback": 3,
+        "stoch_k_oversold": 30,
+        "volume_multiplier": 0.8,
+        "atr_stop_mult": 1.5,
+        "rr1": 2.5, "rr2": 4.0
+    },
+    "MACD_EMA_Strategy": {
+        "profile": "Strict",
+        "adx_threshold": 20,
+        "min_history": 200,
+        "macd_hist_window": 4,
+        "volume_multiplier": 0.85,
+        "atr_stop_mult": 2.0,
+        "rr1": 2.0, "rr2": 3.5
+    },
+    "EMA_RSI_Strategy": {
+        "profile": "Moderate",
+        "adx_threshold": 15,
+        "min_history": 200,
+        "rsi_min": 38, "rsi_max": 68,
+        "pulled_back_lookback": 3,
+        "volume_multiplier": 0.85,
+        "atr_stop_mult": 1.8,
+        "rr1": 2.2, "rr2": 3.8
+    },
+    "Pullback_Strategy": {
+        "profile": "Reversal",
+        "adx_threshold": 16,
+        "min_history": 200,
+        "pulled_back_lookback": 3,
+        "volume_multiplier": 1.0,
+        "atr_stop_mult": 1.5,
+        "rr1": 2.3, "rr2": 4.0
+    },
+    "Momentum_Volatility_Strategy": {
+        "profile": "Strict",
+        "adx_threshold": 22,
+        "min_history": 50,
+        "atr_min": 1.5, "atr_max": 6.5,
+        "rsi_min": 48, "rsi_max": 72,
+        "volume_multiplier": 1.1,
+        "atr_stop_mult": 2.2,
+        "rr1": 1.8, "rr2": 3.2
+    },
+    "Elliott_Wave_Strategy": {
+        "profile": "Strict",
+        "adx_threshold": 22,
+        "min_history": 100,
+        "volume_multiplier": 1.1,
+        "rsi_min": 38, "rsi_max": 68,
+        "wave2_max_retracement": 61.8,
+        "atr_stop_mult": 2.0,
+        "rr1": 2.5, "rr2": 4.5
+    }
+}
+
+# helper to get cfg (works when c4 module is present)
+def _get_cfg(strategy_name: str, key: str, default=None):
+    try:
+        with _c4_original.strategy_filters_lock:
+            sconf = _c4_original.STRATEGY_FILTER_CONFIG.get(strategy_name, {})
+        return sconf.get(key, RECOMMENDED_FILTERS.get(strategy_name, {}).get(key, default))
+    except Exception:
+        return RECOMMENDED_FILTERS.get(strategy_name, {}).get(key, default)
+
+# Implement tuned check functions that mirror structure used in c4.py
+def check_bb_stoch_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('BB_Stoch_Strategy', 'min_history', 50))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    if last['close'] < last.get('ema50', 0):
+        _c4_original.log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
+        return False
+
+    adx_th = float(_get_cfg('BB_Stoch_Strategy', 'adx_threshold', 18))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, f"BB: Weak trend (ADX < {adx_th})")
+        return False
+
+    lb = int(_get_cfg('BB_Stoch_Strategy', 'lower_band_lookback', 3))
+    touched_lower_band = (df['low'].tail(lb) <= df['bb_lower'].tail(lb)).any()
+    above_lower_band = last['close'] > last['bb_lower']
+    if not (touched_lower_band and above_lower_band):
+        _c4_original.log_rejection(symbol_name, "BB: Price not bouncing from lower band")
+        return False
+
+    stoch_k_oversold = float(_get_cfg('BB_Stoch_Strategy', 'stoch_k_oversold', 30))
+    stoch_confirm = (prev['stoch_k'] < stoch_k_oversold) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
+    if not stoch_confirm:
+        _c4_original.log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
+        return False
+
+    vol_mult = float(_get_cfg('BB_Stoch_Strategy', 'volume_multiplier', 0.8))
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * vol_mult
+    if not (last['close'] > last['open'] and volume_ok):
+        _c4_original.log_rejection(symbol_name, "BB: Weak bullish candle or low volume")
+        return False
+
+    return True
+
+def check_macd_ema_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('MACD_EMA_Strategy', 'min_history', 200))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    if not (last.get('ema50',0) > last.get('ema100',0) > last.get('ema200',0)):
+        _c4_original.log_rejection(symbol_name, "MACD: Bearish long-term trend")
+        return False
+
+    adx_th = float(_get_cfg('MACD_EMA_Strategy', 'adx_threshold', 20))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, f"MACD: Weak trend (ADX < {adx_th})")
+        return False
+
+    hist_window = int(_get_cfg('MACD_EMA_Strategy', 'macd_hist_window', 4))
+    hist = df['macd_hist'].tail(hist_window).values
+    if len(hist) < hist_window:
+        _c4_original.log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
+        return False
+
+    macd_ok = last.get('macd',0) > 0 and last.get('macd_hist',0) > 0
+    hist_accelerating = all(hist[i] > hist[i-1] for i in range(1, len(hist)))
+    if not (macd_ok and hist_accelerating):
+        _c4_original.log_rejection(symbol_name, "MACD: Momentum not confirmed")
+        return False
+
+    vol_mult = float(_get_cfg('MACD_EMA_Strategy', 'volume_multiplier', 0.85))
+    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * vol_mult
+    if not volume_ok:
+        _c4_original.log_rejection(symbol_name, "MACD: Volume below average")
+        return False
+
+    return True
+
+def check_ema_rsi_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('EMA_RSI_Strategy', 'min_history', 200))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    if last.get('ema50',0) < last.get('ema200',0):
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
+        return False
+
+    if last.get('ema9',0) < last.get('ema21',0):
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: Short-term EMAs not bullish")
+        return False
+
+    rsi_min = float(_get_cfg('EMA_RSI_Strategy', 'rsi_min', 38))
+    rsi_max = float(_get_cfg('EMA_RSI_Strategy', 'rsi_max', 68))
+    if not (rsi_min <= last.get('rsi',0) <= rsi_max):
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: RSI not in optimal range")
+        return False
+
+    adx_th = float(_get_cfg('EMA_RSI_Strategy', 'adx_threshold', 15))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, f"EMA_RSI: Weak trend (ADX < {adx_th})")
+        return False
+
+    pulled_back_lb = int(_get_cfg('EMA_RSI_Strategy', 'pulled_back_lookback', 3))
+    pulled_back = (df['low'].tail(pulled_back_lb) <= df['ema21'].tail(pulled_back_lb) * 1.005).any()
+    if not pulled_back:
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: No pullback detected")
+        return False
+
+    if not (last['close'] > last['open'] and last['close'] > last.get('ema9',0)):
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: Price not recovering")
+        return False
+
+    vol_mult = float(_get_cfg('EMA_RSI_Strategy', 'volume_multiplier', 0.85))
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * vol_mult
+    if not volume_ok:
+        _c4_original.log_rejection(symbol_name, "EMA_RSI: Volume below average")
+        return False
+
+    return True
+
+def check_pullback_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('Pullback_Strategy', 'min_history', 200))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    if not (last.get('ema21',0) > last.get('ema50',0) > last.get('ema200',0)):
+        _c4_original.log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
+        return False
+
+    adx_th = float(_get_cfg('Pullback_Strategy', 'adx_threshold', 16))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, f"Pullback: Weak trend (ADX < {adx_th})")
+        return False
+
+    lb = int(_get_cfg('Pullback_Strategy', 'pulled_back_lookback', 3))
+    pulled_back = (df['low'].tail(lb) <= df['ema21'].tail(lb)).any()
+    if not pulled_back:
+        _c4_original.log_rejection(symbol_name, "Pullback: No pullback detected")
+        return False
+
+    if not (last['close'] > last['open']):
+        _c4_original.log_rejection(symbol_name, "Pullback: Price not recovering")
+        return False
+
+    vol_mult = float(_get_cfg('Pullback_Strategy', 'volume_multiplier', 1.0))
+    avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
+    if last['volume'] < avg_volume * vol_mult:
+        _c4_original.log_rejection(symbol_name, "Pullback: Low volume on recovery")
+        return False
+
+    return True
+
+def check_momentum_volatility_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('Momentum_Volatility_Strategy', 'min_history', 50))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    if not (last.get('ema9',0) > last.get('ema21',0) > last.get('ema50',0)):
+        _c4_original.log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
+        return False
+
+    adx_th = float(_get_cfg('Momentum_Volatility_Strategy', 'adx_threshold', 22))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, f"Momentum: Weak trend (ADX < {adx_th})")
+        return False
+
+    atr_percent = last.get('atr_percent', 0)
+    atr_min = float(_get_cfg('Momentum_Volatility_Strategy', 'atr_min', 1.5))
+    atr_max = float(_get_cfg('Momentum_Volatility_Strategy', 'atr_max', 6.5))
+    if not (atr_min <= atr_percent <= atr_max):
+        _c4_original.log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
+        return False
+
+    if last.get('macd_hist', 0) <= 0:
+        _c4_original.log_rejection(symbol_name, "Momentum: MACD momentum not positive")
+        return False
+
+    rsi_min = float(_get_cfg('Momentum_Volatility_Strategy', 'rsi_min', 48))
+    rsi_max = float(_get_cfg('Momentum_Volatility_Strategy', 'rsi_max', 72))
+    if not (rsi_min <= last.get('rsi', 0) <= rsi_max):
+        _c4_original.log_rejection(symbol_name, "Momentum: RSI not in optimal range")
+        return False
+
+    vol_mult = float(_get_cfg('Momentum_Volatility_Strategy', 'volume_multiplier', 1.1))
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * vol_mult
+    if not volume_ok:
+        _c4_original.log_rejection(symbol_name, "Momentum: Volume below average")
+        return False
+
+    return True
+
+def check_elliott_wave_strategy_tuned(df):
+    symbol_name = getattr(df, 'name', 'Unknown')
+    min_hist = int(_get_cfg('Elliott_Wave_Strategy', 'min_history', 100))
+    if len(df) < min_hist:
+        _c4_original.log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+
+    if not (last.get('ema21',0) > last.get('ema50',0) > last.get('ema200',0)):
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
+        return False
+
+    adx_th = float(_get_cfg('Elliott_Wave_Strategy', 'adx_threshold', 22))
+    if last.get('adx', 0) < adx_th:
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
+        return False
+
+    vol_mult = float(_get_cfg('Elliott_Wave_Strategy', 'volume_multiplier', 1.1))
+    if last['volume'] < df['volume'].rolling(20).mean().iloc[-1] * vol_mult:
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: Volume too low")
+        return False
+
+    rsi_min = float(_get_cfg('Elliott_Wave_Strategy', 'rsi_min', 38))
+    rsi_max = float(_get_cfg('Elliott_Wave_Strategy', 'rsi_max', 68))
+    if not (rsi_min <= last.get('rsi', 0) <= rsi_max):
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
+        return False
+
+    if last.get('macd', 0) <= 0:
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: MACD not positive")
+        return False
+
+    try:
+        highs = df['high'].values
+        lows = df['low'].values
+        peaks_idx = _c4_original.argrelextrema(highs, _c4_original.np.greater, order=5)[0]
+        troughs_idx = _c4_original.argrelextrema(lows, _c4_original.np.less, order=5)[0]
+        if len(peaks_idx) < 2 or len(troughs_idx) < 2:
+            _c4_original.log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
+            return False
+
+        wave1_start_idx = troughs_idx[-3] if len(troughs_idx) >= 3 else troughs_idx[-2]
+        wave1_end_idx = peaks_idx[-2] if len(peaks_idx) >= 2 else peaks_idx[-1]
+        wave2_end_idx = troughs_idx[-2] if len(troughs_idx) >= 2 else troughs_idx[-1]
+
+        wave1_start_price = lows[wave1_start_idx]
+        wave1_end_price = highs[wave1_end_idx]
+        wave2_end_price = lows[wave2_end_idx]
+        wave1_height = wave1_end_price - wave1_start_price
+        if wave1_height <= 0:
+            _c4_original.log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+            return False
+
+        wave2_retracement = wave1_end_price - wave2_end_price
+        retracement_percent = (wave2_retracement / wave1_height) * 100
+        max_retr = float(_get_cfg('Elliott_Wave_Strategy', 'wave2_max_retracement', 61.8))
+        if retracement_percent > max_retr:
+            _c4_original.log_rejection(symbol_name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
+            return False
+
+        if last['close'] <= wave1_end_price:
+            _c4_original.log_rejection(symbol_name, "Elliott Wave: Price hasn't broken wave 1 resistance")
+            return False
+
+    except Exception as e:
+        logger.exception("Error in Elliott Wave analysis: %s", e)
+        _c4_original.log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+        return False
+
+    return True
+
+def calculate_dynamic_stop_loss_tuned(df, entry_price, strategy_name):
+    last = df.iloc[-1]
+    atr = last.get('atr', 0)
+    mult = float(_get_cfg(strategy_name, 'atr_stop_mult', 2.0))
+
+    if strategy_name == 'BB_Stoch_Strategy':
+        recent_low = df['low'].tail(3).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr * mult))
+    elif strategy_name == 'MACD_EMA_Strategy':
+        stop_loss = min(last.get('ema21', entry_price), entry_price - (atr * mult))
+    elif strategy_name == 'EMA_RSI_Strategy':
+        stop_loss = min(last.get('ema21', entry_price), entry_price - (atr * mult))
+    elif strategy_name == 'Pullback_Strategy':
+        recent_low = df['low'].tail(5).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr * mult))
+    elif strategy_name == 'Momentum_Volatility_Strategy':
+        stop_loss = min(last.get('ema21', entry_price), entry_price - (atr * mult))
+    elif strategy_name == 'Elliott_Wave_Strategy':
+        lows = df['low'].values
+        try:
+            support_idx = _c4_original.argrelextrema(lows, _c4_original.np.less, order=5)[0]
+            if len(support_idx) > 0:
+                recent_support = lows[support_idx[-1]]
+                stop_loss = min(recent_support * 0.995, entry_price - (atr * mult))
+            else:
+                stop_loss = min(last.get('ema21', entry_price), entry_price - (atr * mult))
+        except Exception:
+            stop_loss = entry_price - (atr * mult)
+    else:
+        stop_loss = entry_price - (atr * mult)
+
+    max_stop_distance = entry_price * 0.05
+    if entry_price - stop_loss > max_stop_distance:
+        stop_loss = entry_price - max_stop_distance
+
+    return stop_loss
+
+def calculate_dynamic_take_profit_tuned(df, entry_price, stop_loss, strategy_name):
+    rr1 = float(_get_cfg(strategy_name, 'rr1', 2.0))
+    rr2 = float(_get_cfg(strategy_name, 'rr2', 3.5))
+    risk_amount = entry_price - stop_loss
+    if risk_amount <= 0:
+        return (entry_price * 1.02, entry_price * 1.04)
+    target1 = entry_price + (risk_amount * rr1)
+    target2 = entry_price + (risk_amount * rr2)
+    return target1, target2
+
+def apply_tuning():
+    if _c4_original is None:
+        logger.error("Original c4 module not available. Cannot apply tuning.")
+        return False
+    with _c4_original.strategy_filters_lock:
+        for k, v in RECOMMENDED_FILTERS.items():
+            if k not in _c4_original.STRATEGY_FILTER_CONFIG:
+                _c4_original.STRATEGY_FILTER_CONFIG[k] = {}
+            _c4_original.STRATEGY_FILTER_CONFIG[k].update(v)
+
+    # Replace functions
+    _c4_original.check_bb_stoch_strategy_enhanced = check_bb_stoch_strategy_tuned
+    _c4_original.check_macd_ema_strategy_enhanced = check_macd_ema_strategy_tuned
+    _c4_original.check_ema_rsi_strategy_enhanced = check_ema_rsi_strategy_tuned
+    _c4_original.check_pullback_strategy_enhanced = check_pullback_strategy_tuned
+    _c4_original.check_momentum_volatility_strategy_enhanced = check_momentum_volatility_strategy_tuned
+    _c4_original.check_elliott_wave_strategy_enhanced = check_elliott_wave_strategy_tuned
+    _c4_original.calculate_dynamic_stop_loss = calculate_dynamic_stop_loss_tuned
+    _c4_original.calculate_dynamic_take_profit = calculate_dynamic_take_profit_tuned
+
+    logger.info("✅ Applied tuning to c4 module.")
+    return True
+
+# Attempt to auto-apply when this file is imported *after* the original module is loaded.
+try:
+    if _c4_original is not None:
+        apply_tuning()
+except Exception:
+    pass
+
+# ---------- END TUNING PATCH ----------
+
