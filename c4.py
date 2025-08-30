@@ -107,6 +107,12 @@ USE_EMA_CROSS_SCALPING_STRATEGY: bool = True
 USE_PA_STOCH_SR_STRATEGY: bool = True
 
 
+
+
+# --- مفاتيح تفعيل الاستراتيجيات (15m الجديدة) ---
+USE_VWAP_PULLBACK_15M_STRATEGY: bool = True
+USE_ORB_15M_STRATEGY: bool = True
+USE_BB_SQUEEZE_15M_STRATEGY: bool = True
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
     "BB_Stoch_Strategy": "BB+Stoch (ارتداد مبكر)",
@@ -119,10 +125,22 @@ STRATEGY_NAMES = {
     "EMA_Cross_Scalping_Strategy": "EMA 10/20 Scalping (سكالبينج)",
     "PA_Stoch_SR_Strategy": "Price Action + Stoch (دعم ومقاومة)"
 }
+
+
+# -- إضافة استراتيجيات فريم 15 دقيقة --
+try:
+    STRATEGY_NAMES.update({
+        "VWAP_Pullback_15m_Strategy": "VWAP + Pullback (فريم 15m)",
+        "ORB_15m_Strategy": "Opening Range Breakout (فريم 15m)",
+        "BB_Squeeze_15m_Strategy": "Bollinger Squeeze + Momentum (فريم 15m)"
+    })
+except Exception:
+    pass
+
 strategy_filters_lock = Lock()
 
 # --- إعدادات عامة ---
-SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+SIGNAL_GENERATION_TIMEFRAME: str = '15m'
 HIGHER_TIMEFRAME: str = '1h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
@@ -211,6 +229,11 @@ REJECTION_REASONS_AR = {
     "PA_Stoch_SR: Price not near support": "PA_Stoch_SR: السعر ليس بالقرب من الدعم",
     "PA_Stoch_SR: Stochastic not oversold or crossing up": "PA_Stoch_SR: ستوكاستيك ليس في منطقة تشبع بيعي أو لا يتقاطع لأعلى",
     "PA_Stoch_SR: No bullish price action confirmation": "PA_Stoch_SR: لا يوجد تأكيد من حركة السعر الصاعدة",
+
+
+"VWAP Pullback Conditions Not Met": "شروط ارتداد VWAP غير متحققة",
+"ORB Breakout Not Confirmed": "كسر نطاق الافتتاح غير مؤكد",
+"Squeeze Not Released": "لم يحدث خروج من السكون (Squeeze)",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -625,93 +648,81 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    df_calc = df.copy()
-    
-    # --- SMA Calculations ---
-    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
-    df_calc['sma10'] = df_calc['close'].rolling(window=10).mean()
-    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
 
-    # --- EMA Calculations ---
-    df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
-    df_calc['ema10'] = df_calc['close'].ewm(span=10, adjust=False).mean()
-    df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
-    df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean()
-    df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
-    df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
-    df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
-    df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
-    df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-    
-    # --- ATR and ADX ---
-    high_low = df_calc['high'] - df_calc['low']
-    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
-    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
-    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close'].replace(0, 1e-9)) * 100
-    up_move = df_calc['high'].diff()
-    down_move = -df_calc['low'].diff()
-    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
-    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
-    
-    # --- RSI Calculation ---
+def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
+    """حساب المؤشرات المطلوبة لجميع الاستراتيجيات (5م و15م)."""
+    df_calc = df.copy()
+
+    # EMAs
+    for span in [9, 21, 50, 200]:
+        df_calc[f'ema{span}'] = df_calc['close'].ewm(span=span, adjust=False).mean()
+
+    # RSI(14)
     delta = df_calc['close'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=7).mean()
-    avg_loss = loss.rolling(window=7).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-9)
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss.replace(0, 1e-9))
     df_calc['rsi'] = 100 - (100 / (1 + rs))
-    
-    # --- Bollinger Bands ---
-    bb_middle = df_calc['close'].rolling(window=20).mean()
-    bb_std = df_calc['close'].rolling(window=20).std()
-    df_calc['bb_middle'] = bb_middle
-    df_calc['bb_lower'] = bb_middle - (bb_std * 2)
-    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
-    
-    # --- MACD ---
-    exp1 = df_calc['close'].ewm(span=8, adjust=False).mean()
-    exp2 = df_calc['close'].ewm(span=17, adjust=False).mean()
-    df_calc['macd'] = exp1 - exp2
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
-    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
-    
-    # --- Stochastic ---
-    low_14 = df_calc['low'].rolling(14).min()
-    high_14 = df_calc['high'].rolling(14).max()
-    high_low_range = high_14 - low_14
-    meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
-    df_calc['stoch_k'] = np.where(
-        meaningful_range,
-        100 * ((df_calc['close'] - low_14) / high_low_range.replace(0, 1e-9)),
-        50
-    )
-    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
-    
-    # --- VWAP ---
-    df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
-    
+
+    # MACD (12,26,9) + histogram
+    ema12 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df_calc['close'].ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+    df_calc['macd'] = macd_line
+    df_calc['macd_signal'] = signal_line
+    df_calc['macd_hist'] = macd_line - signal_line
+
+    # Stochastic (14,3)
+    low14 = df_calc['low'].rolling(14).min()
+    high14 = df_calc['high'].rolling(14).max()
+    df_calc['%K'] = 100 * (df_calc['close'] - low14) / ((high14 - low14).replace(0, 1e-9))
+    df_calc['%D'] = df_calc['%K'].rolling(3).mean()
+
+    # SMA 9
+    df_calc['sma9'] = df_calc['close'].rolling(9).mean()
+
+    # VWAP
+    pv = df_calc['close'] * df_calc['volume']
+    df_calc['vwap'] = pv.cumsum() / (df_calc['volume'].cumsum().replace(0, 1e-9))
+
+    # ATR(14)
+    tr = (df_calc['high'] - df_calc['low']).abs()
+    tr2 = (df_calc['high'] - df_calc['close'].shift(1)).abs()
+    tr3 = (df_calc['low'] - df_calc['close'].shift(1)).abs()
+    df_calc['tr'] = pd.concat([tr, tr2, tr3], axis=1).max(axis=1)
+    df_calc['atr'] = df_calc['tr'].rolling(14).mean()
+
+    # Bollinger Bands (20, 2)
+    m20 = df_calc['close'].rolling(20).mean()
+    std20 = df_calc['close'].rolling(20).std()
+    df_calc['bb_middle'] = m20
+    df_calc['bb_upper'] = m20 + 2 * std20
+    df_calc['bb_lower'] = m20 - 2 * std20
+    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / (df_calc['bb_middle'].replace(0, 1e-9))
+
+    # Keltner Channels (EMA20 ± 1.5*ATR)
+    df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean()
+    df_calc['kc_upper'] = df_calc['ema20'] + (df_calc['atr'] * 1.5)
+    df_calc['kc_lower'] = df_calc['ema20'] - (df_calc['atr'] * 1.5)
+
+    # Squeeze flag
+    df_calc['squeeze_on'] = (df_calc['bb_upper'] < df_calc['kc_upper']) & (df_calc['bb_lower'] > df_calc['kc_lower'])
+
+    # Opening Range (per day) - first 4 candles for 15m; repeated for all rows of that day
+    try:
+        ORB_BARS = 4
+        days = pd.to_datetime(df_calc.index).date
+        df_calc['__day__'] = days
+        df_calc['orb_high'] = df_calc.groupby('__day__')['high'].transform(lambda s: s.iloc[:ORB_BARS].max() if len(s) else np.nan)
+        df_calc['orb_low']  = df_calc.groupby('__day__')['low'].transform(lambda s: s.iloc[:ORB_BARS].min() if len(s) else np.nan)
+        df_calc.drop(columns=['__day__'], inplace=True)
+    except Exception:
+        df_calc['orb_high'] = np.nan
+        df_calc['orb_low'] = np.nan
+
     return df_calc
 
-# --- Data Loading & Settings Management ---
-def load_open_signals_to_cache():
-    if not check_db_connection() or not conn: return
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals WHERE status IN ('open', 'updated');")
-            with signal_cache_lock:
-                open_signals_cache.clear()
-                for signal in cur.fetchall(): open_signals_cache[signal['symbol']] = dict(signal)
-            logger.info(f"✅ [Cache] Loaded {len(open_signals_cache)} open signals.")
-    except Exception as e:
-        logger.error(f"❌ [Cache] Failed to load open signals: {e}")
 
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
@@ -785,8 +796,11 @@ def save_settings_to_redis():
             'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
             'USE_SMA_MACD_5MIN_STRATEGY': USE_SMA_MACD_5MIN_STRATEGY,
             'USE_EMA_CROSS_SCALPING_STRATEGY': USE_EMA_CROSS_SCALPING_STRATEGY,
-            'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY
-        }
+            'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY,
+'USE_VWAP_PULLBACK_15M_STRATEGY': USE_VWAP_PULLBACK_15M_STRATEGY,
+'USE_ORB_15M_STRATEGY': USE_ORB_15M_STRATEGY,
+'USE_BB_SQUEEZE_15M_STRATEGY': USE_BB_SQUEEZE_15M_STRATEGY
+}
         redis_client.set('strategy_settings', json.dumps(strategy_settings))
         
         logger.info("Settings saved to Redis successfully")
@@ -841,71 +855,78 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     return True
 
 # --- [ENHANCEMENT] Dynamic Stop Loss & Take Profit ---
+
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
-    atr_value = last.get('atr', 0)
-    
+    atr_value = float(last.get('atr', 0)) if 'atr' in df.columns else 0.0
+    if atr_value <= 0:
+        # تقدير تقريبي للـ ATR إذا لم يتوفر
+        tr = max(last['high'] - last['low'], abs(last['high'] - last['close']), abs(last['low'] - last['close']))
+        atr_value = max(tr, 1e-9)
+
     if strategy_name == "BB_Stoch_Strategy":
         recent_low = df['low'].tail(3).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
     elif strategy_name == "MACD_EMA_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
+        ema21 = last.get('ema21', entry_price)
+        stop_loss = min(ema21, entry_price - (atr_value * 2.0))
     elif strategy_name == "EMA_RSI_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
+        ema21 = last.get('ema21', entry_price)
+        stop_loss = min(ema21, entry_price - (atr_value * 1.8))
     elif strategy_name == "Pullback_Strategy":
         recent_low = df['low'].tail(5).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
     elif strategy_name == "Momentum_Volatility_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.2))
+        ema21 = last.get('ema21', entry_price)
+        stop_loss = min(ema21, entry_price - (atr_value * 2.2))
     elif strategy_name == "Elliott_Wave_Strategy":
-        lows = df['low'].values
-        try:
-            support_idx = argrelextrema(lows, np.less, order=5)[0]
-            if len(support_idx) > 0:
-                recent_support = lows[support_idx[-1]]
-                stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
-            else:
-                stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
-        except Exception as e:
-            logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
-            stop_loss = entry_price - (atr_value * 2.0)
+        stop_loss = entry_price - (atr_value * 2.0)
     elif strategy_name == "SMA_MACD_5min_Strategy":
         stop_loss = min(last['low'], entry_price - (atr_value * 1.2))
     elif strategy_name == "EMA_Cross_Scalping_Strategy":
         stop_loss = entry_price - (atr_value * 1.0)
     elif strategy_name == "PA_Stoch_SR_Strategy":
-        recent_low = df['low'].tail(8).min()
-        stop_loss = min(recent_low * 0.99, entry_price - (atr_value * 1.5))
+        recent_low = df['low'].tail(6).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.7))
+    elif strategy_name == "VWAP_Pullback_15m_Strategy":
+        recent_low = df['low'].tail(5).min()
+        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.4))
+    elif strategy_name == "ORB_15m_Strategy":
+        orb_low = df.get('orb_low', pd.Series([np.nan]*len(df), index=df.index)).iloc[-1]
+        if pd.isna(orb_low): orb_low = df['low'].tail(6).min()
+        stop_loss = min(orb_low * 0.998, entry_price - (atr_value * 1.6))
+    elif strategy_name == "BB_Squeeze_15m_Strategy":
+        ema20 = df.get('ema20', pd.Series([np.nan]*len(df), index=df.index)).iloc[-1]
+        base_sl = ema20 if not pd.isna(ema20) else df['low'].tail(6).min()
+        stop_loss = min(base_sl * 0.995, entry_price - (atr_value * 1.5))
     else:
         stop_loss = entry_price - (atr_value * 2.0)
-    
-    max_stop_distance = entry_price * 0.05
-    if entry_price - stop_loss > max_stop_distance:
-        stop_loss = entry_price - max_stop_distance
-    
-    return stop_loss
 
-def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
-    risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
+    return float(stop_loss)
 
-    if strategy_name == "BB_Stoch_Strategy": rr1, rr2 = 2.5, 4.0
-    elif strategy_name == "MACD_EMA_Strategy": rr1, rr2 = 2.0, 3.5
-    elif strategy_name == "EMA_RSI_Strategy": rr1, rr2 = 2.2, 3.8
-    elif strategy_name == "Pullback_Strategy": rr1, rr2 = 2.3, 4.0
-    elif strategy_name == "Momentum_Volatility_Strategy": rr1, rr2 = 1.8, 3.2
-    elif strategy_name == "Elliott_Wave_Strategy": rr1, rr2 = 2.5, 4.5
-    elif strategy_name == "SMA_MACD_5min_Strategy": rr1, rr2 = 1.5, 3.0
-    elif strategy_name == "EMA_Cross_Scalping_Strategy": rr1, rr2 = 1.0, 2.0
-    elif strategy_name == "PA_Stoch_SR_Strategy": rr1, rr2 = 2.0, 3.5
-    else: rr1, rr2 = 2.0, 3.5
-        
-    target1 = entry_price + (risk_amount * rr1)
-    target2 = entry_price + (risk_amount * rr2)
-    
+def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str):
+    """ترجيع هدفين TP1/TP2 بناءً على نسبة عائد/مخاطرة مخصصة لكل استراتيجية."""
+    rr_map = {
+        "BB_Stoch_Strategy": (1.8, 3.0),
+        "MACD_EMA_Strategy": (2.0, 3.5),
+        "EMA_RSI_Strategy": (1.8, 3.2),
+        "Pullback_Strategy": (1.6, 3.0),
+        "Momentum_Volatility_Strategy": (1.8, 3.2),
+        "Elliott_Wave_Strategy": (2.5, 4.5),
+        "SMA_MACD_5min_Strategy": (1.5, 3.0),
+        "EMA_Cross_Scalping_Strategy": (1.0, 2.0),
+        "PA_Stoch_SR_Strategy": (2.0, 3.5),
+        "VWAP_Pullback_15m_Strategy": (2.0, 3.2),
+        "ORB_15m_Strategy": (2.2, 3.5),
+        "BB_Squeeze_15m_Strategy": (2.0, 3.0),
+    }
+    rr1, rr2 = rr_map.get(strategy_name, (2.0, 3.5))
+
+    risk_amount = abs(entry_price - stop_loss)
+    target1 = entry_price + risk_amount * rr1
+    target2 = entry_price + risk_amount * rr2
     return target1, target2
 
-# --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -2317,7 +2338,10 @@ def settings_page():
         'USE_SMA_MACD_5MIN_STRATEGY': USE_SMA_MACD_5MIN_STRATEGY,
         'USE_EMA_CROSS_SCALPING_STRATEGY': USE_EMA_CROSS_SCALPING_STRATEGY,
         'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY,
-    }
+'USE_VWAP_PULLBACK_15M_STRATEGY': USE_VWAP_PULLBACK_15M_STRATEGY,
+'USE_ORB_15M_STRATEGY': USE_ORB_15M_STRATEGY,
+'USE_BB_SQUEEZE_15M_STRATEGY': USE_BB_SQUEEZE_15M_STRATEGY
+}
     
     return render_template_string(SETTINGS_TEMPLATE, 
                                   fixed_trade_amount=fixed_trade_amount,
@@ -2476,26 +2500,6 @@ def update_settings():
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/strategies', methods=['POST'])
-def update_strategies():
-    try:
-        data = request.json
-        global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_SMA_MACD_5MIN_STRATEGY, USE_EMA_CROSS_SCALPING_STRATEGY, USE_PA_STOCH_SR_STRATEGY
-        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY))
-        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY))
-        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY))
-        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
-        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
-        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
-        USE_SMA_MACD_5MIN_STRATEGY = bool(data.get('USE_SMA_MACD_5MIN_STRATEGY', USE_SMA_MACD_5MIN_STRATEGY))
-        USE_EMA_CROSS_SCALPING_STRATEGY = bool(data.get('USE_EMA_CROSS_SCALPING_STRATEGY', USE_EMA_CROSS_SCALPING_STRATEGY))
-        USE_PA_STOCH_SR_STRATEGY = bool(data.get('USE_PA_STOCH_SR_STRATEGY', USE_PA_STOCH_SR_STRATEGY))
-
-        save_settings_to_redis()
-        return jsonify({"success": True, "message": "Strategies updated successfully"})
-    except Exception as e:
-        logger.error(f"Error updating strategies: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
     try:
@@ -2559,6 +2563,87 @@ def api_close_trade(signal_id):
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
+
+# --- استراتيجيات فريم 15 دقيقة الجديدة ---
+def check_vwap_pullback_15m_strategy(df):
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        # شرط اتجاه عام صاعد: السعر أعلى من EMA200 و EMA50
+        trend_ok = last['close'] > last.get('ema200', last['close']) and last['close'] > last.get('ema50', last['close'])
+        # ارتداد إلى VWAP مع شمعة انعكاسية
+        pullback_ok = (prev['low'] <= prev.get('vwap', prev['low'])) and (last['close'] > last['open'])
+        # حجم تداول أعلى من متوسط 20
+        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
+        return bool(trend_ok and pullback_ok and vol_ok)
+    except Exception:
+        return False
+
+
+def check_orb_15m_strategy(df):
+    try:
+        if len(df) < 120:  # تأكد من وجود عمق بيانات كافٍ
+            return False
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        if 'orb_high' not in df.columns or pd.isna(last.get('orb_high', np.nan)):
+            return False
+        orb_high = last['orb_high']
+        # نتجاهل أول ساعة نفسها
+        # نتحقق من اختراق حقيقي بإغلاق فوق ORB_high بينما الإغلاق السابق كان عند/تحت
+        breakout = (prev['close'] <= orb_high) and (last['close'] > orb_high)
+        # فلتر اتجاه (اختياري): السعر فوق EMA200 إن وجدت
+        trend_ok = True
+        if 'ema200' in df.columns:
+            trend_ok = last['close'] > last['ema200']
+        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
+        return bool(breakout and vol_ok and trend_ok)
+    except Exception:
+        return False
+
+        opening_range = df.iloc[:first_n]
+        orb_high = opening_range['high'].max()
+        orb_low = opening_range['low'].min()
+        # كسر لأعلى مع إغلاق فوق ORB_High وبحجم جيد
+        last = df.iloc[-1]
+        breakout_ok = last['close'] > orb_high and last['high'] >= orb_high
+        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
+        return bool(breakout_ok and vol_ok)
+    except Exception:
+        return False
+
+
+def check_bb_squeeze_15m_strategy(df):
+    try:
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        need_cols = {'bb_upper','bb_lower','kc_upper','kc_lower','macd_hist','volume'}
+        if not need_cols.issubset(df.columns):
+            return False
+        squeeze_on = (df['bb_upper'] < df['kc_upper']) & (df['bb_lower'] > df['kc_lower'])
+        # خروج حديث من السكون
+        released = bool(squeeze_on.iloc[-2] and not squeeze_on.iloc[-1])
+        # اختراق للأعلى مع زخم
+        breakout = last['close'] > last['bb_upper']
+        momentum_ok = (last['macd_hist'] > 0) and (last.get('rsi', 55) > 50)
+        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
+        trend_ok = True
+        if 'ema200' in df.columns:
+            trend_ok = last['close'] > last['ema200']
+        return bool(released and breakout and momentum_ok and vol_ok and trend_ok)
+    except Exception:
+        return False
+
+        # سكون (Squeeze): باندات بولنجر داخل كلتنر
+        squeeze_on = (df['bb_upper'] < df['kc_upper']) & (df['bb_lower'] > df['kc_lower'])
+        if not bool(squeeze_on.iloc[-2] and not squeeze_on.iloc[-1]):
+            return False  # خروج حديث من السكون
+        # زخم إيجابي
+        momentum_ok = last['macd_hist'] > 0 and last.get('rsi', 50) > 50
+        return bool(momentum_ok)
+    except Exception:
+        return False
+
 # --- Backtesting System ---
 def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True, atr_min=1.5, atr_max=4.0, use_news_filter=True, use_liquidity_filter=True):
     logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days with filters: Volatility={use_volatility_filter}, News={use_news_filter}, Liquidity={use_liquidity_filter}")
@@ -2584,7 +2669,11 @@ def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True
         'Elliott_Wave_Strategy': check_elliott_wave_strategy_enhanced,
         'SMA_MACD_5min_Strategy': check_sma_macd_5min_strategy,
         'EMA_Cross_Scalping_Strategy': check_ema_cross_scalping_strategy,
-        'PA_Stoch_SR_Strategy': check_pa_stoch_sr_strategy
+        
+'VWAP_Pullback_15m_Strategy': check_vwap_pullback_15m_strategy,
+'ORB_15m_Strategy': check_orb_15m_strategy,
+'BB_Squeeze_15m_Strategy': check_bb_squeeze_15m_strategy,
+'PA_Stoch_SR_Strategy': check_pa_stoch_sr_strategy
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2749,6 +2838,10 @@ def main_bot_loop():
                 elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
                 elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured): strategy_found = "Momentum_Volatility_Strategy"
                 elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy_enhanced(df_featured): strategy_found = "Elliott_Wave_Strategy"
+
+                elif USE_VWAP_PULLBACK_15M_STRATEGY and check_vwap_pullback_15m_strategy(df_featured): strategy_found = "VWAP_Pullback_15m_Strategy"
+                elif USE_ORB_15M_STRATEGY and check_orb_15m_strategy(df_featured): strategy_found = "ORB_15m_Strategy"
+                elif USE_BB_SQUEEZE_15M_STRATEGY and check_bb_squeeze_15m_strategy(df_featured): strategy_found = "BB_Squeeze_15m_Strategy"
 
                 if strategy_found:
                     create_trade_signal(symbol, df_featured, strategy_found)
