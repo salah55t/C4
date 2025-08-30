@@ -1,13 +1,10 @@
-# ملف c4.py - نسخة V32.9.0 (مُعدَّل حسب إعدادات المستخدم)
+# ملف c4.py - نسخة V32.10.0 (مُعدَّل حسب إعدادات المستخدم)
 # --- وصف التعديلات:
-# 1.  [إضافة استراتيجيات] تمت إضافة 3 استراتيجيات جديدة:
-#     - استراتيجية SMA 10 + MACD (فريم 5 دقائق).
-#     - استراتيجية سكالبينج EMA 10/20.
-#     - استراتيجية Price Action + Support/Resistance + Stochastic.
-# 2.  [تحديث المؤشرات] تم إضافة مؤشرات (SMA 10, EMA 10, EMA 20) لدعم الاستراتيجيات الجديدة.
-# 3.  [تحديث لوحة التحكم] تم تحديث صفحة الإعدادات لتشمل أزرار تفعيل/إيقاف للاستراتيجيات الجديدة.
-# 4.  [توسيع إدارة المخاطر] تم تحديث دوال وقف الخسارة والأهداف الديناميكية لتشمل الاستراتيجيات الجديدة.
-# 5.  [تكامل كامل] تم دمج الاستراتيجيات الجديدة في حلقة الفحص الرئيسية ونظام الاختبار الخلفي.
+# 1.  [تطوير الاختبار الخلفي] تم تحديث نظام الاختبار الخلفي (Backtesting) ليستخدم نفس فلاتر التداول الحي.
+# 2.  [إضافة فلاتر للاختبار] الآن يطبق الاختبار الخلفي فلاتر التقلبات (ATR)، الأخبار، والسيولة.
+# 3.  [تحديث واجهة الاختبار] تمت إضافة قسم جديد في صفحة الاختبار الخلفي للتحكم في إعدادات الفلاتر (تفعيل/إيقاف وتحديد القيم).
+# 4.  [تعديل دوال الفلاتر] تم تعديل دوال الفلاتر لتقبل متغير زمني، مما يسمح باستخدامها في بيانات تاريخية بدلاً من الوقت الحالي فقط.
+# 5.  [تحسين دقة النتائج] ستكون نتائج الاختبار الخلفي الآن أكثر واقعية وتعكس أداء الاستراتيجيات تحت ظروف السوق المفلترة.
 
 import time
 import os
@@ -51,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.9.0')
+logger = logging.getLogger('CryptoBotV32.10.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -105,7 +102,6 @@ USE_EMA_RSI_STRATEGY: bool = True
 USE_PULLBACK_STRATEGY: bool = True
 USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
 USE_ELLIOTT_WAVE_STRATEGY: bool = True
-# --- [إضافة جديدة] مفاتيح الاستراتيجيات الجديدة ---
 USE_SMA_MACD_5MIN_STRATEGY: bool = True
 USE_EMA_CROSS_SCALPING_STRATEGY: bool = True
 USE_PA_STOCH_SR_STRATEGY: bool = True
@@ -119,7 +115,6 @@ STRATEGY_NAMES = {
     "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
     "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)",
-    # --- [إضافة جديدة] أسماء الاستراتيجيات الجديدة ---
     "SMA_MACD_5min_Strategy": "SMA 10 + MACD (فريم 5 دقائق)",
     "EMA_Cross_Scalping_Strategy": "EMA 10/20 Scalping (سكالبينج)",
     "PA_Stoch_SR_Strategy": "Price Action + Stoch (دعم ومقاومة)"
@@ -127,7 +122,7 @@ STRATEGY_NAMES = {
 strategy_filters_lock = Lock()
 
 # --- إعدادات عامة ---
-SIGNAL_GENERATION_TIMEFRAME: str = '5m' # تم التغيير إلى 5 دقائق لدعم الاستراتيجيات الجديدة
+SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 HIGHER_TIMEFRAME: str = '1h'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
@@ -205,7 +200,6 @@ REJECTION_REASONS_AR = {
     "Elliott Wave: Wave 2 Fibonacci retracement invalid": "موجات إليوت: تصحيح فيبوناتشي للموجة 2 غير صالح",
     "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1",
     "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
-    # --- [إضافة جديدة] أسباب الرفض للاستراتيجيات الجديدة ---
     "SMA_MACD_5m: Price not above SMA10": "SMA_MACD_5m: السعر ليس فوق متوسط 10",
     "SMA_MACD_5m: MACD bullish crossover not confirmed": "SMA_MACD_5m: تقاطع الماكد الصاعد غير مؤكد",
     "SMA_MACD_5m: Weak trend (ADX < 20)": "SMA_MACD_5m: اتجاه ضعيف (ADX < 20)",
@@ -636,14 +630,14 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     # --- SMA Calculations ---
     df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
-    df_calc['sma10'] = df_calc['close'].rolling(window=10).mean() # [إضافة جديدة]
+    df_calc['sma10'] = df_calc['close'].rolling(window=10).mean()
     df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
 
     # --- EMA Calculations ---
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
-    df_calc['ema10'] = df_calc['close'].ewm(span=10, adjust=False).mean() # [إضافة جديدة]
+    df_calc['ema10'] = df_calc['close'].ewm(span=10, adjust=False).mean()
     df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
-    df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean() # [إضافة جديدة]
+    df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
@@ -757,7 +751,6 @@ def load_settings_from_redis():
             USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
             USE_MOMENTUM_VOLATILITY_STRATEGY = strategies.get('USE_MOMENTUM_VOLATILITY_STRATEGY', True)
             USE_ELLIOTT_WAVE_STRATEGY = strategies.get('USE_ELLIOTT_WAVE_STRATEGY', True)
-            # [إضافة جديدة]
             USE_SMA_MACD_5MIN_STRATEGY = strategies.get('USE_SMA_MACD_5MIN_STRATEGY', True)
             USE_EMA_CROSS_SCALPING_STRATEGY = strategies.get('USE_EMA_CROSS_SCALPING_STRATEGY', True)
             USE_PA_STOCH_SR_STRATEGY = strategies.get('USE_PA_STOCH_SR_STRATEGY', True)
@@ -790,7 +783,6 @@ def save_settings_to_redis():
             'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
             'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
             'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
-            # [إضافة جديدة]
             'USE_SMA_MACD_5MIN_STRATEGY': USE_SMA_MACD_5MIN_STRATEGY,
             'USE_EMA_CROSS_SCALPING_STRATEGY': USE_EMA_CROSS_SCALPING_STRATEGY,
             'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY
@@ -804,16 +796,17 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
-def add_news_filter() -> bool:
+# --- [تعديل] تحديث الفلاتر لتقبل متغير زمني ---
+def add_news_filter(current_time: Optional[datetime] = None) -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
-    now = datetime.now(timezone.utc)
+    now = current_time or datetime.now(timezone.utc)
     for hour, minute in news_hours:
         if now.hour == hour and abs(now.minute - minute) <= 30:
             return False
     return True
 
-def add_liquidity_filter() -> bool:
-    now = datetime.now(timezone.utc)
+def add_liquidity_filter(current_time: Optional[datetime] = None) -> bool:
+    now = current_time or datetime.now(timezone.utc)
     if now.weekday() >= 5: return False
     if now.hour >= 22 or now.hour <= 2: return False
     return True
@@ -830,21 +823,18 @@ def add_correlation_filter(new_symbol: str) -> bool:
             return False
     return True
 
-# --- فلتر التقلبات المحدث ---
-def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown") -> bool:
+# --- [تعديل] تحديث فلتر التقلبات ليقبل قيم مخصصة ---
+def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown", atr_min: float = 1.5, atr_max: float = 4.0) -> bool:
     if 'atr_percent' not in df.columns or df['atr_percent'].isnull().all():
         log_rejection(symbol, "Market Volatility Filter Failed", {"reason": "No ATR data"})
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    ATR_PERCENT_MIN = 1.5
-    ATR_PERCENT_MAX = 4.0
-    
-    if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
+    if not (atr_min <= last_atr_percent <= atr_max):
         log_rejection(symbol, "Market Volatility Filter Failed", {
             "atr": f"{last_atr_percent:.2f}%",
-            "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
+            "range": f"({atr_min:.2f}-{atr_max:.2f})%"
         })
         return False
     
@@ -879,7 +869,6 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
         except Exception as e:
             logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
             stop_loss = entry_price - (atr_value * 2.0)
-    # [إضافة جديدة]
     elif strategy_name == "SMA_MACD_5min_Strategy":
         stop_loss = min(last['low'], entry_price - (atr_value * 1.2))
     elif strategy_name == "EMA_Cross_Scalping_Strategy":
@@ -906,7 +895,6 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     elif strategy_name == "Pullback_Strategy": rr1, rr2 = 2.3, 4.0
     elif strategy_name == "Momentum_Volatility_Strategy": rr1, rr2 = 1.8, 3.2
     elif strategy_name == "Elliott_Wave_Strategy": rr1, rr2 = 2.5, 4.5
-    # [إضافة جديدة]
     elif strategy_name == "SMA_MACD_5min_Strategy": rr1, rr2 = 1.5, 3.0
     elif strategy_name == "EMA_Cross_Scalping_Strategy": rr1, rr2 = 1.0, 2.0
     elif strategy_name == "PA_Stoch_SR_Strategy": rr1, rr2 = 2.0, 3.5
@@ -1164,7 +1152,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-# --- [إضافة جديدة] الاستراتيجيات الجديدة ---
 def check_sma_macd_5min_strategy(df: pd.DataFrame) -> bool:
     needed = {'sma10', 'macd', 'macd_signal', 'macd_hist', 'close', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -1179,7 +1166,6 @@ def check_sma_macd_5min_strategy(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "SMA_MACD_5m: Price not above SMA10")
         return False
     
-    # bullish crossover: macd line crosses above signal line
     is_crossover = last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']
     if not is_crossover:
         log_rejection(symbol_name, "SMA_MACD_5m: MACD bullish crossover not confirmed")
@@ -1201,7 +1187,6 @@ def check_ema_cross_scalping_strategy(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # Bullish crossover condition
     if not (last['ema10'] > last['ema20'] and prev['ema10'] <= prev['ema20']):
         log_rejection(symbol_name, "EMA_Cross: Bearish crossover or no crossover")
         return False
@@ -1230,7 +1215,6 @@ def check_pa_stoch_sr_strategy(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # 1. Find recent support level (last swing low)
     try:
         lows = df['low'].values
         support_indices = argrelextrema(lows, np.less, order=5)[0]
@@ -1243,18 +1227,15 @@ def check_pa_stoch_sr_strategy(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "PA_Stoch_SR: No recent support level found")
         return False
 
-    # 2. Price is near support
     if not (last['low'] <= last_support_price * 1.01):
         log_rejection(symbol_name, "PA_Stoch_SR: Price not near support")
         return False
         
-    # 3. Stochastic confirmation (oversold and crossing up)
     stoch_confirm = prev['stoch_k'] < 30 and last['stoch_k'] > prev['stoch_k'] and last['stoch_k'] > last['stoch_d']
     if not stoch_confirm:
         log_rejection(symbol_name, "PA_Stoch_SR: Stochastic not oversold or crossing up")
         return False
         
-    # 4. Price Action confirmation (bullish candle)
     if not (last['close'] > last['open']):
         log_rejection(symbol_name, "PA_Stoch_SR: No bullish price action confirmation")
         return False
@@ -1454,7 +1435,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.9.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.10.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1521,7 +1502,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.9.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.10.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1923,7 +1904,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.9.0)</title>
+<title>الإعدادات - بوت التداول (V32.10.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2101,6 +2082,7 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .form-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end;}
 .form-group label {display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px;}
 .form-group input, .form-group select {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
+.form-group.switch-group { display: flex; align-items: center; justify-content: space-between; background: #0b1126; border: 1px solid #233056; padding: 8px; border-radius: 8px; }
 .btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
 .btn.primary {background: var(--accent); color: #fff; border-color: var(--accent);}
 .results-grid {display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 24px;}
@@ -2123,9 +2105,10 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 <body>
 <div class="container">
     <header><h1>الاختبار الخلفي للاستراتيجيات</h1><a href="/" class="btn">العودة للرئيسية</a></header>
-    <div class="card">
-        <div class="card-body">
-            <form id="backtest-form">
+    <form id="backtest-form">
+        <div class="card">
+            <div class="card-body">
+                <h2>إعدادات الاختبار</h2>
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="strategy">اختر الاستراتيجية</label>
@@ -2143,11 +2126,38 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
                         <label for="days">أيام الاختبار</label>
                         <input type="number" id="days" name="days" value="90" required>
                     </div>
-                    <button type="submit" class="btn primary">بدء الاختبار</button>
                 </div>
-            </form>
+            </div>
         </div>
-    </div>
+        <div class="card" style="margin-top:16px">
+             <div class="card-body">
+                <h2>إعدادات الفلاتر</h2>
+                 <div class="form-grid">
+                    <div class="form-group switch-group">
+                        <label for="use_volatility_filter">فلتر التقلب (ATR)</label>
+                        <input type="checkbox" id="use_volatility_filter" name="use_volatility_filter" checked>
+                    </div>
+                    <div class="form-group">
+                        <label for="atr_min">أقل ATR %</label>
+                        <input type="number" id="atr_min" name="atr_min" value="1.5" step="0.1">
+                    </div>
+                    <div class="form-group">
+                        <label for="atr_max">أعلى ATR %</label>
+                        <input type="number" id="atr_max" name="atr_max" value="4.0" step="0.1">
+                    </div>
+                    <div class="form-group switch-group">
+                        <label for="use_news_filter">فلتر الأخبار</label>
+                        <input type="checkbox" id="use_news_filter" name="use_news_filter" checked>
+                    </div>
+                    <div class="form-group switch-group">
+                        <label for="use_liquidity_filter">فلتر السيولة</label>
+                        <input type="checkbox" id="use_liquidity_filter" name="use_liquidity_filter" checked>
+                    </div>
+                 </div>
+            </div>
+        </div>
+        <button type="submit" class="btn primary" style="width:100%; margin-top: 16px; padding: 12px;">بدء الاختبار</button>
+    </form>
     <div id="loader">
         <div class="loading-spinner"></div>
         <div class="loader-text">جاري تحميل البيانات وتنفيذ الاختبار... قد يستغرق هذا بعض الوقت.</div>
@@ -2191,7 +2201,14 @@ qs('#backtest-form').addEventListener('submit', async (e) => {
     qs('#results-container').style.display = 'none';
     
     const formData = new FormData(e.target);
-    const data = Object.fromEntries(formData.entries());
+    const data = {};
+    for (const [key, value] of formData.entries()) {
+        data[key] = value;
+    }
+    // Handle checkboxes, which are only present in formData if checked
+    data['use_volatility_filter'] = qs('#use_volatility_filter').checked;
+    data['use_news_filter'] = qs('#use_news_filter').checked;
+    data['use_liquidity_filter'] = qs('#use_liquidity_filter').checked;
 
     try {
         const response = await fetch('/api/run_backtest', {
@@ -2469,7 +2486,6 @@ def update_strategies():
         USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
         USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
         USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
-        # [إضافة جديدة]
         USE_SMA_MACD_5MIN_STRATEGY = bool(data.get('USE_SMA_MACD_5MIN_STRATEGY', USE_SMA_MACD_5MIN_STRATEGY))
         USE_EMA_CROSS_SCALPING_STRATEGY = bool(data.get('USE_EMA_CROSS_SCALPING_STRATEGY', USE_EMA_CROSS_SCALPING_STRATEGY))
         USE_PA_STOCH_SR_STRATEGY = bool(data.get('USE_PA_STOCH_SR_STRATEGY', USE_PA_STOCH_SR_STRATEGY))
@@ -2544,8 +2560,8 @@ def api_close_trade(signal_id):
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
 # --- Backtesting System ---
-def backtest_strategy(strategy_name, symbol, days=90):
-    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
+def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True, atr_min=1.5, atr_max=4.0, use_news_filter=True, use_liquidity_filter=True):
+    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days with filters: Volatility={use_volatility_filter}, News={use_news_filter}, Liquidity={use_liquidity_filter}")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
     if df is None or len(df) < 200:
         logger.error(f"[Backtest] Insufficient historical data for {symbol}.")
@@ -2557,7 +2573,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     active_trade = None
     initial_balance = 1000.0
     equity_curve = [initial_balance]
-    backtest_trade_amount = 10.0 # حجم الصفقة الثابت للاختبار الخلفي
+    backtest_trade_amount = 10.0
 
     strategy_functions = {
         'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
@@ -2566,7 +2582,6 @@ def backtest_strategy(strategy_name, symbol, days=90):
         'Pullback_Strategy': check_pullback_strategy_enhanced,
         'Momentum_Volatility_Strategy': check_momentum_volatility_strategy_enhanced,
         'Elliott_Wave_Strategy': check_elliott_wave_strategy_enhanced,
-        # [إضافة جديدة]
         'SMA_MACD_5min_Strategy': check_sma_macd_5min_strategy,
         'EMA_Cross_Scalping_Strategy': check_ema_cross_scalping_strategy,
         'PA_Stoch_SR_Strategy': check_pa_stoch_sr_strategy
@@ -2607,6 +2622,16 @@ def backtest_strategy(strategy_name, symbol, days=90):
         if not active_trade:
             df_slice = df.iloc[:i]
             df_slice.name = symbol
+            
+            # --- [تعديل] تطبيق الفلاتر داخل الاختبار الخلفي ---
+            current_time = current_candle.name.to_pydatetime()
+            if use_volatility_filter and not check_market_volatility_filter_enhanced(df_slice, symbol, atr_min, atr_max):
+                continue
+            if use_news_filter and not add_news_filter(current_time):
+                continue
+            if use_liquidity_filter and not add_liquidity_filter(current_time):
+                continue
+            
             if check_strategy(df_slice):
                 entry_price = current_candle['open']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
@@ -2626,7 +2651,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
                 }
 
     if not results:
-        return {"error": "No trades were executed during this period."}
+        return {"error": "No trades were executed during this period with the selected filters."}
 
     total_trades = len(results)
     wins = [r for r in results if r['profit_percent'] > 0]
@@ -2651,11 +2676,22 @@ def api_run_backtest():
         strategy = data.get('strategy')
         symbol = data.get('symbol', '').upper()
         days = int(data.get('days', 90))
+        
+        # --- [تعديل] استقبال إعدادات الفلاتر من الواجهة ---
+        use_volatility_filter = data.get('use_volatility_filter', False)
+        atr_min = float(data.get('atr_min', 1.5))
+        atr_max = float(data.get('atr_max', 4.0))
+        use_news_filter = data.get('use_news_filter', False)
+        use_liquidity_filter = data.get('use_liquidity_filter', False)
 
         if not all([strategy, symbol, days]):
             return jsonify({"error": "Missing parameters."}), 400
 
-        results = backtest_strategy(strategy, symbol, days)
+        results = backtest_strategy(
+            strategy, symbol, days,
+            use_volatility_filter, atr_min, atr_max,
+            use_news_filter, use_liquidity_filter
+        )
         return jsonify(results)
     except Exception as e:
         logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
@@ -2913,7 +2949,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.9.0 (New Strategies Added) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.10.0 (Advanced Backtesting) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2937,3 +2973,4 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
