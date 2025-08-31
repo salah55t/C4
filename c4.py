@@ -1,10 +1,11 @@
-# ملف c4.py - نسخة V32.8.0 (مُعدَّل حسب إعدادات المستخدم)
+# ملف c4.py - نسخة V32.9.0 (مُعدَّل حسب إعدادات المستخدم)
 # --- وصف التعديلات:
-# 1.  [تحديث الاستراتيجيات] تم تعديل إعدادات ومؤشرات استراتيجيات MACD+EMA و EMA+RSI بناءً على طلب المستخدم.
-# 2.  [إضافة مؤشرات] تمت إضافة مؤشرات SMA (7 و 200) و VWAP إلى دالة حساب المؤشرات.
-# 3.  [تعديل الفلاتر] تم تحديث فلتر التقلبات (ATR) ليعمل ضمن نطاق ثابت (1.5% - 4.0%).
-# 4.  [ضبط الإعدادات] تم تعديل المتغيرات العامة للبوت مثل حجم الصفقة، جودة الإشارة، والوقف المتحرك.
-# 5.  [منطق التداول] تم دمج منطق تقاطع SMA في استراتيجية MACD كإشارة دخول قوية.
+# 1.  [تعديل المؤشرات] تم تعديل فترات جميع المؤشرات (SMA, EMA, ATR, ADX, RSI, BB, MACD, Stoch) لتكون أسرع وأكثر استجابة لإطار 15 دقيقة.
+# 2.  [إضافة مؤشرات] تمت إضافة مؤشرات VWAP ومؤشرات تأكيدية جديدة (حجم التداول المتزايد، تغير السعر، تحليل الشموع).
+# 3.  [تحسين الاستراتيجيات] تم تحديث جميع استراتيجيات التداول بشروط دخول مخففة ومؤشرات تأكيد إضافية (مثل RSI, MACD cross, Stoch) لزيادة عدد الفرص المتاحة.
+# 4.  [ضبط إدارة المخاطر] تم تعديل دوال وقف الخسارة وجني الأرباح بمضاعفات ATR ونسب مخاطرة إلى مكافأة جديدة لتناسب التداول السريع.
+# 5.  [توسيع الفلاتر] تم توسيع نطاق فلتر التقلبات (ATR) للسماح بدخول صفقات في ظروف سوقية أكثر تنوعًا.
+# 6.  [تبسيط منطق Elliott] تم تبسيط منطق اكتشاف موجات إليوت للتركيز على الأنماط الصاعدة العامة وتجنب الشروط المعقدة.
 
 import time
 import os
@@ -48,7 +49,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.8.0')
+logger = logging.getLogger('CryptoBotV32.9.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -83,18 +84,14 @@ cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
-# [تعديل المستخدم] زيادة فترة التبريد
 COOLDOWN_MINUTES_AFTER_SL = 30
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-# [تعديل المستخدم] تقليل حجم الصفقة
 FIXED_TRADE_AMOUNT_USDT: float = 3.0
 fixed_trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
-# [تعديل المستخدم] تفعيل أسرع للوقف المتحرك
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
-# [تعديل المستخدم] زيادة الجودة المطلوبة للإشارة
 MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
@@ -162,41 +159,39 @@ REJECTION_REASONS_AR = {
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
     "EMA_RSI: Price not above EMA9": "EMA_RSI: السعر ليس فوق متوسط 9",
-    "EMA_RSI: RSI not above 50": "EMA_RSI: مؤشر القوة النسبية ليس فوق 50",
-    "EMA_RSI: Weak trend (ADX < 18)": "EMA_RSI: اتجاه ضعيف (ADX < 18)",
-    "EMA_RSI: No pullback detected": "EMA_RSI: لم يتم اكتشاف ارتداد",
-    "EMA_RSI: Price not recovering": "EMA_RSI: السعر لا يتعافى",
-    "EMA_RSI: Volume below average": "EMA_RSI: حجم التداول أقل من المتوسط",
-    "BB: Price below EMA50 (bearish trend)": "BB: السعر تحت EMA50 (اتجاه هابط)",
-    "BB: Weak trend (ADX < 17)": "BB: اتجاه ضعيف (ADX < 17)",
+    "EMA_RSI: RSI not above 45": "EMA_RSI: مؤشر القوة النسبية ليس فوق 45",
+    "EMA_RSI: Weak trend (ADX < 15)": "EMA_RSI: اتجاه ضعيف (ADX < 15)",
+    "EMA_RSI: Volume or momentum confirmation failed": "EMA_RSI: فشل تأكيد الحجم أو الزخم",
+    "BB: Price below EMA21 (bearish trend)": "BB: السعر تحت EMA21 (اتجاه هابط)",
+    "BB: Weak trend (ADX < 15)": "BB: اتجاه ضعيف (ADX < 15)",
     "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
     "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
+    "BB: RSI too low (< 40)": "BB: مؤشر القوة النسبية منخفض جدًا (< 40)",
     "BB: Weak bullish candle or low volume": "BB: شمعة صاعدة ضعيفة أو حجم تداول منخفض",
-    "MACD: Bearish long-term trend (SMA7 below SMA200)": "MACD: اتجاه هابط (SMA7 تحت SMA200)",
-    "MACD: Weak trend (ADX < 20)": "MACD: اتجاه ضعيف (ADX < 20)",
+    "MACD: Bearish trend (SMA7 below SMA21)": "MACD: اتجاه هابط (SMA7 تحت SMA21)",
+    "MACD: Weak trend (ADX < 18)": "MACD: اتجاه ضعيف (ADX < 18)",
     "MACD: Insufficient data for momentum check": "MACD: بيانات غير كافية لفحص الزخم",
     "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
     "MACD: Volume below average": "MACD: حجم التداول أقل من المتوسط",
-    "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه ليس صاعدًا بقوة",
-    "Pullback: Weak trend (ADX < 16)": "Pullback: اتجاه ضعيف (ADX < 16)",
+    "Pullback: Trend is not bullish": "Pullback: الاتجاه ليس صاعدًا",
+    "Pullback: Weak trend (ADX < 14)": "Pullback: اتجاه ضعيف (ADX < 14)",
     "Pullback: No pullback detected": "Pullback: لم يتم اكتشاف ارتداد",
     "Pullback: Price not recovering": "Pullback: السعر لا يتعافى",
-    "Pullback: Low volume on recovery": "Pullback: حجم تداول منخفض عند التعافي",
+    "Pullback: Volume or momentum confirmation failed": "Pullback: فشل تأكيد الحجم أو الزخم",
     "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
-    "Momentum: Weak trend (ADX < 22)": "Momentum: اتجاه ضعيف (ADX < 22)",
+    "Momentum: Weak trend (ADX < 18)": "Momentum: اتجاه ضعيف (ADX < 18)",
     "Momentum: Volatility not in optimal range": "Momentum: التقلب ليس في النطاق الأمثل",
     "Momentum: MACD momentum not positive": "Momentum: زخم الماكد ليس إيجابيًا",
     "Momentum: RSI not in optimal range": "Momentum: مؤشر القوة النسبية ليس في النطاق الأمثل",
-    "Momentum: Volume below average": "Momentum: حجم التداول أقل من المتوسط",
+    "Momentum: Volume or momentum confirmation failed": "Momentum: فشل تأكيد الحجم أو الزخم",
     "Elliott Wave: Trend is not bullish": "موجات إليوت: الاتجاه ليس صاعدًا",
     "Elliott Wave: Trend is not strong enough (ADX)": "موجات إليوت: الاتجاه ليس قوياً (ADX)",
     "Elliott Wave: Volume too low": "موجات إليوت: حجم التداول منخفض جدًا",
     "Elliott Wave: RSI not in optimal range": "موجات إليوت: مؤشر القوة النسبية ليس في النطاق الأمثل",
     "Elliott Wave: MACD not positive": "موجات إليوت: مؤشر الماكد ليس إيجابيًا",
-    "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
-    "Elliott Wave: Wave 2 Fibonacci retracement invalid": "موجات إليوت: تصحيح فيبوناتشي للموجة 2 غير صالح",
-    "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1",
-    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط"
+    "Elliott Wave: No bullish pattern detected": "موجات إليوت: لم يتم اكتشاف نمط صاعد",
+    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
+    "Elliott Wave: Stochastic not confirming": "موجات إليوت: ستوكاستيك لا يؤكد الصعود"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -611,16 +606,18 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
+# --- [MODIFIED] تعديل إعدادات المؤشرات لتناسب فريم 15 دقيقة
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
-    # --- SMA Calculations ---
-    # [تعديل المستخدم] إضافة SMAs
+    # --- تعديل فترات المؤشرات لتكون أسرع وأكثر ملاءمة لفريم 15 دقيقة ---
+    # SMA Calculations
     df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
+    df_calc['sma21'] = df_calc['close'].rolling(window=21).mean()  # إضافة SMA21
+    df_calc['sma50'] = df_calc['close'].rolling(window=50).mean()
     df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
 
-    # --- EMA Calculations ---
-    # [تعديل المستخدم] تعديل فترة EMA لتكون أسرع
+    # EMA Calculations - تعديل الفترات لتكون أسرع
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
@@ -629,64 +626,73 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     
-    # --- ATR and ADX ---
+    # ATR and ADX - تعديل الفترات
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
+    df_calc['atr'] = tr.ewm(span=10, adjust=False).mean()  # تعديل من 14 إلى 10
     df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close'].replace(0, 1e-9)) * 100
+    
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
-    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    plus_di = 100 * plus_dm.ewm(span=10, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)  # تعديل من 14 إلى 10
+    minus_di = 100 * minus_dm.ewm(span=10, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)  # تعديل من 14 إلى 10
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
+    df_calc['adx'] = dx.ewm(span=10, adjust=False).mean()  # تعديل من 14 إلى 10
     
-    # --- RSI Calculation ---
-    # [تعديل المستخدم] تعديل فترة RSI لتكون أسرع
+    # RSI Calculation - تعديل الفترة
     delta = df_calc['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=7).mean()
-    avg_loss = loss.rolling(window=7).mean()
+    avg_gain = gain.rolling(window=6).mean()  # تعديل من 7 إلى 6
+    avg_loss = loss.rolling(window=6).mean()  # تعديل من 7 إلى 6
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
     
-    # --- Bollinger Bands ---
-    # إعدادات البولينجر تتوافق مع طلب المستخدم (20, 2)
-    bb_middle = df_calc['close'].rolling(window=20).mean()
-    bb_std = df_calc['close'].rolling(window=20).std()
+    # Bollinger Bands - تعديل الفترة
+    bb_middle = df_calc['close'].rolling(window=18).mean()  # تعديل من 20 إلى 18
+    bb_std = df_calc['close'].rolling(window=18).std()  # تعديل من 20 إلى 18
     df_calc['bb_middle'] = bb_middle
-    df_calc['bb_lower'] = bb_middle - (bb_std * 2)
-    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
+    df_calc['bb_lower'] = bb_middle - (bb_std * 1.8)  # تعديل من 2 إلى 1.8
+    df_calc['bb_upper'] = bb_middle + (bb_std * 1.8)  # تعديل من 2 إلى 1.8
     
-    # --- MACD ---
-    # [تعديل المستخدم] إعدادات سريعة لفريم 15 دقيقة
-    exp1 = df_calc['close'].ewm(span=8, adjust=False).mean()
-    exp2 = df_calc['close'].ewm(span=17, adjust=False).mean()
+    # MACD - تعديل الفترات لتكون أسرع
+    exp1 = df_calc['close'].ewm(span=7, adjust=False).mean()  # تعديل من 8 إلى 7
+    exp2 = df_calc['close'].ewm(span=15, adjust=False).mean()  # تعديل من 17 إلى 15
     df_calc['macd'] = exp1 - exp2
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=7, adjust=False).mean()  # تعديل من 9 إلى 7
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
-    # --- Stochastic ---
-    # إعدادات ستوكاستيك تتوافق مع طلب المستخدم (14, 3)
-    low_14 = df_calc['low'].rolling(14).min()
-    high_14 = df_calc['high'].rolling(14).max()
-    high_low_range = high_14 - low_14
+    # Stochastic - تعديل الفترات
+    low_12 = df_calc['low'].rolling(12).min()  # تعديل من 14 إلى 12
+    high_12 = df_calc['high'].rolling(12).max()  # تعديل من 14 إلى 12
+    high_low_range = high_12 - low_12
     meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
     df_calc['stoch_k'] = np.where(
         meaningful_range,
-        100 * ((df_calc['close'] - low_14) / high_low_range.replace(0, 1e-9)),
+        100 * ((df_calc['close'] - low_12) / high_low_range.replace(0, 1e-9)),
         50
     )
     df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
     
-    # --- VWAP ---
-    # [تعديل المستخدم] إضافة VWAP
+    # VWAP - إضافة مؤشر VWAP
     df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
+    
+    # إضافة مؤشرات تأكيدية جديدة
+    # Volume Increasing - حجم التداول المتزايد
+    df_calc['volume_sma'] = df_calc['volume'].rolling(5).mean()
+    df_calc['volume_increasing'] = df_calc['volume'] > df_calc['volume_sma']
+    
+    # Price Change - تغير السعر
+    df_calc['price_change'] = df_calc['close'].pct_change() * 100
+    
+    # Candle Pattern - نمط الشموع
+    df_calc['body_size'] = abs(df_calc['close'] - df_calc['open'])
+    df_calc['candle_size'] = df_calc['high'] - df_calc['low']
+    df_calc['body_ratio'] = df_calc['body_size'] / df_calc['candle_size'].replace(0, 1e-9)
     
     return df_calc
 
@@ -813,9 +819,9 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    # [تعديل المستخدم] استخدام نطاق ثابت للتقلبات
-    ATR_PERCENT_MIN = 1.5
-    ATR_PERCENT_MAX = 4.0
+    # [MODIFIED] تعديل فلتر التقلبات لتوسيع نطاق الفرص
+    ATR_PERCENT_MIN = 1.2
+    ATR_PERCENT_MAX = 5.0
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
         log_rejection(symbol, "Market Volatility Filter Failed", {
@@ -826,40 +832,41 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
 
-# --- [ENHANCEMENT] Dynamic Stop Loss & Take Profit ---
+# --- [MODIFIED] تعديلات إدارة المخاطر ---
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
+    # تعديل مضاعفات ATR لتكون أكثر ملاءمة لفريم 15 دقيقة
     if strategy_name == "BB_Stoch_Strategy":
         recent_low = df['low'].tail(3).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
+        stop_loss = min(recent_low * 0.997, entry_price - (atr_value * 1.2))  # تعديل من 1.5 إلى 1.2
     elif strategy_name == "MACD_EMA_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
     elif strategy_name == "EMA_RSI_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.3))  # تعديل من 1.8 إلى 1.3
     elif strategy_name == "Pullback_Strategy":
-        # [تعديل المستخدم] تعديل مضاعف ATR للسكالبينج
         recent_low = df['low'].tail(5).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
+        stop_loss = min(recent_low * 0.997, entry_price - (atr_value * 1.2))  # تعديل من 1.5 إلى 1.2
     elif strategy_name == "Momentum_Volatility_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.2))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.7))  # تعديل من 2.2 إلى 1.7
     elif strategy_name == "Elliott_Wave_Strategy":
         lows = df['low'].values
         try:
-            support_idx = argrelextrema(lows, np.less, order=5)[0]
+            support_idx = argrelextrema(lows, np.less, order=3)[0]  # تعديل من 5 إلى 3
             if len(support_idx) > 0:
                 recent_support = lows[support_idx[-1]]
-                stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
+                stop_loss = min(recent_support * 0.997, entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
             else:
-                stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
+                stop_loss = min(last['ema21'], entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
         except Exception as e:
             logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
-            stop_loss = entry_price - (atr_value * 2.0)
+            stop_loss = entry_price - (atr_value * 1.5)  # تعديل من 2.0 إلى 1.5
     else:
-        stop_loss = entry_price - (atr_value * 2.0)
+        stop_loss = entry_price - (atr_value * 1.5)  # تعديل من 2.0 إلى 1.5
     
-    max_stop_distance = entry_price * 0.05
+    # تعديل الحد الأقصى لمسافة وقف الخسارة
+    max_stop_distance = entry_price * 0.04  # تعديل من 0.05 إلى 0.04
     if entry_price - stop_loss > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
     
@@ -869,20 +876,21 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     risk_amount = entry_price - stop_loss
     if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
 
+    # تعديل نسب المخاطرة إلى المكافأة لتكون أكثر واقعية لفريم 15 دقيقة
     if strategy_name == "BB_Stoch_Strategy":
-        rr1, rr2 = 2.5, 4.0
+        rr1, rr2 = 2.0, 3.0  # تعديل من 2.5, 4.0
     elif strategy_name == "MACD_EMA_Strategy":
-        rr1, rr2 = 2.0, 3.5
+        rr1, rr2 = 1.8, 2.8  # تعديل من 2.0, 3.5
     elif strategy_name == "EMA_RSI_Strategy":
-        rr1, rr2 = 2.2, 3.8
+        rr1, rr2 = 1.9, 3.0  # تعديل من 2.2, 3.8
     elif strategy_name == "Pullback_Strategy":
-        rr1, rr2 = 2.3, 4.0
+        rr1, rr2 = 2.0, 3.2  # تعديل من 2.3, 4.0
     elif strategy_name == "Momentum_Volatility_Strategy":
-        rr1, rr2 = 1.8, 3.2
+        rr1, rr2 = 1.6, 2.7  # تعديل من 1.8, 3.2
     elif strategy_name == "Elliott_Wave_Strategy":
-        rr1, rr2 = 2.5, 4.5
+        rr1, rr2 = 2.0, 3.5  # تعديل من 2.5, 4.5
     else:
-        rr1, rr2 = 2.0, 3.5
+        rr1, rr2 = 1.8, 2.8  # تعديل من 2.0, 3.5
         
     target1 = entry_price + (risk_amount * rr1)
     target2 = entry_price + (risk_amount * rr2)
@@ -890,8 +898,9 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     return target1, target2
 
 # --- استراتيجيات التداول المعدلة ---
+# [MODIFIED] تعديلات استراتيجية EMA_RSI_Strategy
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
+    needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx', 'volume_increasing', 'macd_hist'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -899,33 +908,44 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    if last['ema50'] < last['ema200']:
+    # تعديل شرط الاتجاه طويل الأجل - السماح بالدخول إذا كان EMA50 فوق EMA200 أو EMA21 فوق EMA50
+    if not (last['ema50'] > last['ema200'] or last['ema21'] > last['ema50']):
         log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
         return False
     
-    # [تعديل المستخدم] منطق جديد: السعر فوق EMA9 و RSI فوق 50
+    # تعديل شرط السعر فوق EMA9
     if last['close'] <= last['ema9']:
         log_rejection(symbol_name, "EMA_RSI: Price not above EMA9")
         return False
 
-    if last['rsi'] <= 50:
-        log_rejection(symbol_name, "EMA_RSI: RSI not above 50")
+    # تخفيف شرط RSI
+    if last['rsi'] <= 45:  # تعديل من 50 إلى 45
+        log_rejection(symbol_name, "EMA_RSI: RSI not above 45")
         return False
     
-    if last['adx'] < 18:
-        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 18)")
+    # تخفيف شرط ADX
+    if last['adx'] < 15:  # تعديل من 18 إلى 15
+        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 15)")
         return False
         
-    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1
-    if not volume_ok:
-        log_rejection(symbol_name, "EMA_RSI: Volume below average")
+    # تعديل شرط الحجم
+    volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.0  # تعديل من 1.1 إلى 1.0
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    # إضافة مؤشر تأكيدي: تقاطع إيجابي في الماكد
+    macd_positive = last['macd_hist'] > 0
+    
+    if not (volume_ok and volume_increasing and macd_positive):
+        log_rejection(symbol_name, "EMA_RSI: Volume or momentum confirmation failed")
         return False
         
     return True
 
+# [MODIFIED] تعديلات استراتيجية BB_Stoch_Strategy
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    # ملاحظة: إعدادات المستخدم تتطابق مع الإعدادات الحالية (BB: 20,2 | Stoch: 14,3,3)
-    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
+    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema21', 'ema50', 'adx', 'volume', 'volume_increasing', 'rsi'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -934,13 +954,14 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # تأكيد الاتجاه الصاعد فوق EMA 50
-    if last['close'] < last['ema50']:
-        log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
+    # تعديل شرط الاتجاه - السماح بالدخول إذا كان السعر فوق EMA21
+    if last['close'] < last['ema21']:
+        log_rejection(symbol_name, "BB: Price below EMA21 (bearish trend)")
         return False
     
-    if last['adx'] < 17:
-        log_rejection(symbol_name, "BB: Weak trend (ADX < 17)")
+    # تخفيف شرط ADX
+    if last['adx'] < 15:  # تعديل من 17 إلى 15
+        log_rejection(symbol_name, "BB: Weak trend (ADX < 15)")
         return False
     
     # السعر يلامس الشريط السفلي
@@ -951,22 +972,33 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Price not bouncing from lower band")
         return False
     
-    # ستوكاستيك يؤكد الصعود
-    stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
+    # ستوكاستيك يؤكد الصعود - تعديل الشروط
+    stoch_confirm = (prev['stoch_k'] < 35) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
         log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
         return False
         
+    # إضافة مؤشر تأكيدي: RSI > 40
+    if last['rsi'] <= 40:
+        log_rejection(symbol_name, "BB: RSI too low (< 40)")
+        return False
+        
+    # تعديل شروط الشمعة والحجم
     is_bullish_candle = last['close'] > last['open']
-    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.75
-    if not (is_bullish_candle and volume_ok):
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.7  # تعديل من 0.75 إلى 0.7
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    if not (is_bullish_candle and volume_ok and volume_increasing):
         log_rejection(symbol_name, "BB: Weak bullish candle or low volume")
         return False
 
     return True
 
+# [MODIFIED] تعديلات استراتيجية MACD_EMA_Strategy
 def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'sma7', 'sma200', 'adx', 'volume'}
+    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'sma7', 'sma21', 'sma200', 'adx', 'volume', 'volume_increasing', 'ema9'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -974,14 +1006,14 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     last = df.iloc[-1]
     
-    # [تعديل المستخدم] استخدام تقاطع SMA كإشارة قوية للاتجاه
-    if last['sma7'] <= last['sma200']:
-        log_rejection(symbol_name, "MACD: Bearish long-term trend (SMA7 below SMA200)")
+    # تعديل شرط الاتجاه - استخدام SMA21 بدلاً من SMA200 للسماح بمزيد من الفرص
+    if last['sma7'] <= last['sma21']:
+        log_rejection(symbol_name, "MACD: Bearish trend (SMA7 below SMA21)")
         return False
 
-    # [تعديل المستخدم] استخدام ADX > 20 لتأكيد قوة الاتجاه
-    if last['adx'] < 20:
-        log_rejection(symbol_name, "MACD: Weak trend (ADX < 20)")
+    # تخفيف شرط ADX
+    if last['adx'] < 18:  # تعديل من 20 إلى 18
+        log_rejection(symbol_name, "MACD: Weak trend (ADX < 18)")
         return False
 
     hist = df['macd_hist'].tail(4).values
@@ -989,23 +1021,35 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
         return False
         
+    # تعديل شروط الماكد
     macd_ok = last['macd'] > 0 and last['macd_hist'] > 0
     hist_accelerating = hist[3] > hist[2] and hist[2] > hist[1]
     
-    if not (macd_ok and hist_accelerating):
+    # إضافة مؤشر تأكيدي: تقاطع إيجابي في MACD Signal
+    macd_cross_up = (df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]) and (last['macd'] > last['macd_signal'])
+    
+    # إضافة مؤشر تأكيدي: السعر فوق EMA9
+    price_above_ema9 = last['close'] > last['ema9']
+    
+    if not (macd_ok and (hist_accelerating or macd_cross_up) and price_above_ema9):
         log_rejection(symbol_name, "MACD: Momentum not confirmed")
         return False
         
-    # [تعديل المستخدم] زيادة متطلبات الحجم
-    volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
-    if not volume_ok:
+    # تعديل متطلبات الحجم
+    volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.1  # تعديل من 1.2 إلى 1.1
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    if not (volume_ok and volume_increasing):
         log_rejection(symbol_name, "MACD: Volume below average")
         return False
         
     return True
 
+# [MODIFIED] تعديلات استراتيجية Pullback_Strategy
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema21', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx'}
+    needed = {'ema21', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx', 'volume_increasing', 'rsi', 'stoch_k', 'stoch_d'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -1013,32 +1057,51 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    if not (last['ema21'] > last['ema50'] > last['ema200']):
-        log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
+    # تعديل شرط الاتجاه - السماح بترتيب EMA21 > EMA50 أو EMA21 > EMA200
+    if not (last['ema21'] > last['ema50'] or last['ema21'] > last['ema200']):
+        log_rejection(symbol_name, "Pullback: Trend is not bullish")
         return False
     
-    if last['adx'] < 16:
-        log_rejection(symbol_name, "Pullback: Weak trend (ADX < 16)")
+    # تخفيف شرط ADX
+    if last['adx'] < 14:  # تعديل من 16 إلى 14
+        log_rejection(symbol_name, "Pullback: Weak trend (ADX < 14)")
         return False
     
-    pulled_back = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
-    if not pulled_back:
+    # تعديل شرط الارتداد - السماح بالارتداد لـ EMA21 أو EMA50
+    pulled_back_to_ema21 = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
+    pulled_back_to_ema50 = (df['low'].tail(3) <= df['ema50'].tail(3)).any()
+    
+    if not (pulled_back_to_ema21 or pulled_back_to_ema50):
         log_rejection(symbol_name, "Pullback: No pullback detected")
         return False
     
+    # تعديل شرط التعافي
     if not (last['close'] > last['open']):
         log_rejection(symbol_name, "Pullback: Price not recovering")
         return False
     
-    avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
-    if last['volume'] < avg_volume * 1.0:
-        log_rejection(symbol_name, "Pullback: Low volume on recovery")
+    # تعديل شرط الحجم
+    avg_volume = df['volume'].rolling(window=15).mean().iloc[-1]
+    volume_ok = last['volume'] >= avg_volume * 0.9  # تعديل من 1.0 إلى 0.9
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    # إضافة مؤشر تأكيدي: RSI بين 40-60
+    rsi_ok = 40 <= last['rsi'] <= 60
+    
+    # إضافة مؤشر تأكيدي: ستوكاستيك يؤكد الصعود
+    stoch_ok = last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 70
+    
+    if not (volume_ok and volume_increasing and rsi_ok and stoch_ok):
+        log_rejection(symbol_name, "Pullback: Volume or momentum confirmation failed")
         return False
         
     return True
 
+# [MODIFIED] تعديلات استراتيجية Momentum_Volatility_Strategy
 def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'atr_percent', 'ema9', 'ema21', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi'}
+    needed = {'atr_percent', 'ema9', 'ema21', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi', 'volume_increasing', 'macd', 'macd_signal'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -1046,36 +1109,50 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    if not (last['ema9'] > last['ema21'] > last['ema50']):
+    # تعديل شرط ترتيب المتوسطات - السماح بـ EMA9 > EMA21
+    if not (last['ema9'] > last['ema21']):
         log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
         return False
     
-    if last['adx'] < 22:
-        log_rejection(symbol_name, "Momentum: Weak trend (ADX < 22)")
+    # تخفيف شرط ADX
+    if last['adx'] < 18:  # تعديل من 22 إلى 18
+        log_rejection(symbol_name, "Momentum: Weak trend (ADX < 18)")
         return False
     
+    # تعديل نطاق التقلبات
     atr_percent = last['atr_percent']
-    if not (1.8 <= atr_percent <= 6.0):
+    if not (1.5 <= atr_percent <= 6.5):  # تعديل من 1.8-6.0 إلى 1.5-6.5
         log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
         return False
     
+    # تعديل شرط الماكد
     if last['macd_hist'] <= 0:
         log_rejection(symbol_name, "Momentum: MACD momentum not positive")
         return False
         
-    if not (48 <= last['rsi'] <= 72):
+    # توسيع نطاق RSI
+    if not (45 <= last['rsi'] <= 75):  # تعديل من 48-72 إلى 45-75
         log_rejection(symbol_name, "Momentum: RSI not in optimal range")
         return False
         
-    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.1
-    if not volume_ok:
-        log_rejection(symbol_name, "Momentum: Volume below average")
+    # تعديل شرط الحجم
+    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.0  # تعديل من 1.1 إلى 1.0
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    # إضافة مؤشر تأكيدي: تقاطع إيجابي في الماكد
+    macd_cross_up = (df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]) and (last['macd'] > last['macd_signal'])
+    
+    if not (volume_ok and volume_increasing and macd_cross_up):
+        log_rejection(symbol_name, "Momentum: Volume or momentum confirmation failed")
         return False
         
     return True
 
+# [MODIFIED] تعديلات استراتيجية Elliott_Wave_Strategy
 def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'high', 'low', 'close', 'ema21', 'ema50', 'ema200', 'adx', 'volume', 'rsi', 'macd'}
+    needed = {'ema21', 'ema50', 'ema200', 'high', 'low', 'close', 'volume', 'adx', 'rsi', 'macd_hist', 'volume_increasing', 'stoch_k', 'stoch_d'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 100 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -1083,66 +1160,84 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     
-    if not (last['ema21'] > last['ema50'] > last['ema200']):
+    # تعديل شرط الاتجاه - السماح بـ EMA21 > EMA50
+    if not (last['ema21'] > last['ema50']):
         log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
         return False
     
-    if last['adx'] < 22:
+    # تخفيف شرط ADX
+    if last['adx'] < 16:  # تعديل من القيمة الأعلى
         log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
         return False
     
-    if last['volume'] < df['volume'].rolling(20).mean().iloc[-1] * 1.1:
+    # تعديل شرط الحجم
+    avg_volume = df['volume'].rolling(window=10).mean().iloc[-1]
+    volume_ok = last['volume'] > avg_volume * 0.9  # تعديل من القيمة الأعلى
+    
+    # إضافة مؤشر تأكيدي: حجم التداول متزايد
+    volume_increasing = last['volume_increasing']
+    
+    if not (volume_ok and volume_increasing):
         log_rejection(symbol_name, "Elliott Wave: Volume too low")
         return False
     
-    if not (38 <= last['rsi'] <= 68):
+    # توسيع نطاق RSI
+    if not (45 <= last['rsi'] <= 75):  # تعديل من النطاق الأضيق
         log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
         return False
     
-    if last['macd'] <= 0:
+    # تعديل شرط الماكد
+    if last['macd_hist'] <= 0:
         log_rejection(symbol_name, "Elliott Wave: MACD not positive")
         return False
     
-    highs = df['high'].values
-    lows = df['low'].values
+    # إضافة مؤشر تأكيدي: ستوكاستيك يؤكد الصعود
+    stoch_ok = last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 70
     
+    if not stoch_ok:
+        log_rejection(symbol_name, "Elliott Wave: Stochastic not confirming")
+        return False
+    
+    # تبسيط شروط اكتشاف الموجات - التركيز على النمط العام بدلاً من الشروط المعقدة
     try:
-        peaks_idx = argrelextrema(highs, np.greater, order=5)[0]
-        troughs_idx = argrelextrema(lows, np.less, order=5)[0]
+        # اكتشاف نقاط التذبذب المحلية
+        highs = df['high'].values
+        lows = df['low'].values # Correction of typo '..'
         
-        if len(peaks_idx) < 2 or len(troughs_idx) < 2:
-            log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
-            return False
+        # استخدام نافذة أصغر للتكيف مع فريم 15 دقيقة
+        high_idx = argrelextrema(highs, np.greater, order=3)[0]
+        low_idx = argrelextrema(lows, np.less, order=3)[0]
         
-        wave1_start_idx = troughs_idx[-3] if len(troughs_idx) >= 3 else troughs_idx[-2]
-        wave1_end_idx = peaks_idx[-2] if len(peaks_idx) >= 2 else peaks_idx[-1]
-        wave2_end_idx = troughs_idx[-2] if len(troughs_idx) >= 2 else troughs_idx[-1]
+        # التحقق من وجود نمط صاعد بسيط (قمة أعلى وقاع أعلى)
+        if len(high_idx) >= 2 and len(low_idx) >= 2:
+            # التحقق من وجود قمتين متتاليتين مرتفعتين
+            if highs[high_idx[-1]] > highs[high_idx[-2]]:
+                # التحقق من وجود قاعين متتاليتين مرتفعين
+                if lows[low_idx[-1]] > lows[low_idx[-2]]:
+                    # نمط صاعد بسيط تم اكتشافه
+                    return True
         
-        wave1_start_price = lows[wave1_start_idx]
-        wave1_end_price = highs[wave1_end_idx]
-        wave2_end_price = lows[wave2_end_idx]
-        
-        wave1_height = wave1_end_price - wave1_start_price
-        if wave1_height <= 0:
-             log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
-             return False
-        wave2_retracement = wave1_end_price - wave2_end_price
-        retracement_percent = (wave2_retracement / wave1_height) * 100
-        
-        if retracement_percent > 61.8:
-            log_rejection(symbol_name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
-            return False
-        
-        if last['close'] <= wave1_end_price:
-            log_rejection(symbol_name, "Elliott Wave: Price hasn't broken wave 1 resistance")
-            return False
-        
-    except Exception as e:
-        logger.error(f"Error in Elliott Wave analysis: {e}")
-        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+        # إذا لم يتم اكتشاف نمط كامل، تحقق من شروط simpler
+        # السعر فوق المتوسطات المتحركة مع زخم إيجابي
+        if (last['close'] > last['ema21'] and 
+            last['close'] > last['ema50'] and 
+            last['macd_hist'] > 0 and
+            volume_increasing):
+            return True
+            
+        log_rejection(symbol_name, "Elliott Wave: No bullish pattern detected")
         return False
         
-    return True
+    except Exception as e:
+        logger.error(f"Error in Elliott Wave pattern detection: {e}")
+        # في حالة الخطأ، العودة إلى شروط أبسط
+        if (last['close'] > last['ema21'] and 
+            last['macd_hist'] > 0 and
+            volume_increasing):
+            return True
+            
+        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+        return False
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -1336,7 +1431,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.8.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.9.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1403,7 +1498,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.8.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.9.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1805,7 +1900,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.8.0)</title>
+<title>الإعدادات - بوت التداول (V32.9.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2779,7 +2874,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.8.0 (User Settings Applied) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.9.0 (User Settings Applied) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2803,585 +2898,3 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
-
-# ========== Elliott Wave Strategy (Integrated, fixed) ==========
-
-
-# -*- coding: utf-8 -*-
-"""
-Elliott Wave Strategy Module
-============================
-وحدة متكاملة لتطبيق وتحسين نهج موجات إليوت على بيانات الأسعار.
-- تشمل: حساب المؤشرات (RSI/ATR/ADX)، اكتشاف نقاط التذبذب، تحليل أنماط إليوت (اندفاعية/تصحيحية)،
-  التحقق من صحة الأنماط، حساب درجة الثقة، إدارة المخاطر (وقف الخسارة الديناميكي)،
-  التسجيل والمراقبة، واختبارات بسيطة.
-يمكن استخدامها كوحدة مستقلة أو دمجها في بوت التداول.
-"""
-
-
-import json
-import math
-import logging
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from functools import lru_cache
-from typing import Dict, List, Optional, Tuple
-
-import numpy as np
-import pandas as pd
-
-# إعداد مسجل الرسائل
-logger = logging.getLogger("elliott_wave")
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-
-# دعم Redis (اختياري)
-try:
-    import redis  # type: ignore
-    redis_client = redis.Redis(host="localhost", port=6379, db=0)
-    # محاولة PING للتأكد من الاتصال
-    try:
-        redis_client.ping()
-    except Exception:
-        redis_client = None
-except Exception:
-    redis_client = None
-
-
-# ترميز JSON يدعم NumPy
-class NpEncoder(json.JSONEncoder):
-    def default(self, obj):  # noqa: N802
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            return float(obj)
-        if isinstance(obj, (np.ndarray,)):
-            return obj.tolist()
-        return super().default(obj)
-
-
-# دالة تسجيل رفض إشارة
-def log_rejection(symbol: str, reason: str) -> None:
-    logger.info(f"[Reject] {symbol}: {reason}")
-
-
-# ==============================
-# حساب المؤشرات الفنية الأساسية
-# ==============================
-
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    # تجنب القسمة على صفر
-    rs = avg_gain / (avg_loss.replace(0, np.nan))
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50.0)
-
-
-def calc_atr(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series]:
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [
-            (high - low),
-            (high - prev_close).abs(),
-            (low - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr = tr.rolling(period).mean()
-    atr_percent = (atr / close) * 100.0
-    return atr.fillna(method="bfill"), atr_percent.fillna(0.0)
-
-
-def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-
-    up_move = high.diff()
-    down_move = -low.diff()
-
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    tr_s = tr.rolling(period).sum()
-    plus_di = 100 * pd.Series(plus_dm, index=df.index).rolling(period).sum() / tr_s
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).rolling(period).sum() / tr_s
-
-    dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0)
-    adx = dx.rolling(period).mean().fillna(0)
-    return adx
-
-
-# ==============================
-# مميزات إضافية خاصة بموجات إليوت
-# ==============================
-
-def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    حساب جميع الخصائص/المؤشرات المطلوبة، مع إضافة حقول داعمة لموجات إليوت.
-    يتوقع وجود أعمدة: ['high','low','close','volume'] على الأقل.
-    """
-    df_calc = df.copy()
-
-    # مؤشرات أساسية
-    if "rsi" not in df_calc:
-        df_calc["rsi"] = calc_rsi(df_calc["close"])
-    if "atr" not in df_calc or "atr_percent" not in df_calc:
-        atr, atr_pct = calc_atr(df_calc)
-        df_calc["atr"] = atr
-        df_calc["atr_percent"] = atr_pct
-    if "adx" not in df_calc:
-        df_calc["adx"] = calc_adx(df_calc)
-
-    # نقاط التذبذب البسيطة (مساعدة)
-    win = 5
-    df_calc["swing_high"] = (
-        df_calc["high"].rolling(window=win, center=True).max() == df_calc["high"]
-    )
-    df_calc["swing_low"] = (
-        df_calc["low"].rolling(window=win, center=True).min() == df_calc["low"]
-    )
-
-    # نسب فيبوناتشي المرجعية
-    df_calc["fib_38_2"] = df_calc["close"] * 0.382
-    df_calc["fib_61_8"] = df_calc["close"] * 0.618
-
-    return df_calc
-
-
-# ==============================
-# اكتشاف نقاط التذبذب (Swing Points)
-# ==============================
-
-def detect_swing_points(df: pd.DataFrame, window: int = 5) -> List[Dict]:
-    """
-    اكتشاف القمم والقيعان المحلية بأسلوب مشابه لـ ZigZag.
-    يعيد قائمة من القواميس: {'index','price','type','timestamp'}.
-    """
-    swing_points: List[Dict] = []
-    if len(df) < (2 * window + 1):
-        return swing_points
-
-    highs = df["high"].values
-    lows = df["low"].values
-
-    for i in range(window, len(df) - window):
-        current_high = highs[i]
-        current_low = lows[i]
-
-        # قمة محلية
-        is_high = True
-        for j in range(i - window, i + window + 1):
-            if j != i and highs[j] > current_high:
-                is_high = False
-                break
-
-        # قاع محلي
-        is_low = True
-        for j in range(i - window, i + window + 1):
-            if j != i and lows[j] < current_low:
-                is_low = False
-                break
-
-        if is_high or is_low:
-            swing_points.append(
-                {
-                    "index": i,
-                    "price": float(current_high if is_high else current_low),
-                    "type": "high" if is_high else "low",
-                    "timestamp": df.index[i],
-                }
-            )
-    # إزالة التكرارات المتجاورة من نفس النوع
-    deduped: List[Dict] = []
-    for sp in swing_points:
-        if deduped and deduped[-1]["type"] == sp["type"]:
-            # احتفظ بالأبعد سعرياً
-            if (sp["type"] == "high" and sp["price"] >= deduped[-1]["price"]) or (
-                sp["type"] == "low" and sp["price"] <= deduped[-1]["price"]
-            ):
-                deduped[-1] = sp
-        else:
-            deduped.append(sp)
-    return deduped
-
-
-# =====================================
-# البحث عن أنماط الموجات وتحليلها/تقييمها
-# =====================================
-
-def find_impulse_pattern(points: List[Dict]) -> Optional[List[Dict]]:
-    """
-    البحث عن نمط اندفاعي 1-2-3-4-5 بشكل مبسّط.
-    نتوقع تسلسلاً: low -> high -> higher low -> higher high -> higher low (اتجاه صاعد).
-    (يوجد تبسيط لتجنّب التعقيد المفرط).
-    """
-    if len(points) < 5:
-        return None
-
-    for i in range(len(points) - 4):
-        w1, w2, w3, w4, w5 = points[i : i + 5]
-
-        if not (w1["type"] == "low" and w2["type"] == "high" and w3["type"] == "low" and w4["type"] == "high" and w5["type"] == "low"):
-            continue
-
-        # قواعد أساسية مبسطة لنمط صاعد
-        if not (w2["price"] > w1["price"]):  # موجة 1 -> 2 صاعدة
-            continue
-        if not (w3["price"] > w1["price"] * 0.9):  # لا تعود أقل بكثير من بداية 1 (تخفيف)
-            continue
-        if not (w4["price"] > w2["price"]):  # قمة أعلى (موجة 3)
-            continue
-        if not (w5["price"] > w3["price"]):  # قاع أعلى (موجة 4)
-            continue
-
-        return [w1, w2, w3, w4, w5]
-    return None
-
-
-def find_corrective_pattern(points: List[Dict]) -> Optional[List[Dict]]:
-    """
-    البحث عن نمط تصحيحي ABC مبسّط:
-    نتوقع: high -> low -> lower high  (في سياق هابط) أو العكس لسياق صاعد.
-    سنكتفي بمخطط: A (انعكاس) ثم B (ارتداد) ثم C (استكمال التصحيح).
-    """
-    if len(points) < 3:
-        return None
-
-    for i in range(len(points) - 2):
-        a, b, c = points[i : i + 3]
-        # نمط تصحيحي هابط: high -> low -> lower high
-        if a["type"] == "high" and b["type"] == "low" and c["type"] == "high":
-            if b["price"] < a["price"] and c["price"] < a["price"] and c["price"] < (a["price"] - (a["price"] - b["price"]) * 0.618):
-                return [a, b, c]
-        # نمط تصحيحي صاعد: low -> high -> higher low
-        if a["type"] == "low" and b["type"] == "high" and c["type"] == "low":
-            if b["price"] > a["price"] and c["price"] > a["price"] and c["price"] > (a["price"] + (b["price"] - a["price"]) * 0.382):
-                return [a, b, c]
-    return None
-
-
-def calculate_pattern_confidence(pattern: List[Dict], df: pd.DataFrame) -> float:
-    """
-    حساب ثقة النمط بناءً على الحجم/ADX/RSI بشكل مضاعِف (0-100).
-    """
-    confidence = 50.0  # خط أساس
-    volume_factor = 1.0
-    for wave in pattern:
-        idx = int(wave["index"])
-        if 0 <= idx < len(df):
-            current_volume = float(df.iloc[idx].get("volume", np.nan))
-            avg_volume = float(df["volume"].rolling(20).mean().iloc[idx])
-            if not np.isnan(current_volume) and not np.isnan(avg_volume) and current_volume > avg_volume * 1.2:
-                volume_factor *= 1.1
-
-    adx_factor = 1.0
-    if len(df) > 0 and "adx" in df.columns:
-        last_adx = float(df.iloc[-1].get("adx", 0.0))
-        if last_adx > 25:
-            adx_factor = 1.2
-        elif last_adx > 20:
-            adx_factor = 1.1
-
-    rsi_factor = 1.0
-    if len(df) > 0 and "rsi" in df.columns:
-        last_rsi = float(df.iloc[-1].get("rsi", 50.0))
-        if 45 <= last_rsi <= 65:
-            rsi_factor = 1.1
-
-    confidence = min(100.0, confidence * volume_factor * adx_factor * rsi_factor)
-    return float(confidence)
-
-
-def analyze_elliott_wave_pattern(df: pd.DataFrame, swing_points: List[Dict]) -> Optional[Dict]:
-    """
-    تحليل نقاط التذبذب للعثور على أنماط موجات إليوت (اندفاعية أو تصحيحية).
-    يعيد قاموساً يحوي النوع والموجات ودرجة الثقة، أو None.
-    """
-    if len(swing_points) < 3:
-        return None
-
-    points = sorted(swing_points, key=lambda x: x["index"])
-
-    impulse = find_impulse_pattern(points)
-    if impulse:
-        return {
-            "type": "impulse",
-            "waves": impulse,
-            "confidence": calculate_pattern_confidence(impulse, df),
-        }
-
-    corrective = find_corrective_pattern(points)
-    if corrective:
-        return {
-            "type": "corrective",
-            "waves": corrective,
-            "confidence": calculate_pattern_confidence(corrective, df),
-        }
-
-    return None
-
-
-def validate_elliott_wave_pattern(pattern: Dict) -> bool:
-    """
-    التحقق من صحة نمط موجات إليوت بالقواعد الأساسية المبسطة.
-    """
-    ptype = pattern.get("type", "")
-    waves = pattern.get("waves", [])
-
-    if ptype == "impulse" and len(waves) == 5:
-        # قاعدة: الموجة 3 ليست الأقصر
-        wave1_len = abs(waves[1]["price"] - waves[0]["price"])
-        wave3_len = abs(waves[3]["price"] - waves[2]["price"])
-        wave5_len = abs(waves[4]["price"] - waves[3]["price"])
-        if wave3_len <= min(wave1_len, wave5_len):
-            return False
-
-        # قاعدة: الموجة 4 لا تدخل منطقة الموجة 1 (تقريباً)
-        # في تسلسلنا: w1(low)->w2(high)->w3(low)->w4(high)->w5(low)
-        # منطقة الموجة 1 تقريباً بين w1 و w2، نتحقق أن w4 (قاع/قمة سابقة) لا تُبطِلها
-        if waves[3]["price"] < waves[1]["price"] * 0.95:
-            return False
-
-        # نسب فيبوناتشي بسيطة لاسترجاع الموجة 2 (بين 38.2% و 61.8%)
-        denom = (waves[1]["price"] - waves[0]["price"])
-        if denom == 0:
-            return False
-        retr2 = (waves[1]["price"] - waves[2]["price"]) / denom
-        if not (0.382 <= retr2 <= 0.786):  # سعة أوسع عملياً
-            return False
-
-        return True
-
-    if ptype == "corrective" and len(waves) >= 3:
-        a, b, c = waves[:3]
-        # قاعدة عامة: B لا تتجاوز بداية A في النمط القياسي
-        if a["type"] == "high" and b["type"] == "low" and c["type"] == "high":
-            if b["price"] >= a["price"]:
-                return False
-            return True
-        if a["type"] == "low" and b["type"] == "high" and c["type"] == "low":
-            if b["price"] <= a["price"]:
-                return False
-            return True
-
-    return False
-
-
-# ==============================
-# إدارة المخاطر وتسجيل التحليل
-# ==============================
-
-def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
-    """
-    حساب وقف خسارة ديناميكي. يُفضَّل strategy_name == "Elliott_Wave_Strategy"
-    """
-    if strategy_name == "Elliott_Wave_Strategy":
-        swing_points = detect_swing_points(df)
-        recent_lows = [sp for sp in swing_points if sp["type"] == "low"]
-        if recent_lows:
-            last_low = float(recent_lows[-1]["price"])
-            atr_value = float(df.iloc[-1].get("atr", 0.0))
-            stop_loss = min(last_low * 0.995, entry_price - (atr_value * 1.8))
-            return float(stop_loss)
-
-    last = df.iloc[-1]
-    atr_value = float(last.get("atr", 0.0))
-    return float(entry_price - (atr_value * 2.0))
-
-
-def log_elliott_wave_analysis(symbol: str, pattern: Dict) -> None:
-    """
-    تسجيل تحليل موجات إليوت للتصحيح والتحسين.
-    """
-    try:
-        analysis_log = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
-            "pattern_type": pattern["type"],
-            "confidence": float(pattern.get("confidence", 0.0)),
-            "waves_count": int(len(pattern.get("waves", []))),
-        }
-
-        if redis_client:
-            redis_client.lpush("elliott_wave_analysis", json.dumps(analysis_log, cls=NpEncoder))
-
-        logger.info(
-            f"[Elliott Wave] Analysis for {symbol}: "
-            f"{analysis_log['pattern_type']} pattern with {analysis_log['confidence']:.1f}% confidence"
-        )
-    except Exception as e:
-        logger.error(f"\u274c [Elliott Wave] Error logging analysis: {e}")
-
-
-# ==============================
-# الاستراتيجية الرئيسية (التحقق)
-# ==============================
-
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
-    """
-    استراتيجية متقدمة لاكتشاف موجات إليوت.
-    تطبق أفضل الممارسات من المصادر المفتوحة والمجتمع.
-    ترجع True عند توافر إشارة تداول محتملة.
-    """
-    needed = {"high", "low", "close", "volume", "adx", "rsi", "atr_percent"}
-    symbol_name = getattr(df, "name", "Unknown")
-
-    if len(df) < 100 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-
-    last = df.iloc[-1]
-
-    # 1) قوة الاتجاه العام
-    if float(last["adx"]) < 20:
-        log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
-        return False
-
-    # 2) حجم التداول
-    if float(last["volume"]) < float(df["volume"].rolling(20).mean().iloc[-1]) * 0.8:
-        log_rejection(symbol_name, "Elliott Wave: Volume too low")
-        return False
-
-    # 3) نطاق RSI
-    if not (40 <= float(last["rsi"]) <= 70):
-        log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
-        return False
-
-    # 4) اكتشاف الأطراف
-    swing_points = detect_swing_points(df)
-    if len(swing_points) < 5:
-        log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
-        return False
-
-    # 5) تحليل موجات إليوت
-    wave_pattern = analyze_elliott_wave_pattern(df, swing_points)
-    if wave_pattern is None:
-        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
-        return False
-
-    # 6) التحقق من صحة النمط
-    if not validate_elliott_wave_pattern(wave_pattern):
-        log_rejection(symbol_name, "Elliott Wave: Invalid pattern structure")
-        return False
-
-    # 7) التحقق من التقلبات
-    atr_percent = float(last.get("atr_percent", 0.0))
-    if not (1.5 <= atr_percent <= 5.0):
-        log_rejection(symbol_name, "Elliott Wave: Volatility not in optimal range")
-        return False
-
-    # ثقة النمط
-    if float(wave_pattern.get("confidence", 0.0)) <= 60.0:
-        log_rejection(symbol_name, "Elliott Wave: Confidence too low")
-        return False
-
-    # تسجيل التحليل
-    log_elliott_wave_analysis(symbol_name, wave_pattern)
-    return True
-
-
-# ==============================
-# التخزين المؤقت والمراقبة والاختبارات
-# ==============================
-
-def _hash_df_for_cache(df: pd.DataFrame, cols: Tuple[str, ...] = ("high","low","close","volume")) -> str:
-    """إنشاء تجزئة بسيطة للبيانات لاستخدامها كمفتاح كاش."""
-    sub = df.loc[:, [c for c in cols if c in df.columns]].copy()
-    # استخدم آخر 500 صف لتقليل الحجم
-    sub = sub.tail(500)
-    # تحويل إلى bytes مستقرة
-    arr = np.ascontiguousarray(sub.values)
-    return str(hash(arr.tobytes())) + f"|{len(sub)}"
-
-
-@lru_cache(maxsize=256)
-def cached_swing_points_detection(df_key: str, window: int = 5) -> List[Dict]:
-    """
-    دالة كاش تعتمد على مفتاح تجزئة للـ DataFrame.
-    ملاحظة: يجب تمرير df_key الناتج من _hash_df_for_cache.
-    (الغرض توضيحي؛ في النظام الحقيقي سنربط المفتاح بالبيانات خارجاً).
-    """
-    # في هذا المثال لا يمكننا إعادة بناء DataFrame من المفتاح فقط،
-    # لذلك هذه الدالة تُستخدم فقط كمثال هيكلي.
-    # يمكن ربطها بمخزن بيانات مشترك إذا لزم.
-    return []
-
-
-def monitor_elliott_wave_performance(threshold: float = 70.0) -> Optional[float]:
-    """
-    قراءة سجل التحليلات من Redis (إن وجد) وحساب معدل النجاح التقريبي.
-    """
-    if not redis_client:
-        logger.info("Redis not available; skipping performance monitor.")
-        return None
-    analyses = redis_client.lrange("elliott_wave_analysis", 0, -1)
-    if not analyses:
-        logger.info("No analyses recorded yet.")
-        return None
-    success = sum(1 for a in analyses if json.loads(a)["confidence"] > threshold)
-    rate = success / len(analyses)
-    logger.info(f"[Elliott Wave] Success rate: {rate:.2%}")
-    return rate
-
-
-# ==============================
-# اختبارات مبسطة
-# ==============================
-
-def test_swing_points_detection() -> None:
-    test_data = pd.DataFrame(
-        {
-            "high": [10, 12, 15, 13, 11, 14, 16, 14, 12],
-            "low": [8, 10, 12, 10, 9, 11, 13, 11, 10],
-            "close": [9, 11, 14, 12, 10, 13, 15, 13, 11],
-            "volume": [100]*9,
-        }
-    )
-    test_data = calculate_all_features(test_data)
-    swing_points = detect_swing_points(test_data)
-    assert len(swing_points) > 0, "Swing points should not be empty"
-    print("✅ Swing points detection test passed (", len(swing_points), "points)")
-
-
-def _quick_sanity_check() -> None:
-    # توليد بيانات عشوائية لسلامة التنفيذ
-    np.random.seed(42)
-    n = 300
-    base = np.cumsum(np.random.randn(n)) + 100
-    high = base + np.random.rand(n) * 2
-    low = base - np.random.rand(n) * 2
-    close = base + (np.random.rand(n) - 0.5) * 1.0
-    volume = (np.random.rand(n) * 1000 + 500).astype(int)
-    df = pd.DataFrame({"high": high, "low": low, "close": close, "volume": volume})
-    df.name = "SANITY_SYMBOL"
-    df = calculate_all_features(df)
-
-    ok = check_elliott_wave_strategy_enhanced(df)
-    print("Strategy decision:", ok)
-
-
-if __name__ == "__main__":
-    test_swing_points_detection()
-    _quick_sanity_check()
