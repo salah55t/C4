@@ -1,11 +1,11 @@
-# ملف c4.py - نسخة V35.0.0 (دمج استراتيجية موجات إليوت)
+# ملف c4_optimized.py - نسخة V36.0.0 (دمج آلية الاختبار الخلفي التلقائي)
 # --- وصف التعديلات:
-# 1.  [إضافة مؤشر EWO] تمت إضافة دالة `calculate_ewo` لحساب مؤشر موجة إليوت (Elliott Wave Oscillator). ويتم الآن حسابه تلقائيًا لجميع العملات.
-# 2.  [إضافة استراتيجية Elliott Wave] تم إنشاء استراتيجية تداول جديدة ومتكاملة (`check_elliott_wave_strategy`) تعتمد على EWO مع مؤشرات تأكيدية أخرى مثل RSI وحجم التداول.
-# 3.  [إدارة مخاطر مخصصة] تم إضافة منطق مخصص لحساب وقف الخسارة وجني الأرباح لاستراتيجية موجات إليوت، يعتمد على مستويات ATR.
-# 4.  [تحديث واجهة التحكم] تم تحديث صفحة "الإعدادات" لتشمل مفتاح تفعيل/تعطيل استراتيجية موجات إليوت، بالإضافة إلى حقول لتعديل معايير المؤشر (الفترة السريعة والبطيئة).
-# 5.  [تحديث نظام الاختبار الخلفي] تم إضافة الاستراتيجية الجديدة إلى أداة الاختبار الخلفي لتقييم أدائها التاريخي.
-# 6.  [دمج كامل] تم دمج الاستراتيجية الجديدة في جميع جوانب البوت، بما في ذلك حلقة الفحص الرئيسية، نظام الإشعارات، وسجل الرفض.
+# 1. [توسيع قاعدة البيانات] تمت إضافة جدولين جديدين: `backtest_results` لتسجيل جميع نتائج الاختبارات، و `optimized_parameters` لحفظ أفضل المعلمات لكل عملة.
+# 2. [دوال التحسين المتقدم] تم بناء مجموعة من الدوال (`run_optimization_for_all_symbols`, `run_backtest_with_parameter_optimization`, `run_single_backtest`) لتشغيل اختبارات مكثفة على نطاقات معلمات متعددة.
+# 3. [واجهة برمجة تطبيقات (API) جديدة] تم إضافة نقاط نهاية جديدة في Flask (`/optimize_all_symbols`, `/get_optimization_results`) لتشغيل عملية التحسين وجلب النتائج.
+# 4. [تشغيل في الخلفية] تتم عملية التحسين الشاملة في خيط منفصل (Thread) لتجنب تجميد الواجهة الرئيسية وضمان استمرارية عمل البوت.
+# 5. [صفحة تحكم للتحسين] تم إنشاء صفحة ويب جديدة (`/optimization`) مع واجهة رسومية كاملة لبدء التحسين، ومراقبة التقدم عبر WebSocket، وعرض أفضل المعلمات المحفوظة.
+# 6. [تكامل مع الواجهة الرئيسية] تم إضافة زر في لوحة التحكم الرئيسية للانتقال إلى صفحة التحسين الجديدة.
 
 import time
 import os
@@ -17,6 +17,8 @@ import pandas as pd
 import psycopg2
 import redis
 import statistics
+import itertools
+import random
 from decimal import Decimal, ROUND_DOWN, getcontext
 from psycopg2 import sql, OperationalError, InterfaceError
 from psycopg2.extras import RealDictCursor
@@ -45,11 +47,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v35_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v36_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV35.0.0')
+logger = logging.getLogger('CryptoBotV36.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -232,6 +234,13 @@ def get_dashboard_payload() -> Dict:
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     with fixed_trade_amount_lock: fixed_amount = FIXED_TRADE_AMOUNT_USDT
 
+    optimization_status = {
+        "is_running": False,
+        "current_symbol": None,
+        "progress": 0,
+        "total_symbols": len(validated_symbols_to_scan)
+    }
+
     return {
         "trading_enabled": trading_enabled,
         "paper_trading_mode": is_paper_mode,
@@ -241,6 +250,7 @@ def get_dashboard_payload() -> Dict:
         "market_state": market_state,
         "min_signal_quality": min_quality,
         "fixed_trade_amount": fixed_amount,
+        "optimization_status": optimization_status,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -296,6 +306,32 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
                         date DATE
                     );
                 """)
+                # [NEW] Add backtest results table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS backtest_results (
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        strategy_name TEXT NOT NULL,
+                        parameters JSONB NOT NULL,
+                        profit_percentage DOUBLE PRECISION NOT NULL,
+                        win_rate DOUBLE PRECISION NOT NULL,
+                        total_trades INTEGER NOT NULL,
+                        test_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        is_best BOOLEAN DEFAULT FALSE
+                    );
+                """)
+                # [NEW] Add optimized parameters table
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS optimized_parameters (
+                        id SERIAL PRIMARY KEY,
+                        symbol TEXT NOT NULL,
+                        strategy_name TEXT NOT NULL,
+                        parameters JSONB NOT NULL,
+                        last_optimized TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        UNIQUE(symbol, strategy_name)
+                    );
+                """)
+
                 columns_to_add = {
                     "target_price_1": "DOUBLE PRECISION", "target_price_2": "DOUBLE PRECISION",
                     "initial_quantity": "DOUBLE PRECISION"
@@ -1451,7 +1487,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V35.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V36.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1518,7 +1554,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V35.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V36.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1553,6 +1589,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
             <label class="switch"><input id="toggleTrading" type="checkbox" /><span class="dot"></span><span class="small">تشغيل التداول</span></label>
             <a class="btn" href="/settings">الإعدادات</a>
             <a class="btn" href="/backtest">الاختبار الخلفي</a>
+            <a class="btn warn" href="/optimization">تحسين المعلمات</a>
           </div>
           <div class="kv" style="margin-top:12px">
             <div>الرصيد (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
@@ -1921,7 +1958,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V35.0.0)</title>
+<title>الإعدادات - بوت التداول (V36.0.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2298,12 +2335,263 @@ function updateEquityChart(equityData) {
 </html>
 """
 
+OPTIMIZATION_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <title>تحسين المعلمات</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: var(--bg); color: #e8f1ff; direction: rtl; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card { background-color: var(--panel); border: 1px solid #1e2c52; border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+        h1, h2 { color: #d7e4ff; }
+        .btn { padding: 10px 20px; border: none; border-radius: 10px; cursor: pointer; margin: 5px; font-weight: bold; text-decoration: none; display: inline-block; }
+        .btn-primary { background-color: var(--accent); color: white; }
+        .btn-secondary { background-color: #0f1b3b; color: #d9e7ff; border: 1px solid #2a3a68; }
+        .progress { height: 25px; background-color: #0b1126; border-radius: 10px; margin: 10px 0; overflow: hidden; border: 1px solid #233056;}
+        .progress-bar { height: 100%; background-color: var(--ok); border-radius: 10px; transition: width 0.4s ease; text-align: center; color: white; line-height: 25px; font-size: 12px;}
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px;}
+        th, td { border: 1px solid #1e2c52; padding: 10px; text-align: right; }
+        th { background-color: #1a264a; }
+        td { background-color: #0d1730; }
+        .status { padding: 5px 10px; border-radius: 5px; display: inline-block; color: white; font-size: 12px; }
+        .status-running { background-color: var(--warn); color: black; }
+        .status-completed { background-color: var(--ok); }
+        .status-error { background-color: var(--bad); }
+        label { display: block; margin-bottom: 8px; color: var(--muted); }
+        input, select, textarea { width: 100%; padding: 10px; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; border-radius: 8px; margin-bottom: 12px;}
+        textarea { font-family: monospace; direction: ltr; text-align: left; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <h1>تحسين المعلمات التلقائي</h1>
+            <a href="/" class="btn btn-secondary">العودة للرئيسية</a>
+        </header>
+        
+        <div class="card">
+            <h2>إعدادات التحسين</h2>
+            <form id="optimizationForm">
+                <div>
+                    <label for="strategy">الاستراتيجية:</label>
+                    <select name="strategy" id="strategy">
+                        {% for key, name in STRATEGY_NAMES.items() %}
+                        <option value="{{ key }}">{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div>
+                    <label for="days">عدد أيام البيانات:</label>
+                    <input type="number" name="days" id="days" value="90" min="30" max="365">
+                </div>
+                <div>
+                    <label for="parameter_ranges">نطاقات المعلمات (JSON):</label>
+                    <textarea name="parameter_ranges" id="parameter_ranges" rows="8" cols="50">{
+"fast_period": [3, 5, 7, 9],
+"slow_period": [25, 35, 45, 55],
+"high_level": [1.5, 2.0, 2.5, 3.0],
+"low_level": [-12.0, -10.0, -8.0, -6.0]
+}</textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">بدء التحسين</button>
+            </form>
+        </div>
+        
+        <div class="card">
+            <h2>حالة التحسين</h2>
+            <div id="optimizationStatus">
+                <p>لم يبدأ التحسين بعد</p>
+                <div class="progress" style="display: none;">
+                    <div id="progressBarInner" class="progress-bar" style="width: 0%">0%</div>
+                </div>
+                <div id="currentSymbolStatus" style="margin-top: 10px; color: var(--muted); font-size: 14px;"></div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>أفضل المعلمات الحالية</h2>
+            <div style="max-height: 400px; overflow-y: auto;">
+                <table id="optimizedParamsTable">
+                    <thead>
+                        <tr>
+                            <th>العملة</th>
+                            <th>الاستراتيجية</th>
+                            <th>المعلمات</th>
+                            <th>آخر تحديث</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- سيتم ملؤها بواسطة JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h2>آخر نتائج الاختبار</h2>
+            <div style="max-height: 400px; overflow-y: auto;">
+                <table id="resultsTable">
+                    <thead>
+                        <tr>
+                            <th>العملة</th>
+                            <th>الاستراتيجية</th>
+                            <th>الربح (%)</th>
+                            <th>معدل الربح (%)</th>
+                            <th>عدد الصفقات</th>
+                            <th>تاريخ الاختبار</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- سيتم ملؤها بواسطة JavaScript -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+        
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'optimization_progress') {
+                updateOptimizationStatus(data.payload);
+            } else if (data.type === 'optimization_complete') {
+                showOptimizationComplete(data.payload);
+                loadOptimizationData();
+            } else if (data.type === 'optimization_error') {
+                showOptimizationError(data.payload);
+            }
+        };
+        
+        function updateOptimizationStatus(payload) {
+            const statusDiv = document.getElementById('optimizationStatus');
+            const progressBar = document.querySelector('.progress');
+            const progressBarInner = document.getElementById('progressBarInner');
+            const currentSymbolDiv = document.getElementById('currentSymbolStatus');
+            
+            progressBar.style.display = 'block';
+            const progressPercent = (payload.current / payload.total * 100);
+            progressBarInner.style.width = progressPercent + '%';
+            progressBarInner.textContent = `${Math.round(progressPercent)}%`;
+            
+            let resultText = '';
+            if (payload.result) {
+                if (payload.result.error) {
+                    resultText = `<span class="status-error">${payload.result.error}</span>`;
+                } else {
+                    resultText = `ربح: <strong style="color: ${payload.result.profit_percentage > 0 ? 'var(--ok)' : 'var(--bad)'}">${payload.result.profit_percentage.toFixed(2)}%</strong>, صفقات: <strong>${payload.result.total_trades}</strong>`;
+                }
+            }
+            
+            currentSymbolDiv.innerHTML = `جاري معالجة: <strong>${payload.symbol}</strong> (${payload.current}/${payload.total}) - ${resultText}`;
+        }
+        
+        function showOptimizationComplete(payload) {
+            const statusDiv = document.getElementById('optimizationStatus');
+            const progressBarInner = document.getElementById('progressBarInner');
+            progressBarInner.style.width = '100%';
+            progressBarInner.textContent = `اكتمل 100%`;
+            statusDiv.innerHTML += '<p class="status status-completed">✅ اكتمل التحسين بنجاح</p>';
+        }
+        
+        function showOptimizationError(payload) {
+            const statusDiv = document.getElementById('optimizationStatus');
+            statusDiv.innerHTML = `<p class="status status-error">❌ خطأ في التحسين: ${payload.error}</p>`;
+        }
+        
+        function loadOptimizationData() {
+            fetch('/get_optimization_results')
+                .then(response => response.json())
+                .then(data => {
+                    const paramsTable = document.querySelector('#optimizedParamsTable tbody');
+                    paramsTable.innerHTML = '';
+                    if (data.optimized_parameters && data.optimized_parameters.length > 0) {
+                        data.optimized_parameters.forEach(item => {
+                            const row = paramsTable.insertRow();
+                            row.insertCell(0).textContent = item.symbol;
+                            row.insertCell(1).textContent = STRATEGY_NAMES[item.strategy] || item.strategy;
+                            row.insertCell(2).textContent = JSON.stringify(item.parameters);
+                            row.insertCell(3).textContent = new Date(item.last_optimized).toLocaleString();
+                        });
+                    }
+                    
+                    const resultsTable = document.querySelector('#resultsTable tbody');
+                    resultsTable.innerHTML = '';
+                    if(data.recent_results && data.recent_results.length > 0) {
+                        data.recent_results.forEach(item => {
+                            const row = resultsTable.insertRow();
+                            row.insertCell(0).textContent = item.symbol;
+                            row.insertCell(1).textContent = STRATEGY_NAMES[item.strategy] || item.strategy;
+                            row.insertCell(2).innerHTML = `<strong style="color: ${item.profit_percentage > 0 ? 'var(--ok)' : 'var(--bad)'}">${item.profit_percentage.toFixed(2)}</strong>`;
+                            row.insertCell(3).textContent = item.win_rate.toFixed(2);
+                            row.insertCell(4).textContent = item.total_trades;
+                            row.insertCell(5).textContent = new Date(item.test_date).toLocaleString();
+                        });
+                    }
+                })
+                .catch(error => console.error('Error loading optimization data:', error));
+        }
+        
+        document.getElementById('optimizationForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData(this);
+            let parameterRanges;
+            try {
+                parameterRanges = JSON.parse(formData.get('parameter_ranges'));
+            } catch (err) {
+                alert("خطأ في تنسيق JSON الخاص بنطاقات المعلمات. يرجى التصحيح والمحاولة مرة أخرى.");
+                return;
+            }
+
+            const data = {
+                strategy: formData.get('strategy'),
+                days: parseInt(formData.get('days')),
+                parameter_ranges: parameterRanges
+            };
+            
+            document.getElementById('optimizationStatus').innerHTML = '<p>يتم الآن بدء عملية التحسين...</p>';
+
+            fetch('/optimize_all_symbols', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('تم بدء عملية التحسين بنجاح. يمكنك متابعة التقدم في هذه الصفحة.');
+                } else {
+                    alert('خطأ: ' + data.error);
+                }
+            })
+            .catch(error => console.error('Error starting optimization:', error));
+        });
+        
+        const STRATEGY_NAMES = {{ STRATEGY_NAMES | tojson }};
+        window.onload = function() {
+            loadOptimizationData();
+        };
+    </script>
+</body>
+</html>
+"""
+
 # --- مسارات Flask ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
 
 @app.route('/backtest')
 def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
+
+@app.route('/optimization')
+def optimization_page(): return render_template_string(OPTIMIZATION_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
 
 @app.route('/settings')
 def settings_page():
@@ -2567,7 +2855,7 @@ def api_close_trade(signal_id):
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
-# --- Backtesting System ---
+# --- [MODIFIED] Backtesting System ---
 def backtest_strategy(strategy_name, symbol, days=90):
     logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
@@ -2664,6 +2952,250 @@ def api_run_backtest():
         logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
         return jsonify({"error": "An internal error occurred."}), 500
 
+# --- [NEW] Parameter Optimization System ---
+def save_best_parameters(symbol: str, strategy_name: str, result: Dict[str, Any]):
+    """حفظ أفضل المعلمات في قاعدة البيانات"""
+    if not check_db_connection() or not conn:
+        return
+    
+    try:
+        with conn.cursor() as cur:
+            # حفظ نتيجة الاختبار
+            cur.execute("""
+                INSERT INTO backtest_results (
+                    symbol, strategy_name, parameters, profit_percentage, 
+                    win_rate, total_trades, is_best
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (
+                symbol, strategy_name, json.dumps(result['parameters']), 
+                result['profit_percentage'], result['win_rate'], 
+                result['total_trades'], True
+            ))
+            
+            # تحديث أفضل المعلمات
+            cur.execute("""
+                INSERT INTO optimized_parameters (symbol, strategy_name, parameters)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (symbol, strategy_name) 
+                DO UPDATE SET parameters = EXCLUDED.parameters, last_optimized = NOW()
+            """, (
+                symbol, strategy_name, json.dumps(result['parameters'])
+            ))
+            
+            conn.commit()
+            logger.info(f"✅ [DB] Saved best parameters for {symbol}")
+    except Exception as e:
+        logger.error(f"❌ [DB] Error saving parameters for {symbol}: {e}")
+        if conn: conn.rollback()
+
+def run_single_backtest(df: pd.DataFrame, symbol: str, strategy_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    تشغيل اختبار خلفي واحد بمجموعة معلمات محددة
+    """
+    df_test = df.copy()
+    
+    if strategy_name == "Elliott_Wave_Strategy":
+        fast = parameters.get('fast_period', EWO_FAST_PERIOD)
+        slow = parameters.get('slow_period', EWO_SLOW_PERIOD)
+        high = parameters.get('high_level', EWO_HIGH_LEVEL)
+        low = parameters.get('low_level', EWO_LOW_LEVEL) # Corrected from low_period
+        
+        ema_fast = df_test['close'].ewm(span=fast, adjust=False).mean()
+        ema_slow = df_test['close'].ewm(span=slow, adjust=False).mean()
+        df_test['ewo'] = (ema_fast - ema_slow) / df_test['close'] * 100
+        df_test['ewo_high'] = high
+        df_test['ewo_low'] = low
+    
+    df_test = calculate_all_features(df_test)
+    
+    trades = []
+    position = None
+    
+    for i in range(50, len(df_test)): # Start from a reasonable index
+        current_df_slice = df_test.iloc[:i+1]
+        current_price = df_test['close'].iloc[i]
+        
+        if position is None:
+            if strategy_name == "Elliott_Wave_Strategy" and check_elliott_wave_pattern(current_df_slice):
+                entry_price = current_price
+                stop_loss = calculate_dynamic_stop_loss(current_df_slice, entry_price, strategy_name)
+                target1, target2 = calculate_dynamic_take_profit(current_df_slice, entry_price, stop_loss, strategy_name)
+                
+                if stop_loss < entry_price:
+                    position = {
+                        'entry_price': entry_price, 'stop_loss': stop_loss,
+                        'target1': target1, 'target2': target2,
+                        'entry_time': df_test.index[i]
+                    }
+        
+        elif position is not None:
+            exit_price, exit_reason = None, None
+            if df_test['low'].iloc[i] <= position['stop_loss']: exit_price, exit_reason = position['stop_loss'], 'stop_loss'
+            elif df_test['high'].iloc[i] >= position['target2']: exit_price, exit_reason = position['target2'], 'target2'
+            elif df_test['high'].iloc[i] >= position['target1']: exit_price, exit_reason = position['target1'], 'target1'
+
+            if exit_price:
+                profit_percent = (exit_price - position['entry_price']) / position['entry_price'] * 100
+                trades.append({
+                    'entry_price': position['entry_price'], 'exit_price': exit_price,
+                    'profit_percent': profit_percent, 'exit_time': df_test.index[i],
+                    'exit_reason': exit_reason
+                })
+                position = None
+    
+    if not trades:
+        return {"profit_percentage": 0, "win_rate": 0, "total_trades": 0, "parameters": parameters}
+    
+    total_profit_sum = sum(trade['profit_percent'] for trade in trades)
+    winning_trades = sum(1 for trade in trades if trade['profit_percent'] > 0)
+    win_rate = (winning_trades / len(trades)) * 100 if trades else 0
+    
+    return {
+        "profit_percentage": total_profit_sum, # Using sum of profits as the primary metric
+        "win_rate": win_rate,
+        "total_trades": len(trades),
+        "parameters": parameters
+    }
+
+def run_backtest_with_parameter_optimization(symbol: str, strategy_name: str, parameter_ranges: Dict[str, List[Any]], days: int = 90, max_combinations: int = 50) -> Dict[str, Any]:
+    """
+    تشغيل الاختبار الخلفي مع تحسين المعلمات
+    """
+    logger.info(f"[Backtest] Starting parameter optimization for {symbol} with {strategy_name}")
+    
+    df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
+    if df is None or len(df) < 50:
+        logger.warning(f"[Backtest] Insufficient data for {symbol}")
+        return {"error": "Insufficient data"}
+    
+    parameter_names = list(parameter_ranges.keys())
+    parameter_values = list(parameter_ranges.values())
+    
+    all_combinations = list(itertools.product(*parameter_values))
+    if len(all_combinations) > max_combinations:
+        combinations_to_test = random.sample(all_combinations, max_combinations)
+    else:
+        combinations_to_test = all_combinations
+    
+    best_result = {"profit_percentage": -float('inf'), "win_rate": 0, "total_trades": 0, "parameters": {}}
+    
+    for combination in combinations_to_test:
+        current_params = dict(zip(parameter_names, combination))
+        result = run_single_backtest(df, symbol, strategy_name, current_params)
+        
+        if result["profit_percentage"] > best_result["profit_percentage"]:
+            best_result = result
+            best_result["parameters"] = current_params
+    
+    if best_result.get("total_trades", 0) > 0:
+        save_best_parameters(symbol, strategy_name, best_result)
+        logger.info(f"[Backtest] Best parameters for {symbol}: {best_result['parameters']} with profit sum: {best_result['profit_percentage']:.2f}%")
+    else:
+        logger.info(f"[Backtest] No profitable trades found for {symbol} during optimization.")
+        return {"error": "No trades found"}
+
+    return best_result
+
+def run_optimization_for_all_symbols(strategy_name: str, parameter_ranges: Optional[Dict[str, List[Any]]] = None, days: int = 90) -> Dict[str, Any]:
+    """
+    تشغيل الاختبار الخلفي مع تحسين المعلمات لجميع العملات
+    """
+    if parameter_ranges is None:
+        parameter_ranges = {
+            'fast_period': [3, 5, 7, 9], 'slow_period': [25, 35, 45, 55],
+            'high_level': [1.5, 2.0, 2.5, 3.0], 'low_level': [-12.0, -10.0, -8.0, -6.0]
+        }
+    
+    symbols = get_validated_symbols()
+    if not symbols: return {"error": "No symbols found"}
+    
+    results = {}
+    total_symbols = len(symbols)
+    logger.info(f"[Optimization] Starting optimization for {total_symbols} symbols")
+    
+    for i, symbol in enumerate(symbols, 1):
+        try:
+            logger.info(f"[Optimization] Processing {symbol} ({i}/{total_symbols})")
+            
+            result = run_backtest_with_parameter_optimization(symbol, strategy_name, parameter_ranges, days)
+            results[symbol] = result
+            
+            broadcast({"type": "optimization_progress", "payload": {"current": i, "total": total_symbols, "symbol": symbol, "result": result}})
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"❌ [Optimization] Error optimizing {symbol}: {e}")
+            results[symbol] = {"error": str(e)}
+    
+    logger.info(f"[Optimization] Completed optimization for {total_symbols} symbols")
+    return {"strategy": strategy_name, "parameter_ranges": parameter_ranges, "days": days, "results": results, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.route('/optimize_all_symbols', methods=['POST'])
+def optimize_all_symbols_endpoint():
+    try:
+        data = request.get_json() or {}
+        strategy_name = data.get('strategy', 'Elliott_Wave_Strategy')
+        days = data.get('days', 90)
+        
+        default_ranges = {
+            'fast_period': [3, 5, 7, 9], 'slow_period': [25, 35, 45, 55],
+            'high_level': [1.5, 2.0, 2.5, 3.0], 'low_level': [-12.0, -10.0, -8.0, -6.0]
+        }
+        
+        parameter_ranges = data.get('parameter_ranges', default_ranges)
+        
+        def run_optimization():
+            try:
+                results = run_optimization_for_all_symbols(strategy_name, parameter_ranges, days)
+                broadcast({"type": "optimization_complete", "payload": results})
+                log_and_notify("info", f"✅ اكتمل تحسين المعلمات. تم فحص {len(results.get('results', {}))} عملة.", "optimization")
+            except Exception as e:
+                logger.error(f"❌ [Optimization] Error in optimization thread: {e}")
+                broadcast({"type": "optimization_error", "payload": {"error": str(e)}})
+        
+        optimization_thread = Thread(target=run_optimization)
+        optimization_thread.start()
+        
+        return jsonify({
+            "success": True, "message": "تم بدء عملية تحسين المعلمات",
+            "strategy": strategy_name, "days": days, "parameter_ranges": parameter_ranges
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ [API] Error in optimize_all_symbols: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/get_optimization_results', methods=['GET'])
+def get_optimization_results():
+    try:
+        if not check_db_connection() or not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+        
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT symbol, strategy_name, parameters, last_optimized FROM optimized_parameters ORDER BY last_optimized DESC
+            """)
+            optimized_params = [{
+                "symbol": row['symbol'], "strategy": row['strategy_name'],
+                "parameters": row['parameters'], "last_optimized": row['last_optimized'].isoformat()
+            } for row in cur.fetchall()]
+            
+            cur.execute("""
+                SELECT symbol, strategy_name, parameters, profit_percentage, win_rate, total_trades, test_date
+                FROM backtest_results WHERE is_best = TRUE ORDER BY test_date DESC LIMIT 20
+            """)
+            recent_results = [{
+                "symbol": row['symbol'], "strategy": row['strategy_name'], "parameters": row['parameters'],
+                "profit_percentage": row['profit_percentage'], "win_rate": row['win_rate'],
+                "total_trades": row['total_trades'], "test_date": row['test_date'].isoformat()
+            } for row in cur.fetchall()]
+        
+        return jsonify({"optimized_parameters": optimized_params, "recent_results": recent_results})
+        
+    except Exception as e:
+        logger.error(f"❌ [API] Error getting optimization results: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # --- Main Loop & Threads ---
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop...")
@@ -2690,10 +3222,9 @@ def main_bot_loop():
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
 
-            # Fetch BTC data once per cycle for the market trend filter
             df_btc = None
             try:
-                df_btc_raw = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, 60) # Need enough for ema50 etc.
+                df_btc_raw = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, 60)
                 if df_btc_raw is not None and len(df_btc_raw) >= 55:
                     df_btc = calculate_all_features(df_btc_raw)
             except Exception as e:
@@ -2930,7 +3461,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V35.0.0 (Elliott Wave Integrated) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V36.0.0 (Optimizer Integrated) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2953,5 +3484,4 @@ if __name__ == '__main__':
     Thread(target=update_balance_loop, daemon=True).start()
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
-
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
