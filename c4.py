@@ -1,16 +1,12 @@
-# ملف c4.py - نسخة V33.0.0 (تحديث شامل للاستراتيجيات)
+# ملف c4.py - نسخة V34.0.0 (تحسينات متقدمة للاستراتيجيات)
 # --- وصف التعديلات:
-# 1.  [حذف الاستراتيجيات القديمة] تم حذف جميع استراتيجيات التداول السابقة (BB+Stoch, MACD+SMA, EMA+RSI, Pullback, Momentum, Elliott Wave).
-# 2.  [إضافة استراتيجيات جديدة] تم تنفيذ ودمج 5 استراتيجيات جديدة بناءً على طلب المستخدم، وهي الأكثر شيوعًا في مجتمعات التداول:
-#     - RSI + MACD: للدخول عند مناطق ذروة البيع مع تأكيد من ضعف الزخم الهابط.
-#     - ORB (Opening Range Breakout): للدخول عند اختراق نطاق أول شمعة 15 دقيقة في اليوم (بتوقيت UTC).
-#     - Moving Averages Crossover: للدخول عند تقاطع المتوسطات المتحركة الأسية (9 مع 21) مع تأكيد الاتجاه العام (متوسط 55).
-#     - Multi-Timeframe: لتحليل الاتجاه على فريم الساعة والدخول عند الارتداد على فريم 15 دقيقة.
-#     - Bollinger Bands Scalping: للدخول عند ارتداد السعر من الحد السفلي لمؤشر بولينجر باند.
-# 3.  [تعديل المؤشرات] تم إعادة ضبط المؤشرات الفنية لتناسب المعايير القياسية المستخدمة في الاستراتيجيات الجديدة (مثل RSI 14, MACD 12/26/9).
-# 4.  [تحسين إدارة المخاطر] تم تحديث دوال وقف الخسارة وجني الأرباح لتناسب كل استراتيجية جديدة على حدة.
-# 5.  [تحديث الواجهة] تم تحديث واجهات التحكم (لوحة التحكم، الإعدادات، الاختبار الخلفي) لتعكس الاستراتيجيات الجديدة وتسمح بالتحكم فيها.
-# 6.  [منطق متعدد الأطر] تم تعديل اللوب الرئيسي لجلب البيانات من إطارين زمنيين (15 دقيقة و 1 ساعة) لدعم استراتيجية Multi-Timeframe.
+# 1.  [تحسين منطق الاستراتيجيات] تم تحسين جميع الاستراتيجيات الخمس بإضافة شروط أكثر دقة (مثل تأكيد الشموع، ارتفاع RSI من القاع، تحول MACD) لزيادة موثوقية الإشارات وتقليل الإدخالات الخاطئة.
+# 2.  [إضافة فلاتر جديدة] تم إضافة فلترين عامين يتم تطبيقهما قبل أي صفقة:
+#     - فلتر جودة السوق (Market Quality): يتحقق من أن تقلبات السوق (ATR) وحجم التداول ضمن نطاقات مثالية.
+#     - فلتر اتجاه السوق (Market Trend): يستخدم حركة BTC كمرجع ويمنع الدخول في صفقات شراء إذا كان اتجاه البيتكوين هابطًا.
+# 3.  [حساب جودة الإشارة] تم استبدال القيمة الثابتة لجودة الإشارة بدالة ديناميكية (`calculate_signal_quality`) تقوم بتقييم كل فرصة محتملة ومنحها درجة من 0 إلى 100 بناءً على قوة المؤشرات المختلفة (RSI, ADX, Volume, etc.).
+# 4.  [تحديث منطق الفحص] تم تعديل اللوب الرئيسي ليقوم بجلب بيانات البيتكوين مرة واحدة في كل دورة فحص وتمريرها إلى الفلاتر، مما يحسن من كفاءة الأداء.
+# 5.  [إكمال الدوال] تم التأكد من اكتمال وصحة جميع الدوال التي قدمها المستخدم ودمجها بسلاسة في هيكل البوت.
 
 import time
 import os
@@ -50,11 +46,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v33_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v34_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.0.0')
+logger = logging.getLogger('CryptoBotV34.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -158,23 +154,39 @@ REJECTION_REASONS_AR = {
     "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
-    # أسباب الرفض للاستراتيجيات الجديدة
-    "RSI_MACD: Not in oversold zone": "RSI+MACD: السعر ليس في منطقة ذروة البيع (RSI < 30)",
-    "RSI_MACD: Bearish momentum not weakening": "RSI+MACD: الزخم الهابط لا يضعف (MACD Hist)",
-    "RSI_MACD: No bullish candle confirmation": "RSI+MACD: لا توجد شمعة تأكيد صاعدة",
-    "ORB: Not in breakout time window": "ORB: ليس وقت الاختراق (بعد أول شمعة)",
-    "ORB: Price has not broken opening range high": "ORB: السعر لم يخترق قمة النطاق الافتتاحي",
+    "Market Quality Filter Failed": "فلتر جودة السوق العام رفض الدخول",
+    "Market Trend Filter Failed": "فلتر اتجاه السوق العام رفض الدخول (اتجاه BTC هابط)",
+    
+    # أسباب الرفض للاستراتيجيات المحسنة
+    "RSI_MACD: RSI not in oversold zone or not rising": "RSI+MACD: مؤشر RSI ليس في منطقة التشبع البيعي أو لا يرتفع",
+    "RSI_MACD: MACD histogram not showing weakening bearish momentum": "RSI+MACD: مؤشر MACD لا يظهر ضعف في الزخم الهابط",
+    "RSI_MACD: No strong bullish reversal candle": "RSI+MACD: لا توجد شمعة انعكاسية صاعدة قوية",
+    "RSI_MACD: Volume confirmation failed": "RSI+MACD: فشل تأكيد حجم التداول",
+    
+    "ORB: Not in optimal breakout time window": "ORB: خارج نافذة وقت الاختراق المثلى",
+    "ORB: Price has not broken opening range high sufficiently": "ORB: السعر لم يخترق قمة النطاق الافتتاحي بشكل كافٍ",
     "ORB: Insufficient volume for breakout": "ORB: حجم التداول غير كافٍ للاختراق",
-    "MA_Crossover: No bullish crossover occurred": "MA Crossover: لم يحدث تقاطع صاعد (EMA9/21)",
-    "MA_Crossover: General trend is not bullish": "MA Crossover: الاتجاه العام ليس صاعدًا (EMA55)",
-    "MA_Crossover: Price is not above moving averages": "MA Crossover: السعر ليس فوق المتوسطات المتحركة",
-    "Multi_Timeframe: Higher timeframe trend is not bullish": "Multi-TF: الاتجاه على فريم الساعة ليس صاعدًا",
+    "ORB: Market volatility not suitable for ORB": "ORB: تقلب السوق غير مناسب للاستراتيجية",
+    
+    "MA_Crossover: No bullish crossover occurred": "MA Crossover: لم يحدث تقاطع صاعد",
+    "MA_Crossover: Insufficient distance between MAs": "MA Crossover: المسافة بين المتوسطات غير كافية",
+    "MA_Crossover: General trend is not bullish": "MA Crossover: الاتجاه العام ليس صاعدًا",
+    "MA_Crossover: RSI confirmation failed": "MA Crossover: فشل تأكيد مؤشر القوة النسبية (RSI)",
+    "MA_Crossover: ADX indicates weak trend": "MA Crossover: مؤشر ADX يشير إلى اتجاه ضعيف",
+    "MA_Crossover: Volume confirmation failed": "MA Crossover: فشل تأكيد حجم التداول",
+
+    "Multi_Timeframe: Higher timeframe trend is not bullish": "Multi-TF: الاتجاه على فريم الساعة ليس صاعدًا بقوة",
     "Multi_Timeframe: No pullback to support on 15m": "Multi-TF: لم يحدث ارتداد للدعم على فريم 15د",
-    "Multi_Timeframe: No confirmation signal on 15m": "Multi-TF: لا توجد إشارة تأكيد على فريم 15د (RSI/Candle)",
+    "Multi_Timeframe: MACD momentum confirmation failed": "Multi-TF: فشل تأكيد زخم MACD",
+    "Multi_Timeframe: Volume confirmation failed": "Multi-TF: فشل تأكيد حجم التداول",
+    "Multi_Timeframe: No confirmation signal on 15m": "Multi-TF: لا توجد إشارة تأكيد على فريم 15د",
+    
     "BB_Scalping: Price has not touched lower band": "BB Scalping: السعر لم يلامس الحد السفلي للبولينجر",
     "BB_Scalping: Price has not recovered inside band": "BB Scalping: السعر لم يغلق داخل حدود البولينجر",
     "BB_Scalping: RSI confirmation failed": "BB Scalping: فشل تأكيد مؤشر القوة النسبية (RSI)",
+    "BB_Scalping: No strong reversal candle pattern": "BB Scalping: لا يوجد نمط شمعة انعكاسية قوية",
 }
+
 
 # --- إعداد تطبيق Flask و WebSocket ---
 app = Flask(__name__)
@@ -738,6 +750,7 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
+# --- [NEW] الفلاتر العامة المحسنة ---
 def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
@@ -764,21 +777,45 @@ def add_correlation_filter(new_symbol: str) -> bool:
             return False
     return True
 
-# --- فلتر التقلبات المحدث ---
-def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown") -> bool:
+def check_market_quality_filter(df: pd.DataFrame, symbol: str = "Unknown") -> bool:
     if 'atr_percent' not in df.columns or df['atr_percent'].isnull().all():
-        log_rejection(symbol, "Market Volatility Filter Failed", {"reason": "No ATR data"})
+        log_rejection(symbol, "Market Quality Filter Failed", {"reason": "No ATR data"})
         return False
     
-    last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
+    last = df.iloc[-1]
     
-    ATR_PERCENT_MIN = 0.8
-    ATR_PERCENT_MAX = 5.0
+    atr_percent = last.get('atr_percent', 0)
+    if not (0.7 <= atr_percent <= 4.5):
+        log_rejection(symbol, "Market Quality Filter Failed", {
+            "reason": "ATR percent out of optimal range",
+            "atr": f"{atr_percent:.2f}%"
+        })
+        return False
     
-    if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
-        log_rejection(symbol, "Market Volatility Filter Failed", {
-            "atr": f"{last_atr_percent:.2f}%",
-            "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
+    if 'volume' in df.columns and 'volume_sma' in df.columns:
+        volume_ratio = last['volume'] / last['volume_sma'] if last['volume_sma'] > 0 else 0
+        if volume_ratio < 0.8:
+            log_rejection(symbol, "Market Quality Filter Failed", {
+                "reason": "Low trading volume",
+                "volume_ratio": f"{volume_ratio:.2f}"
+            })
+            return False
+    
+    return True
+
+def check_market_trend_filter(df_btc: pd.DataFrame, symbol: str = "Unknown") -> bool:
+    if df_btc is None or len(df_btc) < 50 or 'ema50' not in df_btc.columns or 'rsi' not in df_btc.columns:
+        logger.warning(f"[{symbol}] Skipping Market Trend Filter due to insufficient BTC data.")
+        return True
+    
+    last_btc = df_btc.iloc[-1]
+    
+    btc_bullish = last_btc['close'] > last_btc['ema50'] and last_btc['rsi'] > 40
+    
+    if not btc_bullish:
+        log_rejection(symbol, "Market Trend Filter Failed", {
+            "reason": "BTC trend is bearish",
+            "btc_rsi": f"{last_btc['rsi']:.1f}"
         })
         return False
     
@@ -829,9 +866,9 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     
     return target1, target2
 
-# --- [NEW] استراتيجيات التداول الجديدة ---
+# --- [NEW & IMPROVED] استراتيجيات التداول الجديدة والمحسنة ---
 def check_rsi_macd_strategy(df: pd.DataFrame) -> bool:
-    needed = {'rsi', 'macd_hist', 'close', 'open'}
+    needed = {'rsi', 'macd_hist', 'close', 'open', 'volume', 'volume_sma', 'high', 'low'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -839,26 +876,45 @@ def check_rsi_macd_strategy(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    is_oversold = last['rsi'] < 30
-    if not is_oversold:
-        log_rejection(symbol_name, "RSI_MACD: Not in oversold zone", {'RSI': f"{last['rsi']:.1f}"})
+    prev_2 = df.iloc[-3] if len(df) >= 3 else prev
+    
+    rsi_oversold = last['rsi'] < 35
+    rsi_rising = last['rsi'] > prev['rsi'] and prev['rsi'] <= prev_2['rsi']
+    
+    if not (rsi_oversold and rsi_rising):
+        log_rejection(symbol_name, "RSI_MACD: RSI not in oversold zone or not rising", {
+            'RSI': f"{last['rsi']:.1f}", 'RSI_prev': f"{prev['rsi']:.1f}"})
         return False
     
-    macd_weakening = last['macd_hist'] > prev['macd_hist'] and last['macd_hist'] < 0
-    if not macd_weakening:
-        log_rejection(symbol_name, "RSI_MACD: Bearish momentum not weakening")
+    macd_turning = (last['macd_hist'] > prev['macd_hist'] and 
+                    prev['macd_hist'] <= prev_2['macd_hist'] and 
+                    last['macd_hist'] < 0)
+    
+    if not macd_turning:
+        log_rejection(symbol_name, "RSI_MACD: MACD histogram not showing weakening bearish momentum")
         return False
         
-    is_reversal_candle = last['close'] > last['open']
-    if not is_reversal_candle:
-        log_rejection(symbol_name, "RSI_MACD: No bullish candle confirmation")
+    is_bullish_candle = last['close'] > last['open']
+    body_size = abs(last['close'] - last['open'])
+    total_range = last['high'] - last['low']
+    if total_range == 0: return False
+    strong_bullish = is_bullish_candle and (body_size / total_range) > 0.5
+    
+    if not strong_bullish:
+        log_rejection(symbol_name, "RSI_MACD: No strong bullish reversal candle")
         return False
-        
+    
+    volume_confirm = last['volume'] > last['volume_sma'] * 1.2
+    
+    if not volume_confirm:
+        log_rejection(symbol_name, "RSI_MACD: Volume confirmation failed", {
+            'volume': f"{last['volume']:.2f}", 'volume_sma': f"{last['volume_sma']:.2f}"})
+        return False
+    
     return True
 
 def check_orb_strategy(df: pd.DataFrame) -> bool:
-    needed = {'high', 'low', 'close', 'volume', 'volume_sma'}
+    needed = {'high', 'low', 'close', 'volume', 'volume_sma', 'atr_percent'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 2 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -866,34 +922,47 @@ def check_orb_strategy(df: pd.DataFrame) -> bool:
     
     last_candle_time = df.index[-1]
     
-    # Check if we are in the 2nd or 3rd candle of the day (00:15 or 00:30 UTC)
-    if not (last_candle_time.hour == 0 and last_candle_time.minute in [15, 30]):
-        log_rejection(symbol_name, "ORB: Not in breakout time window")
+    if not (last_candle_time.hour == 0 and 15 <= last_candle_time.minute <= 45):
+        log_rejection(symbol_name, "ORB: Not in optimal breakout time window")
         return False
         
     candles_today = df[df.index.date == last_candle_time.date()]
     if len(candles_today) < 2:
-        return False # Not enough data for today yet
+        return False
 
     first_candle = candles_today.iloc[0]
     opening_range_high = first_candle['high']
-    
     last_candle = df.iloc[-1]
     
-    breakout_confirmed = last_candle['close'] > opening_range_high
+    breakout_percent = (last_candle['close'] - opening_range_high) / opening_range_high * 100
+    breakout_confirmed = breakout_percent >= 0.2
+    
     if not breakout_confirmed:
-        log_rejection(symbol_name, "ORB: Price has not broken opening range high")
+        log_rejection(symbol_name, "ORB: Price has not broken opening range high sufficiently", {
+            'breakout_percent': f"{breakout_percent:.2f}%"})
         return False
         
-    high_volume = last_candle['volume'] > (first_candle['volume'] * 1.5) and last_candle['volume'] > last_candle['volume_sma']
-    if not high_volume:
-        log_rejection(symbol_name, "ORB: Insufficient volume for breakout")
+    volume_confirm = (last_candle['volume'] > first_candle['volume'] * 1.5 and 
+                      last_candle['volume'] > last_candle['volume_sma'] * 1.2)
+    
+    if not volume_confirm:
+        log_rejection(symbol_name, "ORB: Insufficient volume for breakout", {
+            'current_volume': f"{last_candle['volume']:.2f}",
+            'first_candle_volume': f"{first_candle['volume']:.2f}",
+            'volume_sma': f"{last_candle['volume_sma']:.2f}"})
+        return False
+    
+    atr_filter = 0.5 <= last_candle['atr_percent'] <= 4.0
+    
+    if not atr_filter:
+        log_rejection(symbol_name, "ORB: Market volatility not suitable for ORB", {
+            'atr_percent': f"{last_candle['atr_percent']:.2f}%"})
         return False
         
     return True
 
 def check_ma_crossover_strategy(df: pd.DataFrame) -> bool:
-    needed = {'ema9', 'ema21', 'ema55', 'close'}
+    needed = {'ema9', 'ema21', 'ema55', 'close', 'rsi', 'adx', 'volume', 'volume_sma'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 60 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -901,27 +970,53 @@ def check_ma_crossover_strategy(df: pd.DataFrame) -> bool:
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    prev_2 = df.iloc[-3] if len(df) >= 3 else prev
 
-    crossover_up = prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']
+    ema9_above_ema21 = last['ema9'] > last['ema21']
+    was_below = prev['ema9'] <= prev['ema21'] and prev_2['ema9'] <= prev_2['ema21']
+    crossover_up = ema9_above_ema21 and was_below
+    
     if not crossover_up:
         log_rejection(symbol_name, "MA_Crossover: No bullish crossover occurred")
         return False
     
-    trend_up = last['ema21'] > last['ema55']
+    ema_distance_percent = abs(last['ema9'] - last['ema21']) / last['close'] * 100
+    sufficient_distance = ema_distance_percent >= 0.3
+    
+    if not sufficient_distance:
+        log_rejection(symbol_name, "MA_Crossover: Insufficient distance between MAs", {
+            'distance_percent': f"{ema_distance_percent:.2f}%"})
+        return False
+    
+    trend_up = last['ema21'] > last['ema55'] and last['close'] > last['ema55']
+    
     if not trend_up:
         log_rejection(symbol_name, "MA_Crossover: General trend is not bullish")
         return False
         
-    price_above_emas = last['close'] > last['ema9']
-    if not price_above_emas:
-        log_rejection(symbol_name, "MA_Crossover: Price is not above moving averages")
+    rsi_confirm = 50 < last['rsi'] < 70
+    
+    if not rsi_confirm:
+        log_rejection(symbol_name, "MA_Crossover: RSI confirmation failed", {'RSI': f"{last['rsi']:.1f}"})
+        return False
+    
+    adx_confirm = last['adx'] > 20
+    
+    if not adx_confirm:
+        log_rejection(symbol_name, "MA_Crossover: ADX indicates weak trend", {'ADX': f"{last['adx']:.1f}"})
+        return False
+    
+    volume_confirm = last['volume'] > last['volume_sma'] * 1.1
+    
+    if not volume_confirm:
+        log_rejection(symbol_name, "MA_Crossover: Volume confirmation failed")
         return False
         
     return True
 
 def check_multi_timeframe_strategy(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> bool:
-    needed_1h = {'ema50', 'adx', 'close'}
-    needed_15m = {'ema21', 'rsi', 'low', 'open', 'close'}
+    needed_1h = {'ema50', 'adx', 'close', 'rsi'}
+    needed_15m = {'ema21', 'rsi', 'low', 'open', 'close', 'volume', 'volume_sma', 'macd_hist', 'high'}
     symbol_name = getattr(df_15m, 'name', 'Unknown')
     
     if len(df_1h) < 55 or not needed_1h.issubset(df_1h.columns) or \
@@ -930,31 +1025,57 @@ def check_multi_timeframe_strategy(df_15m: pd.DataFrame, df_1h: pd.DataFrame) ->
         return False
 
     last_1h = df_1h.iloc[-1]
-    htf_trend_is_up = last_1h['close'] > last_1h['ema50'] and last_1h['adx'] > 20
-    if not htf_trend_is_up:
-        log_rejection(symbol_name, "Multi_Timeframe: Higher timeframe trend is not bullish")
+    
+    htf_trend_up = last_1h['close'] > last_1h['ema50'] and last_1h['rsi'] > 50
+    htf_momentum_up = last_1h['adx'] > 22
+    
+    if not (htf_trend_up and htf_momentum_up):
+        log_rejection(symbol_name, "Multi_Timeframe: Higher timeframe trend is not bullish", {
+            'RSI_1h': f"{last_1h['rsi']:.1f}", 'ADX_1h': f"{last_1h['adx']:.1f}"})
         return False
         
     last_15m = df_15m.iloc[-1]
+    prev_15m = df_15m.iloc[-2]
     
-    # Check for pullback to 15m EMA21
-    pulled_back = (df_15m['low'].tail(3) <= df_15m['ema21'].tail(3)).any()
-    if not pulled_back:
-        log_rejection(symbol_name, "Multi_Timeframe: No pullback to support on 15m")
+    ema21_values = df_15m['ema21'].tail(5)
+    low_values = df_15m['low'].tail(5)
+    
+    min_distance, touch_point = float('inf'), False
+    for i in range(len(low_values)):
+        distance = abs(low_values.iloc[i] - ema21_values.iloc[i]) / ema21_values.iloc[i] * 100
+        if distance < min_distance: min_distance = distance
+        if distance < 0.5: touch_point = True
+    
+    if not touch_point:
+        log_rejection(symbol_name, "Multi_Timeframe: No pullback to support on 15m", {
+            'min_distance': f"{min_distance:.2f}%"})
         return False
         
-    # Check for confirmation: RSI dip or reversal candle
-    rsi_confirm = last_15m['rsi'] < 45
-    candle_confirm = last_15m['close'] > last_15m['open'] and (last_15m['close'] - last_15m['open']) > (last_15m['high'] - last_15m['low']) * 0.4
+    macd_confirm = (last_15m['macd_hist'] > prev_15m['macd_hist'] and last_15m['macd_hist'] < 0)
+    
+    if not macd_confirm:
+        log_rejection(symbol_name, "Multi_Timeframe: MACD momentum confirmation failed")
+        return False
+    
+    volume_confirm = last_15m['volume'] > last_15m['volume_sma'] * 1.15
+    
+    if not volume_confirm:
+        log_rejection(symbol_name, "Multi_Timeframe: Volume confirmation failed")
+        return False
+    
+    rsi_confirm = last_15m['rsi'] < 45 and last_15m['rsi'] > prev_15m['rsi']
+    candle_confirm = (last_15m['close'] > last_15m['open'] and 
+                     (last_15m['close'] - last_15m['open']) > (last_15m['high'] - last_15m['low']) * 0.4)
     
     if not (rsi_confirm and candle_confirm):
-        log_rejection(symbol_name, "Multi_Timeframe: No confirmation signal on 15m")
+        log_rejection(symbol_name, "Multi_Timeframe: No confirmation signal on 15m", {
+            'RSI_15m': f"{last_15m['rsi']:.1f}"})
         return False
 
     return True
 
 def check_bb_scalping_strategy(df: pd.DataFrame) -> bool:
-    needed = {'bb_lower_scalp', 'rsi', 'low', 'close'}
+    needed = {'bb_lower_scalp', 'rsi', 'low', 'close', 'volume', 'volume_sma', 'open', 'high'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 20 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
@@ -963,23 +1084,80 @@ def check_bb_scalping_strategy(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    touched_lower = prev['low'] <= prev['bb_lower_scalp']
-    if not touched_lower:
+    if not prev['low'] <= prev['bb_lower_scalp']:
         log_rejection(symbol_name, "BB_Scalping: Price has not touched lower band")
         return False
         
-    recovered_inside = last['close'] > last['bb_lower_scalp']
-    if not recovered_inside:
+    if not last['close'] > last['bb_lower_scalp']:
         log_rejection(symbol_name, "BB_Scalping: Price has not recovered inside band")
         return False
-        
-    rsi_confirm = last['rsi'] < 35
+    
+    rsi_confirm = last['rsi'] < 35 and last['rsi'] > prev['rsi']
+    
     if not rsi_confirm:
-        log_rejection(symbol_name, "BB_Scalping: RSI confirmation failed")
+        log_rejection(symbol_name, "BB_Scalping: RSI confirmation failed", {
+            'RSI': f"{last['rsi']:.1f}", 'RSI_prev': f"{prev['rsi']:.1f}"})
+        return False
+    
+    if not last['volume'] > last['volume_sma'] * 1.2:
+        log_rejection(symbol_name, "BB_Scalping: Volume confirmation failed")
+        return False
+    
+    is_bullish = last['close'] > last['open']
+    body = abs(last['close'] - last['open'])
+    l_wick = last['open'] - last['low'] if is_bullish else last['close'] - last['low']
+    total_range = last['high'] - last['low']
+    if total_range == 0: return False
+    
+    is_hammer = is_bullish and l_wick > body * 2 and (body / total_range) < 0.3
+    is_strong_rev = is_bullish and (body / total_range) > 0.6 and last['close'] > (last['high'] + last['low']) / 2
+    
+    if not (is_hammer or is_strong_rev):
+        log_rejection(symbol_name, "BB_Scalping: No strong reversal candle pattern")
         return False
         
     return True
 
+# --- [NEW] دالة حساب جودة الإشارة ---
+def calculate_signal_quality(df: pd.DataFrame, strategy_name: str, df_htf: Optional[pd.DataFrame] = None) -> int:
+    quality_score = 50
+    last = df.iloc[-1]
+    
+    if 'volume' in df.columns and 'volume_sma' in df.columns and last['volume_sma'] > 0:
+        volume_ratio = last['volume'] / last['volume_sma']
+        if volume_ratio > 1.5: quality_score += 15
+        elif volume_ratio > 1.2: quality_score += 10
+        elif volume_ratio > 1.0: quality_score += 5
+    
+    if 'rsi' in df.columns:
+        if 30 <= last['rsi'] <= 40: quality_score += 10
+        elif 25 <= last['rsi'] <= 45: quality_score += 5
+    
+    if 'adx' in df.columns:
+        if last['adx'] > 25: quality_score += 10
+        elif last['adx'] > 20: quality_score += 5
+    
+    if strategy_name == "RSI_MACD_Strategy":
+        if 'rsi' in df.columns and last['rsi'] < 30: quality_score += 10
+        if 'macd_hist' in df.columns and last['macd_hist'] > df.iloc[-2]['macd_hist']: quality_score += 5
+    
+    elif strategy_name == "ORB_Strategy":
+        if 'atr_percent' in df.columns and 1.0 <= last['atr_percent'] <= 3.0: quality_score += 10
+    
+    elif strategy_name == "MA_Crossover_Strategy":
+        if 'ema9' in df.columns and 'ema21' in df.columns:
+            ema_distance = abs(last['ema9'] - last['ema21']) / last['close'] * 100
+            if ema_distance > 0.5: quality_score += 10
+    
+    elif strategy_name == "Multi_Timeframe_Strategy" and df_htf is not None:
+        if 'adx' in df_htf.columns and df_htf.iloc[-1]['adx'] > 25: quality_score += 15
+    
+    elif strategy_name == "BB_Scalping_Strategy":
+        if 'rsi' in df.columns and last['rsi'] < 30: quality_score += 10
+    
+    return min(100, max(0, int(quality_score)))
+
+# --- دوال التداول وإدارة الصفقات ---
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -1055,18 +1233,19 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
-def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, df_htf: Optional[pd.DataFrame] = None):
+def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, df_btc: pd.DataFrame, df_htf: Optional[pd.DataFrame] = None):
     df.strategy = strategy_name 
     
-    if not check_market_volatility_filter_enhanced(df, symbol): return
+    if not check_market_quality_filter(df, symbol): return
+    if not check_market_trend_filter(df_btc, symbol): return
     if not add_news_filter(): log_rejection(symbol, "News Filter Failed"); return
     if not add_liquidity_filter(): log_rejection(symbol, "Liquidity Filter Failed"); return
     if not add_correlation_filter(symbol): log_rejection(symbol, "Correlation Filter Failed"); return
 
-    quality_score = 75 # Placeholder value
+    quality_score = calculate_signal_quality(df, strategy_name, df_htf)
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
-        log_rejection(symbol, "Low Quality Signal", {"score": quality_score, "min_required": min_score})
+        log_rejection(symbol, "Low Quality Signal", {"quality": f"{quality_score}/100", "min_required": min_score})
         return
     logger.info(f"⭐ [Signal Quality] {symbol} ({strategy_name}): {quality_score}/100")
 
@@ -1172,7 +1351,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V34.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1239,7 +1418,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V34.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1642,7 +1821,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.0.0)</title>
+<title>الإعدادات - بوت التداول (V34.0.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2378,6 +2557,16 @@ def main_bot_loop():
                     continue
             
             logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
+
+            # Fetch BTC data once per cycle for the market trend filter
+            df_btc = None
+            try:
+                df_btc_raw = fetch_historical_data(BTC_SYMBOL, SIGNAL_GENERATION_TIMEFRAME, 60) # Need enough for ema50 etc.
+                if df_btc_raw is not None and len(df_btc_raw) >= 55:
+                    df_btc = calculate_all_features(df_btc_raw)
+            except Exception as e:
+                logger.error(f"Could not fetch or process BTC data for market filter: {e}")
+
             for symbol in validated_symbols_to_scan:
                 with signal_cache_lock:
                     if len(open_signals_cache) >= MAX_OPEN_TRADES:
@@ -2412,7 +2601,7 @@ def main_bot_loop():
                             strategy_found = "Multi_Timeframe_Strategy"
 
                 if strategy_found:
-                    create_trade_signal(symbol, df_15m_featured, strategy_found, df_htf=df_1h_featured)
+                    create_trade_signal(symbol, df_15m_featured, strategy_found, df_btc, df_htf=df_1h_featured)
 
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
@@ -2610,7 +2799,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.0.0 (New Strategies) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.0 (Advanced Strategies) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2634,3 +2823,4 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
