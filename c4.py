@@ -1,12 +1,11 @@
-# ملف c4.py - نسخة V34.0.0 (تحسينات متقدمة للاستراتيجيات)
+# ملف c4.py - نسخة V35.0.0 (دمج استراتيجية موجات إليوت)
 # --- وصف التعديلات:
-# 1.  [تحسين منطق الاستراتيجيات] تم تحسين جميع الاستراتيجيات الخمس بإضافة شروط أكثر دقة (مثل تأكيد الشموع، ارتفاع RSI من القاع، تحول MACD) لزيادة موثوقية الإشارات وتقليل الإدخالات الخاطئة.
-# 2.  [إضافة فلاتر جديدة] تم إضافة فلترين عامين يتم تطبيقهما قبل أي صفقة:
-#     - فلتر جودة السوق (Market Quality): يتحقق من أن تقلبات السوق (ATR) وحجم التداول ضمن نطاقات مثالية.
-#     - فلتر اتجاه السوق (Market Trend): يستخدم حركة BTC كمرجع ويمنع الدخول في صفقات شراء إذا كان اتجاه البيتكوين هابطًا.
-# 3.  [حساب جودة الإشارة] تم استبدال القيمة الثابتة لجودة الإشارة بدالة ديناميكية (`calculate_signal_quality`) تقوم بتقييم كل فرصة محتملة ومنحها درجة من 0 إلى 100 بناءً على قوة المؤشرات المختلفة (RSI, ADX, Volume, etc.).
-# 4.  [تحديث منطق الفحص] تم تعديل اللوب الرئيسي ليقوم بجلب بيانات البيتكوين مرة واحدة في كل دورة فحص وتمريرها إلى الفلاتر، مما يحسن من كفاءة الأداء.
-# 5.  [إكمال الدوال] تم التأكد من اكتمال وصحة جميع الدوال التي قدمها المستخدم ودمجها بسلاسة في هيكل البوت.
+# 1.  [إضافة مؤشر EWO] تمت إضافة دالة `calculate_ewo` لحساب مؤشر موجة إليوت (Elliott Wave Oscillator). ويتم الآن حسابه تلقائيًا لجميع العملات.
+# 2.  [إضافة استراتيجية Elliott Wave] تم إنشاء استراتيجية تداول جديدة ومتكاملة (`check_elliott_wave_strategy`) تعتمد على EWO مع مؤشرات تأكيدية أخرى مثل RSI وحجم التداول.
+# 3.  [إدارة مخاطر مخصصة] تم إضافة منطق مخصص لحساب وقف الخسارة وجني الأرباح لاستراتيجية موجات إليوت، يعتمد على مستويات ATR.
+# 4.  [تحديث واجهة التحكم] تم تحديث صفحة "الإعدادات" لتشمل مفتاح تفعيل/تعطيل استراتيجية موجات إليوت، بالإضافة إلى حقول لتعديل معايير المؤشر (الفترة السريعة والبطيئة).
+# 5.  [تحديث نظام الاختبار الخلفي] تم إضافة الاستراتيجية الجديدة إلى أداة الاختبار الخلفي لتقييم أدائها التاريخي.
+# 6.  [دمج كامل] تم دمج الاستراتيجية الجديدة في جميع جوانب البوت، بما في ذلك حلقة الفحص الرئيسية، نظام الإشعارات، وسجل الرفض.
 
 import time
 import os
@@ -46,11 +45,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v34_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v35_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.0.0')
+logger = logging.getLogger('CryptoBotV35.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -97,13 +96,20 @@ MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 
+# --- إعدادات EWO القابلة للتعديل ---
+EWO_FAST_PERIOD: int = 5
+EWO_SLOW_PERIOD: int = 35
+EWO_HIGH_LEVEL: float = 2.0
+EWO_LOW_LEVEL: float = -10.0
+ewo_settings_lock = Lock()
+
 # --- مفاتيح تفعيل الاستراتيجيات الجديدة ---
 USE_RSI_MACD_STRATEGY: bool = True
 USE_ORB_STRATEGY: bool = True
 USE_MA_CROSSOVER_STRATEGY: bool = True
 USE_MULTI_TIMEFRAME_STRATEGY: bool = True
 USE_BB_SCALPING_STRATEGY: bool = True
-
+USE_ELLIOTT_WAVE_STRATEGY: bool = True
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
@@ -111,7 +117,8 @@ STRATEGY_NAMES = {
     "ORB_Strategy": "Opening Range Breakout (ORB)",
     "MA_Crossover_Strategy": "Moving Averages Crossover",
     "Multi_Timeframe_Strategy": "Multi-Timeframe Analysis",
-    "BB_Scalping_Strategy": "Bollinger Bands Scalping"
+    "BB_Scalping_Strategy": "Bollinger Bands Scalping",
+    "Elliott_Wave_Strategy": "Elliott Wave Analysis"
 }
 strategy_filters_lock = Lock()
 
@@ -157,7 +164,6 @@ REJECTION_REASONS_AR = {
     "Market Quality Filter Failed": "فلتر جودة السوق العام رفض الدخول",
     "Market Trend Filter Failed": "فلتر اتجاه السوق العام رفض الدخول (اتجاه BTC هابط)",
     
-    # أسباب الرفض للاستراتيجيات المحسنة
     "RSI_MACD: RSI not in oversold zone or not rising": "RSI+MACD: مؤشر RSI ليس في منطقة التشبع البيعي أو لا يرتفع",
     "RSI_MACD: MACD histogram not showing weakening bearish momentum": "RSI+MACD: مؤشر MACD لا يظهر ضعف في الزخم الهابط",
     "RSI_MACD: No strong bullish reversal candle": "RSI+MACD: لا توجد شمعة انعكاسية صاعدة قوية",
@@ -185,6 +191,10 @@ REJECTION_REASONS_AR = {
     "BB_Scalping: Price has not recovered inside band": "BB Scalping: السعر لم يغلق داخل حدود البولينجر",
     "BB_Scalping: RSI confirmation failed": "BB Scalping: فشل تأكيد مؤشر القوة النسبية (RSI)",
     "BB_Scalping: No strong reversal candle pattern": "BB Scalping: لا يوجد نمط شمعة انعكاسية قوية",
+
+    "Elliott Wave: Basic indicators not aligned": "موجات اليوت: المؤشرات الأساسية غير متوافقة",
+    "Elliott Wave: Volume confirmation failed": "موجات اليوت: فشل تأكيد حجم التداول",
+    "Elliott Wave: Pattern not recognized": "موجات اليوت: لم يتم التعرف على النمط",
 }
 
 
@@ -600,16 +610,33 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-# --- [MODIFIED] تعديل إعدادات المؤشرات لتناسب الاستراتيجيات الجديدة
+# --- [NEW] دالة حساب مؤشر موجة اليوت ---
+def calculate_ewo(df: pd.DataFrame) -> pd.DataFrame:
+    df_calc = df.copy()
+    with ewo_settings_lock:
+        fast = EWO_FAST_PERIOD
+        slow = EWO_SLOW_PERIOD
+        high = EWO_HIGH_LEVEL
+        low = EWO_LOW_LEVEL
+
+    ema_fast = df_calc['close'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df_calc['close'].ewm(span=slow, adjust=False).mean()
+    
+    df_calc['ewo'] = (ema_fast - ema_slow) / df_calc['close'] * 100
+    df_calc['ewo_high'] = high
+    df_calc['ewo_low'] = low
+    
+    return df_calc
+
+# --- [MODIFIED] دالة حساب جميع المؤشرات لتشمل EWO ---
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
-    # --- إعادة ضبط المؤشرات إلى القيم القياسية ---
     # EMA Calculations
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
-    df_calc['ema55'] = df_calc['close'].ewm(span=55, adjust=False).mean() # لاستراتيجية التقاطع
+    df_calc['ema55'] = df_calc['close'].ewm(span=55, adjust=False).mean()
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     
     # ATR and ADX
@@ -638,19 +665,17 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
     
-    # Bollinger Bands (Standard 20, 2)
+    # Bollinger Bands
     bb_middle = df_calc['close'].rolling(window=20).mean()
     bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_middle'] = bb_middle
     df_calc['bb_lower'] = bb_middle - (bb_std * 2)
     df_calc['bb_upper'] = bb_middle + (bb_std * 2)
-    
-    # Bollinger Bands for Scalping Strategy (10, 2)
     bb_middle_scalp = df_calc['close'].rolling(window=10).mean()
     bb_std_scalp = df_calc['close'].rolling(window=10).std()
     df_calc['bb_lower_scalp'] = bb_middle_scalp - (bb_std_scalp * 2)
     
-    # MACD (Standard 12, 26, 9)
+    # MACD
     exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
     exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
@@ -658,6 +683,9 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
     df_calc['volume_sma'] = df_calc['volume'].rolling(20).mean()
+    
+    # Elliott Wave Oscillator
+    df_calc = calculate_ewo(df_calc)
     
     return df_calc
 
@@ -690,29 +718,37 @@ def load_notifications_to_cache():
 def load_settings_from_redis():
     global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, paper_trading_mode, MIN_SIGNAL_QUALITY, \
            USE_RSI_MACD_STRATEGY, USE_ORB_STRATEGY, USE_MA_CROSSOVER_STRATEGY, \
-           USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY
+           USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, \
+           EWO_FAST_PERIOD, EWO_SLOW_PERIOD, EWO_HIGH_LEVEL, EWO_LOW_LEVEL
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            with fixed_trade_amount_lock: FIXED_TRADE_AMOUNT_USDT = settings.get('FIXED_TRADE_AMOUNT_USDT', 3.0)
-            MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
-            with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
-            
+            with fixed_trade_amount_lock: FIXED_TRADE_AMOUNT_USDT = float(settings.get('FIXED_TRADE_AMOUNT_USDT', 3.0))
+            MAX_OPEN_TRADES = int(settings.get('MAX_OPEN_TRADES', 3))
+            with trading_mode_lock: paper_trading_mode = bool(settings.get('paper_trading_mode', True))
+            with ewo_settings_lock:
+                EWO_FAST_PERIOD = int(settings.get('EWO_FAST_PERIOD', 5))
+                EWO_SLOW_PERIOD = int(settings.get('EWO_SLOW_PERIOD', 35))
+                EWO_HIGH_LEVEL = float(settings.get('EWO_HIGH_LEVEL', 2.0))
+                EWO_LOW_LEVEL = float(settings.get('EWO_LOW_LEVEL', -10.0))
+
         quality_settings_data = redis_client.get('signal_quality_settings')
         if quality_settings_data:
             quality_settings = json.loads(quality_settings_data)
-            with min_quality_lock: MIN_SIGNAL_QUALITY = quality_settings.get('min_quality', 70)
+            with min_quality_lock: MIN_SIGNAL_QUALITY = int(quality_settings.get('min_quality', 70))
 
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
-            USE_RSI_MACD_STRATEGY = strategies.get('USE_RSI_MACD_STRATEGY', True)
-            USE_ORB_STRATEGY = strategies.get('USE_ORB_STRATEGY', True)
-            USE_MA_CROSSOVER_STRATEGY = strategies.get('USE_MA_CROSSOVER_STRATEGY', True)
-            USE_MULTI_TIMEFRAME_STRATEGY = strategies.get('USE_MULTI_TIMEFRAME_STRATEGY', True)
-            USE_BB_SCALPING_STRATEGY = strategies.get('USE_BB_SCALPING_STRATEGY', True)
+            USE_RSI_MACD_STRATEGY = bool(strategies.get('USE_RSI_MACD_STRATEGY', True))
+            USE_ORB_STRATEGY = bool(strategies.get('USE_ORB_STRATEGY', True))
+            USE_MA_CROSSOVER_STRATEGY = bool(strategies.get('USE_MA_CROSSOVER_STRATEGY', True))
+            USE_MULTI_TIMEFRAME_STRATEGY = bool(strategies.get('USE_MULTI_TIMEFRAME_STRATEGY', True))
+            USE_BB_SCALPING_STRATEGY = bool(strategies.get('USE_BB_SCALPING_STRATEGY', True))
+            USE_ELLIOTT_WAVE_STRATEGY = bool(strategies.get('USE_ELLIOTT_WAVE_STRATEGY', True))
+
 
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
@@ -724,22 +760,27 @@ def save_settings_to_redis():
         return False
     
     try:
+        with fixed_trade_amount_lock: fta = FIXED_TRADE_AMOUNT_USDT
+        with trading_mode_lock: ptm = paper_trading_mode
+        with ewo_settings_lock: ewo_s = {
+                'EWO_FAST_PERIOD': EWO_FAST_PERIOD, 'EWO_SLOW_PERIOD': EWO_SLOW_PERIOD,
+                'EWO_HIGH_LEVEL': EWO_HIGH_LEVEL, 'EWO_LOW_LEVEL': EWO_LOW_LEVEL
+            }
+
         trading_settings = {
-            'FIXED_TRADE_AMOUNT_USDT': FIXED_TRADE_AMOUNT_USDT,
-            'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
-            'paper_trading_mode': paper_trading_mode
+            'FIXED_TRADE_AMOUNT_USDT': fta, 'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
+            'paper_trading_mode': ptm, **ewo_s
         }
         redis_client.set('trading_settings', json.dumps(trading_settings))
         
-        quality_settings = {'min_quality': MIN_SIGNAL_QUALITY}
+        with min_quality_lock: mq = MIN_SIGNAL_QUALITY
+        quality_settings = {'min_quality': mq}
         redis_client.set('signal_quality_settings', json.dumps(quality_settings))
         
         strategy_settings = {
-            'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY,
-            'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
-            'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY,
-            'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
-            'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY
+            'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY, 'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
+            'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY, 'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
+            'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY, 'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
         }
         redis_client.set('strategy_settings', json.dumps(strategy_settings))
         
@@ -839,10 +880,12 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
         stop_loss = min(recent_low * 0.996, entry_price - (atr_value * 2.0))
     elif strategy_name == "BB_Scalping_Strategy":
         stop_loss = min(last['low'] * 0.997, entry_price - (atr_value * 1.2))
+    elif strategy_name == "Elliott_Wave_Strategy":
+        stop_loss = entry_price - (atr_value * 2.0)
     else:
         stop_loss = entry_price - (atr_value * 1.5)
     
-    max_stop_distance = entry_price * 0.05
+    max_stop_distance = entry_price * 0.08 if strategy_name == "Elliott_Wave_Strategy" else entry_price * 0.05
     if entry_price - stop_loss > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
     
@@ -858,6 +901,8 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
         rr1, rr2 = 2.0, 3.5
     elif strategy_name == "BB_Scalping_Strategy":
         rr1, rr2 = 1.0, 2.0
+    elif strategy_name == "Elliott_Wave_Strategy":
+        rr1, rr2 = 1.618, 2.618
     else: # Default for RSI+MACD
         rr1, rr2 = 1.8, 3.0
         
@@ -867,6 +912,21 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     return target1, target2
 
 # --- [NEW & IMPROVED] استراتيجيات التداول الجديدة والمحسنة ---
+def check_elliott_wave_pattern(df: pd.DataFrame) -> bool:
+    if len(df) < 20:
+        return False
+    
+    last_ewo = df['ewo'].iloc[-1]
+    
+    ewo_condition = (df['ewo_low'].iloc[-1] < last_ewo < df['ewo_high'].iloc[-1])
+    
+    if len(df) >= 2:
+        ewo_trend = df['ewo'].iloc[-1] > df['ewo'].iloc[-2]
+    else:
+        ewo_trend = False
+    
+    return ewo_condition and ewo_trend
+
 def check_rsi_macd_strategy(df: pd.DataFrame) -> bool:
     needed = {'rsi', 'macd_hist', 'close', 'open', 'volume', 'volume_sma', 'high', 'low'}
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -923,7 +983,7 @@ def check_orb_strategy(df: pd.DataFrame) -> bool:
     last_candle_time = df.index[-1]
     
     if not (last_candle_time.hour == 0 and 15 <= last_candle_time.minute <= 45):
-        log_rejection(symbol_name, "ORB: Not in optimal breakout time window")
+        #log_rejection(symbol_name, "ORB: Not in optimal breakout time window") # This would be too verbose
         return False
         
     candles_today = df[df.index.date == last_candle_time.date()]
@@ -977,7 +1037,7 @@ def check_ma_crossover_strategy(df: pd.DataFrame) -> bool:
     crossover_up = ema9_above_ema21 and was_below
     
     if not crossover_up:
-        log_rejection(symbol_name, "MA_Crossover: No bullish crossover occurred")
+        #log_rejection(symbol_name, "MA_Crossover: No bullish crossover occurred") # Too verbose
         return False
     
     ema_distance_percent = abs(last['ema9'] - last['ema21']) / last['close'] * 100
@@ -1030,8 +1090,7 @@ def check_multi_timeframe_strategy(df_15m: pd.DataFrame, df_1h: pd.DataFrame) ->
     htf_momentum_up = last_1h['adx'] > 22
     
     if not (htf_trend_up and htf_momentum_up):
-        log_rejection(symbol_name, "Multi_Timeframe: Higher timeframe trend is not bullish", {
-            'RSI_1h': f"{last_1h['rsi']:.1f}", 'ADX_1h': f"{last_1h['adx']:.1f}"})
+        #log_rejection(symbol_name, "Multi_Timeframe: Higher timeframe trend is not bullish") # Too verbose
         return False
         
     last_15m = df_15m.iloc[-1]
@@ -1047,8 +1106,7 @@ def check_multi_timeframe_strategy(df_15m: pd.DataFrame, df_1h: pd.DataFrame) ->
         if distance < 0.5: touch_point = True
     
     if not touch_point:
-        log_rejection(symbol_name, "Multi_Timeframe: No pullback to support on 15m", {
-            'min_distance': f"{min_distance:.2f}%"})
+        #log_rejection(symbol_name, "Multi_Timeframe: No pullback to support on 15m") # Too verbose
         return False
         
     macd_confirm = (last_15m['macd_hist'] > prev_15m['macd_hist'] and last_15m['macd_hist'] < 0)
@@ -1085,11 +1143,11 @@ def check_bb_scalping_strategy(df: pd.DataFrame) -> bool:
     prev = df.iloc[-2]
     
     if not prev['low'] <= prev['bb_lower_scalp']:
-        log_rejection(symbol_name, "BB_Scalping: Price has not touched lower band")
+        #log_rejection(symbol_name, "BB_Scalping: Price has not touched lower band") # Too verbose
         return False
         
     if not last['close'] > last['bb_lower_scalp']:
-        log_rejection(symbol_name, "BB_Scalping: Price has not recovered inside band")
+        #log_rejection(symbol_name, "BB_Scalping: Price has not recovered inside band") # Too verbose
         return False
     
     rsi_confirm = last['rsi'] < 35 and last['rsi'] > prev['rsi']
@@ -1116,6 +1174,45 @@ def check_bb_scalping_strategy(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB_Scalping: No strong reversal candle pattern")
         return False
         
+    return True
+
+def check_elliott_wave_strategy(df: pd.DataFrame) -> bool:
+    needed = {'rsi', 'ewo', 'close', 'volume', 'volume_sma', 'ema21', 'ema50'}
+    symbol_name = getattr(df, 'name', 'Unknown')
+    
+    if len(df) < 50 or not needed.issubset(df.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    ewo_in_range = -15.0 < last['ewo'] < 5.0
+    ewo_trending_up = last['ewo'] > prev['ewo'] and last['ewo'] > 0
+    rsi_condition = 30 < last['rsi'] < 60
+    price_above_ma = last['close'] > last['ema21']
+    
+    if not (ewo_in_range and ewo_trending_up and rsi_condition and price_above_ma):
+        log_rejection(symbol_name, "Elliott Wave: Basic indicators not aligned", {
+            'EWO': f"{last['ewo']:.2f}",
+            'RSI': f"{last['rsi']:.1f}",
+            'Price_vs_MA': f"{last['close']:.2f} vs {last['ema21']:.2f}"
+        })
+        return False
+    
+    volume_confirm = last['volume'] > last['volume_sma'] * 1.1
+    if not volume_confirm:
+        log_rejection(symbol_name, "Elliott Wave: Volume confirmation failed", {
+            'volume': f"{last['volume']:.2f}",
+            'volume_sma': f"{last['volume_sma']:.2f}"
+        })
+        return False
+    
+    elliott_pattern = check_elliott_wave_pattern(df)
+    if not elliott_pattern:
+        log_rejection(symbol_name, "Elliott Wave: Pattern not recognized")
+        return False
+    
     return True
 
 # --- [NEW] دالة حساب جودة الإشارة ---
@@ -1154,6 +1251,9 @@ def calculate_signal_quality(df: pd.DataFrame, strategy_name: str, df_htf: Optio
     
     elif strategy_name == "BB_Scalping_Strategy":
         if 'rsi' in df.columns and last['rsi'] < 30: quality_score += 10
+
+    elif strategy_name == "Elliott_Wave_Strategy":
+        if 'ewo' in df.columns and last['ewo'] > 0: quality_score += 10
     
     return min(100, max(0, int(quality_score)))
 
@@ -1351,7 +1451,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V34.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V35.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1418,7 +1518,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V34.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V35.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1821,7 +1921,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V34.0.0)</title>
+<title>الإعدادات - بوت التداول (V35.0.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1881,6 +1981,28 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
                         <span class="dot"></span>
                         <span id="tradingModeText">{% if is_paper_mode %}ورقي (Paper){% else %}حقيقي (Real){% endif %}</span>
                     </label>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card" style="margin-top: 16px;">
+            <h2>إعدادات مؤشر موجة إليوت (EWO)</h2>
+            <div class="card-body form-grid">
+                <div class="form-group">
+                    <label for="ewoFast">الفترة السريعة</label>
+                    <input type="number" id="ewoFast" name="EWO_FAST_PERIOD" value="{{ ewo_fast_period }}" step="1" min="2">
+                </div>
+                <div class="form-group">
+                    <label for="ewoSlow">الفترة البطيئة</label>
+                    <input type="number" id="ewoSlow" name="EWO_SLOW_PERIOD" value="{{ ewo_slow_period }}" step="1" min="10">
+                </div>
+                 <div class="form-group">
+                    <label for="ewoHigh">المستوى المرتفع</label>
+                    <input type="number" id="ewoHigh" name="EWO_HIGH_LEVEL" value="{{ ewo_high_level }}" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label for="ewoLow">المستوى المنخفض</label>
+                    <input type="number" id="ewoLow" name="EWO_LOW_LEVEL" value="{{ ewo_low_level }}" step="0.1">
                 </div>
             </div>
         </div>
@@ -2188,13 +2310,16 @@ def settings_page():
     with fixed_trade_amount_lock: fixed_trade_amount = FIXED_TRADE_AMOUNT_USDT
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
+    with ewo_settings_lock:
+        ewo_fast = EWO_FAST_PERIOD
+        ewo_slow = EWO_SLOW_PERIOD
+        ewo_high = EWO_HIGH_LEVEL
+        ewo_low = EWO_LOW_LEVEL
     
     strategies_status = {
-        'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY,
-        'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
-        'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY,
-        'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
-        'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY
+        'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY, 'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
+        'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY, 'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
+        'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY, 'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
     }
     
     return render_template_string(SETTINGS_TEMPLATE, 
@@ -2203,7 +2328,11 @@ def settings_page():
                                   min_quality=min_quality,
                                   is_paper_mode=is_paper_mode,
                                   STRATEGY_NAMES=STRATEGY_NAMES,
-                                  strategies_status=strategies_status)
+                                  strategies_status=strategies_status,
+                                  ewo_fast_period=ewo_fast,
+                                  ewo_slow_period=ewo_slow,
+                                  ewo_high_level=ewo_high,
+                                  ewo_low_level=ewo_low)
 
 @app.route('/api/dashboard_data')
 def dashboard_data():
@@ -2335,18 +2464,21 @@ def toggle_trading():
 def update_settings():
     try:
         data = request.json
-        if 'FIXED_TRADE_AMOUNT_USDT' in data:
-            with fixed_trade_amount_lock:
-                global FIXED_TRADE_AMOUNT_USDT
-                FIXED_TRADE_AMOUNT_USDT = float(data['FIXED_TRADE_AMOUNT_USDT'])
-                broadcast({"type": "fixed_amount_update", "payload": {"fixed_amount": FIXED_TRADE_AMOUNT_USDT}})
-        if 'MAX_OPEN_TRADES' in data:
-            global MAX_OPEN_TRADES
-            MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
-        if 'paper_trading_mode' in data:
-            with trading_mode_lock:
-                global paper_trading_mode
-                paper_trading_mode = bool(data['paper_trading_mode'])
+        with fixed_trade_amount_lock:
+            global FIXED_TRADE_AMOUNT_USDT
+            FIXED_TRADE_AMOUNT_USDT = float(data.get('FIXED_TRADE_AMOUNT_USDT', FIXED_TRADE_AMOUNT_USDT))
+        global MAX_OPEN_TRADES
+        MAX_OPEN_TRADES = int(data.get('MAX_OPEN_TRADES', MAX_OPEN_TRADES))
+        with trading_mode_lock:
+            global paper_trading_mode
+            paper_trading_mode = bool(data.get('paper_trading_mode', paper_trading_mode))
+        with ewo_settings_lock:
+            global EWO_FAST_PERIOD, EWO_SLOW_PERIOD, EWO_HIGH_LEVEL, EWO_LOW_LEVEL
+            EWO_FAST_PERIOD = int(data.get('EWO_FAST_PERIOD', EWO_FAST_PERIOD))
+            EWO_SLOW_PERIOD = int(data.get('EWO_SLOW_PERIOD', EWO_SLOW_PERIOD))
+            EWO_HIGH_LEVEL = float(data.get('EWO_HIGH_LEVEL', EWO_HIGH_LEVEL))
+            EWO_LOW_LEVEL = float(data.get('EWO_LOW_LEVEL', EWO_LOW_LEVEL))
+
         save_settings_to_redis()
         return jsonify({"success": True, "message": "Settings updated successfully"})
     except Exception as e:
@@ -2358,12 +2490,14 @@ def update_strategies():
     try:
         data = request.json
         global USE_RSI_MACD_STRATEGY, USE_ORB_STRATEGY, USE_MA_CROSSOVER_STRATEGY, \
-               USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY
+               USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
         USE_RSI_MACD_STRATEGY = bool(data.get('USE_RSI_MACD_STRATEGY', USE_RSI_MACD_STRATEGY))
         USE_ORB_STRATEGY = bool(data.get('USE_ORB_STRATEGY', USE_ORB_STRATEGY))
         USE_MA_CROSSOVER_STRATEGY = bool(data.get('USE_MA_CROSSOVER_STRATEGY', USE_MA_CROSSOVER_STRATEGY))
         USE_MULTI_TIMEFRAME_STRATEGY = bool(data.get('USE_MULTI_TIMEFRAME_STRATEGY', USE_MULTI_TIMEFRAME_STRATEGY))
         USE_BB_SCALPING_STRATEGY = bool(data.get('USE_BB_SCALPING_STRATEGY', USE_BB_SCALPING_STRATEGY))
+        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
+
         save_settings_to_redis()
         return jsonify({"success": True, "message": "Strategies updated successfully"})
     except Exception as e:
@@ -2458,11 +2592,9 @@ def backtest_strategy(strategy_name, symbol, days=90):
     backtest_trade_amount = 10.0
 
     strategy_functions = {
-        'RSI_MACD_Strategy': check_rsi_macd_strategy,
-        'ORB_Strategy': check_orb_strategy,
-        'MA_Crossover_Strategy': check_ma_crossover_strategy,
-        'Multi_Timeframe_Strategy': check_multi_timeframe_strategy,
-        'BB_Scalping_Strategy': check_bb_scalping_strategy,
+        'RSI_MACD_Strategy': check_rsi_macd_strategy, 'ORB_Strategy': check_orb_strategy,
+        'MA_Crossover_Strategy': check_ma_crossover_strategy, 'Multi_Timeframe_Strategy': check_multi_timeframe_strategy,
+        'BB_Scalping_Strategy': check_bb_scalping_strategy, 'Elliott_Wave_Strategy': check_elliott_wave_strategy
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2586,15 +2718,14 @@ def main_bot_loop():
                 strategy_found = None
                 df_1h_featured = None
 
-                # Check strategies that don't need HTF first
                 if USE_RSI_MACD_STRATEGY and check_rsi_macd_strategy(df_15m_featured): strategy_found = "RSI_MACD_Strategy"
                 elif USE_ORB_STRATEGY and check_orb_strategy(df_15m_featured): strategy_found = "ORB_Strategy"
                 elif USE_MA_CROSSOVER_STRATEGY and check_ma_crossover_strategy(df_15m_featured): strategy_found = "MA_Crossover_Strategy"
                 elif USE_BB_SCALPING_STRATEGY and check_bb_scalping_strategy(df_15m_featured): strategy_found = "BB_Scalping_Strategy"
+                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy(df_15m_featured): strategy_found = "Elliott_Wave_Strategy"
                 
-                # Check Multi-Timeframe strategy if no other signal was found yet
                 elif USE_MULTI_TIMEFRAME_STRATEGY:
-                    df_1h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS + 10) # fetch more days for HTF emas
+                    df_1h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS + 10)
                     if df_1h is not None and len(df_1h) > 55:
                         df_1h_featured = calculate_all_features(df_1h)
                         if check_multi_timeframe_strategy(df_15m_featured, df_1h_featured):
@@ -2799,7 +2930,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.0 (Advanced Strategies) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V35.0.0 (Elliott Wave Integrated) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
