@@ -1,11 +1,16 @@
-# ملف c4.py - نسخة V32.9.0 (مُعدَّل حسب إعدادات المستخدم)
+# ملف c4.py - نسخة V33.0.0 (تحديث شامل للاستراتيجيات)
 # --- وصف التعديلات:
-# 1.  [تعديل المؤشرات] تم تعديل فترات جميع المؤشرات (SMA, EMA, ATR, ADX, RSI, BB, MACD, Stoch) لتكون أسرع وأكثر استجابة لإطار 15 دقيقة.
-# 2.  [إضافة مؤشرات] تمت إضافة مؤشرات VWAP ومؤشرات تأكيدية جديدة (حجم التداول المتزايد، تغير السعر، تحليل الشموع).
-# 3.  [تحسين الاستراتيجيات] تم تحديث جميع استراتيجيات التداول بشروط دخول مخففة ومؤشرات تأكيد إضافية (مثل RSI, MACD cross, Stoch) لزيادة عدد الفرص المتاحة.
-# 4.  [ضبط إدارة المخاطر] تم تعديل دوال وقف الخسارة وجني الأرباح بمضاعفات ATR ونسب مخاطرة إلى مكافأة جديدة لتناسب التداول السريع.
-# 5.  [توسيع الفلاتر] تم توسيع نطاق فلتر التقلبات (ATR) للسماح بدخول صفقات في ظروف سوقية أكثر تنوعًا.
-# 6.  [تبسيط منطق Elliott] تم تبسيط منطق اكتشاف موجات إليوت للتركيز على الأنماط الصاعدة العامة وتجنب الشروط المعقدة.
+# 1.  [حذف الاستراتيجيات القديمة] تم حذف جميع استراتيجيات التداول السابقة (BB+Stoch, MACD+SMA, EMA+RSI, Pullback, Momentum, Elliott Wave).
+# 2.  [إضافة استراتيجيات جديدة] تم تنفيذ ودمج 5 استراتيجيات جديدة بناءً على طلب المستخدم، وهي الأكثر شيوعًا في مجتمعات التداول:
+#     - RSI + MACD: للدخول عند مناطق ذروة البيع مع تأكيد من ضعف الزخم الهابط.
+#     - ORB (Opening Range Breakout): للدخول عند اختراق نطاق أول شمعة 15 دقيقة في اليوم (بتوقيت UTC).
+#     - Moving Averages Crossover: للدخول عند تقاطع المتوسطات المتحركة الأسية (9 مع 21) مع تأكيد الاتجاه العام (متوسط 55).
+#     - Multi-Timeframe: لتحليل الاتجاه على فريم الساعة والدخول عند الارتداد على فريم 15 دقيقة.
+#     - Bollinger Bands Scalping: للدخول عند ارتداد السعر من الحد السفلي لمؤشر بولينجر باند.
+# 3.  [تعديل المؤشرات] تم إعادة ضبط المؤشرات الفنية لتناسب المعايير القياسية المستخدمة في الاستراتيجيات الجديدة (مثل RSI 14, MACD 12/26/9).
+# 4.  [تحسين إدارة المخاطر] تم تحديث دوال وقف الخسارة وجني الأرباح لتناسب كل استراتيجية جديدة على حدة.
+# 5.  [تحديث الواجهة] تم تحديث واجهات التحكم (لوحة التحكم، الإعدادات، الاختبار الخلفي) لتعكس الاستراتيجيات الجديدة وتسمح بالتحكم فيها.
+# 6.  [منطق متعدد الأطر] تم تعديل اللوب الرئيسي لجلب البيانات من إطارين زمنيين (15 دقيقة و 1 ساعة) لدعم استراتيجية Multi-Timeframe.
 
 import time
 import os
@@ -45,11 +50,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v32_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v33_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.9.0')
+logger = logging.getLogger('CryptoBotV33.0.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -96,22 +101,21 @@ MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
 
-# --- مفاتيح تفعيل الاستراتيجيات ---
-USE_BB_STOCH_STRATEGY: bool = True
-USE_MACD_EMA_STRATEGY: bool = True
-USE_EMA_RSI_STRATEGY: bool = True
-USE_PULLBACK_STRATEGY: bool = True
-USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
-USE_ELLIOTT_WAVE_STRATEGY: bool = True
+# --- مفاتيح تفعيل الاستراتيجيات الجديدة ---
+USE_RSI_MACD_STRATEGY: bool = True
+USE_ORB_STRATEGY: bool = True
+USE_MA_CROSSOVER_STRATEGY: bool = True
+USE_MULTI_TIMEFRAME_STRATEGY: bool = True
+USE_BB_SCALPING_STRATEGY: bool = True
+
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
-    "BB_Stoch_Strategy": "BB+Stoch (ارتداد مبكر)",
-    "MACD_EMA_Strategy": "MACD+SMA (زخم وتقاطع)",
-    "EMA_RSI_Strategy": "EMA+RSI (ارتداد سريع)",
-    "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
-    "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
-    "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
+    "RSI_MACD_Strategy": "RSI + MACD",
+    "ORB_Strategy": "Opening Range Breakout (ORB)",
+    "MA_Crossover_Strategy": "Moving Averages Crossover",
+    "Multi_Timeframe_Strategy": "Multi-Timeframe Analysis",
+    "BB_Scalping_Strategy": "Bollinger Bands Scalping"
 }
 strategy_filters_lock = Lock()
 
@@ -141,57 +145,35 @@ rejection_logs_lock = Lock()
 current_market_state: Dict[str, Any] = {"trend_details_by_tf": {}}
 market_state_lock = Lock()
 
-# --- قاموس أسباب الرفض باللغة العربية ---
+# --- قاموس أسباب الرفض باللغة العربية (مُحدَّث) ---
 REJECTION_REASONS_AR = {
     "Market Volatility Filter Failed": "فلتر تقلب السوق رفض الدخول",
     "Trend Strength Filter Failed": "فلتر قوة الاتجاه رفض الدخول",
-    "HTF Trend Confirmation Failed": "فشل تأكيد الترند على الفريم الأعلى",
     "Insufficient Historical Data": "بيانات تاريخية غير كافية للفحص",
     "MinNotional Filter Failed": "قيمة الصفقة أقل من الحد الأدنى للمنصة",
     "LOT_SIZE Filter Failed": "فشل تعديل حجم الصفقة",
     "Insufficient Balance": "الرصيد غير كافي لتنفيذ الصفقة",
-    "Bullish Confirmation Failed": "فشل تأكيد الشمعة الصعودية",
-    "Volume Filter Failed": "فلتر حجم التداول فشل",
     "Low Quality Signal": "جودة الإشارة منخفضة",
     "Invalid Position Size": "حجم الصفقة غير صالح (الوقف أعلى من الدخول)",
     "News Filter Failed": "فلتر الأخبار: تجنب التداول وقت الأخبار",
     "Liquidity Filter Failed": "فلتر السيولة: تجنب التداول في أوقات السيولة المنخفضة",
     "Correlation Filter Failed": "فلتر الارتباط: توجد صفقة مفتوحة على عملة مرتبطة",
-    "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
-    "EMA_RSI: Price not above EMA9": "EMA_RSI: السعر ليس فوق متوسط 9",
-    "EMA_RSI: RSI not above 45": "EMA_RSI: مؤشر القوة النسبية ليس فوق 45",
-    "EMA_RSI: Weak trend (ADX < 15)": "EMA_RSI: اتجاه ضعيف (ADX < 15)",
-    "EMA_RSI: Volume or momentum confirmation failed": "EMA_RSI: فشل تأكيد الحجم أو الزخم",
-    "BB: Price below EMA21 (bearish trend)": "BB: السعر تحت EMA21 (اتجاه هابط)",
-    "BB: Weak trend (ADX < 15)": "BB: اتجاه ضعيف (ADX < 15)",
-    "BB: Price not bouncing from lower band": "BB: السعر لم يرتد من الشريط السفلي",
-    "BB: Stochastic not confirming upward momentum": "BB: ستوكاستيك لا يؤكد الزخم الصاعد",
-    "BB: RSI too low (< 40)": "BB: مؤشر القوة النسبية منخفض جدًا (< 40)",
-    "BB: Weak bullish candle or low volume": "BB: شمعة صاعدة ضعيفة أو حجم تداول منخفض",
-    "MACD: Bearish trend (SMA7 below SMA21)": "MACD: اتجاه هابط (SMA7 تحت SMA21)",
-    "MACD: Weak trend (ADX < 18)": "MACD: اتجاه ضعيف (ADX < 18)",
-    "MACD: Insufficient data for momentum check": "MACD: بيانات غير كافية لفحص الزخم",
-    "MACD: Momentum not confirmed": "MACD: الزخم الصاعد غير مؤكد",
-    "MACD: Volume below average": "MACD: حجم التداول أقل من المتوسط",
-    "Pullback: Trend is not bullish": "Pullback: الاتجاه ليس صاعدًا",
-    "Pullback: Weak trend (ADX < 14)": "Pullback: اتجاه ضعيف (ADX < 14)",
-    "Pullback: No pullback detected": "Pullback: لم يتم اكتشاف ارتداد",
-    "Pullback: Price not recovering": "Pullback: السعر لا يتعافى",
-    "Pullback: Volume or momentum confirmation failed": "Pullback: فشل تأكيد الحجم أو الزخم",
-    "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
-    "Momentum: Weak trend (ADX < 18)": "Momentum: اتجاه ضعيف (ADX < 18)",
-    "Momentum: Volatility not in optimal range": "Momentum: التقلب ليس في النطاق الأمثل",
-    "Momentum: MACD momentum not positive": "Momentum: زخم الماكد ليس إيجابيًا",
-    "Momentum: RSI not in optimal range": "Momentum: مؤشر القوة النسبية ليس في النطاق الأمثل",
-    "Momentum: Volume or momentum confirmation failed": "Momentum: فشل تأكيد الحجم أو الزخم",
-    "Elliott Wave: Trend is not bullish": "موجات إليوت: الاتجاه ليس صاعدًا",
-    "Elliott Wave: Trend is not strong enough (ADX)": "موجات إليوت: الاتجاه ليس قوياً (ADX)",
-    "Elliott Wave: Volume too low": "موجات إليوت: حجم التداول منخفض جدًا",
-    "Elliott Wave: RSI not in optimal range": "موجات إليوت: مؤشر القوة النسبية ليس في النطاق الأمثل",
-    "Elliott Wave: MACD not positive": "موجات إليوت: مؤشر الماكد ليس إيجابيًا",
-    "Elliott Wave: No bullish pattern detected": "موجات إليوت: لم يتم اكتشاف نمط صاعد",
-    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
-    "Elliott Wave: Stochastic not confirming": "موجات إليوت: ستوكاستيك لا يؤكد الصعود"
+    # أسباب الرفض للاستراتيجيات الجديدة
+    "RSI_MACD: Not in oversold zone": "RSI+MACD: السعر ليس في منطقة ذروة البيع (RSI < 30)",
+    "RSI_MACD: Bearish momentum not weakening": "RSI+MACD: الزخم الهابط لا يضعف (MACD Hist)",
+    "RSI_MACD: No bullish candle confirmation": "RSI+MACD: لا توجد شمعة تأكيد صاعدة",
+    "ORB: Not in breakout time window": "ORB: ليس وقت الاختراق (بعد أول شمعة)",
+    "ORB: Price has not broken opening range high": "ORB: السعر لم يخترق قمة النطاق الافتتاحي",
+    "ORB: Insufficient volume for breakout": "ORB: حجم التداول غير كافٍ للاختراق",
+    "MA_Crossover: No bullish crossover occurred": "MA Crossover: لم يحدث تقاطع صاعد (EMA9/21)",
+    "MA_Crossover: General trend is not bullish": "MA Crossover: الاتجاه العام ليس صاعدًا (EMA55)",
+    "MA_Crossover: Price is not above moving averages": "MA Crossover: السعر ليس فوق المتوسطات المتحركة",
+    "Multi_Timeframe: Higher timeframe trend is not bullish": "Multi-TF: الاتجاه على فريم الساعة ليس صاعدًا",
+    "Multi_Timeframe: No pullback to support on 15m": "Multi-TF: لم يحدث ارتداد للدعم على فريم 15د",
+    "Multi_Timeframe: No confirmation signal on 15m": "Multi-TF: لا توجد إشارة تأكيد على فريم 15د (RSI/Candle)",
+    "BB_Scalping: Price has not touched lower band": "BB Scalping: السعر لم يلامس الحد السفلي للبولينجر",
+    "BB_Scalping: Price has not recovered inside band": "BB Scalping: السعر لم يغلق داخل حدود البولينجر",
+    "BB_Scalping: RSI confirmation failed": "BB Scalping: فشل تأكيد مؤشر القوة النسبية (RSI)",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -606,93 +588,64 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-# --- [MODIFIED] تعديل إعدادات المؤشرات لتناسب فريم 15 دقيقة
+# --- [MODIFIED] تعديل إعدادات المؤشرات لتناسب الاستراتيجيات الجديدة
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc = df.copy()
     
-    # --- تعديل فترات المؤشرات لتكون أسرع وأكثر ملاءمة لفريم 15 دقيقة ---
-    # SMA Calculations
-    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
-    df_calc['sma21'] = df_calc['close'].rolling(window=21).mean()  # إضافة SMA21
-    df_calc['sma50'] = df_calc['close'].rolling(window=50).mean()
-    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
-
-    # EMA Calculations - تعديل الفترات لتكون أسرع
+    # --- إعادة ضبط المؤشرات إلى القيم القياسية ---
+    # EMA Calculations
     df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
-    df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
     df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
-    df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
     df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
-    df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
+    df_calc['ema55'] = df_calc['close'].ewm(span=55, adjust=False).mean() # لاستراتيجية التقاطع
     df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
     
-    # ATR and ADX - تعديل الفترات
+    # ATR and ADX
     high_low = df_calc['high'] - df_calc['low']
     high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
     low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
-    df_calc['atr'] = tr.ewm(span=10, adjust=False).mean()  # تعديل من 14 إلى 10
+    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
     df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close'].replace(0, 1e-9)) * 100
     
     up_move = df_calc['high'].diff()
     down_move = -df_calc['low'].diff()
     plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
     minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
-    plus_di = 100 * plus_dm.ewm(span=10, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)  # تعديل من 14 إلى 10
-    minus_di = 100 * minus_dm.ewm(span=10, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)  # تعديل من 14 إلى 10
+    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
     dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
-    df_calc['adx'] = dx.ewm(span=10, adjust=False).mean()  # تعديل من 14 إلى 10
+    df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
     
-    # RSI Calculation - تعديل الفترة
+    # RSI Calculation (Standard 14 period)
     delta = df_calc['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=6).mean()  # تعديل من 7 إلى 6
-    avg_loss = loss.rolling(window=6).mean()  # تعديل من 7 إلى 6
+    avg_gain = gain.rolling(window=14).mean()
+    avg_loss = loss.rolling(window=14).mean()
     rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
     
-    # Bollinger Bands - تعديل الفترة
-    bb_middle = df_calc['close'].rolling(window=18).mean()  # تعديل من 20 إلى 18
-    bb_std = df_calc['close'].rolling(window=18).std()  # تعديل من 20 إلى 18
+    # Bollinger Bands (Standard 20, 2)
+    bb_middle = df_calc['close'].rolling(window=20).mean()
+    bb_std = df_calc['close'].rolling(window=20).std()
     df_calc['bb_middle'] = bb_middle
-    df_calc['bb_lower'] = bb_middle - (bb_std * 1.8)  # تعديل من 2 إلى 1.8
-    df_calc['bb_upper'] = bb_middle + (bb_std * 1.8)  # تعديل من 2 إلى 1.8
+    df_calc['bb_lower'] = bb_middle - (bb_std * 2)
+    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
     
-    # MACD - تعديل الفترات لتكون أسرع
-    exp1 = df_calc['close'].ewm(span=7, adjust=False).mean()  # تعديل من 8 إلى 7
-    exp2 = df_calc['close'].ewm(span=15, adjust=False).mean()  # تعديل من 17 إلى 15
+    # Bollinger Bands for Scalping Strategy (10, 2)
+    bb_middle_scalp = df_calc['close'].rolling(window=10).mean()
+    bb_std_scalp = df_calc['close'].rolling(window=10).std()
+    df_calc['bb_lower_scalp'] = bb_middle_scalp - (bb_std_scalp * 2)
+    
+    # MACD (Standard 12, 26, 9)
+    exp1 = df_calc['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=26, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
-    df_calc['macd_signal'] = df_calc['macd'].ewm(span=7, adjust=False).mean()  # تعديل من 9 إلى 7
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
-    # Stochastic - تعديل الفترات
-    low_12 = df_calc['low'].rolling(12).min()  # تعديل من 14 إلى 12
-    high_12 = df_calc['high'].rolling(12).max()  # تعديل من 14 إلى 12
-    high_low_range = high_12 - low_12
-    meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
-    df_calc['stoch_k'] = np.where(
-        meaningful_range,
-        100 * ((df_calc['close'] - low_12) / high_low_range.replace(0, 1e-9)),
-        50
-    )
-    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
-    
-    # VWAP - إضافة مؤشر VWAP
-    df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
-    
-    # إضافة مؤشرات تأكيدية جديدة
-    # Volume Increasing - حجم التداول المتزايد
-    df_calc['volume_sma'] = df_calc['volume'].rolling(5).mean()
-    df_calc['volume_increasing'] = df_calc['volume'] > df_calc['volume_sma']
-    
-    # Price Change - تغير السعر
-    df_calc['price_change'] = df_calc['close'].pct_change() * 100
-    
-    # Candle Pattern - نمط الشموع
-    df_calc['body_size'] = abs(df_calc['close'] - df_calc['open'])
-    df_calc['candle_size'] = df_calc['high'] - df_calc['low']
-    df_calc['body_ratio'] = df_calc['body_size'] / df_calc['candle_size'].replace(0, 1e-9)
+    df_calc['volume_sma'] = df_calc['volume'].rolling(20).mean()
     
     return df_calc
 
@@ -723,7 +676,9 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, paper_trading_mode, MIN_SIGNAL_QUALITY, \
+           USE_RSI_MACD_STRATEGY, USE_ORB_STRATEGY, USE_MA_CROSSOVER_STRATEGY, \
+           USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -741,12 +696,11 @@ def load_settings_from_redis():
         strategies_data = redis_client.get('strategy_settings')
         if strategies_data:
             strategies = json.loads(strategies_data)
-            USE_BB_STOCH_STRATEGY = strategies.get('USE_BB_STOCH_STRATEGY', True)
-            USE_MACD_EMA_STRATEGY = strategies.get('USE_MACD_EMA_STRATEGY', True)
-            USE_EMA_RSI_STRATEGY = strategies.get('USE_EMA_RSI_STRATEGY', True)
-            USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
-            USE_MOMENTUM_VOLATILITY_STRATEGY = strategies.get('USE_MOMENTUM_VOLATILITY_STRATEGY', True)
-            USE_ELLIOTT_WAVE_STRATEGY = strategies.get('USE_ELLIOTT_WAVE_STRATEGY', True)
+            USE_RSI_MACD_STRATEGY = strategies.get('USE_RSI_MACD_STRATEGY', True)
+            USE_ORB_STRATEGY = strategies.get('USE_ORB_STRATEGY', True)
+            USE_MA_CROSSOVER_STRATEGY = strategies.get('USE_MA_CROSSOVER_STRATEGY', True)
+            USE_MULTI_TIMEFRAME_STRATEGY = strategies.get('USE_MULTI_TIMEFRAME_STRATEGY', True)
+            USE_BB_SCALPING_STRATEGY = strategies.get('USE_BB_SCALPING_STRATEGY', True)
 
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
@@ -769,12 +723,11 @@ def save_settings_to_redis():
         redis_client.set('signal_quality_settings', json.dumps(quality_settings))
         
         strategy_settings = {
-            'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-            'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-            'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-            'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
-            'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+            'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY,
+            'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
+            'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY,
+            'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
+            'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY
         }
         redis_client.set('strategy_settings', json.dumps(strategy_settings))
         
@@ -819,8 +772,7 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    # [MODIFIED] تعديل فلتر التقلبات لتوسيع نطاق الفرص
-    ATR_PERCENT_MIN = 1.2
+    ATR_PERCENT_MIN = 0.8
     ATR_PERCENT_MAX = 5.0
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
@@ -832,41 +784,28 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     return True
 
-# --- [MODIFIED] تعديلات إدارة المخاطر ---
+# --- [MODIFIED] تعديلات إدارة المخاطر للاستراتيجيات الجديدة ---
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
-    # تعديل مضاعفات ATR لتكون أكثر ملاءمة لفريم 15 دقيقة
-    if strategy_name == "BB_Stoch_Strategy":
-        recent_low = df['low'].tail(3).min()
-        stop_loss = min(recent_low * 0.997, entry_price - (atr_value * 1.2))  # تعديل من 1.5 إلى 1.2
-    elif strategy_name == "MACD_EMA_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
-    elif strategy_name == "EMA_RSI_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.3))  # تعديل من 1.8 إلى 1.3
-    elif strategy_name == "Pullback_Strategy":
+    if strategy_name == "RSI_MACD_Strategy":
         recent_low = df['low'].tail(5).min()
-        stop_loss = min(recent_low * 0.997, entry_price - (atr_value * 1.2))  # تعديل من 1.5 إلى 1.2
-    elif strategy_name == "Momentum_Volatility_Strategy":
-        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.7))  # تعديل من 2.2 إلى 1.7
-    elif strategy_name == "Elliott_Wave_Strategy":
-        lows = df['low'].values
-        try:
-            support_idx = argrelextrema(lows, np.less, order=3)[0]  # تعديل من 5 إلى 3
-            if len(support_idx) > 0:
-                recent_support = lows[support_idx[-1]]
-                stop_loss = min(recent_support * 0.997, entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
-            else:
-                stop_loss = min(last['ema21'], entry_price - (atr_value * 1.5))  # تعديل من 2.0 إلى 1.5
-        except Exception as e:
-            logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
-            stop_loss = entry_price - (atr_value * 1.5)  # تعديل من 2.0 إلى 1.5
+        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
+    elif strategy_name == "ORB_Strategy":
+        first_candle_of_day = df[df.index.date == last.name.date()].iloc[0]
+        stop_loss = first_candle_of_day['low'] * 0.998
+    elif strategy_name == "MA_Crossover_Strategy":
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
+    elif strategy_name == "Multi_Timeframe_Strategy":
+        recent_low = df['low'].tail(8).min()
+        stop_loss = min(recent_low * 0.996, entry_price - (atr_value * 2.0))
+    elif strategy_name == "BB_Scalping_Strategy":
+        stop_loss = min(last['low'] * 0.997, entry_price - (atr_value * 1.2))
     else:
-        stop_loss = entry_price - (atr_value * 1.5)  # تعديل من 2.0 إلى 1.5
+        stop_loss = entry_price - (atr_value * 1.5)
     
-    # تعديل الحد الأقصى لمسافة وقف الخسارة
-    max_stop_distance = entry_price * 0.04  # تعديل من 0.05 إلى 0.04
+    max_stop_distance = entry_price * 0.05
     if entry_price - stop_loss > max_stop_distance:
         stop_loss = entry_price - max_stop_distance
     
@@ -876,368 +815,170 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     risk_amount = entry_price - stop_loss
     if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
 
-    # تعديل نسب المخاطرة إلى المكافأة لتكون أكثر واقعية لفريم 15 دقيقة
-    if strategy_name == "BB_Stoch_Strategy":
-        rr1, rr2 = 2.0, 3.0  # تعديل من 2.5, 4.0
-    elif strategy_name == "MACD_EMA_Strategy":
-        rr1, rr2 = 1.8, 2.8  # تعديل من 2.0, 3.5
-    elif strategy_name == "EMA_RSI_Strategy":
-        rr1, rr2 = 1.9, 3.0  # تعديل من 2.2, 3.8
-    elif strategy_name == "Pullback_Strategy":
-        rr1, rr2 = 2.0, 3.2  # تعديل من 2.3, 4.0
-    elif strategy_name == "Momentum_Volatility_Strategy":
-        rr1, rr2 = 1.6, 2.7  # تعديل من 1.8, 3.2
-    elif strategy_name == "Elliott_Wave_Strategy":
-        rr1, rr2 = 2.0, 3.5  # تعديل من 2.5, 4.5
-    else:
-        rr1, rr2 = 1.8, 2.8  # تعديل من 2.0, 3.5
+    if strategy_name in ["ORB_Strategy", "MA_Crossover_Strategy"]:
+        rr1, rr2 = 1.5, 2.5
+    elif strategy_name == "Multi_Timeframe_Strategy":
+        rr1, rr2 = 2.0, 3.5
+    elif strategy_name == "BB_Scalping_Strategy":
+        rr1, rr2 = 1.0, 2.0
+    else: # Default for RSI+MACD
+        rr1, rr2 = 1.8, 3.0
         
     target1 = entry_price + (risk_amount * rr1)
     target2 = entry_price + (risk_amount * rr2)
     
     return target1, target2
 
-# --- استراتيجيات التداول المعدلة ---
-# [MODIFIED] تعديلات استراتيجية EMA_RSI_Strategy
-def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx', 'volume_increasing', 'macd_hist'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-
-    last = df.iloc[-1]
-    
-    # تعديل شرط الاتجاه طويل الأجل - السماح بالدخول إذا كان EMA50 فوق EMA200 أو EMA21 فوق EMA50
-    if not (last['ema50'] > last['ema200'] or last['ema21'] > last['ema50']):
-        log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
-        return False
-    
-    # تعديل شرط السعر فوق EMA9
-    if last['close'] <= last['ema9']:
-        log_rejection(symbol_name, "EMA_RSI: Price not above EMA9")
-        return False
-
-    # تخفيف شرط RSI
-    if last['rsi'] <= 45:  # تعديل من 50 إلى 45
-        log_rejection(symbol_name, "EMA_RSI: RSI not above 45")
-        return False
-    
-    # تخفيف شرط ADX
-    if last['adx'] < 15:  # تعديل من 18 إلى 15
-        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 15)")
-        return False
-        
-    # تعديل شرط الحجم
-    volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.0  # تعديل من 1.1 إلى 1.0
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    # إضافة مؤشر تأكيدي: تقاطع إيجابي في الماكد
-    macd_positive = last['macd_hist'] > 0
-    
-    if not (volume_ok and volume_increasing and macd_positive):
-        log_rejection(symbol_name, "EMA_RSI: Volume or momentum confirmation failed")
-        return False
-        
-    return True
-
-# [MODIFIED] تعديلات استراتيجية BB_Stoch_Strategy
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema21', 'ema50', 'adx', 'volume', 'volume_increasing', 'rsi'}
+# --- [NEW] استراتيجيات التداول الجديدة ---
+def check_rsi_macd_strategy(df: pd.DataFrame) -> bool:
+    needed = {'rsi', 'macd_hist', 'close', 'open'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
         log_rejection(symbol_name, "Insufficient Historical Data")
         return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    is_oversold = last['rsi'] < 30
+    if not is_oversold:
+        log_rejection(symbol_name, "RSI_MACD: Not in oversold zone", {'RSI': f"{last['rsi']:.1f}"})
+        return False
     
+    macd_weakening = last['macd_hist'] > prev['macd_hist'] and last['macd_hist'] < 0
+    if not macd_weakening:
+        log_rejection(symbol_name, "RSI_MACD: Bearish momentum not weakening")
+        return False
+        
+    is_reversal_candle = last['close'] > last['open']
+    if not is_reversal_candle:
+        log_rejection(symbol_name, "RSI_MACD: No bullish candle confirmation")
+        return False
+        
+    return True
+
+def check_orb_strategy(df: pd.DataFrame) -> bool:
+    needed = {'high', 'low', 'close', 'volume', 'volume_sma'}
+    symbol_name = getattr(df, 'name', 'Unknown')
+    if len(df) < 2 or not needed.issubset(df.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+    
+    last_candle_time = df.index[-1]
+    
+    # Check if we are in the 2nd or 3rd candle of the day (00:15 or 00:30 UTC)
+    if not (last_candle_time.hour == 0 and last_candle_time.minute in [15, 30]):
+        log_rejection(symbol_name, "ORB: Not in breakout time window")
+        return False
+        
+    candles_today = df[df.index.date == last_candle_time.date()]
+    if len(candles_today) < 2:
+        return False # Not enough data for today yet
+
+    first_candle = candles_today.iloc[0]
+    opening_range_high = first_candle['high']
+    
+    last_candle = df.iloc[-1]
+    
+    breakout_confirmed = last_candle['close'] > opening_range_high
+    if not breakout_confirmed:
+        log_rejection(symbol_name, "ORB: Price has not broken opening range high")
+        return False
+        
+    high_volume = last_candle['volume'] > (first_candle['volume'] * 1.5) and last_candle['volume'] > last_candle['volume_sma']
+    if not high_volume:
+        log_rejection(symbol_name, "ORB: Insufficient volume for breakout")
+        return False
+        
+    return True
+
+def check_ma_crossover_strategy(df: pd.DataFrame) -> bool:
+    needed = {'ema9', 'ema21', 'ema55', 'close'}
+    symbol_name = getattr(df, 'name', 'Unknown')
+    if len(df) < 60 or not needed.issubset(df.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    crossover_up = prev['ema9'] <= prev['ema21'] and last['ema9'] > last['ema21']
+    if not crossover_up:
+        log_rejection(symbol_name, "MA_Crossover: No bullish crossover occurred")
+        return False
+    
+    trend_up = last['ema21'] > last['ema55']
+    if not trend_up:
+        log_rejection(symbol_name, "MA_Crossover: General trend is not bullish")
+        return False
+        
+    price_above_emas = last['close'] > last['ema9']
+    if not price_above_emas:
+        log_rejection(symbol_name, "MA_Crossover: Price is not above moving averages")
+        return False
+        
+    return True
+
+def check_multi_timeframe_strategy(df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> bool:
+    needed_1h = {'ema50', 'adx', 'close'}
+    needed_15m = {'ema21', 'rsi', 'low', 'open', 'close'}
+    symbol_name = getattr(df_15m, 'name', 'Unknown')
+    
+    if len(df_1h) < 55 or not needed_1h.issubset(df_1h.columns) or \
+       len(df_15m) < 25 or not needed_15m.issubset(df_15m.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
+    last_1h = df_1h.iloc[-1]
+    htf_trend_is_up = last_1h['close'] > last_1h['ema50'] and last_1h['adx'] > 20
+    if not htf_trend_is_up:
+        log_rejection(symbol_name, "Multi_Timeframe: Higher timeframe trend is not bullish")
+        return False
+        
+    last_15m = df_15m.iloc[-1]
+    
+    # Check for pullback to 15m EMA21
+    pulled_back = (df_15m['low'].tail(3) <= df_15m['ema21'].tail(3)).any()
+    if not pulled_back:
+        log_rejection(symbol_name, "Multi_Timeframe: No pullback to support on 15m")
+        return False
+        
+    # Check for confirmation: RSI dip or reversal candle
+    rsi_confirm = last_15m['rsi'] < 45
+    candle_confirm = last_15m['close'] > last_15m['open'] and (last_15m['close'] - last_15m['open']) > (last_15m['high'] - last_15m['low']) * 0.4
+    
+    if not (rsi_confirm and candle_confirm):
+        log_rejection(symbol_name, "Multi_Timeframe: No confirmation signal on 15m")
+        return False
+
+    return True
+
+def check_bb_scalping_strategy(df: pd.DataFrame) -> bool:
+    needed = {'bb_lower_scalp', 'rsi', 'low', 'close'}
+    symbol_name = getattr(df, 'name', 'Unknown')
+    if len(df) < 20 or not needed.issubset(df.columns):
+        log_rejection(symbol_name, "Insufficient Historical Data")
+        return False
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # تعديل شرط الاتجاه - السماح بالدخول إذا كان السعر فوق EMA21
-    if last['close'] < last['ema21']:
-        log_rejection(symbol_name, "BB: Price below EMA21 (bearish trend)")
-        return False
-    
-    # تخفيف شرط ADX
-    if last['adx'] < 15:  # تعديل من 17 إلى 15
-        log_rejection(symbol_name, "BB: Weak trend (ADX < 15)")
-        return False
-    
-    # السعر يلامس الشريط السفلي
-    touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
-    above_lower_band = last['close'] > last['bb_lower']
-    
-    if not (touched_lower_band and above_lower_band):
-        log_rejection(symbol_name, "BB: Price not bouncing from lower band")
-        return False
-    
-    # ستوكاستيك يؤكد الصعود - تعديل الشروط
-    stoch_confirm = (prev['stoch_k'] < 35) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
-    if not stoch_confirm:
-        log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
+    touched_lower = prev['low'] <= prev['bb_lower_scalp']
+    if not touched_lower:
+        log_rejection(symbol_name, "BB_Scalping: Price has not touched lower band")
         return False
         
-    # إضافة مؤشر تأكيدي: RSI > 40
-    if last['rsi'] <= 40:
-        log_rejection(symbol_name, "BB: RSI too low (< 40)")
+    recovered_inside = last['close'] > last['bb_lower_scalp']
+    if not recovered_inside:
+        log_rejection(symbol_name, "BB_Scalping: Price has not recovered inside band")
         return False
         
-    # تعديل شروط الشمعة والحجم
-    is_bullish_candle = last['close'] > last['open']
-    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.7  # تعديل من 0.75 إلى 0.7
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    if not (is_bullish_candle and volume_ok and volume_increasing):
-        log_rejection(symbol_name, "BB: Weak bullish candle or low volume")
-        return False
-
-    return True
-
-# [MODIFIED] تعديلات استراتيجية MACD_EMA_Strategy
-def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'sma7', 'sma21', 'sma200', 'adx', 'volume', 'volume_increasing', 'ema9'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-    
-    last = df.iloc[-1]
-    
-    # تعديل شرط الاتجاه - استخدام SMA21 بدلاً من SMA200 للسماح بمزيد من الفرص
-    if last['sma7'] <= last['sma21']:
-        log_rejection(symbol_name, "MACD: Bearish trend (SMA7 below SMA21)")
-        return False
-
-    # تخفيف شرط ADX
-    if last['adx'] < 18:  # تعديل من 20 إلى 18
-        log_rejection(symbol_name, "MACD: Weak trend (ADX < 18)")
-        return False
-
-    hist = df['macd_hist'].tail(4).values
-    if len(hist) < 4:
-        log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
-        return False
-        
-    # تعديل شروط الماكد
-    macd_ok = last['macd'] > 0 and last['macd_hist'] > 0
-    hist_accelerating = hist[3] > hist[2] and hist[2] > hist[1]
-    
-    # إضافة مؤشر تأكيدي: تقاطع إيجابي في MACD Signal
-    macd_cross_up = (df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]) and (last['macd'] > last['macd_signal'])
-    
-    # إضافة مؤشر تأكيدي: السعر فوق EMA9
-    price_above_ema9 = last['close'] > last['ema9']
-    
-    if not (macd_ok and (hist_accelerating or macd_cross_up) and price_above_ema9):
-        log_rejection(symbol_name, "MACD: Momentum not confirmed")
-        return False
-        
-    # تعديل متطلبات الحجم
-    volume_ok = last['volume'] > df['volume'].rolling(15).mean().iloc[-1] * 1.1  # تعديل من 1.2 إلى 1.1
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    if not (volume_ok and volume_increasing):
-        log_rejection(symbol_name, "MACD: Volume below average")
+    rsi_confirm = last['rsi'] < 35
+    if not rsi_confirm:
+        log_rejection(symbol_name, "BB_Scalping: RSI confirmation failed")
         return False
         
     return True
-
-# [MODIFIED] تعديلات استراتيجية Pullback_Strategy
-def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema21', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx', 'volume_increasing', 'rsi', 'stoch_k', 'stoch_d'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-
-    last = df.iloc[-1]
-    
-    # تعديل شرط الاتجاه - السماح بترتيب EMA21 > EMA50 أو EMA21 > EMA200
-    if not (last['ema21'] > last['ema50'] or last['ema21'] > last['ema200']):
-        log_rejection(symbol_name, "Pullback: Trend is not bullish")
-        return False
-    
-    # تخفيف شرط ADX
-    if last['adx'] < 14:  # تعديل من 16 إلى 14
-        log_rejection(symbol_name, "Pullback: Weak trend (ADX < 14)")
-        return False
-    
-    # تعديل شرط الارتداد - السماح بالارتداد لـ EMA21 أو EMA50
-    pulled_back_to_ema21 = (df['low'].tail(3) <= df['ema21'].tail(3)).any()
-    pulled_back_to_ema50 = (df['low'].tail(3) <= df['ema50'].tail(3)).any()
-    
-    if not (pulled_back_to_ema21 or pulled_back_to_ema50):
-        log_rejection(symbol_name, "Pullback: No pullback detected")
-        return False
-    
-    # تعديل شرط التعافي
-    if not (last['close'] > last['open']):
-        log_rejection(symbol_name, "Pullback: Price not recovering")
-        return False
-    
-    # تعديل شرط الحجم
-    avg_volume = df['volume'].rolling(window=15).mean().iloc[-1]
-    volume_ok = last['volume'] >= avg_volume * 0.9  # تعديل من 1.0 إلى 0.9
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    # إضافة مؤشر تأكيدي: RSI بين 40-60
-    rsi_ok = 40 <= last['rsi'] <= 60
-    
-    # إضافة مؤشر تأكيدي: ستوكاستيك يؤكد الصعود
-    stoch_ok = last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 70
-    
-    if not (volume_ok and volume_increasing and rsi_ok and stoch_ok):
-        log_rejection(symbol_name, "Pullback: Volume or momentum confirmation failed")
-        return False
-        
-    return True
-
-# [MODIFIED] تعديلات استراتيجية Momentum_Volatility_Strategy
-def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'atr_percent', 'ema9', 'ema21', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi', 'volume_increasing', 'macd', 'macd_signal'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-
-    last = df.iloc[-1]
-    
-    # تعديل شرط ترتيب المتوسطات - السماح بـ EMA9 > EMA21
-    if not (last['ema9'] > last['ema21']):
-        log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
-        return False
-    
-    # تخفيف شرط ADX
-    if last['adx'] < 18:  # تعديل من 22 إلى 18
-        log_rejection(symbol_name, "Momentum: Weak trend (ADX < 18)")
-        return False
-    
-    # تعديل نطاق التقلبات
-    atr_percent = last['atr_percent']
-    if not (1.5 <= atr_percent <= 6.5):  # تعديل من 1.8-6.0 إلى 1.5-6.5
-        log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
-        return False
-    
-    # تعديل شرط الماكد
-    if last['macd_hist'] <= 0:
-        log_rejection(symbol_name, "Momentum: MACD momentum not positive")
-        return False
-        
-    # توسيع نطاق RSI
-    if not (45 <= last['rsi'] <= 75):  # تعديل من 48-72 إلى 45-75
-        log_rejection(symbol_name, "Momentum: RSI not in optimal range")
-        return False
-        
-    # تعديل شرط الحجم
-    volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.0  # تعديل من 1.1 إلى 1.0
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    # إضافة مؤشر تأكيدي: تقاطع إيجابي في الماكد
-    macd_cross_up = (df['macd'].iloc[-2] < df['macd_signal'].iloc[-2]) and (last['macd'] > last['macd_signal'])
-    
-    if not (volume_ok and volume_increasing and macd_cross_up):
-        log_rejection(symbol_name, "Momentum: Volume or momentum confirmation failed")
-        return False
-        
-    return True
-
-# [MODIFIED] تعديلات استراتيجية Elliott_Wave_Strategy
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
-    needed = {'ema21', 'ema50', 'ema200', 'high', 'low', 'close', 'volume', 'adx', 'rsi', 'macd_hist', 'volume_increasing', 'stoch_k', 'stoch_d'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 100 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-
-    last = df.iloc[-1]
-    
-    # تعديل شرط الاتجاه - السماح بـ EMA21 > EMA50
-    if not (last['ema21'] > last['ema50']):
-        log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
-        return False
-    
-    # تخفيف شرط ADX
-    if last['adx'] < 16:  # تعديل من القيمة الأعلى
-        log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
-        return False
-    
-    # تعديل شرط الحجم
-    avg_volume = df['volume'].rolling(window=10).mean().iloc[-1]
-    volume_ok = last['volume'] > avg_volume * 0.9  # تعديل من القيمة الأعلى
-    
-    # إضافة مؤشر تأكيدي: حجم التداول متزايد
-    volume_increasing = last['volume_increasing']
-    
-    if not (volume_ok and volume_increasing):
-        log_rejection(symbol_name, "Elliott Wave: Volume too low")
-        return False
-    
-    # توسيع نطاق RSI
-    if not (45 <= last['rsi'] <= 75):  # تعديل من النطاق الأضيق
-        log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
-        return False
-    
-    # تعديل شرط الماكد
-    if last['macd_hist'] <= 0:
-        log_rejection(symbol_name, "Elliott Wave: MACD not positive")
-        return False
-    
-    # إضافة مؤشر تأكيدي: ستوكاستيك يؤكد الصعود
-    stoch_ok = last['stoch_k'] > last['stoch_d'] and last['stoch_k'] < 70
-    
-    if not stoch_ok:
-        log_rejection(symbol_name, "Elliott Wave: Stochastic not confirming")
-        return False
-    
-    # تبسيط شروط اكتشاف الموجات - التركيز على النمط العام بدلاً من الشروط المعقدة
-    try:
-        # اكتشاف نقاط التذبذب المحلية
-        highs = df['high'].values
-        lows = df['low'].values # Correction of typo '..'
-        
-        # استخدام نافذة أصغر للتكيف مع فريم 15 دقيقة
-        high_idx = argrelextrema(highs, np.greater, order=3)[0]
-        low_idx = argrelextrema(lows, np.less, order=3)[0]
-        
-        # التحقق من وجود نمط صاعد بسيط (قمة أعلى وقاع أعلى)
-        if len(high_idx) >= 2 and len(low_idx) >= 2:
-            # التحقق من وجود قمتين متتاليتين مرتفعتين
-            if highs[high_idx[-1]] > highs[high_idx[-2]]:
-                # التحقق من وجود قاعين متتاليتين مرتفعين
-                if lows[low_idx[-1]] > lows[low_idx[-2]]:
-                    # نمط صاعد بسيط تم اكتشافه
-                    return True
-        
-        # إذا لم يتم اكتشاف نمط كامل، تحقق من شروط simpler
-        # السعر فوق المتوسطات المتحركة مع زخم إيجابي
-        if (last['close'] > last['ema21'] and 
-            last['close'] > last['ema50'] and 
-            last['macd_hist'] > 0 and
-            volume_increasing):
-            return True
-            
-        log_rejection(symbol_name, "Elliott Wave: No bullish pattern detected")
-        return False
-        
-    except Exception as e:
-        logger.error(f"Error in Elliott Wave pattern detection: {e}")
-        # في حالة الخطأ، العودة إلى شروط أبسط
-        if (last['close'] > last['ema21'] and 
-            last['macd_hist'] > 0 and
-            volume_increasing):
-            return True
-            
-        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
-        return False
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -1314,7 +1055,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
 
-def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, df_htf: Optional[pd.DataFrame] = None):
     df.strategy = strategy_name 
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
@@ -1431,7 +1172,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.9.0)</title>
+<title>لوحة التحكم - بوت التداول (V33.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1498,7 +1239,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.9.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1591,6 +1332,7 @@ const qs = s => document.querySelector(s);
 let lastPrices = {};
 let performanceChartInstance = null;
 let openSignals = {};
+const strategyNames = {{ STRATEGY_NAMES | tojson }};
 
 const debounce = (func, delay) => {
     let timeout;
@@ -1650,12 +1392,12 @@ function renderSignal(signal) {
     }
     const qualityScore = signal.signal_details?.quality_score || 0;
     const qualityColor = qualityScore > 75 ? 'var(--ok)' : qualityScore > 55 ? 'var(--warn)' : 'var(--bad)';
-    const strategyName = signal.strategy_name.replace(/_/g, " ").replace("Strategy", "");
+    const strategyDisplayName = strategyNames[signal.strategy_name] || signal.strategy_name.replace(/_/g, " ").replace("Strategy", "");
     return `
         <div class="signal" id="signal-${signal.id}" data-symbol="${signal.symbol}">
             <div>
                 <div class="sig-title">${signal.symbol}</div>
-                <div class="sig-meta">${strategyName} | <span style="color: ${qualityColor}; font-weight: bold;">⭐ ${qualityScore}/100</span></div>
+                <div class="sig-meta">${strategyDisplayName} | <span style="color: ${qualityColor}; font-weight: bold;">⭐ ${qualityScore}/100</span></div>
             </div>
             <div style="text-align:end">
                 <div class="price">${fmt(cp)}</div>
@@ -1900,7 +1642,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.9.0)</title>
+<title>الإعدادات - بوت التداول (V33.0.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1971,7 +1713,7 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
                 <div class="form-group" style="flex-direction: row; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e2c52; padding-bottom: 12px; margin-bottom: 12px;">
                     <label>{{ name }}</label>
                     <label class="switch">
-                        <input type="checkbox" name="{{ key }}" {% if strategies_status[key] %}checked{% endif %}>
+                        <input type="checkbox" name="USE_{{ key.replace('Strategy', '').rstrip('_') }}_STRATEGY" {% if strategies_status["USE_" + key.replace('Strategy', '').rstrip('_') + "_STRATEGY"] %}checked{% endif %}>
                         <span class="dot"></span>
                     </label>
                 </div>
@@ -2257,7 +1999,8 @@ function updateEquityChart(equityData) {
 
 # --- مسارات Flask ---
 @app.route('/')
-def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
+def dashboard(): return render_template_string(DASHBOARD_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
+
 @app.route('/backtest')
 def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_NAMES=STRATEGY_NAMES)
 
@@ -2268,12 +2011,11 @@ def settings_page():
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     
     strategies_status = {
-        'USE_BB_STOCH_STRATEGY': USE_BB_STOCH_STRATEGY,
-        'USE_MACD_EMA_STRATEGY': USE_MACD_EMA_STRATEGY,
-        'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
-        'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
-        'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-        'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+        'USE_RSI_MACD_STRATEGY': USE_RSI_MACD_STRATEGY,
+        'USE_ORB_STRATEGY': USE_ORB_STRATEGY,
+        'USE_MA_CROSSOVER_STRATEGY': USE_MA_CROSSOVER_STRATEGY,
+        'USE_MULTI_TIMEFRAME_STRATEGY': USE_MULTI_TIMEFRAME_STRATEGY,
+        'USE_BB_SCALPING_STRATEGY': USE_BB_SCALPING_STRATEGY
     }
     
     return render_template_string(SETTINGS_TEMPLATE, 
@@ -2436,13 +2178,13 @@ def update_settings():
 def update_strategies():
     try:
         data = request.json
-        global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
-        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY))
-        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY))
-        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY))
-        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
-        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
-        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
+        global USE_RSI_MACD_STRATEGY, USE_ORB_STRATEGY, USE_MA_CROSSOVER_STRATEGY, \
+               USE_MULTI_TIMEFRAME_STRATEGY, USE_BB_SCALPING_STRATEGY
+        USE_RSI_MACD_STRATEGY = bool(data.get('USE_RSI_MACD_STRATEGY', USE_RSI_MACD_STRATEGY))
+        USE_ORB_STRATEGY = bool(data.get('USE_ORB_STRATEGY', USE_ORB_STRATEGY))
+        USE_MA_CROSSOVER_STRATEGY = bool(data.get('USE_MA_CROSSOVER_STRATEGY', USE_MA_CROSSOVER_STRATEGY))
+        USE_MULTI_TIMEFRAME_STRATEGY = bool(data.get('USE_MULTI_TIMEFRAME_STRATEGY', USE_MULTI_TIMEFRAME_STRATEGY))
+        USE_BB_SCALPING_STRATEGY = bool(data.get('USE_BB_SCALPING_STRATEGY', USE_BB_SCALPING_STRATEGY))
         save_settings_to_redis()
         return jsonify({"success": True, "message": "Strategies updated successfully"})
     except Exception as e:
@@ -2521,20 +2263,27 @@ def backtest_strategy(strategy_name, symbol, days=90):
         return {"error": "Insufficient historical data."}
     
     df = calculate_all_features(df)
+    df.name = symbol
+
+    df_htf = None
+    if strategy_name == 'Multi_Timeframe_Strategy':
+        df_htf = fetch_historical_data(symbol, HIGHER_TIMEFRAME, days)
+        if df_htf is None or len(df_htf) < 55: return {"error": "Insufficient HTF data."}
+        df_htf = calculate_all_features(df_htf)
+        df_htf.name = symbol
     
     results = []
     active_trade = None
     initial_balance = 1000.0
     equity_curve = [initial_balance]
-    backtest_trade_amount = 10.0 # حجم الصفقة الثابت للاختبار الخلفي
+    backtest_trade_amount = 10.0
 
     strategy_functions = {
-        'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
-        'MACD_EMA_Strategy': check_macd_ema_strategy_enhanced,
-        'EMA_RSI_Strategy': check_ema_rsi_strategy_enhanced,
-        'Pullback_Strategy': check_pullback_strategy_enhanced,
-        'Momentum_Volatility_Strategy': check_momentum_volatility_strategy_enhanced,
-        'Elliott_Wave_Strategy': check_elliott_wave_strategy_enhanced
+        'RSI_MACD_Strategy': check_rsi_macd_strategy,
+        'ORB_Strategy': check_orb_strategy,
+        'MA_Crossover_Strategy': check_ma_crossover_strategy,
+        'Multi_Timeframe_Strategy': check_multi_timeframe_strategy,
+        'BB_Scalping_Strategy': check_bb_scalping_strategy,
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2544,70 +2293,48 @@ def backtest_strategy(strategy_name, symbol, days=90):
         current_candle = df.iloc[i]
         
         if active_trade:
-            exit_price = None
-            exit_reason = None
-            if current_candle['low'] <= active_trade['stop_loss']:
-                exit_price = active_trade['stop_loss']
-                exit_reason = 'Stop Loss'
-            elif current_candle['high'] >= active_trade['target_price_2']:
-                exit_price = active_trade['target_price_2']
-                exit_reason = 'Target 2'
-            elif current_candle['high'] >= active_trade['target_price_1']:
-                exit_price = active_trade['target_price_1']
-                exit_reason = 'Target 1'
+            exit_price, exit_reason = None, None
+            if current_candle['low'] <= active_trade['stop_loss']: exit_price, exit_reason = active_trade['stop_loss'], 'Stop Loss'
+            elif current_candle['high'] >= active_trade['target_price_2']: exit_price, exit_reason = active_trade['target_price_2'], 'Target 2'
+            elif current_candle['high'] >= active_trade['target_price_1']: exit_price, exit_reason = active_trade['target_price_1'], 'Target 1'
             
             if exit_price:
                 profit = (exit_price - active_trade['entry_price']) * active_trade['quantity']
                 equity_curve.append(equity_curve[-1] + profit)
-                
-                active_trade.update({
-                    'exit_time': current_candle.name.isoformat(),
-                    'exit_price': exit_price,
-                    'profit_percent': ((exit_price - active_trade['entry_price']) / active_trade['entry_price']) * 100,
-                    'exit_reason': exit_reason
-                })
+                active_trade.update({'exit_time': current_candle.name.isoformat(), 'exit_price': exit_price, 'profit_percent': ((exit_price - active_trade['entry_price']) / active_trade['entry_price']) * 100, 'exit_reason': exit_reason})
                 results.append(active_trade)
                 active_trade = None
 
         if not active_trade:
-            df_slice = df.iloc[:i]
+            df_slice = df.iloc[:i+1]
             df_slice.name = symbol
-            if check_strategy(df_slice):
-                entry_price = current_candle['open']
+            
+            signal_found = False
+            if strategy_name == 'Multi_Timeframe_Strategy':
+                htf_slice = df_htf[df_htf.index <= current_candle.name]
+                if len(htf_slice) > 55:
+                    signal_found = check_strategy(df_slice, htf_slice)
+            else:
+                signal_found = check_strategy(df_slice)
+
+            if signal_found:
+                entry_price = current_candle['close']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
                 tp1, tp2 = calculate_dynamic_take_profit(df_slice, entry_price, sl, strategy_name)
-                
                 if sl >= entry_price: continue
+                active_trade = {'entry_time': current_candle.name.isoformat(), 'entry_price': entry_price, 'stop_loss': sl, 'target_price_1': tp1, 'target_price_2': tp2, 'quantity': backtest_trade_amount / entry_price}
 
-                quantity = backtest_trade_amount / entry_price
-                
-                active_trade = {
-                    'entry_time': current_candle.name.isoformat(),
-                    'entry_price': entry_price,
-                    'stop_loss': sl,
-                    'target_price_1': tp1,
-                    'target_price_2': tp2,
-                    'quantity': quantity
-                }
-
-    if not results:
-        return {"error": "No trades were executed during this period."}
+    if not results: return {"error": "No trades were executed during this period."}
 
     total_trades = len(results)
     wins = [r for r in results if r['profit_percent'] > 0]
     win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-    
     total_profit = sum(r['profit_percent'] for r in wins)
     total_loss = abs(sum(r['profit_percent'] for r in results if r['profit_percent'] <= 0))
     profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
-    
     avg_profit = sum(r['profit_percent'] for r in results) / total_trades if total_trades > 0 else 0
 
-    return {
-        'strategy': strategy_name, 'symbol': symbol, 'total_trades': total_trades,
-        'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor,
-        'results': results, 'equity_curve': equity_curve
-    }
+    return {'strategy': strategy_name, 'symbol': symbol, 'total_trades': total_trades, 'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor, 'results': results, 'equity_curve': equity_curve}
 
 @app.route('/api/run_backtest', methods=['POST'])
 def api_run_backtest():
@@ -2659,24 +2386,33 @@ def main_bot_loop():
                     if symbol in open_signals_cache:
                         continue
                 
-                df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
-                if df is None or len(df) < 200:
-                    if df is not None: log_rejection(symbol, "Insufficient Historical Data")
+                df_15m = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
+                if df_15m is None or len(df_15m) < 200:
+                    if df_15m is not None: log_rejection(symbol, "Insufficient Historical Data")
                     continue
                 
-                df_featured = calculate_all_features(df)
-                df_featured.name = symbol
+                df_15m_featured = calculate_all_features(df_15m)
+                df_15m_featured.name = symbol
                 
                 strategy_found = None
-                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
-                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
-                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
-                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured): strategy_found = "Momentum_Volatility_Strategy"
-                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy_enhanced(df_featured): strategy_found = "Elliott_Wave_Strategy"
+                df_1h_featured = None
+
+                # Check strategies that don't need HTF first
+                if USE_RSI_MACD_STRATEGY and check_rsi_macd_strategy(df_15m_featured): strategy_found = "RSI_MACD_Strategy"
+                elif USE_ORB_STRATEGY and check_orb_strategy(df_15m_featured): strategy_found = "ORB_Strategy"
+                elif USE_MA_CROSSOVER_STRATEGY and check_ma_crossover_strategy(df_15m_featured): strategy_found = "MA_Crossover_Strategy"
+                elif USE_BB_SCALPING_STRATEGY and check_bb_scalping_strategy(df_15m_featured): strategy_found = "BB_Scalping_Strategy"
+                
+                # Check Multi-Timeframe strategy if no other signal was found yet
+                elif USE_MULTI_TIMEFRAME_STRATEGY:
+                    df_1h = fetch_historical_data(symbol, HIGHER_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS + 10) # fetch more days for HTF emas
+                    if df_1h is not None and len(df_1h) > 55:
+                        df_1h_featured = calculate_all_features(df_1h)
+                        if check_multi_timeframe_strategy(df_15m_featured, df_1h_featured):
+                            strategy_found = "Multi_Timeframe_Strategy"
 
                 if strategy_found:
-                    create_trade_signal(symbol, df_featured, strategy_found)
+                    create_trade_signal(symbol, df_15m_featured, strategy_found, df_htf=df_1h_featured)
 
         except Exception as e:
             logger.error(f"❌ [Main Loop] A critical error occurred: {e}", exc_info=True)
@@ -2874,7 +2610,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.9.0 (User Settings Applied) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.0.0 (New Strategies) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
