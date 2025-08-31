@@ -1,10 +1,10 @@
-# ملف c4.py - نسخة V32.10.0 (مُعدَّل حسب إعدادات المستخدم)
+# ملف c4.py - نسخة V32.8.0 (مُعدَّل حسب إعدادات المستخدم)
 # --- وصف التعديلات:
-# 1.  [تطوير الاختبار الخلفي] تم تحديث نظام الاختبار الخلفي (Backtesting) ليستخدم نفس فلاتر التداول الحي.
-# 2.  [إضافة فلاتر للاختبار] الآن يطبق الاختبار الخلفي فلاتر التقلبات (ATR)، الأخبار، والسيولة.
-# 3.  [تحديث واجهة الاختبار] تمت إضافة قسم جديد في صفحة الاختبار الخلفي للتحكم في إعدادات الفلاتر (تفعيل/إيقاف وتحديد القيم).
-# 4.  [تعديل دوال الفلاتر] تم تعديل دوال الفلاتر لتقبل متغير زمني، مما يسمح باستخدامها في بيانات تاريخية بدلاً من الوقت الحالي فقط.
-# 5.  [تحسين دقة النتائج] ستكون نتائج الاختبار الخلفي الآن أكثر واقعية وتعكس أداء الاستراتيجيات تحت ظروف السوق المفلترة.
+# 1.  [تحديث الاستراتيجيات] تم تعديل إعدادات ومؤشرات استراتيجيات MACD+EMA و EMA+RSI بناءً على طلب المستخدم.
+# 2.  [إضافة مؤشرات] تمت إضافة مؤشرات SMA (7 و 200) و VWAP إلى دالة حساب المؤشرات.
+# 3.  [تعديل الفلاتر] تم تحديث فلتر التقلبات (ATR) ليعمل ضمن نطاق ثابت (1.5% - 4.0%).
+# 4.  [ضبط الإعدادات] تم تعديل المتغيرات العامة للبوت مثل حجم الصفقة، جودة الإشارة، والوقف المتحرك.
+# 5.  [منطق التداول] تم دمج منطق تقاطع SMA في استراتيجية MACD كإشارة دخول قوية.
 
 import time
 import os
@@ -48,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.10.0')
+logger = logging.getLogger('CryptoBotV32.8.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -83,14 +83,18 @@ cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
+# [تعديل المستخدم] زيادة فترة التبريد
 COOLDOWN_MINUTES_AFTER_SL = 30
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
+# [تعديل المستخدم] تقليل حجم الصفقة
 FIXED_TRADE_AMOUNT_USDT: float = 3.0
 fixed_trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
+# [تعديل المستخدم] تفعيل أسرع للوقف المتحرك
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
+# [تعديل المستخدم] زيادة الجودة المطلوبة للإشارة
 MIN_SIGNAL_QUALITY: int = 70
 AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE: bool = True
 min_quality_lock = Lock()
@@ -102,17 +106,7 @@ USE_EMA_RSI_STRATEGY: bool = True
 USE_PULLBACK_STRATEGY: bool = True
 USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
 USE_ELLIOTT_WAVE_STRATEGY: bool = True
-USE_SMA_MACD_5MIN_STRATEGY: bool = True
-USE_EMA_CROSS_SCALPING_STRATEGY: bool = True
-USE_PA_STOCH_SR_STRATEGY: bool = True
 
-
-
-
-# --- مفاتيح تفعيل الاستراتيجيات (15m الجديدة) ---
-USE_VWAP_PULLBACK_15M_STRATEGY: bool = True
-USE_ORB_15M_STRATEGY: bool = True
-USE_BB_SQUEEZE_15M_STRATEGY: bool = True
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
     "BB_Stoch_Strategy": "BB+Stoch (ارتداد مبكر)",
@@ -120,23 +114,8 @@ STRATEGY_NAMES = {
     "EMA_RSI_Strategy": "EMA+RSI (ارتداد سريع)",
     "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
     "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
-    "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)",
-    "SMA_MACD_5min_Strategy": "SMA 10 + MACD (فريم 5 دقائق)",
-    "EMA_Cross_Scalping_Strategy": "EMA 10/20 Scalping (سكالبينج)",
-    "PA_Stoch_SR_Strategy": "Price Action + Stoch (دعم ومقاومة)"
+    "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)"
 }
-
-
-# -- إضافة استراتيجيات فريم 15 دقيقة --
-try:
-    STRATEGY_NAMES.update({
-        "VWAP_Pullback_15m_Strategy": "VWAP + Pullback (فريم 15m)",
-        "ORB_15m_Strategy": "Opening Range Breakout (فريم 15m)",
-        "BB_Squeeze_15m_Strategy": "Bollinger Squeeze + Momentum (فريم 15m)"
-    })
-except Exception:
-    pass
-
 strategy_filters_lock = Lock()
 
 # --- إعدادات عامة ---
@@ -217,23 +196,7 @@ REJECTION_REASONS_AR = {
     "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
     "Elliott Wave: Wave 2 Fibonacci retracement invalid": "موجات إليوت: تصحيح فيبوناتشي للموجة 2 غير صالح",
     "Elliott Wave: Price hasn't broken wave 1 resistance": "موجات إليوت: السعر لم يخترق مقاومة الموجة 1",
-    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
-    "SMA_MACD_5m: Price not above SMA10": "SMA_MACD_5m: السعر ليس فوق متوسط 10",
-    "SMA_MACD_5m: MACD bullish crossover not confirmed": "SMA_MACD_5m: تقاطع الماكد الصاعد غير مؤكد",
-    "SMA_MACD_5m: Weak trend (ADX < 20)": "SMA_MACD_5m: اتجاه ضعيف (ADX < 20)",
-    "EMA_Cross: Bearish crossover or no crossover": "EMA_Cross: تقاطع هابط أو لا يوجد تقاطع",
-    "EMA_Cross: RSI confirmation failed (RSI < 55)": "EMA_Cross: فشل تأكيد RSI (أقل من 55)",
-    "EMA_Cross: Weak trend (ADX < 18)": "EMA_Cross: اتجاه ضعيف (ADX < 18)",
-    "EMA_Cross: Volume below average": "EMA_Cross: حجم التداول أقل من المتوسط",
-    "PA_Stoch_SR: No recent support level found": "PA_Stoch_SR: لم يتم العثور على مستوى دعم حديث",
-    "PA_Stoch_SR: Price not near support": "PA_Stoch_SR: السعر ليس بالقرب من الدعم",
-    "PA_Stoch_SR: Stochastic not oversold or crossing up": "PA_Stoch_SR: ستوكاستيك ليس في منطقة تشبع بيعي أو لا يتقاطع لأعلى",
-    "PA_Stoch_SR: No bullish price action confirmation": "PA_Stoch_SR: لا يوجد تأكيد من حركة السعر الصاعدة",
-
-
-"VWAP Pullback Conditions Not Met": "شروط ارتداد VWAP غير متحققة",
-"ORB Breakout Not Confirmed": "كسر نطاق الافتتاح غير مؤكد",
-"Squeeze Not Released": "لم يحدث خروج من السكون (Squeeze)",
+    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط"
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -648,109 +611,97 @@ def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.
     except Exception as e:
         logger.error(f"❌ [Data] Error fetching data for {symbol}: {e}"); return None
 
-
-
 def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
-    """حساب المؤشرات المطلوبة لجميع الاستراتيجيات (5م و15م)."""
     df_calc = df.copy()
+    
+    # --- SMA Calculations ---
+    # [تعديل المستخدم] إضافة SMAs
+    df_calc['sma7'] = df_calc['close'].rolling(window=7).mean()
+    df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
 
-    # EMAs
-    for span in [9, 21, 50, 200]:
-        df_calc[f'ema{span}'] = df_calc['close'].ewm(span=span, adjust=False).mean()
-
-    # RSI(14)
+    # --- EMA Calculations ---
+    # [تعديل المستخدم] تعديل فترة EMA لتكون أسرع
+    df_calc['ema9'] = df_calc['close'].ewm(span=9, adjust=False).mean()
+    df_calc['ema13'] = df_calc['close'].ewm(span=13, adjust=False).mean()
+    df_calc['ema21'] = df_calc['close'].ewm(span=21, adjust=False).mean()
+    df_calc['ema34'] = df_calc['close'].ewm(span=34, adjust=False).mean()
+    df_calc['ema50'] = df_calc['close'].ewm(span=50, adjust=False).mean()
+    df_calc['ema100'] = df_calc['close'].ewm(span=100, adjust=False).mean()
+    df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+    
+    # --- ATR and ADX ---
+    high_low = df_calc['high'] - df_calc['low']
+    high_close = (df_calc['high'] - df_calc['close'].shift()).abs()
+    low_close = (df_calc['low'] - df_calc['close'].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1, skipna=False)
+    df_calc['atr'] = tr.ewm(span=14, adjust=False).mean()
+    df_calc['atr_percent'] = (df_calc['atr'] / df_calc['close'].replace(0, 1e-9)) * 100
+    up_move = df_calc['high'].diff()
+    down_move = -df_calc['low'].diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df_calc.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df_calc.index)
+    plus_di = 100 * plus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    minus_di = 100 * minus_dm.ewm(span=14, adjust=False).mean() / df_calc['atr'].replace(0, 1e-9)
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, 1e-9))
+    df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
+    
+    # --- RSI Calculation ---
+    # [تعديل المستخدم] تعديل فترة RSI لتكون أسرع
     delta = df_calc['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / (loss.replace(0, 1e-9))
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=7).mean()
+    avg_loss = loss.rolling(window=7).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-9)
     df_calc['rsi'] = 100 - (100 / (1 + rs))
-
-    # MACD (12,26,9) + histogram
-    ema12 = df_calc['close'].ewm(span=12, adjust=False).mean()
-    ema26 = df_calc['close'].ewm(span=26, adjust=False).mean()
-    macd_line = ema12 - ema26
-    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-    df_calc['macd'] = macd_line
-    df_calc['macd_signal'] = signal_line
-    df_calc['macd_hist'] = macd_line - signal_line
-
-    # Stochastic (14,3)
-    low14 = df_calc['low'].rolling(14).min()
-    high14 = df_calc['high'].rolling(14).max()
-    df_calc['%K'] = 100 * (df_calc['close'] - low14) / ((high14 - low14).replace(0, 1e-9))
-    df_calc['%D'] = df_calc['%K'].rolling(3).mean()
-
-    # SMA 9
-    df_calc['sma9'] = df_calc['close'].rolling(9).mean()
-
-    # VWAP
-    pv = df_calc['close'] * df_calc['volume']
-    df_calc['vwap'] = pv.cumsum() / (df_calc['volume'].cumsum().replace(0, 1e-9))
-
-    # ATR(14)
-    tr = (df_calc['high'] - df_calc['low']).abs()
-    tr2 = (df_calc['high'] - df_calc['close'].shift(1)).abs()
-    tr3 = (df_calc['low'] - df_calc['close'].shift(1)).abs()
-    df_calc['tr'] = pd.concat([tr, tr2, tr3], axis=1).max(axis=1)
-    df_calc['atr'] = df_calc['tr'].rolling(14).mean()
-
-    # Bollinger Bands (20, 2)
-    m20 = df_calc['close'].rolling(20).mean()
-    std20 = df_calc['close'].rolling(20).std()
-    df_calc['bb_middle'] = m20
-    df_calc['bb_upper'] = m20 + 2 * std20
-    df_calc['bb_lower'] = m20 - 2 * std20
-    df_calc['bb_width'] = (df_calc['bb_upper'] - df_calc['bb_lower']) / (df_calc['bb_middle'].replace(0, 1e-9))
-
-    # Keltner Channels (EMA20 ± 1.5*ATR)
-    df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean()
-    df_calc['kc_upper'] = df_calc['ema20'] + (df_calc['atr'] * 1.5)
-    df_calc['kc_lower'] = df_calc['ema20'] - (df_calc['atr'] * 1.5)
-
-    # Squeeze flag
-    df_calc['squeeze_on'] = (df_calc['bb_upper'] < df_calc['kc_upper']) & (df_calc['bb_lower'] > df_calc['kc_lower'])
-
-    # Opening Range (per day) - first 4 candles for 15m; repeated for all rows of that day
-    try:
-        ORB_BARS = 4
-        days = pd.to_datetime(df_calc.index).date
-        df_calc['__day__'] = days
-        df_calc['orb_high'] = df_calc.groupby('__day__')['high'].transform(lambda s: s.iloc[:ORB_BARS].max() if len(s) else np.nan)
-        df_calc['orb_low']  = df_calc.groupby('__day__')['low'].transform(lambda s: s.iloc[:ORB_BARS].min() if len(s) else np.nan)
-        df_calc.drop(columns=['__day__'], inplace=True)
-    except Exception:
-        df_calc['orb_high'] = np.nan
-        df_calc['orb_low'] = np.nan
-
+    
+    # --- Bollinger Bands ---
+    # إعدادات البولينجر تتوافق مع طلب المستخدم (20, 2)
+    bb_middle = df_calc['close'].rolling(window=20).mean()
+    bb_std = df_calc['close'].rolling(window=20).std()
+    df_calc['bb_middle'] = bb_middle
+    df_calc['bb_lower'] = bb_middle - (bb_std * 2)
+    df_calc['bb_upper'] = bb_middle + (bb_std * 2)
+    
+    # --- MACD ---
+    # [تعديل المستخدم] إعدادات سريعة لفريم 15 دقيقة
+    exp1 = df_calc['close'].ewm(span=8, adjust=False).mean()
+    exp2 = df_calc['close'].ewm(span=17, adjust=False).mean()
+    df_calc['macd'] = exp1 - exp2
+    df_calc['macd_signal'] = df_calc['macd'].ewm(span=9, adjust=False).mean()
+    df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
+    
+    # --- Stochastic ---
+    # إعدادات ستوكاستيك تتوافق مع طلب المستخدم (14, 3)
+    low_14 = df_calc['low'].rolling(14).min()
+    high_14 = df_calc['high'].rolling(14).max()
+    high_low_range = high_14 - low_14
+    meaningful_range = high_low_range > (df_calc['close'] * 0.0001)
+    df_calc['stoch_k'] = np.where(
+        meaningful_range,
+        100 * ((df_calc['close'] - low_14) / high_low_range.replace(0, 1e-9)),
+        50
+    )
+    df_calc['stoch_d'] = df_calc['stoch_k'].rolling(3).mean()
+    
+    # --- VWAP ---
+    # [تعديل المستخدم] إضافة VWAP
+    df_calc['vwap'] = (df_calc['close'] * df_calc['volume']).cumsum() / df_calc['volume'].cumsum()
+    
     return df_calc
 
-
+# --- Data Loading & Settings Management ---
 def load_open_signals_to_cache():
-    """Load open signals from DB into the in-memory cache 'open_signals_cache'."""
-    if not check_db_connection() or not conn: 
-        logger.warning("Skipping load_open_signals_to_cache: DB not available")
-        return
+    if not check_db_connection() or not conn: return
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM signals WHERE status IN ('open','updated');")
-            rows = cur.fetchall()
+            cur.execute("SELECT * FROM signals WHERE status IN ('open', 'updated');")
             with signal_cache_lock:
                 open_signals_cache.clear()
-                for r in rows:
-                    try:
-                        # normalize timestamps if present
-                        if 'created_at' in r and hasattr(r['created_at'], 'isoformat'):
-                            r['created_at'] = r['created_at'].isoformat()
-                        if 'updated_at' in r and hasattr(r['updated_at'], 'isoformat'):
-                            r['updated_at'] = r['updated_at'].isoformat()
-                    except Exception:
-                        pass
-                    # use symbol as key if available, else id
-                    key = r.get('symbol') or str(r.get('id'))
-                    open_signals_cache[key] = dict(r)
+                for signal in cur.fetchall(): open_signals_cache[signal['symbol']] = dict(signal)
+            logger.info(f"✅ [Cache] Loaded {len(open_signals_cache)} open signals.")
     except Exception as e:
         logger.error(f"❌ [Cache] Failed to load open signals: {e}")
-
 
 def load_notifications_to_cache():
     if not check_db_connection() or not conn: return
@@ -766,7 +717,7 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY, USE_SMA_MACD_5MIN_STRATEGY, USE_EMA_CROSS_SCALPING_STRATEGY, USE_PA_STOCH_SR_STRATEGY
+    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
@@ -790,10 +741,6 @@ def load_settings_from_redis():
             USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
             USE_MOMENTUM_VOLATILITY_STRATEGY = strategies.get('USE_MOMENTUM_VOLATILITY_STRATEGY', True)
             USE_ELLIOTT_WAVE_STRATEGY = strategies.get('USE_ELLIOTT_WAVE_STRATEGY', True)
-            USE_SMA_MACD_5MIN_STRATEGY = strategies.get('USE_SMA_MACD_5MIN_STRATEGY', True)
-            USE_EMA_CROSS_SCALPING_STRATEGY = strategies.get('USE_EMA_CROSS_SCALPING_STRATEGY', True)
-            USE_PA_STOCH_SR_STRATEGY = strategies.get('USE_PA_STOCH_SR_STRATEGY', True)
-
 
         logger.info("✅ [Redis] Successfully loaded settings from Redis.")
     except Exception as e:
@@ -821,14 +768,8 @@ def save_settings_to_redis():
             'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
             'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
             'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
-            'USE_SMA_MACD_5MIN_STRATEGY': USE_SMA_MACD_5MIN_STRATEGY,
-            'USE_EMA_CROSS_SCALPING_STRATEGY': USE_EMA_CROSS_SCALPING_STRATEGY,
-            'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY,
-'USE_VWAP_PULLBACK_15M_STRATEGY': USE_VWAP_PULLBACK_15M_STRATEGY,
-'USE_ORB_15M_STRATEGY': USE_ORB_15M_STRATEGY,
-'USE_BB_SQUEEZE_15M_STRATEGY': USE_BB_SQUEEZE_15M_STRATEGY
-}
+            'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+        }
         redis_client.set('strategy_settings', json.dumps(strategy_settings))
         
         logger.info("Settings saved to Redis successfully")
@@ -838,17 +779,16 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
-# --- [تعديل] تحديث الفلاتر لتقبل متغير زمني ---
-def add_news_filter(current_time: Optional[datetime] = None) -> bool:
+def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
-    now = current_time or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
     for hour, minute in news_hours:
         if now.hour == hour and abs(now.minute - minute) <= 30:
             return False
     return True
 
-def add_liquidity_filter(current_time: Optional[datetime] = None) -> bool:
-    now = current_time or datetime.now(timezone.utc)
+def add_liquidity_filter() -> bool:
+    now = datetime.now(timezone.utc)
     if now.weekday() >= 5: return False
     if now.hour >= 22 or now.hour <= 2: return False
     return True
@@ -865,96 +805,91 @@ def add_correlation_filter(new_symbol: str) -> bool:
             return False
     return True
 
-# --- [تعديل] تحديث فلتر التقلبات ليقبل قيم مخصصة ---
-def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown", atr_min: float = 1.5, atr_max: float = 4.0) -> bool:
+# --- فلتر التقلبات المحدث ---
+def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unknown") -> bool:
     if 'atr_percent' not in df.columns or df['atr_percent'].isnull().all():
         log_rejection(symbol, "Market Volatility Filter Failed", {"reason": "No ATR data"})
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    if not (atr_min <= last_atr_percent <= atr_max):
+    # [تعديل المستخدم] استخدام نطاق ثابت للتقلبات
+    ATR_PERCENT_MIN = 1.5
+    ATR_PERCENT_MAX = 4.0
+    
+    if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
         log_rejection(symbol, "Market Volatility Filter Failed", {
             "atr": f"{last_atr_percent:.2f}%",
-            "range": f"({atr_min:.2f}-{atr_max:.2f})%"
+            "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
         })
         return False
     
     return True
 
 # --- [ENHANCEMENT] Dynamic Stop Loss & Take Profit ---
-
 def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_name: str) -> float:
     last = df.iloc[-1]
-    atr_value = float(last.get('atr', 0)) if 'atr' in df.columns else 0.0
-    if atr_value <= 0:
-        # تقدير تقريبي للـ ATR إذا لم يتوفر
-        tr = max(last['high'] - last['low'], abs(last['high'] - last['close']), abs(last['low'] - last['close']))
-        atr_value = max(tr, 1e-9)
-
+    atr_value = last.get('atr', 0)
+    
     if strategy_name == "BB_Stoch_Strategy":
         recent_low = df['low'].tail(3).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
     elif strategy_name == "MACD_EMA_Strategy":
-        ema21 = last.get('ema21', entry_price)
-        stop_loss = min(ema21, entry_price - (atr_value * 2.0))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
     elif strategy_name == "EMA_RSI_Strategy":
-        ema21 = last.get('ema21', entry_price)
-        stop_loss = min(ema21, entry_price - (atr_value * 1.8))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 1.8))
     elif strategy_name == "Pullback_Strategy":
+        # [تعديل المستخدم] تعديل مضاعف ATR للسكالبينج
         recent_low = df['low'].tail(5).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.5))
     elif strategy_name == "Momentum_Volatility_Strategy":
-        ema21 = last.get('ema21', entry_price)
-        stop_loss = min(ema21, entry_price - (atr_value * 2.2))
+        stop_loss = min(last['ema21'], entry_price - (atr_value * 2.2))
     elif strategy_name == "Elliott_Wave_Strategy":
-        stop_loss = entry_price - (atr_value * 2.0)
-    elif strategy_name == "SMA_MACD_5min_Strategy":
-        stop_loss = min(last['low'], entry_price - (atr_value * 1.2))
-    elif strategy_name == "EMA_Cross_Scalping_Strategy":
-        stop_loss = entry_price - (atr_value * 1.0)
-    elif strategy_name == "PA_Stoch_SR_Strategy":
-        recent_low = df['low'].tail(6).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.7))
-    elif strategy_name == "VWAP_Pullback_15m_Strategy":
-        recent_low = df['low'].tail(5).min()
-        stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.4))
-    elif strategy_name == "ORB_15m_Strategy":
-        orb_low = df.get('orb_low', pd.Series([np.nan]*len(df), index=df.index)).iloc[-1]
-        if pd.isna(orb_low): orb_low = df['low'].tail(6).min()
-        stop_loss = min(orb_low * 0.998, entry_price - (atr_value * 1.6))
-    elif strategy_name == "BB_Squeeze_15m_Strategy":
-        ema20 = df.get('ema20', pd.Series([np.nan]*len(df), index=df.index)).iloc[-1]
-        base_sl = ema20 if not pd.isna(ema20) else df['low'].tail(6).min()
-        stop_loss = min(base_sl * 0.995, entry_price - (atr_value * 1.5))
+        lows = df['low'].values
+        try:
+            support_idx = argrelextrema(lows, np.less, order=5)[0]
+            if len(support_idx) > 0:
+                recent_support = lows[support_idx[-1]]
+                stop_loss = min(recent_support * 0.995, entry_price - (atr_value * 2.0))
+            else:
+                stop_loss = min(last['ema21'], entry_price - (atr_value * 2.0))
+        except Exception as e:
+            logger.error(f"Error calculating stop loss for Elliott Wave: {e}")
+            stop_loss = entry_price - (atr_value * 2.0)
     else:
         stop_loss = entry_price - (atr_value * 2.0)
+    
+    max_stop_distance = entry_price * 0.05
+    if entry_price - stop_loss > max_stop_distance:
+        stop_loss = entry_price - max_stop_distance
+    
+    return stop_loss
 
-    return float(stop_loss)
+def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
+    risk_amount = entry_price - stop_loss
+    if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
 
-def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str):
-    """ترجيع هدفين TP1/TP2 بناءً على نسبة عائد/مخاطرة مخصصة لكل استراتيجية."""
-    rr_map = {
-        "BB_Stoch_Strategy": (1.8, 3.0),
-        "MACD_EMA_Strategy": (2.0, 3.5),
-        "EMA_RSI_Strategy": (1.8, 3.2),
-        "Pullback_Strategy": (1.6, 3.0),
-        "Momentum_Volatility_Strategy": (1.8, 3.2),
-        "Elliott_Wave_Strategy": (2.5, 4.5),
-        "SMA_MACD_5min_Strategy": (1.5, 3.0),
-        "EMA_Cross_Scalping_Strategy": (1.0, 2.0),
-        "PA_Stoch_SR_Strategy": (2.0, 3.5),
-        "VWAP_Pullback_15m_Strategy": (2.0, 3.2),
-        "ORB_15m_Strategy": (2.2, 3.5),
-        "BB_Squeeze_15m_Strategy": (2.0, 3.0),
-    }
-    rr1, rr2 = rr_map.get(strategy_name, (2.0, 3.5))
-
-    risk_amount = abs(entry_price - stop_loss)
-    target1 = entry_price + risk_amount * rr1
-    target2 = entry_price + risk_amount * rr2
+    if strategy_name == "BB_Stoch_Strategy":
+        rr1, rr2 = 2.5, 4.0
+    elif strategy_name == "MACD_EMA_Strategy":
+        rr1, rr2 = 2.0, 3.5
+    elif strategy_name == "EMA_RSI_Strategy":
+        rr1, rr2 = 2.2, 3.8
+    elif strategy_name == "Pullback_Strategy":
+        rr1, rr2 = 2.3, 4.0
+    elif strategy_name == "Momentum_Volatility_Strategy":
+        rr1, rr2 = 1.8, 3.2
+    elif strategy_name == "Elliott_Wave_Strategy":
+        rr1, rr2 = 2.5, 4.5
+    else:
+        rr1, rr2 = 2.0, 3.5
+        
+    target1 = entry_price + (risk_amount * rr1)
+    target2 = entry_price + (risk_amount * rr2)
+    
     return target1, target2
 
+# --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'ema9', 'ema21', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
@@ -968,6 +903,7 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
         return False
     
+    # [تعديل المستخدم] منطق جديد: السعر فوق EMA9 و RSI فوق 50
     if last['close'] <= last['ema9']:
         log_rejection(symbol_name, "EMA_RSI: Price not above EMA9")
         return False
@@ -988,6 +924,7 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
     return True
 
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
+    # ملاحظة: إعدادات المستخدم تتطابق مع الإعدادات الحالية (BB: 20,2 | Stoch: 14,3,3)
     needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
@@ -997,6 +934,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
+    # تأكيد الاتجاه الصاعد فوق EMA 50
     if last['close'] < last['ema50']:
         log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
         return False
@@ -1005,6 +943,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Weak trend (ADX < 17)")
         return False
     
+    # السعر يلامس الشريط السفلي
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
     above_lower_band = last['close'] > last['bb_lower']
     
@@ -1012,6 +951,7 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "BB: Price not bouncing from lower band")
         return False
     
+    # ستوكاستيك يؤكد الصعود
     stoch_confirm = (prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
         log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
@@ -1034,10 +974,12 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     
     last = df.iloc[-1]
     
+    # [تعديل المستخدم] استخدام تقاطع SMA كإشارة قوية للاتجاه
     if last['sma7'] <= last['sma200']:
         log_rejection(symbol_name, "MACD: Bearish long-term trend (SMA7 below SMA200)")
         return False
 
+    # [تعديل المستخدم] استخدام ADX > 20 لتأكيد قوة الاتجاه
     if last['adx'] < 20:
         log_rejection(symbol_name, "MACD: Weak trend (ADX < 20)")
         return False
@@ -1054,6 +996,7 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         log_rejection(symbol_name, "MACD: Momentum not confirmed")
         return False
         
+    # [تعديل المستخدم] زيادة متطلبات الحجم
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
     if not volume_ok:
         log_rejection(symbol_name, "MACD: Volume below average")
@@ -1200,97 +1143,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         return False
         
     return True
-
-def check_sma_macd_5min_strategy(df: pd.DataFrame) -> bool:
-    needed = {'sma10', 'macd', 'macd_signal', 'macd_hist', 'close', 'adx'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 30 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-    
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    if last['close'] <= last['sma10']:
-        log_rejection(symbol_name, "SMA_MACD_5m: Price not above SMA10")
-        return False
-    
-    is_crossover = last['macd'] > last['macd_signal'] and prev['macd'] <= prev['macd_signal']
-    if not is_crossover:
-        log_rejection(symbol_name, "SMA_MACD_5m: MACD bullish crossover not confirmed")
-        return False
-        
-    if last['adx'] < 20:
-        log_rejection(symbol_name, "SMA_MACD_5m: Weak trend (ADX < 20)")
-        return False
-
-    return True
-
-def check_ema_cross_scalping_strategy(df: pd.DataFrame) -> bool:
-    needed = {'ema10', 'ema20', 'rsi', 'volume', 'adx'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 30 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-        
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    if not (last['ema10'] > last['ema20'] and prev['ema10'] <= prev['ema20']):
-        log_rejection(symbol_name, "EMA_Cross: Bearish crossover or no crossover")
-        return False
-        
-    if last['rsi'] < 55:
-        log_rejection(symbol_name, "EMA_Cross: RSI confirmation failed (RSI < 55)")
-        return False
-        
-    if last['adx'] < 18:
-        log_rejection(symbol_name, "EMA_Cross: Weak trend (ADX < 18)")
-        return False
-        
-    if last['volume'] < df['volume'].rolling(20).mean().iloc[-1] * 1.1:
-        log_rejection(symbol_name, "EMA_Cross: Volume below average")
-        return False
-        
-    return True
-
-def check_pa_stoch_sr_strategy(df: pd.DataFrame) -> bool:
-    needed = {'stoch_k', 'stoch_d', 'low', 'close', 'open'}
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 20 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
-        return False
-        
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    try:
-        lows = df['low'].values
-        support_indices = argrelextrema(lows, np.less, order=5)[0]
-        if len(support_indices) == 0:
-            log_rejection(symbol_name, "PA_Stoch_SR: No recent support level found")
-            return False
-        
-        last_support_price = lows[support_indices[-1]]
-    except Exception:
-        log_rejection(symbol_name, "PA_Stoch_SR: No recent support level found")
-        return False
-
-    if not (last['low'] <= last_support_price * 1.01):
-        log_rejection(symbol_name, "PA_Stoch_SR: Price not near support")
-        return False
-        
-    stoch_confirm = prev['stoch_k'] < 30 and last['stoch_k'] > prev['stoch_k'] and last['stoch_k'] > last['stoch_d']
-    if not stoch_confirm:
-        log_rejection(symbol_name, "PA_Stoch_SR: Stochastic not oversold or crossing up")
-        return False
-        
-    if not (last['close'] > last['open']):
-        log_rejection(symbol_name, "PA_Stoch_SR: No bullish price action confirmation")
-        return False
-        
-    return True
-
 
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
@@ -1484,7 +1336,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.10.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.8.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1551,7 +1403,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.10.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.8.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1953,7 +1805,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.10.0)</title>
+<title>الإعدادات - بوت التداول (V32.8.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2131,7 +1983,6 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 .form-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: end;}
 .form-group label {display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px;}
 .form-group input, .form-group select {width: 100%; background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px;}
-.form-group.switch-group { display: flex; align-items: center; justify-content: space-between; background: #0b1126; border: 1px solid #233056; padding: 8px; border-radius: 8px; }
 .btn{appearance:none;border:1px solid #2a3a68;background:#0f1b3b;color:#d9e7ff;padding:10px 14px;border-radius:10px;cursor:pointer;font-weight:700;transition: .18s; text-decoration: none;}
 .btn.primary {background: var(--accent); color: #fff; border-color: var(--accent);}
 .results-grid {display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 24px;}
@@ -2154,10 +2005,9 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
 <body>
 <div class="container">
     <header><h1>الاختبار الخلفي للاستراتيجيات</h1><a href="/" class="btn">العودة للرئيسية</a></header>
-    <form id="backtest-form">
-        <div class="card">
-            <div class="card-body">
-                <h2>إعدادات الاختبار</h2>
+    <div class="card">
+        <div class="card-body">
+            <form id="backtest-form">
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="strategy">اختر الاستراتيجية</label>
@@ -2175,38 +2025,11 @@ h1{font-size:18px;margin:0;font-weight:700;color:#d7e4ff}
                         <label for="days">أيام الاختبار</label>
                         <input type="number" id="days" name="days" value="90" required>
                     </div>
+                    <button type="submit" class="btn primary">بدء الاختبار</button>
                 </div>
-            </div>
+            </form>
         </div>
-        <div class="card" style="margin-top:16px">
-             <div class="card-body">
-                <h2>إعدادات الفلاتر</h2>
-                 <div class="form-grid">
-                    <div class="form-group switch-group">
-                        <label for="use_volatility_filter">فلتر التقلب (ATR)</label>
-                        <input type="checkbox" id="use_volatility_filter" name="use_volatility_filter" checked>
-                    </div>
-                    <div class="form-group">
-                        <label for="atr_min">أقل ATR %</label>
-                        <input type="number" id="atr_min" name="atr_min" value="1.5" step="0.1">
-                    </div>
-                    <div class="form-group">
-                        <label for="atr_max">أعلى ATR %</label>
-                        <input type="number" id="atr_max" name="atr_max" value="4.0" step="0.1">
-                    </div>
-                    <div class="form-group switch-group">
-                        <label for="use_news_filter">فلتر الأخبار</label>
-                        <input type="checkbox" id="use_news_filter" name="use_news_filter" checked>
-                    </div>
-                    <div class="form-group switch-group">
-                        <label for="use_liquidity_filter">فلتر السيولة</label>
-                        <input type="checkbox" id="use_liquidity_filter" name="use_liquidity_filter" checked>
-                    </div>
-                 </div>
-            </div>
-        </div>
-        <button type="submit" class="btn primary" style="width:100%; margin-top: 16px; padding: 12px;">بدء الاختبار</button>
-    </form>
+    </div>
     <div id="loader">
         <div class="loading-spinner"></div>
         <div class="loader-text">جاري تحميل البيانات وتنفيذ الاختبار... قد يستغرق هذا بعض الوقت.</div>
@@ -2250,14 +2073,7 @@ qs('#backtest-form').addEventListener('submit', async (e) => {
     qs('#results-container').style.display = 'none';
     
     const formData = new FormData(e.target);
-    const data = {};
-    for (const [key, value] of formData.entries()) {
-        data[key] = value;
-    }
-    // Handle checkboxes, which are only present in formData if checked
-    data['use_volatility_filter'] = qs('#use_volatility_filter').checked;
-    data['use_news_filter'] = qs('#use_news_filter').checked;
-    data['use_liquidity_filter'] = qs('#use_liquidity_filter').checked;
+    const data = Object.fromEntries(formData.entries());
 
     try {
         const response = await fetch('/api/run_backtest', {
@@ -2362,14 +2178,8 @@ def settings_page():
         'USE_EMA_RSI_STRATEGY': USE_EMA_RSI_STRATEGY,
         'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
         'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
-        'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
-        'USE_SMA_MACD_5MIN_STRATEGY': USE_SMA_MACD_5MIN_STRATEGY,
-        'USE_EMA_CROSS_SCALPING_STRATEGY': USE_EMA_CROSS_SCALPING_STRATEGY,
-        'USE_PA_STOCH_SR_STRATEGY': USE_PA_STOCH_SR_STRATEGY,
-'USE_VWAP_PULLBACK_15M_STRATEGY': USE_VWAP_PULLBACK_15M_STRATEGY,
-'USE_ORB_15M_STRATEGY': USE_ORB_15M_STRATEGY,
-'USE_BB_SQUEEZE_15M_STRATEGY': USE_BB_SQUEEZE_15M_STRATEGY
-}
+        'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY
+    }
     
     return render_template_string(SETTINGS_TEMPLATE, 
                                   fixed_trade_amount=fixed_trade_amount,
@@ -2528,6 +2338,22 @@ def update_settings():
         return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route('/api/strategies', methods=['POST'])
+def update_strategies():
+    try:
+        data = request.json
+        global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY
+        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY))
+        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY))
+        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY))
+        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
+        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
+        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
+        save_settings_to_redis()
+        return jsonify({"success": True, "message": "Strategies updated successfully"})
+    except Exception as e:
+        logger.error(f"Error updating strategies: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
 @app.route('/api/signal_quality', methods=['POST'])
 def update_signal_quality():
     try:
@@ -2591,90 +2417,9 @@ def api_close_trade(signal_id):
     thread.start()
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
-
-# --- استراتيجيات فريم 15 دقيقة الجديدة ---
-def check_vwap_pullback_15m_strategy(df):
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        # شرط اتجاه عام صاعد: السعر أعلى من EMA200 و EMA50
-        trend_ok = last['close'] > last.get('ema200', last['close']) and last['close'] > last.get('ema50', last['close'])
-        # ارتداد إلى VWAP مع شمعة انعكاسية
-        pullback_ok = (prev['low'] <= prev.get('vwap', prev['low'])) and (last['close'] > last['open'])
-        # حجم تداول أعلى من متوسط 20
-        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
-        return bool(trend_ok and pullback_ok and vol_ok)
-    except Exception:
-        return False
-
-
-def check_orb_15m_strategy(df):
-    try:
-        if len(df) < 120:  # تأكد من وجود عمق بيانات كافٍ
-            return False
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        if 'orb_high' not in df.columns or pd.isna(last.get('orb_high', np.nan)):
-            return False
-        orb_high = last['orb_high']
-        # نتجاهل أول ساعة نفسها
-        # نتحقق من اختراق حقيقي بإغلاق فوق ORB_high بينما الإغلاق السابق كان عند/تحت
-        breakout = (prev['close'] <= orb_high) and (last['close'] > orb_high)
-        # فلتر اتجاه (اختياري): السعر فوق EMA200 إن وجدت
-        trend_ok = True
-        if 'ema200' in df.columns:
-            trend_ok = last['close'] > last['ema200']
-        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
-        return bool(breakout and vol_ok and trend_ok)
-    except Exception:
-        return False
-
-        opening_range = df.iloc[:first_n]
-        orb_high = opening_range['high'].max()
-        orb_low = opening_range['low'].min()
-        # كسر لأعلى مع إغلاق فوق ORB_High وبحجم جيد
-        last = df.iloc[-1]
-        breakout_ok = last['close'] > orb_high and last['high'] >= orb_high
-        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
-        return bool(breakout_ok and vol_ok)
-    except Exception:
-        return False
-
-
-def check_bb_squeeze_15m_strategy(df):
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        need_cols = {'bb_upper','bb_lower','kc_upper','kc_lower','macd_hist','volume'}
-        if not need_cols.issubset(df.columns):
-            return False
-        squeeze_on = (df['bb_upper'] < df['kc_upper']) & (df['bb_lower'] > df['kc_lower'])
-        # خروج حديث من السكون
-        released = bool(squeeze_on.iloc[-2] and not squeeze_on.iloc[-1])
-        # اختراق للأعلى مع زخم
-        breakout = last['close'] > last['bb_upper']
-        momentum_ok = (last['macd_hist'] > 0) and (last.get('rsi', 55) > 50)
-        vol_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
-        trend_ok = True
-        if 'ema200' in df.columns:
-            trend_ok = last['close'] > last['ema200']
-        return bool(released and breakout and momentum_ok and vol_ok and trend_ok)
-    except Exception:
-        return False
-
-        # سكون (Squeeze): باندات بولنجر داخل كلتنر
-        squeeze_on = (df['bb_upper'] < df['kc_upper']) & (df['bb_lower'] > df['kc_lower'])
-        if not bool(squeeze_on.iloc[-2] and not squeeze_on.iloc[-1]):
-            return False  # خروج حديث من السكون
-        # زخم إيجابي
-        momentum_ok = last['macd_hist'] > 0 and last.get('rsi', 50) > 50
-        return bool(momentum_ok)
-    except Exception:
-        return False
-
 # --- Backtesting System ---
-def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True, atr_min=1.5, atr_max=4.0, use_news_filter=True, use_liquidity_filter=True):
-    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days with filters: Volatility={use_volatility_filter}, News={use_news_filter}, Liquidity={use_liquidity_filter}")
+def backtest_strategy(strategy_name, symbol, days=90):
+    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
     if df is None or len(df) < 200:
         logger.error(f"[Backtest] Insufficient historical data for {symbol}.")
@@ -2686,7 +2431,7 @@ def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True
     active_trade = None
     initial_balance = 1000.0
     equity_curve = [initial_balance]
-    backtest_trade_amount = 10.0
+    backtest_trade_amount = 10.0 # حجم الصفقة الثابت للاختبار الخلفي
 
     strategy_functions = {
         'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
@@ -2694,14 +2439,7 @@ def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True
         'EMA_RSI_Strategy': check_ema_rsi_strategy_enhanced,
         'Pullback_Strategy': check_pullback_strategy_enhanced,
         'Momentum_Volatility_Strategy': check_momentum_volatility_strategy_enhanced,
-        'Elliott_Wave_Strategy': check_elliott_wave_strategy_enhanced,
-        'SMA_MACD_5min_Strategy': check_sma_macd_5min_strategy,
-        'EMA_Cross_Scalping_Strategy': check_ema_cross_scalping_strategy,
-        
-'VWAP_Pullback_15m_Strategy': check_vwap_pullback_15m_strategy,
-'ORB_15m_Strategy': check_orb_15m_strategy,
-'BB_Squeeze_15m_Strategy': check_bb_squeeze_15m_strategy,
-'PA_Stoch_SR_Strategy': check_pa_stoch_sr_strategy
+        'Elliott_Wave_Strategy': check_elliott_wave_strategy_enhanced
     }
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
@@ -2739,16 +2477,6 @@ def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True
         if not active_trade:
             df_slice = df.iloc[:i]
             df_slice.name = symbol
-            
-            # --- [تعديل] تطبيق الفلاتر داخل الاختبار الخلفي ---
-            current_time = current_candle.name.to_pydatetime()
-            if use_volatility_filter and not check_market_volatility_filter_enhanced(df_slice, symbol, atr_min, atr_max):
-                continue
-            if use_news_filter and not add_news_filter(current_time):
-                continue
-            if use_liquidity_filter and not add_liquidity_filter(current_time):
-                continue
-            
             if check_strategy(df_slice):
                 entry_price = current_candle['open']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
@@ -2768,7 +2496,7 @@ def backtest_strategy(strategy_name, symbol, days=90, use_volatility_filter=True
                 }
 
     if not results:
-        return {"error": "No trades were executed during this period with the selected filters."}
+        return {"error": "No trades were executed during this period."}
 
     total_trades = len(results)
     wins = [r for r in results if r['profit_percent'] > 0]
@@ -2793,22 +2521,11 @@ def api_run_backtest():
         strategy = data.get('strategy')
         symbol = data.get('symbol', '').upper()
         days = int(data.get('days', 90))
-        
-        # --- [تعديل] استقبال إعدادات الفلاتر من الواجهة ---
-        use_volatility_filter = data.get('use_volatility_filter', False)
-        atr_min = float(data.get('atr_min', 1.5))
-        atr_max = float(data.get('atr_max', 4.0))
-        use_news_filter = data.get('use_news_filter', False)
-        use_liquidity_filter = data.get('use_liquidity_filter', False)
 
         if not all([strategy, symbol, days]):
             return jsonify({"error": "Missing parameters."}), 400
 
-        results = backtest_strategy(
-            strategy, symbol, days,
-            use_volatility_filter, atr_min, atr_max,
-            use_news_filter, use_liquidity_filter
-        )
+        results = backtest_strategy(strategy, symbol, days)
         return jsonify(results)
     except Exception as e:
         logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
@@ -2817,17 +2534,15 @@ def api_run_backtest():
 # --- Main Loop & Threads ---
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop...")
-    time_multiplier = 1 if SIGNAL_GENERATION_TIMEFRAME.endswith('m') else 60
-    candle_minutes = int(SIGNAL_GENERATION_TIMEFRAME[:-1]) * time_multiplier
-
     while True:
         try:
             while True:
                 now = datetime.now(timezone.utc)
-                seconds_until_next_candle = (candle_minutes - (now.minute % candle_minutes)) * 60 - now.second
+                seconds_until_next_candle = (15 - (now.minute % 15)) * 60 - now.second
                 
                 is_enabled_now = False
-                with trading_status_lock: is_enabled_now = is_trading_enabled
+                with trading_status_lock:
+                    is_enabled_now = is_trading_enabled
 
                 if is_enabled_now and seconds_until_next_candle <= 1:
                     time.sleep(1) 
@@ -2846,7 +2561,8 @@ def main_bot_loop():
                     if len(open_signals_cache) >= MAX_OPEN_TRADES:
                         logger.info(f"Max open trades ({MAX_OPEN_TRADES}) reached. Pausing scan.")
                         break
-                    if symbol in open_signals_cache: continue
+                    if symbol in open_signals_cache:
+                        continue
                 
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
@@ -2857,19 +2573,12 @@ def main_bot_loop():
                 df_featured.name = symbol
                 
                 strategy_found = None
-                if USE_SMA_MACD_5MIN_STRATEGY and check_sma_macd_5min_strategy(df_featured): strategy_found = "SMA_MACD_5min_Strategy"
-                elif USE_EMA_CROSS_SCALPING_STRATEGY and check_ema_cross_scalping_strategy(df_featured): strategy_found = "EMA_Cross_Scalping_Strategy"
-                elif USE_PA_STOCH_SR_STRATEGY and check_pa_stoch_sr_strategy(df_featured): strategy_found = "PA_Stoch_SR_Strategy"
-                elif USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
+                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
                 elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
                 elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
                 elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
                 elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured): strategy_found = "Momentum_Volatility_Strategy"
                 elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy_enhanced(df_featured): strategy_found = "Elliott_Wave_Strategy"
-
-                elif USE_VWAP_PULLBACK_15M_STRATEGY and check_vwap_pullback_15m_strategy(df_featured): strategy_found = "VWAP_Pullback_15m_Strategy"
-                elif USE_ORB_15M_STRATEGY and check_orb_15m_strategy(df_featured): strategy_found = "ORB_15m_Strategy"
-                elif USE_BB_SQUEEZE_15M_STRATEGY and check_bb_squeeze_15m_strategy(df_featured): strategy_found = "BB_Squeeze_15m_Strategy"
 
                 if strategy_found:
                     create_trade_signal(symbol, df_featured, strategy_found)
@@ -3070,7 +2779,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.10.0 (Advanced Backtesting) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.8.0 (User Settings Applied) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -3094,4 +2803,3 @@ if __name__ == '__main__':
     start_periodic_reports()
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
