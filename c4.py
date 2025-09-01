@@ -1,11 +1,12 @@
-# ملف c4.py - نسخة V33.2.0 (مرونة محسنة + استراتيجية جديدة)
+# ملف c4.py - نسخة V33.3.0 (تحليل متعدد الأطر الزمنية)
 # --- وصف التعديلات:
-# بناءً على طلب المستخدم لزيادة فرص التداول دون التضحية بالجودة، تم إجراء التعديلات التالية:
-# 1.  [استراتيجية جديدة] تمت إضافة استراتيجية "Range Reversal" الجديدة، المصممة خصيصًا لاقتناص الفرص في الأسواق الجانبية (غير المتجهة) عندما يكون مؤشر ADX منخفضًا.
-# 2.  [مرونة MACD] تم تخفيف شرط الاتجاه في استراتيجية MACD. بدلاً من الرفض الفوري إذا كان SMA7 تحت SMA200، سيقبل البوت الآن الصفقات طالما أن السعر نفسه لا يزال فوق SMA200، مما يسمح بالدخول أثناء التصحيحات الصحية في الاتجاه الصاعد.
-# 3.  [مرونة موجات إليوت] تم تخفيف شرط ترتيب المتوسطات المتحركة (EMA). الشرط الآن يتطلب فقط أن يكون EMA50 فوق EMA200، مما يؤكد الاتجاه الصاعد على المدى المتوسط دون الحاجة إلى ترتيب مثالي للمتوسطات قصيرة المدى.
-# 4.  [توسيع نطاق التقلب] تم توسيع النطاق المقبول لتقلبات السوق في استراتيجية الزخم (Momentum)، مما يسمح لها بالعمل في ظروف سوق أوسع.
-# 5.  [تحسين منطق الإغلاق] تم تحسين منطق الإغلاق اليدوي ليكون أكثر موثوقية ويقدم تقارير أفضل.
+# بناءً على طلب المستخدم لاكتشاف المزيد من الفرص في الاتجاهات الصاعدة قصيرة ومتوسطة المدى، تم إجراء التعديلات التالية:
+# 1.  [نظام جديد] تمت إضافة نظام تحليل متعدد الأطر الزمنية (MTF) يقوم بفحص الاتجاه على إطاري 15 دقيقة وساعة واحدة بشكل مستقل.
+# 2.  [مرونة استراتيجية] تم تعديل استراتيجيات "MACD" و "Elliott Wave" للاستفادة من نظام MTF.
+#     - إذا كان الاتجاه صاعدًا بقوة على إطاري 15 دقيقة وساعة واحدة معًا، سيتجاوز البوت شرط الاتجاه الصاعد طويل الأمد (مثل SMA200)، مما يسمح له باقتناص الفرص المبكرة في الاتجاهات الجديدة.
+#     - إذا لم يكن الاتجاه قويًا على الإطارات الأصغر، سيعود البوت إلى الاعتماد على شروطه الصارمة للاتجاه طويل الأمد كإجراء وقائي.
+# 3.  [تحسين استراتيجية Pullback] تم جعل استراتيجية الارتداد (Pullback) أكثر تساهلاً مع عمق الارتدادات إذا كان الاتجاه الصاعد قويًا على نظام MTF.
+# 4.  [تحديث واجهة المستخدم] تم تحديث رقم الإصدار في واجهة المستخدم.
 
 import time
 import os
@@ -49,7 +50,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.2.0')
+logger = logging.getLogger('CryptoBotV33.3.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -103,7 +104,7 @@ USE_EMA_RSI_STRATEGY: bool = True
 USE_PULLBACK_STRATEGY: bool = True
 USE_MOMENTUM_VOLATILITY_STRATEGY: bool = True
 USE_ELLIOTT_WAVE_STRATEGY: bool = True
-USE_RANGE_REVERSAL_STRATEGY: bool = True # <<-- استراتيجية جديدة
+USE_RANGE_REVERSAL_STRATEGY: bool = True
 
 # --- إعدادات الفلاتر الديناميكية للاستراتيجيات ---
 STRATEGY_NAMES = {
@@ -113,7 +114,7 @@ STRATEGY_NAMES = {
     "Pullback_Strategy": "Pullback (ارتداد بحجم تداول)",
     "Momentum_Volatility_Strategy": "Momentum (زخم متزايد)",
     "Elliott_Wave_Strategy": "Elliott Wave (موجات إليوت)",
-    "Range_Reversal_Strategy": "Range Reversal (انعكاس نطاقي)" # <<-- استراتيجية جديدة
+    "Range_Reversal_Strategy": "Range Reversal (انعكاس نطاقي)"
 }
 strategy_filters_lock = Lock()
 
@@ -174,10 +175,10 @@ REJECTION_REASONS_AR = {
     # Strategy Specific Rejections
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
     "BB: Price below EMA50 (bearish trend)": "BB: السعر تحت EMA50 (اتجاه هابط)",
-    "MACD: Bearish long-term trend (Price or SMA7 below SMA200)": "MACD: اتجاه هابط (السعر أو SMA7 تحت SMA200)",
+    "MACD: Not bullish on MTF or long-term": "MACD: الاتجاه ليس صاعدًا (إطارات متعددة أو طويل الأمد)",
     "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه ليس صاعدًا بقوة",
     "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
-    "Elliott Wave: Trend is not bullish (EMA50 below EMA200)": "موجات إليوت: الاتجاه ليس صاعدًا (EMA50 تحت EMA200)",
+    "Elliott Wave: Not bullish on MTF or long-term": "موجات إليوت: الاتجاه ليس صاعدًا (إطارات متعددة أو طويل الأمد)",
     "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
     "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
     "Range Reversal: Trend too strong (ADX > 23)": "انعكاس نطاقي: الاتجاه قوي جدًا (ADX > 23)",
@@ -926,11 +927,14 @@ def check_ema_rsi_dynamic_filters(df: pd.DataFrame) -> Dict:
         'volume_ok': last_row['volume'] > volume_ma.iloc[-1] * trend_strength_multiplier,
     }
 
-def check_pullback_dynamic_filters(df: pd.DataFrame) -> Dict:
+def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
     pullback_depth = 0.035 if atr_percent > 2.0 else 0.02
+    # [تعديل] السماح بارتداد أعمق في الاتجاهات الصاعدة القوية
+    if mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish':
+        pullback_depth *= 1.2 # Allow 20% deeper pullbacks
     
     recent_low = df['low'].tail(5).min()
     recovery_threshold = recent_low * (1 + pullback_depth)
@@ -949,7 +953,6 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     volatility_ma = atr_percent.rolling(20).mean()
     volatility_std = atr_percent.rolling(20).std()
     
-    # [توسيع النطاق] تم توسيع نطاق التقلب من 1.0 إلى 1.5 انحراف معياري
     dynamic_vol_min = volatility_ma.iloc[-1] - (volatility_std.iloc[-1] * 1.5)
     dynamic_vol_max = volatility_ma.iloc[-1] + (volatility_std.iloc[-1] * 1.5)
     
@@ -1110,7 +1113,7 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     return target1, target2
 
 # --- استراتيجيات التداول المعدلة مع الفلاتر الديناميكية ---
-def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200: return False
 
@@ -1125,7 +1128,7 @@ def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50: return False
     
@@ -1144,14 +1147,17 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
 
     return True
 
-def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200: return False
     
     last = df.iloc[-1]
-    # [تعديل] تخفيف شرط الاتجاه للسماح بالتصحيحات
-    if last['close'] <= last['sma200'] and last['sma7'] <= last['sma200']:
-        log_rejection(symbol_name, "MACD: Bearish long-term trend (Price or SMA7 below SMA200)")
+    
+    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish'
+    is_long_term_bullish = last['close'] > last['sma200']
+
+    if not (is_mtf_bullish or is_long_term_bullish):
+        log_rejection(symbol_name, "MACD: Not bullish on MTF or long-term")
         return False
 
     hist = df['macd_hist'].tail(4).values
@@ -1165,7 +1171,7 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200: return False
 
@@ -1173,13 +1179,13 @@ def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
     if not (last['ema21'] > last['ema50'] > last['ema200'] and (df['low'].tail(3) <= df['ema21'].tail(3)).any()):
         return False
     
-    filters = check_pullback_dynamic_filters(df)
+    filters = check_pullback_dynamic_filters(df, mtf_trend)
     if not filters['recovery_ok']: log_rejection(symbol_name, "DYN_RECOVERY_FAIL"); return False
     if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
         
     return True
 
-def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50: return False
 
@@ -1194,14 +1200,17 @@ def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
+def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 100: return False
 
     last = df.iloc[-1]
-    # [تعديل] تخفيف شرط ترتيب المتوسطات
-    if not (last['ema50'] > last['ema200']):
-        log_rejection(symbol_name, "Elliott Wave: Trend is not bullish (EMA50 below EMA200)")
+    
+    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish'
+    is_long_term_bullish = last['ema50'] > last['ema200']
+
+    if not (is_mtf_bullish or is_long_term_bullish):
+        log_rejection(symbol_name, "Elliott Wave: Not bullish on MTF or long-term")
         return False
     
     if last['adx'] < 22: return False
@@ -1214,7 +1223,7 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         
     return True
 
-def check_range_reversal_strategy(df: pd.DataFrame) -> bool:
+def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50: return False
 
@@ -1427,7 +1436,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.2.0)</title>
+<title>لوحة التحكم - بوت التداول (V33.3.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1494,7 +1503,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.2.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.3.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1896,7 +1905,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.2.0)</title>
+<title>الإعدادات - بوت التداول (V33.3.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2539,6 +2548,9 @@ def backtest_strategy(strategy_name, symbol, days=90):
     check_strategy = strategy_functions.get(strategy_name)
     if not check_strategy:
         return {"error": f"Strategy '{strategy_name}' not found."}
+    
+    # Dummy mtf_trend for backtesting
+    dummy_mtf = {'15m': 'bullish', '1h': 'bullish'}
 
     for i in range(200, len(df)):
         current_candle = df.iloc[i]
@@ -2572,7 +2584,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
         if not active_trade:
             df_slice = df.iloc[:i]
             df_slice.name = symbol
-            if check_strategy(df_slice):
+            if check_strategy(df_slice, dummy_mtf):
                 entry_price = current_candle['open']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
                 tp1, tp2 = calculate_dynamic_take_profit(df_slice, entry_price, sl, strategy_name)
@@ -2627,6 +2639,33 @@ def api_run_backtest():
         return jsonify({"error": "An internal error occurred."}), 500
 
 # --- Main Loop & Threads ---
+def get_mtf_trend(symbol: str) -> Dict[str, str]:
+    trends = {}
+    timeframes = {'15m': 10, '1h': 10}
+
+    for tf, days in timeframes.items():
+        try:
+            df = fetch_historical_data(symbol, tf, days)
+            if df is None or len(df) < 50:
+                trends[tf] = 'unknown'
+                continue
+
+            df['ema21'] = df['close'].ewm(span=21, adjust=False).mean()
+            df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+            last = df.iloc[-1]
+
+            if last['close'] > last['ema50'] and last['ema21'] > last['ema50']:
+                trends[tf] = 'bullish'
+            elif last['close'] < last['ema50'] and last['ema21'] < last['ema50']:
+                trends[tf] = 'bearish'
+            else:
+                trends[tf] = 'sideways'
+        except Exception as e:
+            logger.warning(f"[MTF Trend] Could not determine trend for {symbol} on {tf}: {e}")
+            trends[tf] = 'unknown'
+            
+    return trends
+    
 def main_bot_loop():
     logger.info("🚀 [Main Loop] Starting signal scanning loop...")
     while True:
@@ -2659,6 +2698,8 @@ def main_bot_loop():
                     if symbol in open_signals_cache:
                         continue
                 
+                mtf_trend = get_mtf_trend(symbol)
+
                 df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, SIGNAL_GENERATION_LOOKBACK_DAYS)
                 if df is None or len(df) < 200:
                     if df is not None: log_rejection(symbol, "Insufficient Historical Data")
@@ -2668,13 +2709,13 @@ def main_bot_loop():
                 df_featured.name = symbol
                 
                 strategy_found = None
-                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured): strategy_found = "BB_Stoch_Strategy"
-                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured): strategy_found = "MACD_EMA_Strategy"
-                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured): strategy_found = "EMA_RSI_Strategy"
-                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured): strategy_found = "Pullback_Strategy"
-                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured): strategy_found = "Momentum_Volatility_Strategy"
-                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy_enhanced(df_featured): strategy_found = "Elliott_Wave_Strategy"
-                elif USE_RANGE_REVERSAL_STRATEGY and check_range_reversal_strategy(df_featured): strategy_found = "Range_Reversal_Strategy"
+                if USE_BB_STOCH_STRATEGY and check_bb_stoch_strategy_enhanced(df_featured, mtf_trend): strategy_found = "BB_Stoch_Strategy"
+                elif USE_MACD_EMA_STRATEGY and check_macd_ema_strategy_enhanced(df_featured, mtf_trend): strategy_found = "MACD_EMA_Strategy"
+                elif USE_EMA_RSI_STRATEGY and check_ema_rsi_strategy_enhanced(df_featured, mtf_trend): strategy_found = "EMA_RSI_Strategy"
+                elif USE_PULLBACK_STRATEGY and check_pullback_strategy_enhanced(df_featured, mtf_trend): strategy_found = "Pullback_Strategy"
+                elif USE_MOMENTUM_VOLATILITY_STRATEGY and check_momentum_volatility_strategy_enhanced(df_featured, mtf_trend): strategy_found = "Momentum_Volatility_Strategy"
+                elif USE_ELLIOTT_WAVE_STRATEGY and check_elliott_wave_strategy_enhanced(df_featured, mtf_trend): strategy_found = "Elliott_Wave_Strategy"
+                elif USE_RANGE_REVERSAL_STRATEGY and check_range_reversal_strategy(df_featured, mtf_trend): strategy_found = "Range_Reversal_Strategy"
 
 
                 if strategy_found:
@@ -2876,7 +2917,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.2.0 (Enhanced Flexibility) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.0 (MTF Analysis) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2907,3 +2948,4 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
