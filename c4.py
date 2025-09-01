@@ -1,11 +1,10 @@
-# ملف c4.py - نسخة V33.0.0 (دمج الفلاتر الديناميكية)
+# ملف c4.py - نسخة V33.1.0 (تخفيف الشروط)
 # --- وصف التعديلات:
-# 1.  [فلاتر ديناميكية] تم دمج فلاتر متقدمة لكل استراتيجية لضبط المعلمات (مثل ATR, ADX, Volume) بناءً على تقلبات السوق.
-# 2.  [نظام حالة السوق] تمت إضافة دالة `detect_market_regime` لتحديد ما إذا كان السوق في حالة اتجاهية، عرضية، أو متقلبة.
-# 3.  [نظام تعلم تكيفي] تم إنشاء بنية لفئة `AdaptiveLearningSystem` يمكنها تعديل صرامة الفلاتر بناءً على معدلات النجاح السابقة (تتطلب تشغيلًا دوريًا).
-# 4.  [تحسين المؤشرات] تم إضافة `bb_width` إلى دالة حساب المؤشرات لدعم الفلاتر الجديدة.
-# 5.  [أسباب رفض جديدة] تم تحديث قاموس أسباب الرفض ليشمل تفاصيل دقيقة من الفلاتر الديناميكية.
-# 6.  [إعادة هيكلة] تم تنظيم الكود بشكل أفضل لفصل منطق الفلاتر عن منطق الاستراتيجيات الأساسي.
+# 1.  [تخفيف الفلاتر] تم تعديل معلمات الفلاتر الديناميكية لتكون أقل صرامة بناءً على طلب المستخدم.
+# 2.  [تقليل ADX] تم تخفيض الحد الأدنى المطلوب لمؤشر ADX في عدة استراتيجيات للسماح بدخول الصفقات في الاتجاهات الأقل قوة.
+# 3.  [توسيع النطاقات] تم توسيع النطاقات المقبولة لمؤشرات مثل RSI وعرض البولينجر.
+# 4.  [مرونة الحجم] تم جعل متطلبات حجم التداول أكثر مرونة لتتناسب مع ظروف السوق المختلفة.
+# 5.  [تعديل الزخم] تم تخفيف شروط الزخم لتكون أقل حساسية للتغيرات الطفيفة.
 
 import time
 import os
@@ -49,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.0.0')
+logger = logging.getLogger('CryptoBotV33.1.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -825,8 +824,6 @@ class AdaptiveLearningSystem:
         return self.parameter_adjustments.get(strategy_name, {}).get(param_name, default)
 
     def update_parameters_from_performance(self):
-        # هذه الدالة يمكن تشغيلها بشكل دوري (مثلاً، مرة كل يوم)
-        # لتحليل أداء الاستراتيجيات وتحديث المعلمات
         if not check_db_connection() or not conn: return
 
         try:
@@ -846,14 +843,11 @@ class AdaptiveLearningSystem:
                 if strategy not in self.parameter_adjustments:
                     self.parameter_adjustments[strategy] = {}
 
-                # مثال بسيط لزيادة التشدد
                 if win_rate < 0.4 and record['total'] > 10:
                     logger.info(f"[Adaptive] Low win rate for {strategy} ({win_rate:.2f}). Increasing strictness.")
                     if strategy == 'MACD_EMA_Strategy':
                         self.parameter_adjustments[strategy]['adx_threshold'] = self.get_param(strategy, 'adx_threshold', 20) * 1.1
-                    # يمكن إضافة قواعد أخرى هنا
                 
-                # مثال لتقليل التشدد
                 elif win_rate > 0.7 and record['total'] > 10:
                     logger.info(f"[Adaptive] High win rate for {strategy} ({win_rate:.2f}). Decreasing strictness.")
                     if strategy == 'MACD_EMA_Strategy':
@@ -872,9 +866,11 @@ def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     atr_percent = last_row.get('atr_percent', 0)
     
     bb_width = df['bb_width']
-    dynamic_bb_threshold = bb_width.rolling(20).mean() * 1.5
+    # [تخفيف] تقليل مضاعف عرض البولينجر
+    dynamic_bb_threshold = bb_width.rolling(20).mean() * 1.2
 
-    stoch_threshold = 25 if atr_percent > 3.0 else 20
+    # [تخفيف] تقليل عتبة الستوكاستيك
+    stoch_threshold = 23 if atr_percent > 3.0 else 18
     
     volume_ma = df['volume'].rolling(20).mean()
     volume_multiplier = 1.0 + (atr_percent / 100)
@@ -889,14 +885,17 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    default_adx_thresh = 25 if atr_percent > 2.5 else 18
+    # [تخفيف] تقليل عتبة ADX الافتراضية
+    default_adx_thresh = 22 if atr_percent > 2.5 else 17
     adx_threshold = adaptive_system.get_param('MACD_EMA_Strategy', 'adx_threshold', default_adx_thresh)
     
     volume_ma = df['volume'].rolling(20).mean()
-    volatility_adjusted_volume = volume_ma * (1 + atr_percent / 50)
+    # [تخفيف] تقليل حساسية الحجم للتقلب
+    volatility_adjusted_volume = volume_ma * (1 + atr_percent / 75)
     
     macd_momentum = df['macd_hist'].diff()
-    momentum_threshold = macd_momentum.rolling(10).std() * 0.5
+    # [تخفيف] تقليل مضاعف عتبة الزخم
+    momentum_threshold = macd_momentum.rolling(10).std() * 0.3
     
     return {
         'adx_ok': last_row['adx'] > adx_threshold,
@@ -908,13 +907,15 @@ def check_ema_rsi_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     adx = last_row.get('adx', 0)
     
-    if adx > 30:
-        rsi_lower, rsi_upper = 45, 75
+    # [تخفيف] توسيع نطاق RSI
+    if adx > 25: # تم تقليل ADX من 30
+        rsi_lower, rsi_upper = 42, 78
     else:
-        rsi_lower, rsi_upper = 50, 70
+        rsi_lower, rsi_upper = 48, 72
     
     ema_spread = (df['ema9'] - df['ema21']) / df['ema21'].replace(0, 1e-9)
-    dynamic_ema_threshold = ema_spread.rolling(20).std() * 2
+    # [تخفيف] تقليل مضاعف الانحراف المعياري
+    dynamic_ema_threshold = ema_spread.rolling(20).std() * 1.7
     
     volume_ma = df['volume'].rolling(20).mean()
     trend_strength_multiplier = 1 + (adx / 100)
@@ -929,13 +930,15 @@ def check_pullback_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    pullback_depth = 0.03 if atr_percent > 2.0 else 0.015
+    # [تخفيف] السماح بارتداد أعمق
+    pullback_depth = 0.035 if atr_percent > 2.0 else 0.02
     
     recent_low = df['low'].tail(5).min()
     recovery_threshold = recent_low * (1 + pullback_depth)
     
     volume_ma = df['volume'].rolling(20).mean()
-    recovery_volume_multiplier = 1.2 + (atr_percent / 100)
+    # [تخفيف] تقليل متطلبات حجم التعافي
+    recovery_volume_multiplier = 1.1 + (atr_percent / 100)
     
     return {
         'recovery_ok': last_row['close'] > recovery_threshold,
@@ -959,7 +962,8 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     momentum_score = sum(momentum_indicators) / len(momentum_indicators)
     
     adx_ma = df['adx'].rolling(20).mean()
-    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.9
+    # [تخفيف] تقليل مضاعف عتبة ADX
+    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.85
     
     return {
         'volatility_ok': dynamic_vol_min <= atr_percent.iloc[-1] <= dynamic_vol_max,
@@ -971,13 +975,15 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
+    # [تخفيف] توسيع نطاق فيبوناتشي
     if atr_percent > 2.5:
-        fib_min, fib_max = 0.382, 0.618
+        fib_min, fib_max = 0.3, 0.786
     else:
-        fib_min, fib_max = 0.236, 0.5
+        fib_min, fib_max = 0.2, 0.618
     
     volume_ma = df['volume'].rolling(20).mean()
-    wave_volume_multiplier = 1.5 + (atr_percent / 50)
+    # [تخفيف] تقليل مضاعف حجم الموجة
+    wave_volume_multiplier = 1.3 + (atr_percent / 50)
     
     macd_momentum = df['macd_hist'].rolling(5).mean()
     momentum_threshold = macd_momentum.rolling(20).std() * 0.3
@@ -1393,7 +1399,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.0.0)</title>
+<title>لوحة التحكم - بوت التداول (V33.1.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1460,7 +1466,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.1.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1862,7 +1868,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.0.0)</title>
+<title>الإعدادات - بوت التداول (V33.1.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2837,7 +2843,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.0.0 (Dynamic Filters) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.1.0 (Relaxed Conditions) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2868,3 +2874,4 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
