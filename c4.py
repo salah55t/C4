@@ -1,12 +1,11 @@
-# ملف c4.py - نسخة V33.3.0 (تحليل متعدد الأطر الزمنية)
+# ملف c4.py - نسخة V33.3.1 (شروط مرنة)
 # --- وصف التعديلات:
-# بناءً على طلب المستخدم لاكتشاف المزيد من الفرص في الاتجاهات الصاعدة قصيرة ومتوسطة المدى، تم إجراء التعديلات التالية:
-# 1.  [نظام جديد] تمت إضافة نظام تحليل متعدد الأطر الزمنية (MTF) يقوم بفحص الاتجاه على إطاري 15 دقيقة وساعة واحدة بشكل مستقل.
-# 2.  [مرونة استراتيجية] تم تعديل استراتيجيات "MACD" و "Elliott Wave" للاستفادة من نظام MTF.
-#     - إذا كان الاتجاه صاعدًا بقوة على إطاري 15 دقيقة وساعة واحدة معًا، سيتجاوز البوت شرط الاتجاه الصاعد طويل الأمد (مثل SMA200)، مما يسمح له باقتناص الفرص المبكرة في الاتجاهات الجديدة.
-#     - إذا لم يكن الاتجاه قويًا على الإطارات الأصغر، سيعود البوت إلى الاعتماد على شروطه الصارمة للاتجاه طويل الأمد كإجراء وقائي.
-# 3.  [تحسين استراتيجية Pullback] تم جعل استراتيجية الارتداد (Pullback) أكثر تساهلاً مع عمق الارتدادات إذا كان الاتجاه الصاعد قويًا على نظام MTF.
-# 4.  [تحديث واجهة المستخدم] تم تحديث رقم الإصدار في واجهة المستخدم.
+# بناءً على سجل الرفض، تم تخفيف الشروط لزيادة عدد الصفقات المقبولة:
+# 1. [تخفيف شرط الاتجاه] تم تعديل استراتيجيات "MACD" و "Elliott Wave" لتقبل الإشارة إذا كان الاتجاه صاعدًا
+#    على إطار 15 دقيقة "أو" ساعة واحدة، بدلاً من الشرط السابق الذي كان يتطلب "كلا الإطارين معًا".
+#    هذا يسمح باقتناص الفرص في بداية تكون الاتجاهات.
+# 2. [تخفيف فلتر التقلب] تم خفض الحد الأدنى لفلتر التقلب (ATR Percent) من 1.5% إلى 1.2% للسماح
+#    بالتداول في العملات ذات التقلب المنخفض نسبياً.
 
 import time
 import os
@@ -50,7 +49,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.3.0')
+logger = logging.getLogger('CryptoBotV33.3.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1038,7 +1037,8 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    ATR_PERCENT_MIN = 1.5
+    # --- FIX: Relaxed the minimum ATR requirement based on user feedback ---
+    ATR_PERCENT_MIN = 1.2 # تم تخفيضه من 1.5 للسماح بتداولات أكثر في الأسواق الأقل تقلباً
     ATR_PERCENT_MAX = 4.0
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
@@ -1153,7 +1153,8 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     last = df.iloc[-1]
     
-    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish'
+    # --- FIX: Relaxed MTF trend condition from AND to OR ---
+    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' or mtf_trend.get('1h') == 'bullish'
     is_long_term_bullish = last['close'] > last['sma200']
 
     if not (is_mtf_bullish or is_long_term_bullish):
@@ -1206,7 +1207,8 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
 
     last = df.iloc[-1]
     
-    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish'
+    # --- FIX: Relaxed MTF trend condition from AND to OR ---
+    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' or mtf_trend.get('1h') == 'bullish'
     is_long_term_bullish = last['ema50'] > last['ema200']
 
     if not (is_mtf_bullish or is_long_term_bullish):
@@ -1268,9 +1270,6 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
-# --- FIX START: Rewritten calculate_position_size function ---
-# The original function failed when the fixed trade amount was below the exchange's MIN_NOTIONAL limit.
-# This new version automatically adjusts the trade size up to meet the minimum requirement, if the balance allows it.
 def calculate_position_size(symbol: str, entry_price: float, available_balance: float) -> Optional[Decimal]:
     with fixed_trade_amount_lock:
         fixed_amount = FIXED_TRADE_AMOUNT_USDT
@@ -1290,17 +1289,15 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
             log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
             return None
 
-        # --- Initial Calculation based on fixed amount ---
         initial_quantity = dec_fixed_amount / dec_entry
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
 
         if adjusted_quantity is None:
              logger.warning(f"[{symbol}] Initial quantity adjustment failed (likely too small). Will check against MIN_NOTIONAL.")
-             adjusted_quantity = Decimal('0') # Set to 0 to proceed to min_notional check
+             adjusted_quantity = Decimal('0')
 
         notional_value = adjusted_quantity * dec_entry
 
-        # --- MinNotional Check and Correction ---
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
             min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
@@ -1311,14 +1308,12 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
                 if notional_value < min_notional:
                     logger.warning(f"[{symbol}] Notional value ${notional_value:.2f} is below min_notional ${min_notional}. Attempting to adjust.")
                     
-                    # Add a small buffer (1%) to the min_notional to avoid floating point issues
                     required_notional = min_notional * Decimal('1.01')
                     
                     if required_notional > dec_balance:
                         log_rejection(symbol, "Insufficient Balance", {"reason": "Cannot meet min_notional", "required": f"${required_notional:.2f}", "available": f"${dec_balance:.2f}"})
                         return None
                         
-                    # Recalculate quantity based on min_notional
                     new_quantity = required_notional / dec_entry
                     adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity))
 
@@ -1329,7 +1324,6 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
                     notional_value = adjusted_quantity * dec_entry
                     logger.info(f"[{symbol}] Quantity adjusted to meet min_notional. New quantity: {adjusted_quantity}, New notional: ${notional_value:.2f}")
 
-        # --- Final Balance Check ---
         if notional_value <= 0:
              log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Final notional value is zero after all adjustments."})
              return None
@@ -1344,8 +1338,6 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
     except Exception as e:
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
-# --- FIX END ---
-
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     df.strategy = strategy_name 
@@ -1465,7 +1457,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.3.0)</title>
+<title>لوحة التحكم - بوت التداول (V33.3.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1532,7 +1524,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.3.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.3.1</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1934,7 +1926,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.3.0)</title>
+<title>الإعدادات - بوت التداول (V33.3.1)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2946,7 +2938,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.0 (MTF Analysis) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.1 (Flexible Conditions) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2977,3 +2969,4 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
