@@ -1,11 +1,9 @@
-# ملف c4.py - نسخة V34.1.0 (تحسينات شاملة للوحة التحكم)
+# ملف c4.py - نسخة V34.2.0 (تحسين جلب الرصيد وحساب الصفقات)
 # --- وصف التعديلات:
-# 1. [لوحة التحكم] إعادة تصميم شاملة للواجهة لتكون أكثر حداثة وتجاوباً مع جميع الشاشات.
-# 2. [لوحة التحكم] إضافة قسم "مؤشرات الأداء" مع رسم بياني للأرباح التراكمية لآخر 30 يومًا.
-# 3. [لوحة التحكم] إضافة إمكانية تعديل "حجم الصفقة الثابت" مباشرة من الواجهة الرئيسية.
-# 4. [لوحة التحكم] إصلاح طريقة عرض جداول سجل الرفض والأحداث.
-# 5. [Backend] إضافة مسار API جديد (`/api/performance_stats`) لجلب بيانات الأداء من قاعدة البيانات.
-# 6. [إصلاح خطأ] التأكد من وجود دالة `handle_socket_message` التي كانت مفقودة في الإصدارات السابقة.
+# 1. [Backend] إضافة دالة جديدة `get_available_balance` للاستعلام بشكل صريح عن الرصيد المتاح قبل فتح الصفقات الحقيقية.
+# 2. [Backend] إعادة هيكلة دالة `calculate_position_size` لتوضيح منطق التحقق من الرصيد وقواعد المنصة.
+# 3. [Backend] تحسين تسجيل الأخطاء عند فشل حساب حجم الصفقة لتقديم سبب واضح للرفض.
+# 4. [لوحة التحكم] تعديل مسمى عرض الرصيد إلى "الرصيد المتاح (USDT)" لزيادة الوضوح.
 
 import time
 import os
@@ -49,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.1.0')
+logger = logging.getLogger('CryptoBotV34.2.0')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -192,7 +190,7 @@ DASHBOARD_TEMPLATE_V2 = """
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>لوحة التحكم - بوت التداول (V34.1.0)</title>
+    <title>لوحة التحكم - بوت التداول (V34.2.0)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
     <style>
@@ -258,7 +256,7 @@ DASHBOARD_TEMPLATE_V2 = """
 </head>
 <body>
 <div class="container">
-    <header><h1>لوحة التحكم • بوت V34.1.0</h1><div class="badge" id="serverTime">—</div></header>
+    <header><h1>لوحة التحكم • بوت V34.2.0</h1><div class="badge" id="serverTime">—</div></header>
     
     <div class="main-column">
         <div class="card">
@@ -302,7 +300,8 @@ DASHBOARD_TEMPLATE_V2 = """
                 </div>
                 <hr style="border-color: var(--border-color); margin: 1rem 0;">
                 <div class="status-grid">
-                    <div class="status-item"><div class="status-label">الرصيد (USDT)</div><div id="balance" class="status-value">—</div></div>
+                    <!-- [تعديل] تم تغيير المسمى هنا -->
+                    <div class="status-item"><div class="status-label">الرصيد المتاح (USDT)</div><div id="balance" class="status-value">—</div></div>
                     <div class="status-item"><div class="status-label">صفقات مفتوحة</div><div id="openCount" class="status-value">—</div></div>
                 </div>
             </div>
@@ -881,7 +880,6 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     )
     send_enhanced_telegram_message(message, force=True)
 
-# [إصلاح] تمت إضافة الدالة المفقودة هنا
 def handle_socket_message(msg):
     global live_prices
     try:
@@ -938,6 +936,29 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return validated
     except Exception as e:
         logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
+
+def get_available_balance(is_real_trade: bool) -> float:
+    """
+    [جديد] الاستعلام عن الرصيد المتاح للتداول.
+    للتداول الحقيقي: يجلب الرصيد الحر من منصة Binance.
+    للتداول الورقي: يستخدم الرصيد المحاكى.
+    """
+    if is_real_trade:
+        try:
+            if not client:
+                logger.error("❌ Binance client not initialized. Cannot fetch real balance.")
+                return 0.0
+            balance_info = client.get_asset_balance(asset='USDT')
+            balance = float(balance_info.get('free', 0.0))
+            logger.info(f"💰 [Real Balance] Fetched available balance: {balance:.2f} USDT")
+            return balance
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch REAL USDT balance: {e}. Returning 0.")
+            return 0.0
+    else:  # Paper trading
+        with balance_lock:
+            # For paper mode, use the globally managed simulated balance
+            return usdt_balance
 # --- نهاية دوال المساعدة ---
 
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
@@ -1402,7 +1423,7 @@ def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     if not filters['rsi_ok']: log_rejection(symbol_name, "Range Reversal: RSI not in oversold zone"); return False
     return True
 
-# --- دوال حساب حجم الصفقة والتداول (بدون تغيير كبير) ---
+# --- [معدل] دوال حساب حجم الصفقة والتداول ---
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -1428,30 +1449,56 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         return None
 
 def calculate_position_size(symbol: str, entry_price: float, available_balance: float) -> Optional[Decimal]:
+    """
+    [معدل] حساب حجم الصفقة بناءً على مبلغ ثابت مع التحقق من قواعد المنصة.
+    
+    المنطق:
+    1. استخدام قيمة `FIXED_TRADE_AMOUNT_USDT` المحددة في الإعدادات كحجم أساسي للصفقة.
+    2. التحقق من أن الرصيد المتاح (`available_balance`) كافٍ لتغطية هذا المبلغ. إذا لم يكن كذلك، يتم رفض الصفقة.
+    3. حساب الكمية الأولية (`initial_quantity`) بقسمة المبلغ الثابت على سعر الدخول.
+    4. تعديل الكمية لتتوافق مع قواعد `LOT_SIZE` الخاصة بالعملة.
+    5. التحقق من أن القيمة النهائية للصفقة (`notional_value`) تتجاوز الحد الأدنى `MIN_NOTIONAL`.
+    6. إذا نجحت كل الشروط، يتم إرجاع الكمية المعدلة. وإلا، يتم إرجاع `None` ويتم تسجيل سبب الرفض.
+    """
     with fixed_trade_amount_lock: fixed_amount = FIXED_TRADE_AMOUNT_USDT
     try:
         dec_entry = Decimal(str(entry_price))
         dec_balance = Decimal(str(available_balance))
         dec_fixed_amount = Decimal(str(fixed_amount))
+
+        # الخطوة 1: التحقق من أن الرصيد المتاح يغطي حجم الصفقة الثابت المطلوب
         if dec_fixed_amount > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
+            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount:.2f}", "available": f"${dec_balance:.2f}"})
             return None
+        
         if dec_entry <= 0: return None
+        
+        # الخطوة 2: حساب الكمية بناءً على المبلغ الثابت
         initial_quantity = dec_fixed_amount / dec_entry
+        
+        # الخطوة 3: تعديل الكمية حسب قواعد LOT_SIZE
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
-        if adjusted_quantity is None or adjusted_quantity <= 0: return None
+        if adjusted_quantity is None or adjusted_quantity <= 0:
+            # يتم تسجيل سبب الرفض داخل `adjust_quantity_to_lot_size`
+            return None
+            
         notional_value = adjusted_quantity * dec_entry
+        
+        # الخطوة 4: التحقق من الحد الأدنى لقيمة الصفقة (MIN_NOTIONAL)
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
-                    min_notional = Decimal(f.get('minNotional', f.get('notional', '5.0')))
-                    if notional_value < min_notional:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
-                        return None
+            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+            if min_notional_filter:
+                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '5.0')))
+                if notional_value < min_notional:
+                    log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+                    return None
+                    
+        # فحص أخير للتأكد من أن القيمة النهائية لا تتجاوز الرصيد (نادر الحدوث لكنه آمن)
         if notional_value > dec_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
             return None
+            
         return adjusted_quantity
     except Exception as e:
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
@@ -1463,7 +1510,6 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_t
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
 
-    # [تعديل] استخدام نظام الجودة الديناميكي
     quality_score = calculate_signal_quality(df, mtf_trend)
     with min_quality_lock: min_score = MIN_SIGNAL_QUALITY
     if quality_score < min_score:
@@ -1483,16 +1529,11 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str, mtf_t
     signal_details = {"quality_score": quality_score, "atr_percent": df.iloc[-1].get('atr_percent', 0)}
     trade_levels = {"entry_price": entry_price, "stop_loss": stop_loss_price, "target_price_1": target_price_1, "target_price_2": target_price_2}
     
-    available_balance = 0
-    if is_real:
-        try:
-            balance_response = client.get_asset_balance(asset='USDT')
-            available_balance = float(balance_response['free'])
-        except Exception as e:
-            logger.error(f"❌ [{symbol}] Failed to fetch REAL USDT balance: {e}. Trade rejected.")
-            return
-    else:
-        available_balance = PAPER_TRADE_INITIAL_BALANCE
+    # [تعديل] استدعاء دالة الاستعلام عن الرصيد المتاح بشكل صريح
+    available_balance = get_available_balance(is_real)
+    if available_balance <= 0.1: # تحقق من وجود رصيد كافي
+        if is_real: log_rejection(symbol, "Insufficient Balance", {"reason": "Available balance is zero or could not be fetched."})
+        return
 
     quantity_dec = calculate_position_size(symbol, entry_price, available_balance)
     if quantity_dec is None or quantity_dec <= 0:
@@ -1836,7 +1877,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.0 (UI Overhaul) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.2.0 (Balance & Sizing Refactor) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
