@@ -1268,45 +1268,72 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
+# --- FIX START: Rewritten calculate_position_size function ---
+# The original function failed when the fixed trade amount was below the exchange's MIN_NOTIONAL limit.
+# This new version automatically adjusts the trade size up to meet the minimum requirement, if the balance allows it.
 def calculate_position_size(symbol: str, entry_price: float, available_balance: float) -> Optional[Decimal]:
     with fixed_trade_amount_lock:
         fixed_amount = FIXED_TRADE_AMOUNT_USDT
     
     try:
         dec_entry = Decimal(str(entry_price))
+        if dec_entry <= 0:
+            logger.error(f"[{symbol}] Invalid entry price (zero or negative).")
+            return None
+        
         dec_balance = Decimal(str(available_balance))
         dec_fixed_amount = Decimal(str(fixed_amount))
-
-        logger.info(f"[{symbol}] Starting fixed position sizing. Desired amount: ${dec_fixed_amount}, Available Balance: ${dec_balance:.2f}")
+        
+        logger.info(f"[{symbol}] Starting position sizing. Desired amount: ${dec_fixed_amount}, Available Balance: ${dec_balance:.2f}")
 
         if dec_fixed_amount > dec_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
             return None
 
-        if dec_entry <= 0:
-            logger.error(f"[{symbol}] Invalid entry price (zero or negative).")
-            return None
+        # --- Initial Calculation based on fixed amount ---
         initial_quantity = dec_fixed_amount / dec_entry
-        logger.info(f"[{symbol}] Initial quantity for ${dec_fixed_amount}: {initial_quantity}")
-
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
-        
-        if adjusted_quantity is None or adjusted_quantity <= 0:
-            logger.error(f"[{symbol}] Quantity became zero or None after LOT_SIZE adjustment.")
-            return None
-        
-        logger.info(f"[{symbol}] Quantity after LOT_SIZE adjustment: {adjusted_quantity}")
+
+        if adjusted_quantity is None:
+             logger.warning(f"[{symbol}] Initial quantity adjustment failed (likely too small). Will check against MIN_NOTIONAL.")
+             adjusted_quantity = Decimal('0') # Set to 0 to proceed to min_notional check
 
         notional_value = adjusted_quantity * dec_entry
+
+        # --- MinNotional Check and Correction ---
         symbol_info = exchange_info_map.get(symbol)
         if symbol_info:
-            for f in symbol_info['filters']:
-                if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
-                    min_notional = Decimal(f.get('minNotional', f.get('notional', '5.0')))
-                    if notional_value < min_notional:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+            min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL')), None)
+            
+            if min_notional_filter:
+                min_notional = Decimal(min_notional_filter.get('minNotional', min_notional_filter.get('notional', '5.0')))
+                
+                if notional_value < min_notional:
+                    logger.warning(f"[{symbol}] Notional value ${notional_value:.2f} is below min_notional ${min_notional}. Attempting to adjust.")
+                    
+                    # Add a small buffer (1%) to the min_notional to avoid floating point issues
+                    required_notional = min_notional * Decimal('1.01')
+                    
+                    if required_notional > dec_balance:
+                        log_rejection(symbol, "Insufficient Balance", {"reason": "Cannot meet min_notional", "required": f"${required_notional:.2f}", "available": f"${dec_balance:.2f}"})
                         return None
-        
+                        
+                    # Recalculate quantity based on min_notional
+                    new_quantity = required_notional / dec_entry
+                    adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(new_quantity))
+
+                    if adjusted_quantity is None or adjusted_quantity <= 0:
+                        log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Failed to adjust quantity for min_notional"})
+                        return None
+
+                    notional_value = adjusted_quantity * dec_entry
+                    logger.info(f"[{symbol}] Quantity adjusted to meet min_notional. New quantity: {adjusted_quantity}, New notional: ${notional_value:.2f}")
+
+        # --- Final Balance Check ---
+        if notional_value <= 0:
+             log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Final notional value is zero after all adjustments."})
+             return None
+
         if notional_value > dec_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
             return None
@@ -1317,6 +1344,8 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
     except Exception as e:
         logger.error(f"❌ [{symbol}] Unhandled exception in calculate_position_size: {e}", exc_info=True)
         return None
+# --- FIX END ---
+
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
     df.strategy = strategy_name 
@@ -2948,4 +2977,3 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
