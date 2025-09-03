@@ -1,10 +1,8 @@
-# ملف c4_5min_fixed.py - نسخة V34.0.2 (إصلاح MinNotional وكمية البيع)
+# ملف c4_5min_fixed.py - نسخة V34.0.3 (إصلاح SyntaxError)
 # --- وصف التعديلات:
-# 1. [إصلاح خطأ MinNotional] تم تعديل دالة `calculate_position_size` لتحميل قواعد التداول من المنصة.
-#    - الآن، يتم تحديد حجم الصفقة بناءً على قيمة ثابتة (بين 4.5 و 6.5 دولار) بدلاً من نسبة مئوية.
-#    - إذا كانت قيمة الصفقة المحسوبة أقل من `min_notional` (الحد الأدنى للمنصة)، يقوم البوت بزيادة الكمية تلقائيًا لتلبية الحد الأدنى.
-# 2. [تحسين البيع الحقيقي] تم تعديل دالة `close_signal` بحيث تستعلم عن الرصيد الفعلي للعملة في المنصة قبل تنفيذ أمر البيع، لضمان بيع الكمية الصحيحة.
-# 3. [تخصص 5 دقائق] يحتفظ هذا الإصدار بجميع التعديلات السابقة للعمل على إطار 5 دقائق.
+# 1. [إصلاح خطأ] تم إصلاح خطأ "SyntaxError: expected 'except' or 'finally' block"
+#    عن طريق إضافة كتلة `except` مفقودة في دالة `api_run_backtest`.
+# 2. [تحسينات سابقة] يحتفظ هذا الإصدار بجميع التحسينات السابقة المتعلقة بـ min_notional وكمية البيع.
 
 import time
 import os
@@ -2289,6 +2287,7 @@ def api_health():
         with trading_status_lock: trading_enabled = is_trading_enabled
         with trading_mode_lock: is_paper = paper_trading_mode
         return jsonify({"status": "ok", "trading_enabled": trading_enabled, "mode": "PAPER" if is_paper else "REAL", "open_signals": len(open_signals_cache), "ws": {"connected": True}}), 200
+    except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
 @app.route('/api/open_signals')
 def get_open_signals():
     if not check_db_connection(): return jsonify({"error": "Database connection failed"}), 500
@@ -2934,3 +2933,4 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
