@@ -1,8 +1,8 @@
-# ملف c4_5min_fixed.py - نسخة V34.0.3 (إصلاح SyntaxError)
+# ملف c4_5min_fixed.py - نسخة V34.0.4 (تحسين الرصيد والصفقات الورقية)
 # --- وصف التعديلات:
-# 1. [إصلاح خطأ] تم إصلاح خطأ "SyntaxError: expected 'except' or 'finally' block"
-#    عن طريق إضافة كتلة `except` مفقودة في دالة `api_run_backtest`.
-# 2. [تحسينات سابقة] يحتفظ هذا الإصدار بجميع التحسينات السابقة المتعلقة بـ min_notional وكمية البيع.
+# 1. [عرض الرصيد الفعلي] الآن يقوم البوت دائمًا بجلب وعرض رصيد USDT الحقيقي من المنصة، حتى في وضع التداول الورقي.
+# 2. [صفقات ورقية ثابتة] تم تعديل الصفقات الورقية لتستخدم دائمًا قيمة ثابتة قدرها 10 USDT، دون التأثير على أي رصيد (وهمي أو حقيقي).
+# 3. [تحسينات سابقة] يحتفظ هذا الإصدار بجميع التحسينات السابقة.
 
 import time
 import os
@@ -76,19 +76,18 @@ is_trading_enabled: bool = False
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
-usdt_balance: float = 0.0
+usdt_balance: float = 0.0 # سيحتوي دائمًا على الرصيد الحقيقي
 balance_lock = Lock()
 cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
 COOLDOWN_MINUTES_AFTER_SL = 30
-PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-# تم استبدال النسبة المئوية بقيمة ثابتة
-FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5
-FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5
+PAPER_TRADE_FIXED_AMOUNT_USDT: float = 10.0 # قيمة ثابتة للصفقات الورقية
+FIXED_TRADE_AMOUNT_MIN_USDT: float = 4.5  # للصفقات الحقيقية فقط
+FIXED_TRADE_AMOUNT_MAX_USDT: float = 6.5  # للصفقات الحقيقية فقط
 trade_amount_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
@@ -1190,10 +1189,14 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         logger.error(f"❌ [{symbol}] CRITICAL ERROR adjusting quantity: {e}", exc_info=True)
         return None
 
-def calculate_position_size(symbol: str, entry_price: float, available_balance: float) -> Optional[Decimal]:
-    with trade_amount_lock:
-        desired_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
-    
+def calculate_position_size(symbol: str, entry_price: float, available_balance: float, is_real: bool) -> Optional[Decimal]:
+    desired_usdt_amount = 0.0
+    if not is_real:
+        desired_usdt_amount = PAPER_TRADE_FIXED_AMOUNT_USDT
+    else:
+        with trade_amount_lock:
+            desired_usdt_amount = random.uniform(FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT)
+
     try:
         dec_entry = Decimal(str(entry_price))
         if dec_entry <= 0:
@@ -1205,7 +1208,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         
         logger.info(f"[{symbol}] Starting position sizing. Desired amount: ${dec_desired_amount:.2f}")
 
-        if dec_desired_amount > dec_balance:
+        if is_real and dec_desired_amount > dec_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_desired_amount:.2f}", "available": f"${dec_balance:.2f}"})
             return None
 
@@ -1231,7 +1234,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
                     
                     required_notional = min_notional * Decimal('1.01')
                     
-                    if required_notional > dec_balance:
+                    if is_real and required_notional > dec_balance:
                         log_rejection(symbol, "Insufficient Balance", {"reason": "Cannot meet min_notional", "required": f"${required_notional:.2f}", "available": f"${dec_balance:.2f}"})
                         return None
                         
@@ -1249,7 +1252,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
              log_rejection(symbol, "MinNotional Filter Failed", {"reason": "Final notional value is zero after all adjustments."})
              return None
 
-        if notional_value > dec_balance:
+        if is_real and notional_value > dec_balance:
             log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
             return None
             
@@ -1261,7 +1264,6 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
-    global usdt_balance
     df.strategy = strategy_name 
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
@@ -1296,19 +1298,11 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
         "target_price_1": target_price_1, "target_price_2": target_price_2
     }
 
-    quantity_dec = None
-    available_balance = 0
-    if is_real:
-        try:
-            balance_response = client.get_asset_balance(asset='USDT')
-            available_balance = float(balance_response['free'])
-        except Exception as e:
-            logger.error(f"❌ [{symbol}] Failed to fetch REAL USDT balance: {e}. Trade rejected.")
-            return
-    else:
-        with balance_lock: available_balance = usdt_balance if usdt_balance > 0 else PAPER_TRADE_INITIAL_BALANCE
+    current_real_balance = 0
+    with balance_lock:
+        current_real_balance = usdt_balance
 
-    quantity_dec = calculate_position_size(symbol, entry_price, available_balance)
+    quantity_dec = calculate_position_size(symbol, entry_price, current_real_balance, is_real)
 
     if quantity_dec is None or quantity_dec <= 0:
         logger.error(f"❌ [{symbol}] Position size calculation failed. Trade rejected.")
@@ -1344,8 +1338,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
             float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
         )
-        with balance_lock:
-             usdt_balance -= notional_value
+        # لا يتم خصم أي شيء من الرصيد في الصفقات الورقية
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1381,7 +1374,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.0.0)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.0.4)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1448,7 +1441,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.0</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.4</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1485,7 +1478,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
             <a class="btn" href="/backtest">الاختبار الخلفي</a>
           </div>
           <div class="kv" style="margin-top:12px">
-            <div>الرصيد (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
+            <div>الرصيد الفعلي (USDT):</div><div id="balance">—</div><div>عدد الصفقات:</div><div id="openCount">—</div>
           </div>
         </div>
       </div>
@@ -1516,8 +1509,12 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
             </div>
           </div>
           <div class="kv" style="margin-top: 12px;">
-            <div>قيمة الصفقة (USDT):</div>
+            <div>قيمة الصفقة (الحقيقية):</div>
             <div id="tradeAmountDisplay">$4.5 - $6.5</div>
+          </div>
+           <div class="kv" style="margin-top: 12px;">
+            <div>قيمة الصفقة (الورقية):</div>
+            <div>$10.0 (ثابتة)</div>
           </div>
         </div>
       </div>
@@ -1850,7 +1847,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.0.0)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.0.4)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1865,6 +1862,7 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
 @media(min-width: 600px){.form-grid{grid-template-columns:1fr 1fr;}}
 .form-group{display:flex;flex-direction:column;gap:8px}
 .form-group label{font-weight:600;color:var(--muted);font-size:14px}
+.form-group .note{font-size:12px; color: var(--muted); opacity: 0.8;}
 .form-group input, .form-group select {
     background: #0b1126; border: 1px solid #233056; color: #e8f1ff; padding: 10px; border-radius: 8px; font-size: 14px;
 }
@@ -1892,12 +1890,14 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
             <h2>إعدادات التداول العامة</h2>
             <div class="card-body form-grid">
                 <div class="form-group">
-                    <label for="tradeAmountMinInput">أدنى قيمة للصفقة (USDT)</label>
+                    <label for="tradeAmountMinInput">أدنى قيمة للصفقة (الحقيقية)</label>
                     <input type="number" id="tradeAmountMinInput" name="FIXED_TRADE_AMOUNT_MIN_USDT" value="{{ trade_amount_min }}" step="0.1" min="1.0" max="50.0">
+                    <small class="note">لا يؤثر على الصفقات الورقية</small>
                 </div>
                 <div class="form-group">
-                    <label for="tradeAmountMaxInput">أقصى قيمة للصفقة (USDT)</label>
+                    <label for="tradeAmountMaxInput">أقصى قيمة للصفقة (الحقيقية)</label>
                     <input type="number" id="tradeAmountMaxInput" name="FIXED_TRADE_AMOUNT_MAX_USDT" value="{{ trade_amount_max }}" step="0.1" min="1.0" max="50.0">
+                     <small class="note">لا يؤثر على الصفقات الورقية</small>
                 </div>
                 <div class="form-group">
                     <label for="maxTradesInput">الحد الأقصى للصفقات المفتوحة</label>
@@ -2740,17 +2740,9 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
 
     profit = ((closing_price - entry_price) / entry_price) * 100
-    if not signal.get('is_real_trade'):
-        with balance_lock:
-            # For paper trades, profit calculation remains based on the bot's tracked quantity
-            initial_notional = signal.get('initial_quantity', 0) * entry_price
-            final_value = signal.get('initial_quantity', 0) * closing_price
-            # This logic might be buggy for partial closes, let's adjust it
-            profit_or_loss_amount = final_value - initial_notional
-            usdt_balance += profit_or_loss_amount
-            logger.info(f"[Paper Balance] Trade for {symbol} closed. P/L: ${profit_or_loss_amount:.2f}. New balance: ${usdt_balance:.2f}")
-
-
+    
+    # لا يوجد أي تعديل على الرصيد للصفقات الورقية
+    
     with consecutive_losses_lock:
         if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
         else: consecutive_losses_by_symbol[symbol] = 0
@@ -2810,15 +2802,7 @@ def trade_management_loop():
                     update_signal_in_db(signal['id'], updates)
                     send_enhanced_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
                     
-                    if not signal.get('is_real_trade'):
-                         with balance_lock:
-                             global usdt_balance
-                             closed_notional = part_qty_to_close * entry_price
-                             final_value = part_qty_to_close * tp1
-                             profit_or_loss_amount = final_value - closed_notional
-                             usdt_balance += profit_or_loss_amount # Add profit/loss from partial close
-                             logger.info(f"[Paper Balance] Partial close for {symbol}. P/L: ${profit_or_loss_amount:.2f}. New balance: ${usdt_balance:.2f}")
-
+                    # لا يوجد تعديل على الرصيد للصفقات الورقية
                     continue
                 
                 profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
@@ -2879,30 +2863,25 @@ def start_market_state_updater():
     logger.info("[Market State] Started market state updater thread")
 
 def update_balance():
-    with trading_mode_lock:
-        is_paper = paper_trading_mode
-    
-    if is_paper:
-        # For paper trading, balance is managed internally
-        return
-
+    # هذه الدالة الآن تحدث الرصيد الحقيقي دائمًا
     try:
         balance_info = client.get_asset_balance(asset='USDT')
         with balance_lock:
             global usdt_balance
             usdt_balance = float(balance_info['free'])
-    except Exception as e: logger.error(f"❌ [Balance] Could not update REAL USDT balance: {e}")
+    except Exception as e: 
+        logger.error(f"❌ [Balance] Could not update REAL USDT balance: {e}")
 
 def update_balance_loop():
     logger.info("🚀 [Balance Updater] Starting balance update loop...")
     while True:
         try: update_balance()
         except Exception as e: logger.error(f"❌ [Balance Loop] Error: {e}", exc_info=True)
-        time.sleep(60 * 10)
+        time.sleep(60 * 5) # تحديث الرصيد كل 5 دقائق
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.1 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.4 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2919,7 +2898,11 @@ if __name__ == '__main__':
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
-    with balance_lock: usdt_balance = PAPER_TRADE_INITIAL_BALANCE # Initialize paper balance
+    logger.info("Fetching initial real account balance...")
+    update_balance() # جلب الرصيد الحقيقي عند بدء التشغيل
+    with balance_lock:
+        logger.info(f"Initial real balance fetched: ${usdt_balance:.2f}")
+
     logger.info("Initial data fetch complete.")
     
     # Start background threads
