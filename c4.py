@@ -1,13 +1,8 @@
-# ملف c4_5min.py - نسخة V34.0.0 (متخصص لإطار 5 دقائق)
+# ملف c4_5min_fixed.py - نسخة V34.0.1 (إصلاح خطأ Global)
 # --- وصف التعديلات:
-# بناءً على طلب المستخدم، تم تعديل البوت بالكامل للعمل على إطار زمني 5 دقائق (Scalping).
-# 1. [تغيير الإطار الزمني] تم تغيير الإطار الزمني الرئيسي لتوليد الإشارات إلى '5m'.
-# 2. [ضبط الأطر الزمنية] تم تعديل الأطر الزمنية الأعلى لتصبح '15m' و '1h' لتحليل الاتجاه.
-# 3. [معايرة الفلاتر] تم ضبط فلاتر التقلب (ATR) وقوة الاتجاه (ADX) لتكون أكثر حساسية ومناسبة
-#    للإشارات السريعة على إطار 5 دقائق.
-# 4. [تحسين أهداف الربح] تم تعديل نسب المخاطرة إلى العائد (RRR) في جميع الاستراتيجيات
-#    لتتناسب مع طبيعة التداولات الخاطفة (Scalping).
-# 5. [تسريع دورة الفحص] تم تعديل الحلقة الرئيسية لتعمل كل 5 دقائق.
+# 1. [إصلاح خطأ] تم إصلاح خطأ "SyntaxError: name 'usdt_balance' is used prior to global declaration"
+#    عن طريق نقل تعريف `global usdt_balance` إلى بداية الدوال التي تستخدمه.
+# 2. [تخصص 5 دقائق] يحتفظ هذا الإصدار بجميع التعديلات السابقة للعمل على إطار 5 دقائق.
 
 import time
 import os
@@ -51,7 +46,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.0.0_5min')
+logger = logging.getLogger('CryptoBotV34.0.1_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -1255,6 +1250,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         return None
 
 def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
+    global usdt_balance
     df.strategy = strategy_name 
     
     if not check_market_volatility_filter_enhanced(df, symbol): return
@@ -1338,7 +1334,6 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
         )
         with balance_lock:
-             global usdt_balance
              usdt_balance -= notional_value
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
@@ -2689,6 +2684,7 @@ def update_signal_in_db(signal_id, updates):
         return False
 
 def close_signal(signal: Dict, closing_price: float, reason: str):
+    global usdt_balance
     symbol, signal_id, entry_price = signal['symbol'], signal['id'], signal['entry_price']
     
     with signal_cache_lock:
@@ -2726,7 +2722,6 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
     profit = ((closing_price - entry_price) / entry_price) * 100
     if not signal.get('is_real_trade'):
         with balance_lock:
-            global usdt_balance
             initial_notional = signal.get('initial_quantity', 0) * entry_price
             final_value = signal.get('initial_quantity', 0) * closing_price
             usdt_balance += (final_value - initial_notional)
@@ -2879,7 +2874,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.0 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.1 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
