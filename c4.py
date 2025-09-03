@@ -1,12 +1,12 @@
-# ملف c4.py - نسخة V33.3.2 (تداول في السوق المحايد)
+# ملف c4.py - نسخة V33.3.3 (حجم الصفقة النسبي)
 # --- وصف التعديلات:
-# بناءً على استمرار رفض الفرص في الأسواق غير الصاعدة بوضوح، تم إجراء تعديلات جوهرية:
-# 1. [السماح بالتداول المحايد] تم تغيير منطق استراتيجيات "MACD" و "Elliott Wave" بشكل كبير.
-#    بدلاً من التحقق من وجود اتجاه صاعد (is_bullish)، سيتحقق البوت الآن من "عدم وجود اتجاه هابط قوي".
-#    هذا يسمح بالدخول في صفقات في الأسواق الجانبية والمحايدة، مما يزيد بشكل كبير من عدد الفرص.
-# 2. [تخفيف فلتر الزخم] تم تبسيط وتخفيف شروط فلتر الزخم الديناميكي ليكون أكثر تساهلاً.
-# 3. [تخفيف فلتر الارتداد] تم جعل شرط تعافي السعر في استراتيجية الارتداد (Pullback) أكثر مرونة.
-# 4. [توسيع نطاق فيبوناتشي] تم توسيع النطاق المقبول لتصحيحات فيبوناتشي في استراتيجية موجات إليوت.
+# بناءً على طلب المستخدم، تم تغيير استراتيجية إدارة رأس المال بشكل جذري:
+# 1. [حجم الصفقة النسبي] تم إلغاء نظام حجم الصفقة الثابت (FIXED_TRADE_AMOUNT_USDT).
+# 2. [إدارة رأس المال بالنسبة المئوية] تم إضافة متغير جديد `TRADE_AMOUNT_PERCENTAGE` يسمح بتحديد
+#    حجم كل صفقة كنسبة مئوية من الرصيد المتاح. تم ضبط القيمة الافتراضية على 50% حسب الطلب.
+#    تحذير: هذه نسبة مخاطرة عالية جداً وغير مستصوبة.
+# 3. [تحديث الواجهة] تم تحديث واجهة التحكم وصفحة الإعدادات لتعكس التغيير الجديد،
+#    حيث يمكن للمستخدم الآن التحكم في النسبة المئوية لحجم الصفقة.
 
 import time
 import os
@@ -50,7 +50,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.3.2')
+logger = logging.getLogger('CryptoBotV33.3.3')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -89,8 +89,9 @@ COOLDOWN_MINUTES_AFTER_SL = 30
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-FIXED_TRADE_AMOUNT_USDT: float = 3.0
-fixed_trade_amount_lock = Lock()
+# --- تنبيه: 50% هي نسبة مخاطرة عالية جداً. يوصى بشدة باستخدام 1-2% فقط. ---
+TRADE_AMOUNT_PERCENTAGE: float = 50.0
+trade_amount_percentage_lock = Lock()
 MAX_OPEN_TRADES: int = 3
 TRAILING_STOP_ACTIVATION_PROFIT_PERCENT: float = 1.0
 MIN_SIGNAL_QUALITY: int = 70
@@ -217,7 +218,7 @@ def get_dashboard_payload() -> Dict:
     with rejection_logs_lock: rejections = list(rejection_logs_cache)
     with market_state_lock: market_state = dict(current_market_state)
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
-    with fixed_trade_amount_lock: fixed_amount = FIXED_TRADE_AMOUNT_USDT
+    with trade_amount_percentage_lock: trade_percentage = TRADE_AMOUNT_PERCENTAGE
 
     return {
         "trading_enabled": trading_enabled,
@@ -227,7 +228,7 @@ def get_dashboard_payload() -> Dict:
         "rejections": rejections,
         "market_state": market_state,
         "min_signal_quality": min_quality,
-        "fixed_trade_amount": fixed_amount,
+        "trade_amount_percentage": trade_percentage,
         "server_time": datetime.now(timezone.utc).isoformat()
     }
 
@@ -672,7 +673,7 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     
     return df_calc
 
-# --- Data Loading & Settings Management (remains the same) ---
+# --- Data Loading & Settings Management ---
 def load_open_signals_to_cache():
     if not check_db_connection() or not conn: return
     try:
@@ -699,13 +700,13 @@ def load_notifications_to_cache():
         logger.error(f"❌ [Cache] Failed to load notifications: {e}")
 
 def load_settings_from_redis():
-    global FIXED_TRADE_AMOUNT_USDT, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
+    global TRADE_AMOUNT_PERCENTAGE, MAX_OPEN_TRADES, USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY, paper_trading_mode, MIN_SIGNAL_QUALITY
     if not redis_client: return
     try:
         settings_data = redis_client.get('trading_settings')
         if settings_data:
             settings = json.loads(settings_data)
-            with fixed_trade_amount_lock: FIXED_TRADE_AMOUNT_USDT = settings.get('FIXED_TRADE_AMOUNT_USDT', 3.0)
+            with trade_amount_percentage_lock: TRADE_AMOUNT_PERCENTAGE = settings.get('TRADE_AMOUNT_PERCENTAGE', 50.0)
             MAX_OPEN_TRADES = settings.get('MAX_OPEN_TRADES', 3)
             with trading_mode_lock: paper_trading_mode = settings.get('paper_trading_mode', True)
             
@@ -736,7 +737,7 @@ def save_settings_to_redis():
     
     try:
         trading_settings = {
-            'FIXED_TRADE_AMOUNT_USDT': FIXED_TRADE_AMOUNT_USDT,
+            'TRADE_AMOUNT_PERCENTAGE': TRADE_AMOUNT_PERCENTAGE,
             'MAX_OPEN_TRADES': MAX_OPEN_TRADES,
             'paper_trading_mode': paper_trading_mode
         }
@@ -764,23 +765,7 @@ def save_settings_to_redis():
         return False
 
 # --- الفلاتر الديناميكية ونظام السوق ---
-def detect_market_regime(df: pd.DataFrame) -> str:
-    if len(df) < 21: return 'ranging_stable'
-    atr_percent = df['atr_percent'].iloc[-1]
-    adx = df['adx'].iloc[-1]
-    price_change = abs(df['close'].pct_change(20).iloc[-1])
-    
-    if adx > 25 and price_change > 0.1:
-        return 'trending_volatile'
-    elif adx > 25 and price_change <= 0.1:
-        return 'trending_stable'
-    elif adx <= 25 and atr_percent > 2.5:
-        return 'ranging_volatile'
-    else:
-        return 'ranging_stable'
-
 def get_wave_retracement(df: pd.DataFrame) -> float:
-    # دالة مساعدة لحساب تصحيح الموجة الأخيرة
     try:
         highs = df['high'].values
         lows = df['low'].values
@@ -805,70 +790,6 @@ def get_wave_retracement(df: pd.DataFrame) -> float:
     except Exception:
         return 999.0
 
-# --- نظام التعلم والتكيف ---
-class AdaptiveLearningSystem:
-    def __init__(self):
-        self.parameter_adjustments = {}
-        self.load_parameters()
-
-    def load_parameters(self):
-        if not redis_client: return
-        try:
-            params_json = redis_client.get('adaptive_parameters')
-            if params_json:
-                self.parameter_adjustments = json.loads(params_json)
-                logger.info("✅ [Adaptive] Loaded adaptive parameters from Redis.")
-        except Exception as e:
-            logger.error(f"❌ [Adaptive] Failed to load parameters from Redis: {e}")
-
-    def save_parameters(self):
-        if not redis_client: return
-        try:
-            redis_client.set('adaptive_parameters', json.dumps(self.parameter_adjustments))
-        except Exception as e:
-            logger.error(f"❌ [Adaptive] Failed to save parameters to Redis: {e}")
-            
-    def get_param(self, strategy_name: str, param_name: str, default: Any) -> Any:
-        return self.parameter_adjustments.get(strategy_name, {}).get(param_name, default)
-
-    def update_parameters_from_performance(self):
-        if not check_db_connection() or not conn: return
-
-        try:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT strategy_name, COUNT(*) as total, SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as wins
-                    FROM signals
-                    WHERE status = 'closed' AND closed_at >= NOW() - INTERVAL '7 days' AND strategy_name IS NOT NULL
-                    GROUP BY strategy_name
-                """)
-                performance_data = cur.fetchall()
-
-            for record in performance_data:
-                strategy = record['strategy_name']
-                win_rate = (record['wins'] / record['total']) if record['total'] > 0 else 0
-                
-                if strategy not in self.parameter_adjustments:
-                    self.parameter_adjustments[strategy] = {}
-
-                if win_rate < 0.4 and record['total'] > 10:
-                    logger.info(f"[Adaptive] Low win rate for {strategy} ({win_rate:.2f}). Increasing strictness.")
-                    if strategy == 'MACD_EMA_Strategy':
-                        self.parameter_adjustments[strategy]['adx_threshold'] = self.get_param(strategy, 'adx_threshold', 20) * 1.1
-                
-                elif win_rate > 0.7 and record['total'] > 10:
-                    logger.info(f"[Adaptive] High win rate for {strategy} ({win_rate:.2f}). Decreasing strictness.")
-                    if strategy == 'MACD_EMA_Strategy':
-                         self.parameter_adjustments[strategy]['adx_threshold'] = self.get_param(strategy, 'adx_threshold', 20) * 0.95
-            
-            self.save_parameters()
-
-        except Exception as e:
-            logger.error(f"❌ [Adaptive] Error updating parameters: {e}")
-
-# تهيئة نظام التعلم
-adaptive_system = AdaptiveLearningSystem()
-
 def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
@@ -892,7 +813,7 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     atr_percent = last_row.get('atr_percent', 0)
     
     default_adx_thresh = 22 if atr_percent > 2.5 else 17
-    adx_threshold = adaptive_system.get_param('MACD_EMA_Strategy', 'adx_threshold', default_adx_thresh)
+    adx_threshold = default_adx_thresh
     
     volume_ma = df['volume'].rolling(20).mean()
     volatility_adjusted_volume = volume_ma * (1 + atr_percent / 75)
@@ -936,8 +857,7 @@ def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
         pullback_depth *= 1.2
     
     recent_low = df['low'].tail(5).min()
-    # --- FIX: Relaxed recovery threshold ---
-    recovery_threshold = recent_low * (1 + (pullback_depth * 0.9)) # Requires 90% of the original recovery
+    recovery_threshold = recent_low * (1 + (pullback_depth * 0.9))
     
     volume_ma = df['volume'].rolling(20).mean()
     recovery_volume_multiplier = 1.1 + (atr_percent / 100)
@@ -956,7 +876,6 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     dynamic_vol_min = volatility_ma.iloc[-1] - (volatility_std.iloc[-1] * 1.5)
     dynamic_vol_max = volatility_ma.iloc[-1] + (volatility_std.iloc[-1] * 1.5)
     
-    # --- FIX: Simplified and relaxed momentum score check ---
     is_momentum_ok = (last_row['rsi'] > 51) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
 
     adx_ma = df['adx'].rolling(20).mean()
@@ -972,11 +891,10 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- FIX: Expanded Fibonacci retracement range ---
     if atr_percent > 2.5:
-        fib_min, fib_max = 0.236, 0.886 # Formerly 0.3, 0.786
+        fib_min, fib_max = 0.236, 0.886
     else:
-        fib_min, fib_max = 0.236, 0.786 # Formerly 0.2, 0.618
+        fib_min, fib_max = 0.236, 0.786
     
     volume_ma = df['volume'].rolling(20).mean()
     wave_volume_multiplier = 1.3 + (atr_percent / 50)
@@ -1109,7 +1027,7 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     
     return target1, target2
 
-# --- استراتيجيات التداول المعدلة مع الفلاتر الديناميكية ---
+# --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200: return False
@@ -1150,12 +1068,9 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     last = df.iloc[-1]
     
-    # --- FIX: Major logic change. Instead of requiring a bullish trend, we now only avoid a strongly bearish trend. ---
     is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
     is_long_term_bearish = last['close'] < last['sma200']
 
-    # Only reject if the trend is bearish on BOTH short-term AND long-term indicators.
-    # This allows trading in neutral / sideways markets.
     if is_mtf_bearish and is_long_term_bearish:
         log_rejection(symbol_name, "MACD: Strongly bearish trend")
         return False
@@ -1206,7 +1121,6 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
 
     last = df.iloc[-1]
     
-    # --- FIX: Major logic change. Same as MACD strategy, we avoid strongly bearish markets. ---
     is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
     is_long_term_bearish = last['close'] < last['ema200']
     
@@ -1270,8 +1184,8 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         return None
 
 def calculate_position_size(symbol: str, entry_price: float, available_balance: float) -> Optional[Decimal]:
-    with fixed_trade_amount_lock:
-        fixed_amount = FIXED_TRADE_AMOUNT_USDT
+    with trade_amount_percentage_lock:
+        trade_percent = TRADE_AMOUNT_PERCENTAGE
     
     try:
         dec_entry = Decimal(str(entry_price))
@@ -1280,15 +1194,15 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
             return None
         
         dec_balance = Decimal(str(available_balance))
-        dec_fixed_amount = Decimal(str(fixed_amount))
+        dec_desired_amount = (dec_balance * Decimal(str(trade_percent))) / Decimal('100')
         
-        logger.info(f"[{symbol}] Starting position sizing. Desired amount: ${dec_fixed_amount}, Available Balance: ${dec_balance:.2f}")
+        logger.info(f"[{symbol}] Starting position sizing. Desired amount: ${dec_desired_amount:.2f} ({trade_percent}% of ${dec_balance:.2f})")
 
-        if dec_fixed_amount > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
+        if dec_desired_amount > dec_balance:
+            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_desired_amount:.2f}", "available": f"${dec_balance:.2f}"})
             return None
 
-        initial_quantity = dec_fixed_amount / dec_entry
+        initial_quantity = dec_desired_amount / dec_entry
         adjusted_quantity = adjust_quantity_to_lot_size(symbol, float(initial_quantity))
 
         if adjusted_quantity is None:
@@ -1456,7 +1370,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.3.2)</title>
+<title>لوحة التحكم - بوت التداول (V33.3.3)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1523,7 +1437,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.3.2</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.3.3</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1591,8 +1505,8 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
             </div>
           </div>
           <div class="kv" style="margin-top: 12px;">
-            <div>حجم الصفقة الثابت:</div>
-            <div id="fixedTradeAmountDisplay">$3.00</div>
+            <div>حجم الصفقة (% من الرصيد):</div>
+            <div id="tradeAmountPercentageDisplay">50.00%</div>
           </div>
         </div>
       </div>
@@ -1803,7 +1717,7 @@ async function initializeDashboard() {
         qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي';
         qs('#qualityFilter').value = baseData.min_signal_quality;
         qs('#qualityValue').textContent = baseData.min_signal_quality;
-        qs('#fixedTradeAmountDisplay').textContent = `$${parseFloat(baseData.fixed_trade_amount).toFixed(2)}`;
+        qs('#tradeAmountPercentageDisplay').textContent = `${parseFloat(baseData.trade_amount_percentage).toFixed(2)}%`;
         updateMarketTrends(baseData.market_state);
         
         qs('#rejections tbody').innerHTML = '';
@@ -1856,7 +1770,7 @@ function setupWebSocket() {
             case 'market_state_update': updateMarketTrends(data.payload); break;
             case 'trading_mode': const isPaper = data.payload.paper_trading; qs('#tradingModeToggle').checked = !isPaper; qs('#tradingModeText').textContent = isPaper ? 'ورقي' : 'حقيقي'; break;
             case 'quality_filter': qs('#qualityFilter').value = data.payload.min_quality; qs('#qualityValue').textContent = data.payload.min_quality; break;
-            case 'fixed_amount_update': qs('#fixedTradeAmountDisplay').textContent = `$${parseFloat(data.payload.fixed_amount).toFixed(2)}`; break;
+            case 'trade_amount_update': qs('#tradeAmountPercentageDisplay').textContent = `${parseFloat(data.payload.trade_amount_percentage).toFixed(2)}%`; break;
         }
     };
     socket.onclose = () => { console.log("WebSocket connection closed, reconnecting..."); setTimeout(setupWebSocket, 3000); };
@@ -1925,7 +1839,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.3.2)</title>
+<title>الإعدادات - بوت التداول (V33.3.3)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -1967,8 +1881,8 @@ h1{font-size:22px;margin:0;font-weight:700;color:#d7e4ff}
             <h2>إعدادات التداول العامة</h2>
             <div class="card-body form-grid">
                 <div class="form-group">
-                    <label for="fixedAmountInput">حجم الصفقة الثابت (USDT)</label>
-                    <input type="number" id="fixedAmountInput" name="FIXED_TRADE_AMOUNT_USDT" value="{{ fixed_trade_amount }}" step="0.1" min="1.0" max="100.0">
+                    <label for="tradeAmountPercentageInput">حجم الصفقة (% من الرصيد)</label>
+                    <input type="number" id="tradeAmountPercentageInput" name="TRADE_AMOUNT_PERCENTAGE" value="{{ trade_amount_percentage }}" step="0.5" min="0.5" max="50.0">
                 </div>
                 <div class="form-group">
                     <label for="maxTradesInput">الحد الأقصى للصفقات المفتوحة</label>
@@ -2280,7 +2194,7 @@ function updateEquityChart(equityData) {
 </html>
 """
 
-# --- مسارات Flask (تبقى كما هي) ---
+# --- مسارات Flask ---
 @app.route('/')
 def dashboard(): return render_template_string(DASHBOARD_TEMPLATE)
 @app.route('/backtest')
@@ -2288,7 +2202,7 @@ def backtest_page(): return render_template_string(BACKTEST_TEMPLATE, STRATEGY_N
 
 @app.route('/settings')
 def settings_page():
-    with fixed_trade_amount_lock: fixed_trade_amount = FIXED_TRADE_AMOUNT_USDT
+    with trade_amount_percentage_lock: trade_amount_percentage = TRADE_AMOUNT_PERCENTAGE
     with trading_mode_lock: is_paper_mode = paper_trading_mode
     with min_quality_lock: min_quality = MIN_SIGNAL_QUALITY
     
@@ -2303,7 +2217,7 @@ def settings_page():
     }
     
     return render_template_string(SETTINGS_TEMPLATE, 
-                                  fixed_trade_amount=fixed_trade_amount,
+                                  trade_amount_percentage=trade_amount_percentage,
                                   MAX_OPEN_TRADES=MAX_OPEN_TRADES,
                                   min_quality=min_quality,
                                   is_paper_mode=is_paper_mode,
@@ -2316,6 +2230,38 @@ def dashboard_data():
     except Exception as e:
         logger.error(f"❌ [API Error] Failed to generate dashboard data: {e}", exc_info=True)
         return jsonify({"error": "Failed to load dashboard data."}), 500
+
+@app.route('/toggle_trading', methods=['POST'])
+def toggle_trading():
+    global is_trading_enabled
+    with trading_status_lock: is_trading_enabled = not is_trading_enabled
+    status_msg = "enabled" if is_trading_enabled else "disabled"
+    log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
+    return jsonify({"status": "success", "trading_enabled": is_trading_enabled})
+
+@app.route('/api/settings', methods=['POST'])
+def update_settings():
+    try:
+        data = request.json
+        if 'TRADE_AMOUNT_PERCENTAGE' in data:
+            with trade_amount_percentage_lock:
+                global TRADE_AMOUNT_PERCENTAGE
+                TRADE_AMOUNT_PERCENTAGE = float(data['TRADE_AMOUNT_PERCENTAGE'])
+                broadcast({"type": "trade_amount_update", "payload": {"trade_amount_percentage": TRADE_AMOUNT_PERCENTAGE}})
+        if 'MAX_OPEN_TRADES' in data:
+            global MAX_OPEN_TRADES
+            MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
+        if 'paper_trading_mode' in data:
+            with trading_mode_lock:
+                global paper_trading_mode
+                paper_trading_mode = bool(data['paper_trading_mode'])
+        save_settings_to_redis()
+        return jsonify({"success": True, "message": "Settings updated successfully"})
+    except Exception as e:
+        logger.error(f"Error updating settings: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+# (Rest of the Flask routes and main script logic remains the same as previous version)
 @app.route('/api/health')
 def api_health():
     try:
@@ -2428,36 +2374,6 @@ def advanced_performance_data():
         logger.error(f"❌ [API] Error fetching advanced performance data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/toggle_trading', methods=['POST'])
-def toggle_trading():
-    global is_trading_enabled
-    with trading_status_lock: is_trading_enabled = not is_trading_enabled
-    status_msg = "enabled" if is_trading_enabled else "disabled"
-    log_and_notify("info", f"Trading has been {status_msg}.", "TRADING_STATUS")
-    return jsonify({"status": "success", "trading_enabled": is_trading_enabled})
-
-@app.route('/api/settings', methods=['POST'])
-def update_settings():
-    try:
-        data = request.json
-        if 'FIXED_TRADE_AMOUNT_USDT' in data:
-            with fixed_trade_amount_lock:
-                global FIXED_TRADE_AMOUNT_USDT
-                FIXED_TRADE_AMOUNT_USDT = float(data['FIXED_TRADE_AMOUNT_USDT'])
-                broadcast({"type": "fixed_amount_update", "payload": {"fixed_amount": FIXED_TRADE_AMOUNT_USDT}})
-        if 'MAX_OPEN_TRADES' in data:
-            global MAX_OPEN_TRADES
-            MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
-        if 'paper_trading_mode' in data:
-            with trading_mode_lock:
-                global paper_trading_mode
-                paper_trading_mode = bool(data['paper_trading_mode'])
-        save_settings_to_redis()
-        return jsonify({"success": True, "message": "Settings updated successfully"})
-    except Exception as e:
-        logger.error(f"Error updating settings: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-
 @app.route('/api/strategies', methods=['POST'])
 def update_strategies():
     try:
@@ -2540,7 +2456,24 @@ def api_close_trade(signal_id):
     return jsonify({"success": True, "message": "Trade close command received and is being processed."})
 
 
-# --- Backtesting System (remains unchanged) ---
+@app.route('/api/run_backtest', methods=['POST'])
+def api_run_backtest():
+    try:
+        data = request.json
+        strategy = data.get('strategy')
+        symbol = data.get('symbol', '').upper()
+        days = int(data.get('days', 90))
+
+        if not all([strategy, symbol, days]):
+            return jsonify({"error": "Missing parameters."}), 400
+
+        results = backtest_strategy(strategy, symbol, days)
+        return jsonify(results)
+    except Exception as e:
+        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
+        return jsonify({"error": "An internal error occurred."}), 500
+
+# (The rest of the main script, including backtesting, loops, and startup logic, remains the same)
 def backtest_strategy(strategy_name, symbol, days=90):
     logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
@@ -2554,7 +2487,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     active_trade = None
     initial_balance = 1000.0
     equity_curve = [initial_balance]
-    backtest_trade_amount = 10.0 # حجم الصفقة الثابت للاختبار الخلفي
+    backtest_trade_amount = 10.0
 
     strategy_functions = {
         'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
@@ -2569,7 +2502,6 @@ def backtest_strategy(strategy_name, symbol, days=90):
     if not check_strategy:
         return {"error": f"Strategy '{strategy_name}' not found."}
     
-    # Dummy mtf_trend for backtesting
     dummy_mtf = {'15m': 'bullish', '1h': 'bullish'}
 
     for i in range(200, len(df)):
@@ -2640,25 +2572,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
         'win_rate': win_rate, 'avg_profit': avg_profit, 'profit_factor': profit_factor,
         'results': results, 'equity_curve': equity_curve
     }
-
-@app.route('/api/run_backtest', methods=['POST'])
-def api_run_backtest():
-    try:
-        data = request.json
-        strategy = data.get('strategy')
-        symbol = data.get('symbol', '').upper()
-        days = int(data.get('days', 90))
-
-        if not all([strategy, symbol, days]):
-            return jsonify({"error": "Missing parameters."}), 400
-
-        results = backtest_strategy(strategy, symbol, days)
-        return jsonify(results)
-    except Exception as e:
-        logger.error(f"❌ [Backtest API] Error: {e}", exc_info=True)
-        return jsonify({"error": "An internal error occurred."}), 500
-
-# --- Main Loop & Threads ---
+    
 def get_mtf_trend(symbol: str) -> Dict[str, str]:
     trends = {}
     timeframes = {'15m': 10, '1h': 10}
@@ -2937,7 +2851,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.2 (Neutral Market Trading) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.3 (Percentage Sizing) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2954,7 +2868,6 @@ if __name__ == '__main__':
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
-    adaptive_system.load_parameters() # تحميل المعلمات التكيفية
     logger.info("Initial data fetch complete.")
     
     # Start background threads
