@@ -1,11 +1,12 @@
-# ملف c4.py - نسخة V33.3.1 (شروط مرنة)
+# ملف c4.py - نسخة V33.3.2 (تداول في السوق المحايد)
 # --- وصف التعديلات:
-# بناءً على سجل الرفض، تم تخفيف الشروط لزيادة عدد الصفقات المقبولة:
-# 1. [تخفيف شرط الاتجاه] تم تعديل استراتيجيات "MACD" و "Elliott Wave" لتقبل الإشارة إذا كان الاتجاه صاعدًا
-#    على إطار 15 دقيقة "أو" ساعة واحدة، بدلاً من الشرط السابق الذي كان يتطلب "كلا الإطارين معًا".
-#    هذا يسمح باقتناص الفرص في بداية تكون الاتجاهات.
-# 2. [تخفيف فلتر التقلب] تم خفض الحد الأدنى لفلتر التقلب (ATR Percent) من 1.5% إلى 1.2% للسماح
-#    بالتداول في العملات ذات التقلب المنخفض نسبياً.
+# بناءً على استمرار رفض الفرص في الأسواق غير الصاعدة بوضوح، تم إجراء تعديلات جوهرية:
+# 1. [السماح بالتداول المحايد] تم تغيير منطق استراتيجيات "MACD" و "Elliott Wave" بشكل كبير.
+#    بدلاً من التحقق من وجود اتجاه صاعد (is_bullish)، سيتحقق البوت الآن من "عدم وجود اتجاه هابط قوي".
+#    هذا يسمح بالدخول في صفقات في الأسواق الجانبية والمحايدة، مما يزيد بشكل كبير من عدد الفرص.
+# 2. [تخفيف فلتر الزخم] تم تبسيط وتخفيف شروط فلتر الزخم الديناميكي ليكون أكثر تساهلاً.
+# 3. [تخفيف فلتر الارتداد] تم جعل شرط تعافي السعر في استراتيجية الارتداد (Pullback) أكثر مرونة.
+# 4. [توسيع نطاق فيبوناتشي] تم توسيع النطاق المقبول لتصحيحات فيبوناتشي في استراتيجية موجات إليوت.
 
 import time
 import os
@@ -49,7 +50,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.3.1')
+logger = logging.getLogger('CryptoBotV33.3.2')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -174,10 +175,10 @@ REJECTION_REASONS_AR = {
     # Strategy Specific Rejections
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
     "BB: Price below EMA50 (bearish trend)": "BB: السعر تحت EMA50 (اتجاه هابط)",
-    "MACD: Not bullish on MTF or long-term": "MACD: الاتجاه ليس صاعدًا (إطارات متعددة أو طويل الأمد)",
+    "MACD: Strongly bearish trend": "MACD: الاتجاه هابط بقوة",
     "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه ليس صاعدًا بقوة",
     "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
-    "Elliott Wave: Not bullish on MTF or long-term": "موجات إليوت: الاتجاه ليس صاعدًا (إطارات متعددة أو طويل الأمد)",
+    "Elliott Wave: Strongly bearish trend": "موجات إليوت: الاتجاه هابط بقوة",
     "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
     "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
     "Range Reversal: Trend too strong (ADX > 23)": "انعكاس نطاقي: الاتجاه قوي جدًا (ADX > 23)",
@@ -931,12 +932,12 @@ def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
     atr_percent = last_row.get('atr_percent', 0)
     
     pullback_depth = 0.035 if atr_percent > 2.0 else 0.02
-    # [تعديل] السماح بارتداد أعمق في الاتجاهات الصاعدة القوية
     if mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish':
-        pullback_depth *= 1.2 # Allow 20% deeper pullbacks
+        pullback_depth *= 1.2
     
     recent_low = df['low'].tail(5).min()
-    recovery_threshold = recent_low * (1 + pullback_depth)
+    # --- FIX: Relaxed recovery threshold ---
+    recovery_threshold = recent_low * (1 + (pullback_depth * 0.9)) # Requires 90% of the original recovery
     
     volume_ma = df['volume'].rolling(20).mean()
     recovery_volume_multiplier = 1.1 + (atr_percent / 100)
@@ -955,19 +956,15 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     dynamic_vol_min = volatility_ma.iloc[-1] - (volatility_std.iloc[-1] * 1.5)
     dynamic_vol_max = volatility_ma.iloc[-1] + (volatility_std.iloc[-1] * 1.5)
     
-    momentum_indicators = [
-        last_row['macd_hist'],
-        last_row['rsi'] - 50,
-        (last_row['close'] - last_row['ema21']) / last_row['ema21']
-    ]
-    momentum_score = sum(momentum_indicators) / len(momentum_indicators)
-    
+    # --- FIX: Simplified and relaxed momentum score check ---
+    is_momentum_ok = (last_row['rsi'] > 51) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
+
     adx_ma = df['adx'].rolling(20).mean()
     dynamic_adx_threshold = adx_ma.iloc[-1] * 0.85
     
     return {
         'volatility_ok': dynamic_vol_min <= atr_percent.iloc[-1] <= dynamic_vol_max,
-        'momentum_ok': momentum_score > 0,
+        'momentum_ok': is_momentum_ok,
         'adx_ok': last_row['adx'] > dynamic_adx_threshold,
     }
 
@@ -975,10 +972,11 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
+    # --- FIX: Expanded Fibonacci retracement range ---
     if atr_percent > 2.5:
-        fib_min, fib_max = 0.3, 0.786
+        fib_min, fib_max = 0.236, 0.886 # Formerly 0.3, 0.786
     else:
-        fib_min, fib_max = 0.2, 0.618
+        fib_min, fib_max = 0.236, 0.786 # Formerly 0.2, 0.618
     
     volume_ma = df['volume'].rolling(20).mean()
     wave_volume_multiplier = 1.3 + (atr_percent / 50)
@@ -1037,8 +1035,7 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    # --- FIX: Relaxed the minimum ATR requirement based on user feedback ---
-    ATR_PERCENT_MIN = 1.2 # تم تخفيضه من 1.5 للسماح بتداولات أكثر في الأسواق الأقل تقلباً
+    ATR_PERCENT_MIN = 1.2
     ATR_PERCENT_MAX = 4.0
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
@@ -1153,12 +1150,14 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     
     last = df.iloc[-1]
     
-    # --- FIX: Relaxed MTF trend condition from AND to OR ---
-    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' or mtf_trend.get('1h') == 'bullish'
-    is_long_term_bullish = last['close'] > last['sma200']
+    # --- FIX: Major logic change. Instead of requiring a bullish trend, we now only avoid a strongly bearish trend. ---
+    is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
+    is_long_term_bearish = last['close'] < last['sma200']
 
-    if not (is_mtf_bullish or is_long_term_bullish):
-        log_rejection(symbol_name, "MACD: Not bullish on MTF or long-term")
+    # Only reject if the trend is bearish on BOTH short-term AND long-term indicators.
+    # This allows trading in neutral / sideways markets.
+    if is_mtf_bearish and is_long_term_bearish:
+        log_rejection(symbol_name, "MACD: Strongly bearish trend")
         return False
 
     hist = df['macd_hist'].tail(4).values
@@ -1207,12 +1206,12 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> b
 
     last = df.iloc[-1]
     
-    # --- FIX: Relaxed MTF trend condition from AND to OR ---
-    is_mtf_bullish = mtf_trend.get('15m') == 'bullish' or mtf_trend.get('1h') == 'bullish'
-    is_long_term_bullish = last['ema50'] > last['ema200']
-
-    if not (is_mtf_bullish or is_long_term_bullish):
-        log_rejection(symbol_name, "Elliott Wave: Not bullish on MTF or long-term")
+    # --- FIX: Major logic change. Same as MACD strategy, we avoid strongly bearish markets. ---
+    is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
+    is_long_term_bearish = last['close'] < last['ema200']
+    
+    if is_mtf_bearish and is_long_term_bearish:
+        log_rejection(symbol_name, "Elliott Wave: Strongly bearish trend")
         return False
     
     if last['adx'] < 22: return False
@@ -1457,7 +1456,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.3.1)</title>
+<title>لوحة التحكم - بوت التداول (V33.3.2)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1524,7 +1523,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.3.1</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V33.3.2</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1926,7 +1925,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.3.1)</title>
+<title>الإعدادات - بوت التداول (V33.3.2)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2938,7 +2937,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.1 (Flexible Conditions) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.2 (Neutral Market Trading) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
