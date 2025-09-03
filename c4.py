@@ -1,12 +1,13 @@
-# ملف c4.py - نسخة V33.3.3 (حجم الصفقة النسبي)
+# ملف c4_5min.py - نسخة V34.0.0 (متخصص لإطار 5 دقائق)
 # --- وصف التعديلات:
-# بناءً على طلب المستخدم، تم تغيير استراتيجية إدارة رأس المال بشكل جذري:
-# 1. [حجم الصفقة النسبي] تم إلغاء نظام حجم الصفقة الثابت (FIXED_TRADE_AMOUNT_USDT).
-# 2. [إدارة رأس المال بالنسبة المئوية] تم إضافة متغير جديد `TRADE_AMOUNT_PERCENTAGE` يسمح بتحديد
-#    حجم كل صفقة كنسبة مئوية من الرصيد المتاح. تم ضبط القيمة الافتراضية على 50% حسب الطلب.
-#    تحذير: هذه نسبة مخاطرة عالية جداً وغير مستصوبة.
-# 3. [تحديث الواجهة] تم تحديث واجهة التحكم وصفحة الإعدادات لتعكس التغيير الجديد،
-#    حيث يمكن للمستخدم الآن التحكم في النسبة المئوية لحجم الصفقة.
+# بناءً على طلب المستخدم، تم تعديل البوت بالكامل للعمل على إطار زمني 5 دقائق (Scalping).
+# 1. [تغيير الإطار الزمني] تم تغيير الإطار الزمني الرئيسي لتوليد الإشارات إلى '5m'.
+# 2. [ضبط الأطر الزمنية] تم تعديل الأطر الزمنية الأعلى لتصبح '15m' و '1h' لتحليل الاتجاه.
+# 3. [معايرة الفلاتر] تم ضبط فلاتر التقلب (ATR) وقوة الاتجاه (ADX) لتكون أكثر حساسية ومناسبة
+#    للإشارات السريعة على إطار 5 دقائق.
+# 4. [تحسين أهداف الربح] تم تعديل نسب المخاطرة إلى العائد (RRR) في جميع الاستراتيجيات
+#    لتتناسب مع طبيعة التداولات الخاطفة (Scalping).
+# 5. [تسريع دورة الفحص] تم تعديل الحلقة الرئيسية لتعمل كل 5 دقائق.
 
 import time
 import os
@@ -46,11 +47,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_v33_logs.log', encoding='utf-8'),
+        logging.FileHandler('crypto_bot_v34_5min_logs.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV33.3.3')
+logger = logging.getLogger('CryptoBotV34.0.0_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -89,7 +90,6 @@ COOLDOWN_MINUTES_AFTER_SL = 30
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
 # --- المتغيرات القابلة للتعديل ---
-# --- تنبيه: 50% هي نسبة مخاطرة عالية جداً. يوصى بشدة باستخدام 1-2% فقط. ---
 TRADE_AMOUNT_PERCENTAGE: float = 50.0
 trade_amount_percentage_lock = Lock()
 MAX_OPEN_TRADES: int = 3
@@ -119,11 +119,11 @@ STRATEGY_NAMES = {
 }
 strategy_filters_lock = Lock()
 
-# --- إعدادات عامة ---
-SIGNAL_GENERATION_TIMEFRAME: str = '15m'
-HIGHER_TIMEFRAME: str = '1h'
-TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['15m', '1h', '4h']
-SIGNAL_GENERATION_LOOKBACK_DAYS: int = 15
+# --- إعدادات عامة (معدلة لإطار 5 دقائق) ---
+SIGNAL_GENERATION_TIMEFRAME: str = '5m'
+HIGHER_TIMEFRAME: str = '15m'
+TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
+SIGNAL_GENERATION_LOOKBACK_DAYS: int = 7 # تقليل مدة البيانات التاريخية لتسريع الحسابات
 BTC_SYMBOL: str = 'BTCUSDT'
 API_REQUEST_DELAY: float = 1
 
@@ -408,7 +408,7 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     emoji = "🔥" if is_real else "📊"
     
     message = (
-        f"{emoji} *صفقة {trade_type} جديدة*\n\n"
+        f"{emoji} *صفقة {trade_type} جديدة (5 دقائق)*\n\n"
         f"*العملة:* `{symbol}`\n"
         f"*الاستراتيجية:* `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n"
         f"*جودة الإشارة:* `{quality_score}/100`\n"
@@ -797,7 +797,7 @@ def check_bb_stoch_dynamic_filters(df: pd.DataFrame) -> Dict:
     bb_width = df['bb_width']
     dynamic_bb_threshold = bb_width.rolling(20).mean() * 1.2
 
-    stoch_threshold = 23 if atr_percent > 3.0 else 18
+    stoch_threshold = 23 if atr_percent > 1.5 else 18 # Adjusted for 5m
     
     volume_ma = df['volume'].rolling(20).mean()
     volume_multiplier = 1.0 + (atr_percent / 100)
@@ -812,7 +812,7 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    default_adx_thresh = 22 if atr_percent > 2.5 else 17
+    default_adx_thresh = 20 if atr_percent > 1.5 else 16 # Adjusted for 5m
     adx_threshold = default_adx_thresh
     
     volume_ma = df['volume'].rolling(20).mean()
@@ -853,7 +853,7 @@ def check_pullback_dynamic_filters(df: pd.DataFrame, mtf_trend: Dict) -> Dict:
     atr_percent = last_row.get('atr_percent', 0)
     
     pullback_depth = 0.035 if atr_percent > 2.0 else 0.02
-    if mtf_trend.get('15m') == 'bullish' and mtf_trend.get('1h') == 'bullish':
+    if mtf_trend.get('5m') == 'bullish' and mtf_trend.get('15m') == 'bullish':
         pullback_depth *= 1.2
     
     recent_low = df['low'].tail(5).min()
@@ -925,7 +925,7 @@ def add_news_filter() -> bool:
     news_hours = [(12, 30), (14, 0), (18, 30)]
     now = datetime.now(timezone.utc)
     for hour, minute in news_hours:
-        if now.hour == hour and abs(now.minute - minute) <= 30:
+        if now.hour == hour and abs(now.minute - minute) <= 15: # Reduced window for 5m
             return False
     return True
 
@@ -953,8 +953,9 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    ATR_PERCENT_MIN = 1.2
-    ATR_PERCENT_MAX = 4.0
+    # Adjusted for 5-minute timeframe
+    ATR_PERCENT_MIN = 0.5
+    ATR_PERCENT_MAX = 2.8
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
         log_rejection(symbol, "Market Volatility Filter Failed", {
@@ -1008,19 +1009,20 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
 
 def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_loss: float, strategy_name: str) -> tuple:
     risk_amount = entry_price - stop_loss
-    if risk_amount <= 0: return (entry_price * 1.02, entry_price * 1.04)
+    if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.025) # Default for 5m
 
-    if strategy_name == "BB_Stoch_Strategy": rr1, rr2 = 2.5, 4.0
-    elif strategy_name == "MACD_EMA_Strategy": rr1, rr2 = 2.0, 3.5
-    elif strategy_name == "EMA_RSI_Strategy": rr1, rr2 = 2.2, 3.8
-    elif strategy_name == "Pullback_Strategy": rr1, rr2 = 2.3, 4.0
-    elif strategy_name == "Momentum_Volatility_Strategy": rr1, rr2 = 1.8, 3.2
-    elif strategy_name == "Elliott_Wave_Strategy": rr1, rr2 = 2.5, 4.5
+    # Risk-Reward Ratios adjusted for 5m timeframe (Scalping)
+    if strategy_name == "BB_Stoch_Strategy": rr1, rr2 = 1.8, 3.0
+    elif strategy_name == "MACD_EMA_Strategy": rr1, rr2 = 1.6, 2.8
+    elif strategy_name == "EMA_RSI_Strategy": rr1, rr2 = 1.7, 3.0
+    elif strategy_name == "Pullback_Strategy": rr1, rr2 = 1.8, 3.2
+    elif strategy_name == "Momentum_Volatility_Strategy": rr1, rr2 = 1.5, 2.5
+    elif strategy_name == "Elliott_Wave_Strategy": rr1, rr2 = 2.0, 3.5
     elif strategy_name == "Range_Reversal_Strategy":
-        middle_band = df.iloc[-1].get('bb_middle', entry_price * 1.02)
-        upper_band = df.iloc[-1].get('bb_upper', entry_price * 1.04)
+        middle_band = df.iloc[-1].get('bb_middle', entry_price * 1.015)
+        upper_band = df.iloc[-1].get('bb_upper', entry_price * 1.03)
         return middle_band, upper_band
-    else: rr1, rr2 = 2.0, 3.5
+    else: rr1, rr2 = 1.6, 2.8
         
     target1 = entry_price + (risk_amount * rr1)
     target2 = entry_price + (risk_amount * rr2)
@@ -1297,7 +1299,7 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             logger.error(f"❌ [{symbol}] Failed to fetch REAL USDT balance: {e}. Trade rejected.")
             return
     else:
-        available_balance = PAPER_TRADE_INITIAL_BALANCE
+        with balance_lock: available_balance = usdt_balance if usdt_balance > 0 else PAPER_TRADE_INITIAL_BALANCE
 
     quantity_dec = calculate_position_size(symbol, entry_price, available_balance)
 
@@ -1335,6 +1337,9 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
             symbol, strategy_name, entry_price, stop_loss_price, target_price_1, target_price_2,
             float(quantity_dec), is_real, quality_score, df.iloc[-1].get('atr_percent', 0), notional_value
         )
+        with balance_lock:
+             global usdt_balance
+             usdt_balance -= notional_value
 
 def save_signal_to_db(symbol: str, entry_price: float, trade_levels: Dict, strategy_name: str, is_real: bool, quantity: float, signal_details: Dict, order_id: Optional[str] = None):
     try:
@@ -1370,7 +1375,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V33.3.3)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.0.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1437,7 +1442,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V33.3.3</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1687,7 +1692,7 @@ function updateMarketTrends(marketState) {
   const trendsContainer = document.getElementById('marketTrends');
   trendsContainer.innerHTML = '';
   if (marketState && marketState.trend_details_by_tf) {
-    ['15m', '1h', '4h'].forEach(tf => {
+    ['5m', '15m', '1h'].forEach(tf => {
       const trend = marketState.trend_details_by_tf[tf];
       if (trend) {
         let trendClass = 'amber', trendText = 'جانبي';
@@ -1839,7 +1844,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V33.3.3)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.0.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2475,7 +2480,7 @@ def api_run_backtest():
 
 # (The rest of the main script, including backtesting, loops, and startup logic, remains the same)
 def backtest_strategy(strategy_name, symbol, days=90):
-    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days.")
+    logger.info(f"[Backtest] Starting for {strategy_name} on {symbol} for {days} days on {SIGNAL_GENERATION_TIMEFRAME}.")
     df = fetch_historical_data(symbol, SIGNAL_GENERATION_TIMEFRAME, days)
     if df is None or len(df) < 200:
         logger.error(f"[Backtest] Insufficient historical data for {symbol}.")
@@ -2502,7 +2507,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     if not check_strategy:
         return {"error": f"Strategy '{strategy_name}' not found."}
     
-    dummy_mtf = {'15m': 'bullish', '1h': 'bullish'}
+    dummy_mtf = {'5m': 'bullish', '15m': 'bullish'}
 
     for i in range(200, len(df)):
         current_candle = df.iloc[i]
@@ -2575,7 +2580,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     
 def get_mtf_trend(symbol: str) -> Dict[str, str]:
     trends = {}
-    timeframes = {'15m': 10, '1h': 10}
+    timeframes = {'5m': 7, '15m': 10} # Adjusted for 5m strategy
 
     for tf, days in timeframes.items():
         try:
@@ -2601,12 +2606,13 @@ def get_mtf_trend(symbol: str) -> Dict[str, str]:
     return trends
     
 def main_bot_loop():
-    logger.info("🚀 [Main Loop] Starting signal scanning loop...")
+    logger.info("🚀 [Main Loop] Starting signal scanning loop (5-minute cycle)...")
     while True:
         try:
             while True:
                 now = datetime.now(timezone.utc)
-                seconds_until_next_candle = (15 - (now.minute % 15)) * 60 - now.second
+                # Adjusted for 5-minute candles
+                seconds_until_next_candle = (5 - (now.minute % 5)) * 60 - now.second
                 
                 is_enabled_now = False
                 with trading_status_lock:
@@ -2623,7 +2629,7 @@ def main_bot_loop():
                     logger.info("Trading was disabled during the wait. Skipping scan cycle.")
                     continue
             
-            logger.info("="*20 + " Starting New Scan Cycle " + "="*20)
+            logger.info("="*20 + " Starting New 5-Min Scan Cycle " + "="*20)
             for symbol in validated_symbols_to_scan:
                 with signal_cache_lock:
                     if len(open_signals_cache) >= MAX_OPEN_TRADES:
@@ -2718,6 +2724,13 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
             logger.error(f"❌ [Real Close] CRITICAL ERROR for {symbol}: {e}", exc_info=True)
 
     profit = ((closing_price - entry_price) / entry_price) * 100
+    if not signal.get('is_real_trade'):
+        with balance_lock:
+            global usdt_balance
+            initial_notional = signal.get('initial_quantity', 0) * entry_price
+            final_value = signal.get('initial_quantity', 0) * closing_price
+            usdt_balance += (final_value - initial_notional)
+
     with consecutive_losses_lock:
         if profit < 0: consecutive_losses_by_symbol[symbol] = consecutive_losses_by_symbol.get(symbol, 0) + 1
         else: consecutive_losses_by_symbol[symbol] = 0
@@ -2770,11 +2783,19 @@ def trade_management_loop():
                                 logger.error(f"❌ [Partial Close] Error for {symbol}: {e}")
                     
                     new_sl = max(stop_loss, entry_price)
-                    updates = {"quantity": remaining_qty - part_qty_to_close, "stop_loss": new_sl, "status": "updated"}
+                    new_remaining_qty = remaining_qty - part_qty_to_close
+                    updates = {"quantity": new_remaining_qty, "stop_loss": new_sl, "status": "updated"}
                     details['tp1_done'] = True
                     updates['signal_details'] = json.dumps(details)
                     update_signal_in_db(signal['id'], updates)
                     send_enhanced_telegram_message(f"🥇 *تحقق الهدف الأول* لـ `{symbol}`\nتم إقفال 50% من العقد وتحريك الوقف إلى نقطة الدخول.")
+                    
+                    if not signal.get('is_real_trade'):
+                         with balance_lock:
+                             global usdt_balance
+                             closed_notional = part_qty_to_close * entry_price
+                             final_value = part_qty_to_close * tp1
+                             usdt_balance += (final_value - closed_notional)
                     continue
                 
                 profit_pct = ((current_price - entry_price) / max(entry_price, 1e-8)) * 100 if entry_price else 0
@@ -2787,7 +2808,7 @@ def trade_management_loop():
                     new_sl = max(stop_loss, current_price * (1 - (TRAILING_STOP_ACTIVATION_PROFIT_PERCENT / 200)))
                     if new_sl > stop_loss:
                         update_signal_in_db(signal['id'], {"stop_loss": new_sl})
-                        send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
+                        # send_enhanced_telegram_message(f"🔧 *تحديث الوقف المتحرك* لـ `{symbol}` → `{new_sl:.6f}`")
             time.sleep(1)
         except Exception as e:
             logger.error(f"❌ [Trade Manager] Loop error: {e}", exc_info=True)
@@ -2835,12 +2856,19 @@ def start_market_state_updater():
     logger.info("[Market State] Started market state updater thread")
 
 def update_balance():
+    with trading_mode_lock:
+        is_paper = paper_trading_mode
+    
+    if is_paper:
+        # For paper trading, balance is managed internally
+        return
+
     try:
         balance_info = client.get_asset_balance(asset='USDT')
         with balance_lock:
             global usdt_balance
             usdt_balance = float(balance_info['free'])
-    except Exception as e: logger.error(f"❌ [Balance] Could not update USDT balance: {e}")
+    except Exception as e: logger.error(f"❌ [Balance] Could not update REAL USDT balance: {e}")
 
 def update_balance_loop():
     logger.info("🚀 [Balance Updater] Starting balance update loop...")
@@ -2851,7 +2879,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V33.3.3 (Percentage Sizing) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.0 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2868,6 +2896,7 @@ if __name__ == '__main__':
     load_open_signals_to_cache()
     load_notifications_to_cache()
     load_settings_from_redis()
+    with balance_lock: usdt_balance = PAPER_TRADE_INITIAL_BALANCE # Initialize paper balance
     logger.info("Initial data fetch complete.")
     
     # Start background threads
@@ -2881,4 +2910,3 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
-
