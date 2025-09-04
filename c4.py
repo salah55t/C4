@@ -1,11 +1,10 @@
-# ملف c4.py - نسخة V32.9.0 (مُحسَّنة لفريم 5 دقائق)
+# ملف c4.py - نسخة V32.9.1 (تطبيق الفلاتر على الاختبار الخلفي)
 # --- وصف التعديلات:
-# 1.  [ضبط الإطار الزمني] تم تغيير إطار العمل الرئيسي إلى 5 دقائق، والإطار الأعلى إلى 15 دقيقة.
-# 2.  [تحسين المؤشرات] تم تعديل فترات مؤشرات EMA, RSI, MACD, و Stochastic لتكون أسرع وأكثر استجابة.
-# 3.  [تكييف الاستراتيجيات] تم تعديل عتبات ADX و RSI داخل كل استراتيجية لتناسب الحركة السريعة لفريم الـ 5 دقائق.
-# 4.  [إدارة المخاطر] تم تقليل نسب أخذ الربح ووقف الخسارة (Risk/Reward) لتكون أكثر واقعية للصفقات السريعة.
-# 5.  [تعديل الفلاتر] تم تعديل فلتر التقلب (ATR) ليعمل مع النطاقات السعرية الضيقة المميزة للفريمات الصغيرة.
-# 6.  [تحسين الأداء] تم تقليل فترة جلب البيانات التاريخية لتسريع عملية الفحص.
+# 1.  [محاكاة واقعية] تم تعديل دالة الاختبار الخلفي (backtest_strategy) لتطبيق فلتر تقلب السوق (ATR)
+#     تماماً كما يتم تطبيقه في التداول المباشر. هذا يضمن أن نتائج الاختبار الخلفي تعكس بشكل أدق
+#     الأداء المتوقع للبوت في الظروف الحقيقية.
+# 2.  [ملاحظة] الفلاتر المعتمدة على الوقت الحالي (مثل فلتر الأخبار والسيولة) لا يمكن محاكاتها تاريخياً
+#     بدقة، لذا تم التركيز على تطبيق الفلاتر القائمة على بيانات الشموع نفسها.
 
 import time
 import os
@@ -49,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV32.9.0')
+logger = logging.getLogger('CryptoBotV32.9.1')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -84,7 +83,6 @@ cooldowns_by_symbol = {}
 cooldowns_lock = Lock()
 consecutive_losses_by_symbol = {}
 consecutive_losses_lock = Lock()
-# [تعديل لفريم 5 دقائق] تقليل فترة التبريد بعد الخسارة لتناسب سرعة الفريم
 COOLDOWN_MINUTES_AFTER_SL = 15
 PAPER_TRADE_INITIAL_BALANCE = 1000.0
 
@@ -117,11 +115,9 @@ STRATEGY_NAMES = {
 strategy_filters_lock = Lock()
 
 # --- إعدادات عامة ---
-# [تعديل لفريم 5 دقائق] تغيير الإطارات الزمنية الرئيسية
 SIGNAL_GENERATION_TIMEFRAME: str = '5m'
 HIGHER_TIMEFRAME: str = '15m'
 TIMEFRAMES_FOR_TREND_LIGHTS: List[str] = ['5m', '15m', '1h']
-# [تعديل لفريم 5 دقائق] تقليل فترة جلب البيانات لتسريع الفحص
 SIGNAL_GENERATION_LOOKBACK_DAYS: int = 5
 BTC_SYMBOL: str = 'BTCUSDT'
 API_REQUEST_DELAY: float = 1
@@ -619,7 +615,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['sma200'] = df_calc['close'].rolling(window=200).mean()
 
     # --- EMA Calculations ---
-    # [تعديل لفريم 5 دقائق] استخدام فترات أسرع
     df_calc['ema5'] = df_calc['close'].ewm(span=5, adjust=False).mean()
     df_calc['ema10'] = df_calc['close'].ewm(span=10, adjust=False).mean()
     df_calc['ema20'] = df_calc['close'].ewm(span=20, adjust=False).mean()
@@ -645,7 +640,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['adx'] = dx.ewm(span=14, adjust=False).mean()
     
     # --- RSI Calculation ---
-    # [تعديل لفريم 5 دقائق] تعديل فترة RSI لتقليل الضوضاء قليلاً
     delta = df_calc['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -662,7 +656,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['bb_upper'] = bb_middle + (bb_std * 2)
     
     # --- MACD ---
-    # [تعديل لفريم 5 دقائق] إعدادات فائقة السرعة لفريم 5 دقائق
     exp1 = df_calc['close'].ewm(span=5, adjust=False).mean()
     exp2 = df_calc['close'].ewm(span=13, adjust=False).mean()
     df_calc['macd'] = exp1 - exp2
@@ -670,7 +663,6 @@ def calculate_all_features(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['macd_hist'] = df_calc['macd'] - df_calc['macd_signal']
     
     # --- Stochastic ---
-    # [تعديل لفريم 5 دقائق] إعدادات أسرع للستوكاستيك
     low_10 = df_calc['low'].rolling(10).min()
     high_10 = df_calc['high'].rolling(10).max()
     high_low_range = high_10 - low_10
@@ -810,15 +802,16 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
     
-    # [تعديل لفريم 5 دقائق] استخدام نطاق تقلبات مناسب للصفقات السريعة
     ATR_PERCENT_MIN = 0.5
     ATR_PERCENT_MAX = 2.5
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
-        log_rejection(symbol, "Market Volatility Filter Failed", {
-            "atr": f"{last_atr_percent:.2f}%",
-            "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
-        })
+        # في الاختبار الخلفي، لا نسجل الرفض لتجنب إبطاء العملية
+        if __name__ == '__main__': # This condition ensures rejection is logged only in live mode
+            log_rejection(symbol, "Market Volatility Filter Failed", {
+                "atr": f"{last_atr_percent:.2f}%",
+                "range": f"({ATR_PERCENT_MIN:.2f}-{ATR_PERCENT_MAX:.2f})%"
+            })
         return False
     
     return True
@@ -828,7 +821,6 @@ def calculate_dynamic_stop_loss(df: pd.DataFrame, entry_price: float, strategy_n
     last = df.iloc[-1]
     atr_value = last.get('atr', 0)
     
-    # [تعديل لفريم 5 دقائق] تضييق مضاعفات ATR لوقف الخسارة
     if strategy_name == "BB_Stoch_Strategy":
         recent_low = df['low'].tail(3).min()
         stop_loss = min(recent_low * 0.995, entry_price - (atr_value * 1.2))
@@ -866,7 +858,6 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     risk_amount = entry_price - stop_loss
     if risk_amount <= 0: return (entry_price * 1.015, entry_price * 1.03)
 
-    # [تعديل لفريم 5 دقائق] تقليل نسب الربح لتكون واقعية أكثر
     if strategy_name == "BB_Stoch_Strategy":
         rr1, rr2 = 1.5, 2.5
     elif strategy_name == "MACD_EMA_Strategy":
@@ -889,36 +880,33 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
 
 # --- استراتيجيات التداول المعدلة ---
 def check_ema_rsi_strategy_enhanced(df: pd.DataFrame) -> bool:
-    # [تعديل لفريم 5 دقائق] تحديث المؤشرات المستخدمة
     needed = {'ema5', 'ema20', 'ema50', 'ema200', 'rsi', 'low', 'close', 'volume', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
 
     last = df.iloc[-1]
     
     if last['ema50'] < last['ema200']:
-        log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
+        if __name__ == '__main__': log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
         return False
     
-    # [تعديل لفريم 5 دقائق] استخدام EMA5 الأسرع
     if last['close'] <= last['ema5']:
-        log_rejection(symbol_name, "EMA_RSI: Price not above EMA5")
+        if __name__ == '__main__': log_rejection(symbol_name, "EMA_RSI: Price not above EMA5")
         return False
 
     if last['rsi'] <= 50:
-        log_rejection(symbol_name, "EMA_RSI: RSI not above 50")
+        if __name__ == '__main__': log_rejection(symbol_name, "EMA_RSI: RSI not above 50")
         return False
     
-    # [تعديل لفريم 5 دقائق] تقليل عتبة ADX
     if last['adx'] < 17:
-        log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 17)")
+        if __name__ == '__main__': log_rejection(symbol_name, "EMA_RSI: Weak trend (ADX < 17)")
         return False
         
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.1
     if not volume_ok:
-        log_rejection(symbol_name, "EMA_RSI: Volume below average")
+        if __name__ == '__main__': log_rejection(symbol_name, "EMA_RSI: Volume below average")
         return False
         
     return True
@@ -927,38 +915,36 @@ def check_bb_stoch_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'bb_lower', 'stoch_k', 'stoch_d', 'open', 'close', 'ema50', 'adx', 'volume'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
     if last['close'] < last['ema50']:
-        log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
+        if __name__ == '__main__': log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
         return False
     
-    # [تعديل لفريم 5 دقائق] تقليل عتبة ADX
     if last['adx'] < 16:
-        log_rejection(symbol_name, "BB: Weak trend (ADX < 16)")
+        if __name__ == '__main__': log_rejection(symbol_name, "BB: Weak trend (ADX < 16)")
         return False
     
     touched_lower_band = (df['low'].tail(3) <= df['bb_lower'].tail(3)).any()
     above_lower_band = last['close'] > last['bb_lower']
     
     if not (touched_lower_band and above_lower_band):
-        log_rejection(symbol_name, "BB: Price not bouncing from lower band")
+        if __name__ == '__main__': log_rejection(symbol_name, "BB: Price not bouncing from lower band")
         return False
     
-    # [تعديل لفريم 5 دقائق] زيادة حساسية الاستوكاستيك
     stoch_confirm = (prev['stoch_k'] < 25) and (last['stoch_k'] > prev['stoch_k']) and (last['stoch_k'] > last['stoch_d'])
     if not stoch_confirm:
-        log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
+        if __name__ == '__main__': log_rejection(symbol_name, "BB: Stochastic not confirming upward momentum")
         return False
         
     is_bullish_candle = last['close'] > last['open']
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 0.75
     if not (is_bullish_candle and volume_ok):
-        log_rejection(symbol_name, "BB: Weak bullish candle or low volume")
+        if __name__ == '__main__': log_rejection(symbol_name, "BB: Weak bullish candle or low volume")
         return False
 
     return True
@@ -967,143 +953,135 @@ def check_macd_ema_strategy_enhanced(df: pd.DataFrame) -> bool:
     needed = {'macd', 'macd_signal', 'macd_hist', 'close', 'sma7', 'sma200', 'adx', 'volume'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
     
     last = df.iloc[-1]
     
     if last['sma7'] <= last['sma200']:
-        log_rejection(symbol_name, "MACD: Bearish long-term trend (SMA7 below SMA200)")
+        if __name__ == '__main__': log_rejection(symbol_name, "MACD: Bearish long-term trend (SMA7 below SMA200)")
         return False
 
-    # [تعديل لفريم 5 دقائق] تقليل عتبة ADX
     if last['adx'] < 18:
-        log_rejection(symbol_name, "MACD: Weak trend (ADX < 18)")
+        if __name__ == '__main__': log_rejection(symbol_name, "MACD: Weak trend (ADX < 18)")
         return False
 
     hist = df['macd_hist'].tail(4).values
     if len(hist) < 4:
-        log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
+        if __name__ == '__main__': log_rejection(symbol_name, "MACD: Insufficient data for momentum check")
         return False
         
     macd_ok = last['macd'] > 0 and last['macd_hist'] > 0
     hist_accelerating = hist[3] > hist[2] and hist[2] > hist[1]
     
     if not (macd_ok and hist_accelerating):
-        log_rejection(symbol_name, "MACD: Momentum not confirmed")
+        if __name__ == '__main__': log_rejection(symbol_name, "MACD: Momentum not confirmed")
         return False
         
     volume_ok = last['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2
     if not volume_ok:
-        log_rejection(symbol_name, "MACD: Volume below average")
+        if __name__ == '__main__': log_rejection(symbol_name, "MACD: Volume below average")
         return False
         
     return True
 
 def check_pullback_strategy_enhanced(df: pd.DataFrame) -> bool:
-    # [تعديل لفريم 5 دقائق] تحديث المؤشرات المستخدمة
     needed = {'ema20', 'ema50', 'ema200', 'open', 'close', 'low', 'volume', 'adx'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 200 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
 
     last = df.iloc[-1]
     
     if not (last['ema20'] > last['ema50'] > last['ema200']):
-        log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
+        if __name__ == '__main__': log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
         return False
     
     if last['adx'] < 16:
-        log_rejection(symbol_name, "Pullback: Weak trend (ADX < 16)")
+        if __name__ == '__main__': log_rejection(symbol_name, "Pullback: Weak trend (ADX < 16)")
         return False
     
     pulled_back = (df['low'].tail(3) <= df['ema20'].tail(3)).any()
     if not pulled_back:
-        log_rejection(symbol_name, "Pullback: No pullback detected")
+        if __name__ == '__main__': log_rejection(symbol_name, "Pullback: No pullback detected")
         return False
     
     if not (last['close'] > last['open']):
-        log_rejection(symbol_name, "Pullback: Price not recovering")
+        if __name__ == '__main__': log_rejection(symbol_name, "Pullback: Price not recovering")
         return False
     
     avg_volume = df['volume'].rolling(window=20).mean().iloc[-1]
     if last['volume'] < avg_volume * 1.0:
-        log_rejection(symbol_name, "Pullback: Low volume on recovery")
+        if __name__ == '__main__': log_rejection(symbol_name, "Pullback: Low volume on recovery")
         return False
         
     return True
 
 def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame) -> bool:
-    # [تعديل لفريم 5 دقائق] تحديث المؤشرات المستخدمة
     needed = {'atr_percent', 'ema5', 'ema10', 'ema50', 'macd_hist', 'close', 'volume', 'adx', 'rsi'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 50 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
 
     last = df.iloc[-1]
     
     if not (last['ema5'] > last['ema10'] > last['ema50']):
-        log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
         return False
     
-    # [تعديل لفريم 5 دقائق] تقليل عتبة ADX
     if last['adx'] < 20:
-        log_rejection(symbol_name, "Momentum: Weak trend (ADX < 20)")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: Weak trend (ADX < 20)")
         return False
     
     atr_percent = last['atr_percent']
     if not (1.8 <= atr_percent <= 6.0):
-        log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: Volatility not in optimal range")
         return False
     
     if last['macd_hist'] <= 0:
-        log_rejection(symbol_name, "Momentum: MACD momentum not positive")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: MACD momentum not positive")
         return False
         
-    # [تعديل لفريم 5 دقائق] تضييق نطاق RSI
     if not (52 <= last['rsi'] <= 70):
-        log_rejection(symbol_name, "Momentum: RSI not in optimal range")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: RSI not in optimal range")
         return False
         
     volume_ok = last['volume'] > df['volume'].rolling(10).mean().iloc[-1] * 1.1
     if not volume_ok:
-        log_rejection(symbol_name, "Momentum: Volume below average")
+        if __name__ == '__main__': log_rejection(symbol_name, "Momentum: Volume below average")
         return False
         
     return True
 
 def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
-    # [تعديل لفريم 5 دقائق] تحديث المؤشرات المستخدمة
     needed = {'high', 'low', 'close', 'ema20', 'ema50', 'ema200', 'adx', 'volume', 'rsi', 'macd'}
     symbol_name = getattr(df, 'name', 'Unknown')
     if len(df) < 100 or not needed.issubset(df.columns):
-        log_rejection(symbol_name, "Insufficient Historical Data")
+        if __name__ == '__main__': log_rejection(symbol_name, "Insufficient Historical Data")
         return False
 
     last = df.iloc[-1]
     
     if not (last['ema20'] > last['ema50'] > last['ema200']):
-        log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Trend is not bullish")
         return False
     
-    # [تعديل لفريم 5 دقائق] تقليل عتبة ADX
     if last['adx'] < 20:
-        log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Trend is not strong enough (ADX)")
         return False
     
     if last['volume'] < df['volume'].rolling(20).mean().iloc[-1] * 1.1:
-        log_rejection(symbol_name, "Elliott Wave: Volume too low")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Volume too low")
         return False
     
-    # [تعديل لفريم 5 دقائق] تعديل نطاق RSI
     if not (45 <= last['rsi'] <= 75):
-        log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: RSI not in optimal range")
         return False
     
     if last['macd'] <= 0:
-        log_rejection(symbol_name, "Elliott Wave: MACD not positive")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: MACD not positive")
         return False
     
     highs = df['high'].values
@@ -1114,7 +1092,7 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         troughs_idx = argrelextrema(lows, np.less, order=5)[0]
         
         if len(peaks_idx) < 2 or len(troughs_idx) < 2:
-            log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
+            if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Insufficient swing points")
             return False
         
         wave1_start_idx = troughs_idx[-3] if len(troughs_idx) >= 3 else troughs_idx[-2]
@@ -1127,22 +1105,22 @@ def check_elliott_wave_strategy_enhanced(df: pd.DataFrame) -> bool:
         
         wave1_height = wave1_end_price - wave1_start_price
         if wave1_height <= 0:
-             log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+             if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
              return False
         wave2_retracement = wave1_end_price - wave2_end_price
         retracement_percent = (wave2_retracement / wave1_height) * 100
         
         if retracement_percent > 61.8:
-            log_rejection(symbol_name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
+            if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Wave 2 Fibonacci retracement invalid")
             return False
         
         if last['close'] <= wave1_end_price:
-            log_rejection(symbol_name, "Elliott Wave: Price hasn't broken wave 1 resistance")
+            if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Price hasn't broken wave 1 resistance")
             return False
         
     except Exception as e:
         logger.error(f"Error in Elliott Wave analysis: {e}")
-        log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
+        if __name__ == '__main__': log_rejection(symbol_name, "Elliott Wave: Error in pattern detection")
         return False
         
     return True
@@ -1161,11 +1139,11 @@ def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decima
         min_qty = Decimal(lot_size_filter['minQty'])
         quantity_dec = Decimal(str(quantity))
         if quantity_dec < min_qty:
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": f"{quantity_dec}", "min": f"{min_qty}"})
+            if __name__ == '__main__': log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Below minQty", "qty": f"{quantity_dec}", "min": f"{min_qty}"})
             return None
         adjusted_quantity = (quantity_dec - (quantity_dec % step_size))
         if adjusted_quantity < min_qty:
-            log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": f"{adjusted_quantity}", "min": f"{min_qty}"})
+            if __name__ == '__main__': log_rejection(symbol, "LOT_SIZE Filter Failed", {"reason": "Adjusted below minQty", "qty": f"{adjusted_quantity}", "min": f"{min_qty}"})
             return None
         return adjusted_quantity
     except Exception as e:
@@ -1184,7 +1162,7 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
         logger.info(f"[{symbol}] Starting fixed position sizing. Desired amount: ${dec_fixed_amount}, Available Balance: ${dec_balance:.2f}")
 
         if dec_fixed_amount > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
+            if __name__ == '__main__': log_rejection(symbol, "Insufficient Balance", {"required": f"${dec_fixed_amount}", "available": f"${dec_balance:.2f}"})
             return None
 
         if dec_entry <= 0:
@@ -1208,11 +1186,11 @@ def calculate_position_size(symbol: str, entry_price: float, available_balance: 
                 if f['filterType'] in ('MIN_NOTIONAL', 'NOTIONAL'):
                     min_notional = Decimal(f.get('minNotional', f.get('notional', '5.0')))
                     if notional_value < min_notional:
-                        log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
+                        if __name__ == '__main__': log_rejection(symbol, "MinNotional Filter Failed", {"value": f"{notional_value:.2f}", "required": f"{min_notional}"})
                         return None
         
         if notional_value > dec_balance:
-            log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
+            if __name__ == '__main__': log_rejection(symbol, "Insufficient Balance", {"required": f"{notional_value:.2f}", "available": f"${dec_balance:.2f}"})
             return None
             
         logger.info(f"[{symbol}] Final valid quantity: {adjusted_quantity} (Notional: ${notional_value:.2f})")
@@ -1339,7 +1317,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت التداول (V32.9.0)</title>
+<title>لوحة التحكم - بوت التداول (V32.9.1)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1406,7 +1384,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت التداول V32.9.0 (فريم 5 دقائق)</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت التداول V32.9.1 (فريم 5 دقائق)</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1808,7 +1786,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت التداول (V32.9.0)</title>
+<title>الإعدادات - بوت التداول (V32.9.1)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2434,7 +2412,7 @@ def backtest_strategy(strategy_name, symbol, days=90):
     active_trade = None
     initial_balance = 1000.0
     equity_curve = [initial_balance]
-    backtest_trade_amount = 10.0 # حجم الصفقة الثابت للاختبار الخلفي
+    backtest_trade_amount = 10.0 
 
     strategy_functions = {
         'BB_Stoch_Strategy': check_bb_stoch_strategy_enhanced,
@@ -2480,7 +2458,9 @@ def backtest_strategy(strategy_name, symbol, days=90):
         if not active_trade:
             df_slice = df.iloc[:i]
             df_slice.name = symbol
-            if check_strategy(df_slice):
+            
+            # [تعديل رئيسي] تطبيق الفلاتر قبل الدخول في الصفقة
+            if check_strategy(df_slice) and check_market_volatility_filter_enhanced(df_slice, symbol):
                 entry_price = current_candle['open']
                 sl = calculate_dynamic_stop_loss(df_slice, entry_price, strategy_name)
                 tp1, tp2 = calculate_dynamic_take_profit(df_slice, entry_price, sl, strategy_name)
@@ -2541,7 +2521,6 @@ def main_bot_loop():
         try:
             while True:
                 now = datetime.now(timezone.utc)
-                # [تعديل لفريم 5 دقائق] تغيير منطق انتظار الشمعة التالية
                 seconds_until_next_candle = (5 - (now.minute % 5)) * 60 - now.second
                 
                 is_enabled_now = False
@@ -2783,7 +2762,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.9.0 (5-Min Optimized) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V32.9.1 (5-Min Optimized & Backtest Filters) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
