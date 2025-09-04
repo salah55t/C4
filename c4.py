@@ -1167,6 +1167,34 @@ def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
     return True
 # --- نهاية الاستراتيجيات ---
 
+def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
+    """
+    Formats the quantity to the correct precision required by Binance API for a specific symbol.
+    """
+    try:
+        symbol_info = exchange_info_map.get(symbol)
+        if not symbol_info:
+            logger.warning(f"[{symbol}] No exchange info for formatting. Using default format.")
+            return f"{quantity.normalize()}"
+
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        if not lot_size_filter:
+            logger.warning(f"[{symbol}] LOT_SIZE filter not found. Using default format.")
+            return f"{quantity.normalize()}"
+        
+        step_size = Decimal(lot_size_filter['stepSize'])
+        
+        # Quantize the number to the step size (e.g., 0.01 for 2 decimal places)
+        # This correctly formats the number by rounding down to the nearest valid trade amount.
+        formatted_quantity = quantity.quantize(step_size, rounding=ROUND_DOWN)
+
+        # Return as a plain string without scientific notation or extra trailing zeros.
+        return f"{formatted_quantity.normalize()}"
+        
+    except Exception as e:
+        logger.error(f"❌ [{symbol}] Error formatting quantity: {e}. Returning raw value string.")
+        return str(quantity)
+
 def adjust_quantity_to_lot_size(symbol: str, quantity: float) -> Optional[Decimal]:
     try:
         symbol_info = exchange_info_map.get(symbol)
@@ -1315,8 +1343,14 @@ def create_trade_signal(symbol: str, df: pd.DataFrame, strategy_name: str):
 
     if is_real:
         try:
-            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {quantity_dec} of {symbol}")
-            order = client.create_order(symbol=symbol, side=Client.SIDE_BUY, type=Client.ORDER_TYPE_MARKET, quantity=str(quantity_dec))
+            formatted_quantity = get_formatted_quantity(symbol, quantity_dec)
+            logger.info(f"💰 [Real Trade] Placing LIVE MARKET BUY order for {formatted_quantity} of {symbol}")
+            order = client.create_order(
+                symbol=symbol, 
+                side=Client.SIDE_BUY, 
+                type=Client.ORDER_TYPE_MARKET, 
+                quantity=formatted_quantity
+            )
             avg_fill_price = sum(Decimal(f['price']) * Decimal(f['qty']) for f in order.get('fills', [])) / max(sum(Decimal(f['qty']) for f in order.get('fills', [])), Decimal('1e-8')) if order.get('fills') else Decimal(str(entry_price))
             final_quantity = Decimal(order.get('executedQty', str(quantity_dec)))
             order_id = order.get('orderId', 'N/A')
@@ -2233,7 +2267,7 @@ def settings_page():
         'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
         'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
         'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
-        'USE_RANGE_REVERSAL_STRATEGY': USE_RANGE_REVERSال_STRATEGY
+        'USE_RANGE_REVERSAL_STRATEGY': USE_RANGE_REVERSAL_STRATEGY
     }
     
     return render_template_string(SETTINGS_TEMPLATE, 
@@ -2730,8 +2764,9 @@ def close_signal(signal: Dict, closing_price: float, reason: str):
                     adjusted_quantity_to_sell = adjust_quantity_to_lot_size(symbol, float(quantity_to_sell))
                     
                     if adjusted_quantity_to_sell and adjusted_quantity_to_sell > 0:
-                        logger.info(f"💰 [Real Close] Executing MARKET SELL for {adjusted_quantity_to_sell} of {symbol} due to {reason}")
-                        client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=str(adjusted_quantity_to_sell))
+                        formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_quantity_to_sell)
+                        logger.info(f"💰 [Real Close] Executing MARKET SELL for {formatted_sell_quantity} of {symbol} due to {reason}")
+                        client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=formatted_sell_quantity)
                     else:
                         logger.warning(f"⚠️ [Real Close] Adjusted sell quantity for {symbol} is zero or None. Skipping API sell call.")
                 else:
@@ -2792,8 +2827,9 @@ def trade_management_loop():
                         adjusted_qty = adjust_quantity_to_lot_size(symbol, part_qty_to_close)
                         if adjusted_qty and adjusted_qty > 0:
                              try:
-                                logger.info(f"💰 [Real Close] Executing PARTIAL MARKET SELL for {adjusted_qty} of {symbol} at TP1")
-                                client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=str(adjusted_qty))
+                                formatted_sell_quantity = get_formatted_quantity(symbol, adjusted_qty)
+                                logger.info(f"💰 [Real Close] Executing PARTIAL MARKET SELL for {formatted_sell_quantity} of {symbol} at TP1")
+                                client.create_order(symbol=symbol, side=Client.SIDE_SELL, type=Client.ORDER_TYPE_MARKET, quantity=formatted_sell_quantity)
                              except Exception as e:
                                 logger.error(f"❌ [Partial Close] Error for {symbol}: {e}")
                     
