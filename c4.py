@@ -1,8 +1,8 @@
-# ملف c4_5min_v34_0_5.py - نسخة V34.0.5 (تحسين مرونة فيبوناتشي)
+# ملف c4_5min_fixed.py - نسخة V34.0.4 (تحسين الرصيد والصفقات الورقية)
 # --- وصف التعديلات:
-# 1. [توسيع نطاق فيبوناتشي] تم تعديل الفلتر الديناميكي الخاص باستراتيجية موجات إليوت ليقبل نطاقًا أوسع من تصحيحات فيبوناتشي، مما يقلل من الصرامة ويزيد من فرص الدخول.
-# 2. [عرض الرصيد الفعلي] يحتفظ البوت بميزة عرض رصيد USDT الحقيقي دائمًا.
-# 3. [صفقات ورقية ثابتة] تظل الصفقات الورقية تستخدم قيمة ثابتة قدرها 10 USDT.
+# 1. [عرض الرصيد الفعلي] الآن يقوم البوت دائمًا بجلب وعرض رصيد USDT الحقيقي من المنصة، حتى في وضع التداول الورقي.
+# 2. [صفقات ورقية ثابتة] تم تعديل الصفقات الورقية لتستخدم دائمًا قيمة ثابتة قدرها 10 USDT، دون التأثير على أي رصيد (وهمي أو حقيقي).
+# 3. [تحسينات سابقة] يحتفظ هذا الإصدار بجميع التحسينات السابقة.
 
 import time
 import os
@@ -47,7 +47,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.0.5_5min')
+logger = logging.getLogger('CryptoBotV34.0.1_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -895,13 +895,10 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- تحسين: تم توسيع نطاق قبول فيبوناتشي ليكون أكثر مرونة ---
-    # النطاق السابق للتقلب العالي: 0.236 إلى 0.886
-    # النطاق السابق للتقلب العادي: 0.236 إلى 0.786
-    if atr_percent > 2.5: # سوق متقلب
-        fib_min, fib_max = 0.18, 0.94 # نطاق أوسع للتصحيحات العميقة
-    else: # سوق عادي
-        fib_min, fib_max = 0.18, 0.886 # نطاق أوسع قليلاً
+    if atr_percent > 2.5:
+        fib_min, fib_max = 0.236, 0.886
+    else:
+        fib_min, fib_max = 0.236, 0.786
     
     volume_ma = df['volume'].rolling(20).mean()
     wave_volume_multiplier = 1.3 + (atr_percent / 50)
@@ -1377,7 +1374,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.0.5)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.0.4)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1444,7 +1441,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.5</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.4</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1850,7 +1847,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.0.5)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.0.4)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2233,7 +2230,7 @@ def settings_page():
         'USE_PULLBACK_STRATEGY': USE_PULLBACK_STRATEGY,
         'USE_MOMENTUM_VOLATILITY_STRATEGY': USE_MOMENTUM_VOLATILITY_STRATEGY,
         'USE_ELLIOTT_WAVE_STRATEGY': USE_ELLIOTT_WAVE_STRATEGY,
-        'USE_RANGE_REVERSAL_STRATEGY': USE_RANGE_REVERSال_STRATEGY
+        'USE_RANGE_REVERSAL_STRATEGY': USE_RANGE_REVERSAL_STRATEGY
     }
     
     return render_template_string(SETTINGS_TEMPLATE, 
@@ -2884,7 +2881,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.5 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.4 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
@@ -2919,3 +2916,4 @@ if __name__ == '__main__':
     # Start Flask App
     logger.info("🌐 [Flask] Starting UI on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000, debug=False)
+
