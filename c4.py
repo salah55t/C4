@@ -3,7 +3,7 @@
 # 1. [توسيع نطاق فيبوناتشي] تم تعديل الفلتر الديناميكي الخاص باستراتيجية موجات إليوت ليقبل نطاقًا أوسع من تصحيحات فيبوناتشي، مما يقلل من الصرامة ويزيد من فرص الدخول.
 # 2. [عرض الرصيد الفعلي] يحتفظ البوت بميزة عرض رصيد USDT الحقيقي دائمًا.
 # 3. [صفقات ورقية ثابتة] تظل الصفقات الورقية تستخدم قيمة ثابتة قدرها 10 USDT.
-# 4. [تحسينات شاملة] تم تطبيق تحسينات على منطق الاستراتيجيات، لوحة التحكم، إدارة الصفقات، وقف الخسارة، وجني الأرباح.
+# 4. [إصلاح خطأ قاعدة البيانات] تم إصلاح خطأ "column s.created_at does not exist" عن طريق إضافة العمود المفقود تلقائيًا وتحسين معالجة أخطاء المعاملات.
 
 import time
 import os
@@ -250,8 +250,7 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
                         stop_loss DOUBLE PRECISION NOT NULL, status TEXT DEFAULT 'open',
                         closing_price DOUBLE PRECISION, closed_at TIMESTAMP, profit_percentage DOUBLE PRECISION,
                         strategy_name TEXT, signal_details JSONB, is_real_trade BOOLEAN DEFAULT FALSE,
-                        quantity DOUBLE PRECISION, closing_reason TEXT, order_id TEXT,
-                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                        quantity DOUBLE PRECISION, closing_reason TEXT, order_id TEXT
                     );
                 """)
                 cur.execute("CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(), type TEXT NOT NULL, message TEXT NOT NULL);")
@@ -264,9 +263,11 @@ def init_db(retries: int = 5, base_delay: int = 5) -> None:
                         date DATE
                     );
                 """)
+                # **FIX**: Add created_at to the columns to check and add if missing
                 columns_to_add = {
                     "target_price_1": "DOUBLE PRECISION", "target_price_2": "DOUBLE PRECISION",
-                    "initial_quantity": "DOUBLE PRECISION"
+                    "initial_quantity": "DOUBLE PRECISION",
+                    "created_at": "TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
                 }
                 for col, col_type in columns_to_add.items():
                     if not column_exists(cur, 'signals', col):
@@ -873,9 +874,6 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- تحسين: تم توسيع نطاق قبول فيبوناتشي ليكون أكثر مرونة ---
-    # النطاق السابق للتقلب العالي: 0.236 إلى 0.886
-    # النطاق السابق للتقلب العادي: 0.236 إلى 0.786
     if atr_percent > 2.5: # سوق متقلب
         fib_min, fib_max = 0.18, 0.94 # نطاق أوسع للتصحيحات العميقة
     else: # سوق عادي
@@ -1422,6 +1420,9 @@ def get_open_trades_details() -> List[Dict]:
             return open_trades
     except Exception as e:
         logger.error(f"❌ [Dashboard] Error fetching open trades details: {e}")
+        # **FIX**: Rollback the transaction if it fails
+        if conn:
+            conn.rollback()
         return []
 
 def get_strategy_performance_stats() -> Dict:
@@ -1463,6 +1464,9 @@ def get_strategy_performance_stats() -> Dict:
             return stats
     except Exception as e:
         logger.error(f"❌ [Dashboard] Error fetching strategy performance stats: {e}")
+        # **FIX**: Rollback the transaction if it fails
+        if conn:
+            conn.rollback()
         return {}
 
 # --- ** NEW/ENHANCED FUNCTIONS END HERE ** ---
@@ -3211,6 +3215,8 @@ def process_open_trades_periodically():
             time.sleep(30)  # تحقق كل 30 ثانية
         except Exception as e:
             logger.error(f"❌ [Process Open Trades] Error in processor: {e}", exc_info=True)
+            if conn:
+                conn.rollback()
             time.sleep(60)
 
 def update_market_state():
@@ -3298,7 +3304,7 @@ if __name__ == '__main__':
     # Start background threads
     start_websocket()
     Thread(target=main_bot_loop, daemon=True).start()
-    Thread(target=process_open_trades_periodically, daemon=True).start() # Replaced trade_management_loop
+    Thread(target=process_open_trades_periodically, daemon=True).start()
     start_market_state_updater()
     Thread(target=update_balance_loop, daemon=True).start()
     start_periodic_reports()
