@@ -1,4 +1,4 @@
-# ملف c4_5min_v34_0_5_enhanced.py - نسخة V34.0.5 محسنة بالكامل
+# ملف c4_5min_v34_0_5_enhanced.py - نسخة V34.0.5 محسنة بالكامل (مصححة)
 # --- وصف التحسينات:
 # 1. تحسين شامل لجميع استراتيجيات التداول مع فلتر حجم التداول وتأكيد الزخم
 # 2. تحسين نظام إدارة المخاطر مع حساب ديناميكي لوقف الخسارة وجني الأرباح
@@ -138,7 +138,7 @@ ws_manager: Optional[ThreadedWebsocketManager] = None
 live_prices: Dict[str, float] = {}
 live_prices_lock = Lock()
 exchange_info_map: Dict[str, Any] = {}
-validated_symbols_to_scan: List[str] = []
+validated_symbols_to_scan: List[str] = []  # تعريف المتغير هنا قبل استخدامه
 open_signals_cache: Dict[str, Dict] = {}
 signal_cache_lock = Lock()
 notifications_cache = deque(maxlen=20)
@@ -2766,8 +2766,8 @@ def scan_for_signals_enhanced():
     try:
         market_state = get_market_state()
         
+        global validated_symbols_to_scan  # استخدام global هنا
         if not validated_symbols_to_scan:
-            global validated_symbols_to_scan
             validated_symbols_to_scan = get_validated_symbols()
         
         if not validated_symbols_to_scan:
