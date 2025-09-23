@@ -5,6 +5,8 @@
 # 3. [صفقات ورقية ثابتة] تظل الصفقات الورقية تستخدم قيمة ثابتة قدرها 10 USDT.
 # 4. [إصلاح خطأ قاعدة البيانات] تم إصلاح خطأ "column s.created_at does not exist" عن طريق إضافة العمود المفقود تلقائيًا وتحسين معالجة أخطاء المعاملات.
 # 5. [تحسين جودة التوصيات] تضييق نطاق فيبوناتشي، تشديد فلاتر حجم التداول، تحسين نسب المخاطرة، زيادة متطلبات ADX، إضافة فلتر التقلبات العشوائية، تحسين إدارة المخاطر، تحسين فلتر السيولة والارتباط.
+# 6. [إصلاح مشكلة بدء التداول] إصلاح مشكلة عدم بدء البحث عن فرص التداول عند تفعيل البوت.
+# 7. [تحسين رسائل تلغرام] تحسين تنسيق رسائل التليجرام وإضافة معلومات إضافية مفيدة.
 
 import time
 import os
@@ -356,6 +358,7 @@ def get_notification_settings() -> Dict:
     except Exception as e:
         logger.error(f"❌ [Redis] Failed to get notification settings: {e}"); return defaults
 
+# تحسين رسائل تلغرام
 def send_enhanced_telegram_message(message: str, force: bool = False):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -390,21 +393,59 @@ def send_trade_open_notification(symbol: str, strategy_name: str, entry_price: f
     trade_type = "حقيقية" if is_real else "ورقية"
     emoji = "🔥" if is_real else "📊"
     
+    # حساب النسب المئوية
+    risk_percent = ((entry_price - stop_loss) / entry_price * 100)
+    reward1_percent = ((target1 - entry_price) / entry_price * 100)
+    reward2_percent = ((target2 - entry_price) / entry_price * 100)
+    rr_ratio1 = reward1_percent / risk_percent if risk_percent > 0 else 0
+    rr_ratio2 = reward2_percent / risk_percent if risk_percent > 0 else 0
+    
     message = (
         f"{emoji} *صفقة {trade_type} جديدة (5 دقائق)*\n\n"
-        f"*العملة:* `{symbol}`\n"
-        f"*الاستراتيجية:* `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n"
-        f"*جودة الإشارة:* `{quality_score}/100`\n"
-        f"*تقلب السوق:* `{atr_percent:.2f}%`\n\n"
-        f"*سعر الدخول:* `{entry_price:.4f}`\n"
-        f"*وقف الخسارة:* `{stop_loss:.4f}`\n"
-        f"*الهدف الأول:* `{target1:.4f}`\n"
-        f"*الهدف الثاني:* `{target2:.4f}`\n\n"
-        f"*الكمية:* `{quantity:.4f}`\n"
-        f"*قيمة الصفقة:* `${notional_value:.2f}`\n"
-        f"*نسبة المخاطرة:* `{((entry_price - stop_loss) / entry_price * 100):.2f}%`\n"
-        f"*نسبة الربح المحتملة 1:* `{((target1 - entry_price) / entry_price * 100):.2f}%`\n"
-        f"*نسبة الربح المحتملة 2:* `{((target2 - entry_price) / entry_price * 100):.2f}%`"
+        f"📊 *العملة:* `{symbol}`\n"
+        f"📈 *الاستراتيجية:* `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n"
+        f"⭐ *جودة الإشارة:* `{quality_score}/100`\n"
+        f"📉 *تقلب السوق:* `{atr_percent:.2f}%`\n\n"
+        f"💰 *تفاصيل الصفقة:*\n"
+        f"🔸 *سعر الدخول:* `{entry_price:.4f}`\n"
+        f"🔸 *وقف الخسارة:* `{stop_loss:.4f}`\n"
+        f"🔸 *الهدف الأول:* `{target1:.4f}`\n"
+        f"🔸 *الهدف الثاني:* `{target2:.4f}`\n\n"
+        f"📏 *الكمية:* `{quantity:.4f}`\n"
+        f"💵 *قيمة الصفقة:* `${notional_value:.2f}`\n\n"
+        f"📊 *نسب المخاطرة والمكافأة:*\n"
+        f"🔸 *نسبة المخاطرة:* `{risk_percent:.2f}%`\n"
+        f"🔸 *نسبة الربح 1:* `{reward1_percent:.2f}%` (RR: `{rr_ratio1:.2f}`)\n"
+        f"🔸 *نسبة الربح 2:* `{reward2_percent:.2f}%` (RR: `{rr_ratio2:.2f}`)\n\n"
+        f"⏰ *الوقت:* `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
+    )
+    
+    send_enhanced_telegram_message(message, force=True)
+
+def send_trade_close_notification(symbol: str, strategy_name: str, entry_price: float, close_price: float,
+                                profit_percent: float, close_reason: str, is_real: bool):
+    trade_type = "حقيقية" if is_real else "ورقية"
+    emoji = "✅" if profit_percent > 0 else "❌"
+    
+    # تحديد سبب الإغلاق بالعربية
+    close_reason_ar = {
+        "stop_loss": "إيقاف الخسارة",
+        "take_profit_1": "جني الأرباح الأول",
+        "take_profit_2": "جني الأرباح الثاني",
+        "manual_close": "إغلاق يدوي",
+        "timeout": "انتهاء الوقت"
+    }.get(close_reason, close_reason)
+    
+    message = (
+        f"{emoji} *إغلاق صفقة {trade_type}*\n\n"
+        f"📊 *العملة:* `{symbol}`\n"
+        f"📈 *الاستراتيجية:* `{STRATEGY_NAMES.get(strategy_name, strategy_name)}`\n\n"
+        f"💰 *تفاصيل الصفقة:*\n"
+        f"🔸 *سعر الدخول:* `{entry_price:.4f}`\n"
+        f"🔸 *سعر الإغلاق:* `{close_price:.4f}`\n"
+        f"🔸 *سبب الإغلاق:* `{close_reason_ar}`\n\n"
+        f"📊 *النتيجة:* `{profit_percent:.2f}%`\n"
+        f"⏰ *الوقت:* `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
     )
     
     send_enhanced_telegram_message(message, force=True)
@@ -420,7 +461,9 @@ def send_daily_performance_report():
                 SELECT COUNT(*) as total_trades,
                        SUM(CASE WHEN profit_percentage > 0 THEN 1 ELSE 0 END) as winning_trades,
                        AVG(profit_percentage) as avg_profit,
-                       SUM(profit_percentage) as total_profit
+                       SUM(profit_percentage) as total_profit,
+                       MAX(profit_percentage) as max_profit,
+                       MIN(profit_percentage) as max_loss
                 FROM signals
                 WHERE closed_at::date = %s AND status = 'closed'
             """, (today,))
@@ -430,6 +473,8 @@ def send_daily_performance_report():
             if not stats or stats['total_trades'] == 0:
                 logger.info("[Daily Report] No trades to report for today.")
                 return
+            
+            win_rate = (stats['winning_trades'] / stats['total_trades'] * 100) if stats['total_trades'] > 0 else 0
             
             cur.execute("""
                 SELECT symbol, profit_percentage, strategy_name
@@ -449,24 +494,31 @@ def send_daily_performance_report():
             
             message = (
                 f"📈 *تقرير الأداء اليومي*\n\n"
-                f"*التاريخ:* `{today.strftime('%Y-%m-%d')}`\n\n"
-                f"*إجمالي الصفقات:* `{stats['total_trades']}`\n"
-                f"*الصفقات الرابحة:* `{stats.get('winning_trades', 0) or 0}`\n"
-                f"*نسبة الربح:* `{(stats.get('winning_trades', 0) / stats['total_trades'] * 100):.1f}%`\n"
-                f"*متوسط الربح:* `{stats.get('avg_profit', 0):.2f}%`\n"
-                f"*إجمالي الربح:* `{stats.get('total_profit', 0):.2f}%`\n\n"
+                f"📅 *التاريخ:* `{today.strftime('%Y-%m-%d')}`\n\n"
+                f"📊 *إحصائيات التداول:*\n"
+                f"🔸 *إجمالي الصفقات:* `{stats['total_trades']}`\n"
+                f"🔸 *الصفقات الرابحة:* `{stats.get('winning_trades', 0) or 0}`\n"
+                f"🔸 *نسبة الربح:* `{win_rate:.1f}%`\n"
+                f"🔸 *متوسط الربح:* `{stats.get('avg_profit', 0):.2f}%`\n"
+                f"🔸 *إجمالي الربح:* `{stats.get('total_profit', 0):.2f}%`\n"
+                f"🔸 *أفضل صفقة:* `{stats.get('max_profit', 0):.2f}%`\n"
+                f"🔸 *أسوأ صفقة:* `{stats.get('max_loss', 0):.2f}%`\n\n"
             )
             
             if best_trade:
                 message += (
-                    f"🏆 *أفضل صفقة:*\n"
-                    f"العملة: `{best_trade['symbol']}` | الربح: `{best_trade['profit_percentage']:.2f}%`\n\n"
+                    f"🏆 *أفضل صفقة اليوم:*\n"
+                    f"العملة: `{best_trade['symbol']}` | "
+                    f"الاستراتيجية: `{STRATEGY_NAMES.get(best_trade['strategy_name'], best_trade['strategy_name'])}` | "
+                    f"الربح: `{best_trade['profit_percentage']:.2f}%`\n\n"
                 )
             
             if worst_trade:
                 message += (
-                    f"📉 *أسوأ صفقة:*\n"
-                    f"العملة: `{worst_trade['symbol']}` | الخسارة: `{worst_trade['profit_percentage']:.2f}%`\n\n"
+                    f"📉 *أسوأ صفقة اليوم:*\n"
+                    f"العملة: `{worst_trade['symbol']}` | "
+                    f"الاستراتيجية: `{STRATEGY_NAMES.get(worst_trade['strategy_name'], worst_trade['strategy_name'])}` | "
+                    f"الخسارة: `{worst_trade['profit_percentage']:.2f}%`\n\n"
                 )
             
             send_enhanced_telegram_message(message, force=True)
@@ -485,7 +537,31 @@ def send_market_state_notification():
     for tf, details in state["trend_details_by_tf"].items():
         trend = details.get("trend", "N/A")
         emoji = "🟢" if trend == "bullish" else "🔴" if trend == "bearish" else "🟡"
-        message += f"{emoji} *{tf}:* {trend.capitalize()} (ADX: {details.get('adx', 0):.1f}, RSI: {details.get('rsi', 0):.1f})\n"
+        message += f"{emoji} *{tf}:* {trend.capitalize()} (ADX: {details.get('adx', 0):.1f}, RSI: {details.get('rsi', 0):.1f}, Vol: {details.get('atr_percent', 0):.2f}%)\n"
+    
+    send_enhanced_telegram_message(message, force=False)
+
+def send_bot_status_notification():
+    with trading_status_lock:
+        status = "مفعّل" if is_trading_enabled else "معطّل"
+    
+    with trading_mode_lock:
+        mode = "حقيقي" if not paper_trading_mode else "ورقي"
+    
+    with signal_cache_lock:
+        open_trades = len(open_signals_cache)
+    
+    with balance_lock:
+        balance = usdt_balance
+    
+    message = (
+        f"🤖 *حالة البوت*\n\n"
+        f"🔌 *الحالة:* `{status}`\n"
+        f"📝 *نوع التداول:* `{mode}`\n"
+        f"📊 *الصفقات المفتوحة:* `{open_trades}/{MAX_OPEN_TRADES}`\n"
+        f"💰 *الرصيد:* `{balance:.2f} USDT`\n"
+        f"⏰ *الوقت:* `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
+    )
     
     send_enhanced_telegram_message(message, force=False)
 
@@ -494,12 +570,22 @@ def schedule_periodic_reports():
     while True:
         try:
             now = datetime.now(timezone.utc)
+            
+            # إرسال تقرير يومي في الساعة 23:59
             if now.hour == 23 and now.minute == 59:
                 send_daily_performance_report()
                 time.sleep(61)
+            
+            # إرسال تحديث حالة السوق كل 6 ساعات
             if now.hour % 6 == 0 and now.minute == 0:
                 send_market_state_notification()
                 time.sleep(61)
+            
+            # إرسال حالة البوت كل ساعة
+            if now.minute == 0:
+                send_bot_status_notification()
+                time.sleep(61)
+            
             time.sleep(30)
         except Exception as e:
             logger.error(f"❌ [Periodic Reports] Error in scheduler: {e}", exc_info=True)
@@ -1434,6 +1520,12 @@ def calculate_position_size(symbol: str, entry_price: float, stop_loss: float, u
 
 def execute_trade(symbol: str, strategy_name: str, entry_price: float, stop_loss: float, 
                  target1: float, target2: float, quality_score: int, atr_percent: float) -> bool:
+    # إصلاح: التحقق من حالة التداول قبل تنفيذ أي صفقة
+    with trading_status_lock:
+        if not is_trading_enabled:
+            logger.info("Trading is disabled. Skipping trade execution.")
+            return False
+    
     with trading_mode_lock:
         is_real_trade = not paper_trading_mode
     
@@ -1576,6 +1668,7 @@ def execute_trade(symbol: str, strategy_name: str, entry_price: float, stop_loss
         return False
 
 def check_and_generate_signals() -> None:
+    # إصلاح: التحقق من حالة التداول قبل البحث عن فرص
     if not is_trading_enabled:
         return
         
@@ -1707,7 +1800,7 @@ def monitor_open_trades() -> None:
     try:
         with conn.cursor() as cur:
             # Get all open signals
-            cur.execute("SELECT * FROM signals WHERE status = 'open'")
+            cur.execute("SELECT * FROM signals WHERE status IN ('open', 'updated')")
             open_signals = cur.fetchall()
             
             for signal in open_signals:
@@ -1771,6 +1864,12 @@ def monitor_open_trades() -> None:
                         if symbol in open_signals_cache:
                             del open_signals_cache[symbol]
                     
+                    # Send notification
+                    send_trade_close_notification(
+                        symbol, signal['strategy_name'], entry_price, current_price,
+                        profit_percentage, closing_reason, is_real_trade
+                    )
+                    
                     logger.info(f"✅ Stop loss hit for {symbol} at {current_price}")
                     
                 elif current_price >= target2:
@@ -1815,9 +1914,15 @@ def monitor_open_trades() -> None:
                         if symbol in open_signals_cache:
                             del open_signals_cache[symbol]
                     
+                    # Send notification
+                    send_trade_close_notification(
+                        symbol, signal['strategy_name'], entry_price, current_price,
+                        profit_percentage, closing_reason, is_real_trade
+                    )
+                    
                     logger.info(f"✅ Take profit 2 hit for {symbol} at {current_price}")
                     
-                elif current_price >= target1:
+                elif current_price >= target1 and signal['status'] == 'open':
                     # Take profit 1 hit - close half position and move stop loss to breakeven
                     closing_reason = "take_profit_1"
                     profit_percentage = ((current_price - entry_price) / entry_price) * 100
@@ -1911,6 +2016,8 @@ def index():
                 .status-open { background-color: #d1ecf1; }
                 .status-closed { background-color: #f8d7da; }
                 .status-updated { background-color: #fff3cd; }
+                .trading-enabled { border-left: 5px solid #28a745; }
+                .trading-disabled { border-left: 5px solid #dc3545; }
             </style>
         </head>
         <body>
@@ -1924,7 +2031,7 @@ def index():
                 
                 <div class="row">
                     <div class="col-md-6">
-                        <div class="card">
+                        <div class="card {{ 'trading-enabled' if is_trading_enabled else 'trading-disabled' }}">
                             <div class="card-header">
                                 <h5>Trading Controls</h5>
                             </div>
@@ -2069,7 +2176,7 @@ def index():
                                         </thead>
                                         <tbody id="openSignalsTable">
                                             {% for signal in open_signals.values() %}
-                                            <tr class="signal-row" data-symbol="{{ signal.symbol }}">
+                                            <tr class="signal-row {{ 'status-' + signal.status }}" data-symbol="{{ signal.symbol }}">
                                                 <td>{{ signal.symbol }}</td>
                                                 <td>{{ STRATEGY_NAMES.get(signal.strategy_name, signal.strategy_name) }}</td>
                                                 <td>{{ "%.4f"|format(signal.entry_price) }}</td>
@@ -2300,6 +2407,8 @@ def index():
                     .then(data => {
                         if (data.success) {
                             alert('Settings saved successfully!');
+                            // Reload page to reflect changes
+                            location.reload();
                         } else {
                             alert('Error saving settings: ' + data.error);
                         }
@@ -2399,6 +2508,11 @@ def update_settings():
         # Save to Redis
         save_settings_to_redis()
         
+        # Send notification when trading is enabled/disabled
+        if data.get('tradingEnabled') != is_trading_enabled:
+            status = "مفعّل" if is_trading_enabled else "معطّل"
+            log_and_notify("info", f"تم {status} التداول", "trading_status")
+        
         return jsonify({'success': True})
     except Exception as e:
         logger.error(f"Error updating settings: {e}")
@@ -2495,6 +2609,9 @@ def main():
     flask_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=5000, threaded=True), daemon=True)
     flask_thread.start()
     logger.info("✅ [Flask] Web interface started on http://localhost:5000")
+    
+    # Send initial bot status notification
+    send_bot_status_notification()
     
     # Main loop
     logger.info("✅ Bot started successfully. Entering main loop...")
