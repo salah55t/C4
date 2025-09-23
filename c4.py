@@ -73,7 +73,7 @@ except Exception as e:
     exit(1)
 
 # --- متغيرات عامة وإعدادات البوت ---
-is_trading_enabled: bool = False # **مهم**: القيمة الأولية ستُحمّل من Redis
+is_trading_enabled: bool = True # **مهم**: القيمة الأولية ستُحمّل من Redis
 trading_status_lock = Lock()
 paper_trading_mode: bool = True
 trading_mode_lock = Lock()
@@ -1673,3 +1673,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
