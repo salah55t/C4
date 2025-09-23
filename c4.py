@@ -1,10 +1,9 @@
-# ملف c4_5min_v35_0_0.py - نسخة V35.0.0 (تحسين متقدم لتناغم الاستراتيجيات وإدارة الصفقات)
+# ملف c4_5min_v35_0_1.py - نسخة V35.0.1 (لوحة تحكم عربية وإصلاح تفعيل التداول)
 # --- وصف التعديلات:
-# 1. [نظام تقييم السوق المتكامل] إضافة نظام شامل لتقييم حالة السوق وتعديل الاستراتيجيات ديناميكيًا
-# 2. [إدارة صفقات متقدمة] تحسين نظام تحديث وقف الخسارة والأهداف بشكل ديناميكي
-# 3. [تحليل دوري للصفقات] إضافة نظام تحليل دوري للصفقات المفتوحة وتحديثها
-# 4. [إشعارات تلغرام محسنة] تحسين دقة ووضوح إشعارات تلغرام
-# 5. [لوحة تحكم متقدمة] إضافة مؤشرات وتفاصيل أكثر دقة للوحة التحكم
+# 1. [تحويل لوحة التحكم] تحويل واجهة لوحة التحكم بالكامل إلى اللغة العربية
+# 2. [إصلاح تفعيل التداول] إصلاح مشكلة عدم استجابة البوت عند تفعيل التداول من لوحة التحكم
+# 3. [تحسين اتجاه النصوص] تعديل اتجاه النصوص والواجهة لتكون مناسبة للغة العربية
+# 4. [تحسين الأداء] تحسين أداء WebSocket ومعالجة الطلبات
 
 import time
 import os
@@ -49,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV35.0.0_5min')
+logger = logging.getLogger('CryptoBotV35.0.1_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -631,8 +630,126 @@ def get_validated_symbols(filename: str = 'crypto_list.txt') -> List[str]:
         return validated
     except Exception as e:
         logger.error(f"❌ [Symbols] Error validating symbols: {e}"); return []
-# --- نهاية دوال المساعدة ---
 
+# --- نظام تقييم حالة السوق المتكامل ---
+def analyze_market_regime(df_5m: pd.DataFrame, df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> Dict[str, str]:
+    """
+    تحليل نظام السوق (trending, ranging, volatile)
+    """
+    try:
+        # تحليل تقلب السوق
+        atr_percent_5m = df_5m['atr_percent'].iloc[-1]
+        atr_percent_15m = df_15m['atr_percent'].iloc[-1]
+        atr_percent_1h = df_1h['atr_percent'].iloc[-1]
+        
+        # تحديد حالة التقلب
+        if atr_percent_5m > 2.5 or atr_percent_15m > 3.0 or atr_percent_1h > 3.5:
+            volatility_state = "high"
+        elif atr_percent_5m < 1.0 or atr_percent_15m < 1.2 or atr_percent_1h < 1.5:
+            volatility_state = "low"
+        else:
+            volatility_state = "medium"
+        
+        # تحليل اتجاه السوق
+        adx_5m = df_5m['adx'].iloc[-1]
+        adx_15m = df_15m['adx'].iloc[-1]
+        adx_1h = df_1h['adx'].iloc[-1]
+        
+        # تحديد قوة الاتجاه
+        strong_trend = (adx_5m > 22 and adx_15m > 20 and adx_1h > 18)
+        weak_trend = (adx_5m < 15 and adx_15m < 15 and adx_1h < 15)
+        
+        # تحليل نطاق التداول
+        bb_width_5m = df_5m['bb_width'].iloc[-1]
+        bb_width_15m = df_15m['bb_width'].iloc[-1]
+        bb_width_1h = df_1h['bb_width'].iloc[-1]
+        
+        # تحديد حالة النطاق
+        wide_range = (bb_width_5m > 0.05 or bb_width_15m > 0.06 or bb_width_1h > 0.07)
+        narrow_range = (bb_width_5m < 0.02 or bb_width_15m < 0.025 or bb_width_1h < 0.03)
+        
+        # تحديد نظام السوق
+        if volatility_state == "high" and wide_range:
+            market_regime = "volatile"
+        elif strong_trend:
+            market_regime = "trending"
+        elif weak_trend and narrow_range:
+            market_regime = "ranging"
+        else:
+            market_regime = "unknown"
+        
+        return {
+            "market_regime": market_regime,
+            "volatility_state": volatility_state
+        }
+    except Exception as e:
+        logger.error(f"❌ [Market Analysis] Error analyzing market regime: {e}")
+        return {"market_regime": "unknown", "volatility_state": "medium"}
+
+def update_market_state():
+    """
+    تحديث حالة السوق العامة
+    """
+    try:
+        # جلب البيانات لفريمات مختلفة
+        btc_5m = fetch_historical_data(BTC_SYMBOL, '5m', 2)
+        btc_15m = fetch_historical_data(BTC_SYMBOL, '15m', 3)
+        btc_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
+        
+        if btc_5m is None or btc_15m is None or btc_1h is None:
+            logger.warning("❌ [Market Analysis] Could not fetch market data")
+            return
+        
+        # حساب المؤشرات
+        btc_5m = calculate_all_features(btc_5m)
+        btc_15m = calculate_all_features(btc_15m)
+        btc_1h = calculate_all_features(btc_1h)
+        
+        # تحليل نظام السوق
+        market_analysis = analyze_market_regime(btc_5m, btc_15m, btc_1h)
+        
+        # تحليل اتجاه كل فريم
+        trend_details = {}
+        
+        for tf, df in [('5m', btc_5m), ('15m', btc_15m), ('1h', btc_1h)]:
+            last = df.iloc[-1]
+            
+            # تحديد الاتجاه
+            if last['ema50'] > last['ema200'] and last['close'] > last['ema50']:
+                trend = "bullish"
+            elif last['ema50'] < last['ema200'] and last['close'] < last['ema50']:
+                trend = "bearish"
+            else:
+                trend = "neutral"
+            
+            trend_details[tf] = {
+                "trend": trend,
+                "adx": last['adx'],
+                "rsi": last['rsi']
+            }
+        
+        # تحديث حالة السوق
+        with market_state_lock:
+            current_market_state["trend_details_by_tf"] = trend_details
+            current_market_state["market_regime"] = market_analysis["market_regime"]
+            current_market_state["volatility_state"] = market_analysis["volatility_state"]
+        
+        # إرسال تحديث عبر WebSocket
+        broadcast({
+            "type": "market_state_update",
+            "payload": {
+                "trend_details_by_tf": trend_details,
+                "market_regime": market_analysis["market_regime"],
+                "volatility_state": market_analysis["volatility_state"]
+            }
+        })
+        
+        logger.info(f"✅ [Market Analysis] Updated market state: {market_analysis['market_regime']} regime, {market_analysis['volatility_state']} volatility")
+        
+    except Exception as e:
+        logger.error(f"❌ [Market Analysis] Error updating market state: {e}")
+
+# --- دوال البيانات والمؤشرات ---
 def fetch_historical_data(symbol: str, interval: str, days: int) -> Optional[pd.DataFrame]:
     time.sleep(API_REQUEST_DELAY)
     try:
@@ -815,125 +932,7 @@ def save_settings_to_redis():
         logger.error(f"Error saving settings to Redis: {e}")
         return False
 
-# --- نظام تقييم حالة السوق المتكامل ---
-def analyze_market_regime(df_5m: pd.DataFrame, df_15m: pd.DataFrame, df_1h: pd.DataFrame) -> Dict[str, str]:
-    """
-    تحليل نظام السوق (trending, ranging, volatile)
-    """
-    try:
-        # تحليل تقلب السوق
-        atr_percent_5m = df_5m['atr_percent'].iloc[-1]
-        atr_percent_15m = df_15m['atr_percent'].iloc[-1]
-        atr_percent_1h = df_1h['atr_percent'].iloc[-1]
-        
-        # تحديد حالة التقلب
-        if atr_percent_5m > 2.5 or atr_percent_15m > 3.0 or atr_percent_1h > 3.5:
-            volatility_state = "high"
-        elif atr_percent_5m < 1.0 or atr_percent_15m < 1.2 or atr_percent_1h < 1.5:
-            volatility_state = "low"
-        else:
-            volatility_state = "medium"
-        
-        # تحليل اتجاه السوق
-        adx_5m = df_5m['adx'].iloc[-1]
-        adx_15m = df_15m['adx'].iloc[-1]
-        adx_1h = df_1h['adx'].iloc[-1]
-        
-        # تحديد قوة الاتجاه
-        strong_trend = (adx_5m > 22 and adx_15m > 20 and adx_1h > 18)
-        weak_trend = (adx_5m < 15 and adx_15m < 15 and adx_1h < 15)
-        
-        # تحليل نطاق التداول
-        bb_width_5m = df_5m['bb_width'].iloc[-1]
-        bb_width_15m = df_15m['bb_width'].iloc[-1]
-        bb_width_1h = df_1h['bb_width'].iloc[-1]
-        
-        # تحديد حالة النطاق
-        wide_range = (bb_width_5m > 0.05 or bb_width_15m > 0.06 or bb_width_1h > 0.07)
-        narrow_range = (bb_width_5m < 0.02 or bb_width_15m < 0.025 or bb_width_1h < 0.03)
-        
-        # تحديد نظام السوق
-        if volatility_state == "high" and wide_range:
-            market_regime = "volatile"
-        elif strong_trend:
-            market_regime = "trending"
-        elif weak_trend and narrow_range:
-            market_regime = "ranging"
-        else:
-            market_regime = "unknown"
-        
-        return {
-            "market_regime": market_regime,
-            "volatility_state": volatility_state
-        }
-    except Exception as e:
-        logger.error(f"❌ [Market Analysis] Error analyzing market regime: {e}")
-        return {"market_regime": "unknown", "volatility_state": "medium"}
-
-def update_market_state():
-    """
-    تحديث حالة السوق العامة
-    """
-    try:
-        # جلب البيانات لفريمات مختلفة
-        btc_5m = fetch_historical_data(BTC_SYMBOL, '5m', 2)
-        btc_15m = fetch_historical_data(BTC_SYMBOL, '15m', 3)
-        btc_1h = fetch_historical_data(BTC_SYMBOL, '1h', 5)
-        
-        if btc_5m is None or btc_15m is None or btc_1h is None:
-            logger.warning("❌ [Market Analysis] Could not fetch market data")
-            return
-        
-        # حساب المؤشرات
-        btc_5m = calculate_all_features(btc_5m)
-        btc_15m = calculate_all_features(btc_15m)
-        btc_1h = calculate_all_features(btc_1h)
-        
-        # تحليل نظام السوق
-        market_analysis = analyze_market_regime(btc_5m, btc_15m, btc_1h)
-        
-        # تحليل اتجاه كل فريم
-        trend_details = {}
-        
-        for tf, df in [('5m', btc_5m), ('15m', btc_15m), ('1h', btc_1h)]:
-            last = df.iloc[-1]
-            
-            # تحديد الاتجاه
-            if last['ema50'] > last['ema200'] and last['close'] > last['ema50']:
-                trend = "bullish"
-            elif last['ema50'] < last['ema200'] and last['close'] < last['ema50']:
-                trend = "bearish"
-            else:
-                trend = "neutral"
-            
-            trend_details[tf] = {
-                "trend": trend,
-                "adx": last['adx'],
-                "rsi": last['rsi']
-            }
-        
-        # تحديث حالة السوق
-        with market_state_lock:
-            current_market_state["trend_details_by_tf"] = trend_details
-            current_market_state["market_regime"] = market_analysis["market_regime"]
-            current_market_state["volatility_state"] = market_analysis["volatility_state"]
-        
-        # إرسال تحديث عبر WebSocket
-        broadcast({
-            "type": "market_state_update",
-            "payload": {
-                "trend_details_by_tf": trend_details,
-                "market_regime": market_analysis["market_regime"],
-                "volatility_state": market_analysis["volatility_state"]
-            }
-        })
-        
-        logger.info(f"✅ [Market Analysis] Updated market state: {market_analysis['market_regime']} regime, {market_analysis['volatility_state']} volatility")
-        
-    except Exception as e:
-        logger.error(f"❌ [Market Analysis] Error updating market state: {e}")
-
-# --- الفلاتر الديناميكية ونظام السوق ---
+# --- الفلاتر الديناميكية ---
 def get_wave_retracement(df: pd.DataFrame) -> float:
     try:
         highs = df['high'].values
@@ -2270,53 +2269,236 @@ def generate_signals():
 def index():
     return render_template_string('''
         <!DOCTYPE html>
-        <html>
+        <html dir="rtl" lang="ar">
         <head>
-            <title>Crypto Trading Bot Dashboard</title>
+            <title>لوحة تحكم بوت التداول</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
             <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css">
+            <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700&display=swap" rel="stylesheet">
             <style>
-                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; }
-                .sidebar { background-color: #343a40; color: white; min-height: 100vh; }
-                .main-content { padding: 20px; }
-                .card { margin-bottom: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                .card-header { font-weight: bold; border-radius: 10px 10px 0 0 !important; }
-                .trade-card { border-left: 4px solid; }
-                .profit { border-left-color: #28a745; }
-                .loss { border-left-color: #dc3545; }
-                .neutral { border-left-color: #6c757d; }
-                .signal-quality { font-weight: bold; }
-                .quality-high { color: #28a745; }
-                .quality-medium { color: #ffc107; }
-                .quality-low { color: #dc3545; }
-                .market-regime { font-weight: bold; padding: 5px 10px; border-radius: 20px; }
-                .regime-trending { background-color: #d4edda; color: #155724; }
-                .regime-ranging { background-color: #fff3cd; color: #856404; }
-                .regime-volatile { background-color: #f8d7da; color: #721c24; }
-                .volatility-low { color: #28a745; }
-                .volatility-medium { color: #ffc107; }
-                .volatility-high { color: #dc3545; }
-                .trend-indicator { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; }
-                .trend-bullish { background-color: #28a745; }
-                .trend-bearish { background-color: #dc3545; }
-                .trend-neutral { background-color: #6c757d; }
-                .price-up { color: #28a745; }
-                .price-down { color: #dc3545; }
-                .notification-item { padding: 10px; margin-bottom: 10px; border-radius: 5px; }
-                .notification-info { background-color: #d1ecf1; border-left: 4px solid #17a2b8; }
-                .notification-warning { background-color: #fff3cd; border-left: 4px solid #ffc107; }
-                .notification-error { background-color: #f8d7da; border-left: 4px solid #dc3545; }
-                .rejection-item { padding: 10px; margin-bottom: 10px; border-radius: 5px; background-color: #f8f9fa; border-left: 4px solid #6c757d; }
-                .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; }
-                .status-active { background-color: #28a745; }
-                .status-inactive { background-color: #dc3545; }
-                .tab-content { padding: 20px; }
-                .nav-tabs .nav-link { color: #495057; }
-                .nav-tabs .nav-link.active { font-weight: bold; }
-                .settings-section { margin-bottom: 20px; }
-                .strategy-switch { margin-right: 10px; }
+                body { 
+                    font-family: 'Tajawal', sans-serif; 
+                    background-color: #f8f9fa;
+                }
+                .sidebar { 
+                    background-color: #343a40; 
+                    color: white; 
+                    min-height: 100vh;
+                    text-align: right;
+                }
+                .main-content { 
+                    padding: 20px;
+                    text-align: right;
+                }
+                .card { 
+                    margin-bottom: 20px; 
+                    border-radius: 10px; 
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                }
+                .card-header { 
+                    font-weight: bold; 
+                    border-radius: 10px 10px 0 0 !important;
+                    text-align: right;
+                }
+                .trade-card { 
+                    border-left: none;
+                    border-right: 4px solid;
+                }
+                .profit { 
+                    border-right-color: #28a745; 
+                }
+                .loss { 
+                    border-right-color: #dc3545; 
+                }
+                .neutral { 
+                    border-right-color: #6c757d; 
+                }
+                .signal-quality { 
+                    font-weight: bold; 
+                }
+                .quality-high { 
+                    color: #28a745; 
+                }
+                .quality-medium { 
+                    color: #ffc107; 
+                }
+                .quality-low { 
+                    color: #dc3545; 
+                }
+                .market-regime { 
+                    font-weight: bold; 
+                    padding: 5px 10px; 
+                    border-radius: 20px; 
+                    display: inline-block;
+                }
+                .regime-trending { 
+                    background-color: #d4edda; 
+                    color: #155724; 
+                }
+                .regime-ranging { 
+                    background-color: #fff3cd; 
+                    color: #856404; 
+                }
+                .regime-volatile { 
+                    background-color: #f8d7da; 
+                    color: #721c24; 
+                }
+                .volatility-low { 
+                    color: #28a745; 
+                }
+                .volatility-medium { 
+                    color: #ffc107; 
+                }
+                .volatility-high { 
+                    color: #dc3545; 
+                }
+                .trend-indicator { 
+                    display: inline-block; 
+                    width: 12px; 
+                    height: 12px; 
+                    border-radius: 50%; 
+                    margin-left: 5px;
+                }
+                .trend-bullish { 
+                    background-color: #28a745; 
+                }
+                .trend-bearish { 
+                    background-color: #dc3545; 
+                }
+                .trend-neutral { 
+                    background-color: #6c757d; 
+                }
+                .price-up { 
+                    color: #28a745; 
+                }
+                .price-down { 
+                    color: #dc3545; 
+                }
+                .notification-item { 
+                    padding: 10px; 
+                    margin-bottom: 10px; 
+                    border-radius: 5px;
+                    text-align: right;
+                }
+                .notification-info { 
+                    background-color: #d1ecf1; 
+                    border-right: 4px solid #17a2b8;
+                    border-left: none;
+                }
+                .notification-warning { 
+                    background-color: #fff3cd; 
+                    border-right: 4px solid #ffc107;
+                    border-left: none;
+                }
+                .notification-error { 
+                    background-color: #f8d7da; 
+                    border-right: 4px solid #dc3545;
+                    border-left: none;
+                }
+                .rejection-item { 
+                    padding: 10px; 
+                    margin-bottom: 10px; 
+                    border-radius: 5px; 
+                    background-color: #f8f9fa; 
+                    border-right: 4px solid #6c757d;
+                    border-left: none;
+                    text-align: right;
+                }
+                .status-indicator { 
+                    display: inline-block; 
+                    width: 10px; 
+                    height: 10px; 
+                    border-radius: 50%; 
+                    margin-left: 5px;
+                }
+                .status-active { 
+                    background-color: #28a745; 
+                }
+                .status-inactive { 
+                    background-color: #dc3545; 
+                }
+                .tab-content { 
+                    padding: 20px; 
+                }
+                .nav-tabs .nav-link { 
+                    color: #495057; 
+                }
+                .nav-tabs .nav-link.active { 
+                    font-weight: bold; 
+                }
+                .settings-section { 
+                    margin-bottom: 20px; 
+                }
+                .strategy-switch { 
+                    margin-left: 10px; 
+                }
+                .form-check {
+                    text-align: right;
+                    padding-right: 1.5em;
+                    padding-left: 0;
+                }
+                .form-check-input {
+                    margin-left: 0;
+                    margin-right: -1.5em;
+                }
+                .progress {
+                    direction: ltr;
+                }
+                .alert {
+                    text-align: right;
+                }
+                .table {
+                    text-align: right;
+                }
+                .table th {
+                    text-align: right;
+                }
+                .btn-group {
+                    direction: ltr;
+                }
+                .form-label {
+                    text-align: right;
+                    display: block;
+                }
+                .text-center {
+                    text-align: center !important;
+                }
+                .text-start {
+                    text-align: right !important;
+                }
+                .text-end {
+                    text-align: left !important;
+                }
+                .dropdown-menu {
+                    text-align: right;
+                }
+                .modal-header {
+                    text-align: right;
+                }
+                .modal-footer {
+                    justify-content: flex-start;
+                }
+                .list-group {
+                    text-align: right;
+                }
+                .carousel-caption {
+                    text-align: right;
+                }
+                .blockquote {
+                    border-right: 4px solid #ccc;
+                    border-left: none;
+                    padding-right: 1rem;
+                    padding-left: 0;
+                }
+                .breadcrumb {
+                    direction: rtl;
+                }
+                .pagination {
+                    direction: ltr;
+                    justify-content: center;
+                }
             </style>
         </head>
         <body>
@@ -2324,36 +2506,36 @@ def index():
                 <div class="row">
                     <!-- Sidebar -->
                     <div class="col-md-3 col-lg-2 sidebar p-3">
-                        <h4 class="mb-4">Trading Bot</h4>
+                        <h4 class="mb-4 text-center">بوت التداول</h4>
                         <ul class="nav flex-column">
                             <li class="nav-item">
                                 <a class="nav-link active text-white" href="#" data-tab="dashboard">
-                                    <i class="bi bi-speedometer2 me-2"></i> Dashboard
+                                    <i class="bi bi-speedometer2 ms-2"></i> لوحة التحكم
                                 </a>
                             </li>
                             <li class="nav-item">
                                 <a class="nav-link text-white" href="#" data-tab="trades">
-                                    <i class="bi bi-graph-up me-2"></i> Open Trades
+                                    <i class="bi bi-graph-up ms-2"></i> الصفقات المفتوحة
                                 </a>
                             </li>
                             <li class="nav-item">
                                 <a class="nav-link text-white" href="#" data-tab="market">
-                                    <i class="bi bi-globe me-2"></i> Market State
+                                    <i class="bi bi-globe ms-2"></i> حالة السوق
                                 </a>
                             </li>
                             <li class="nav-item">
                                 <a class="nav-link text-white" href="#" data-tab="notifications">
-                                    <i class="bi bi-bell me-2"></i> Notifications
+                                    <i class="bi bi-bell ms-2"></i> الإشعارات
                                 </a>
                             </li>
                             <li class="nav-item">
                                 <a class="nav-link text-white" href="#" data-tab="rejections">
-                                    <i class="bi bi-x-circle me-2"></i> Rejections
+                                    <i class="bi bi-x-circle ms-2"></i> عمليات الرفض
                                 </a>
                             </li>
                             <li class="nav-item">
                                 <a class="nav-link text-white" href="#" data-tab="settings">
-                                    <i class="bi bi-gear me-2"></i> Settings
+                                    <i class="bi bi-gear ms-2"></i> الإعدادات
                                 </a>
                             </li>
                         </ul>
@@ -2364,48 +2546,48 @@ def index():
                         <!-- Dashboard Tab -->
                         <div id="dashboard-tab" class="tab-content">
                             <div class="d-flex justify-content-between align-items-center mb-4">
-                                <h2>Dashboard</h2>
+                                <h2>لوحة التحكم</h2>
                                 <div>
                                     <span id="trading-status" class="status-indicator status-inactive"></span>
-                                    <span id="trading-status-text">Trading Disabled</span>
-                                    <button id="toggle-trading" class="btn btn-sm btn-primary ms-2">Enable Trading</button>
+                                    <span id="trading-status-text">التداول معطل</span>
+                                    <button id="toggle-trading" class="btn btn-sm btn-primary me-2">تفعيل التداول</button>
                                 </div>
                             </div>
                             
                             <div class="row">
                                 <div class="col-md-3">
                                     <div class="card text-center">
-                                        <div class="card-header bg-primary text-white">Balance</div>
+                                        <div class="card-header bg-primary text-white">الرصيد</div>
                                         <div class="card-body">
                                             <h5 id="balance">$0.00</h5>
-                                            <small id="balance-status">Paper Trading</small>
+                                            <small id="balance-status">تداول ورقي</small>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="card text-center">
-                                        <div class="card-header bg-success text-white">Open Trades</div>
+                                        <div class="card-header bg-success text-white">الصفقات المفتوحة</div>
                                         <div class="card-body">
                                             <h5 id="open-trades-count">0</h5>
-                                            <small>Max: <span id="max-trades">3</span></small>
+                                            <small>الحد الأقصى: <span id="max-trades">3</span></small>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="card text-center">
-                                        <div class="card-header bg-info text-white">Market Regime</div>
+                                        <div class="card-header bg-info text-white">نظام السوق</div>
                                         <div class="card-body">
-                                            <h5 id="market-regime">Unknown</h5>
-                                            <small id="volatility-state">Medium Volatility</small>
+                                            <h5 id="market-regime">غير معروف</h5>
+                                            <small id="volatility-state">تقلب متوسط</small>
                                         </div>
                                     </div>
                                 </div>
                                 <div class="col-md-3">
                                     <div class="card text-center">
-                                        <div class="card-header bg-warning text-white">Signal Quality</div>
+                                        <div class="card-header bg-warning text-white">جودة الإشارة</div>
                                         <div class="card-body">
                                             <h5 id="signal-quality">70%</h5>
-                                            <small>Minimum Required</small>
+                                            <small>الحد الأدنى المطلوب</small>
                                         </div>
                                     </div>
                                 </div>
@@ -2414,7 +2596,7 @@ def index():
                             <div class="row mt-4">
                                 <div class="col-md-6">
                                     <div class="card">
-                                        <div class="card-header">Performance Summary</div>
+                                        <div class="card-header">ملخص الأداء</div>
                                         <div class="card-body">
                                             <canvas id="performance-chart" height="150"></canvas>
                                         </div>
@@ -2422,7 +2604,7 @@ def index():
                                 </div>
                                 <div class="col-md-6">
                                     <div class="card">
-                                        <div class="card-header">Strategy Distribution</div>
+                                        <div class="card-header">توزيع الاستراتيجيات</div>
                                         <div class="card-body">
                                             <canvas id="strategy-chart" height="150"></canvas>
                                         </div>
@@ -2433,31 +2615,31 @@ def index():
                         
                         <!-- Open Trades Tab -->
                         <div id="trades-tab" class="tab-content" style="display: none;">
-                            <h2 class="mb-4">Open Trades</h2>
+                            <h2 class="mb-4">الصفقات المفتوحة</h2>
                             <div id="open-trades-container">
                                 <div class="text-center py-5">
                                     <div class="spinner-border text-primary" role="status">
-                                        <span class="visually-hidden">Loading...</span>
+                                        <span class="visually-hidden">جاري التحميل...</span>
                                     </div>
-                                    <p class="mt-2">Loading open trades...</p>
+                                    <p class="mt-2">جاري تحميل الصفقات المفتوحة...</p>
                                 </div>
                             </div>
                         </div>
                         
                         <!-- Market State Tab -->
                         <div id="market-tab" class="tab-content" style="display: none;">
-                            <h2 class="mb-4">Market State</h2>
+                            <h2 class="mb-4">حالة السوق</h2>
                             <div class="row">
                                 <div class="col-md-6">
                                     <div class="card">
-                                        <div class="card-header">Trend Analysis</div>
+                                        <div class="card-header">تحليل الاتجاه</div>
                                         <div class="card-body">
                                             <div id="trend-analysis">
                                                 <div class="text-center py-5">
                                                     <div class="spinner-border text-primary" role="status">
-                                                        <span class="visually-hidden">Loading...</span>
+                                                        <span class="visually-hidden">جاري التحميل...</span>
                                                     </div>
-                                                    <p class="mt-2">Loading market analysis...</p>
+                                                    <p class="mt-2">جاري تحليل السوق...</p>
                                                 </div>
                                             </div>
                                         </div>
@@ -2465,7 +2647,7 @@ def index():
                                 </div>
                                 <div class="col-md-6">
                                     <div class="card">
-                                        <div class="card-header">Volatility Analysis</div>
+                                        <div class="card-header">تحليل التقلب</div>
                                         <div class="card-body">
                                             <canvas id="volatility-chart" height="200"></canvas>
                                         </div>
@@ -2476,43 +2658,43 @@ def index():
                         
                         <!-- Notifications Tab -->
                         <div id="notifications-tab" class="tab-content" style="display: none;">
-                            <h2 class="mb-4">Notifications</h2>
+                            <h2 class="mb-4">الإشعارات</h2>
                             <div id="notifications-container">
                                 <div class="text-center py-5">
                                     <div class="spinner-border text-primary" role="status">
-                                        <span class="visually-hidden">Loading...</span>
+                                        <span class="visually-hidden">جاري التحميل...</span>
                                     </div>
-                                    <p class="mt-2">Loading notifications...</p>
+                                    <p class="mt-2">جاري تحميل الإشعارات...</p>
                                 </div>
                             </div>
                         </div>
                         
                         <!-- Rejections Tab -->
                         <div id="rejections-tab" class="tab-content" style="display: none;">
-                            <h2 class="mb-4">Signal Rejections</h2>
+                            <h2 class="mb-4">عمليات الرفض</h2>
                             <div id="rejections-container">
                                 <div class="text-center py-5">
                                     <div class="spinner-border text-primary" role="status">
-                                        <span class="visually-hidden">Loading...</span>
+                                        <span class="visually-hidden">جاري التحميل...</span>
                                     </div>
-                                    <p class="mt-2">Loading rejections...</p>
+                                    <p class="mt-2">جاري تحميل عمليات الرفض...</p>
                                 </div>
                             </div>
                         </div>
                         
                         <!-- Settings Tab -->
                         <div id="settings-tab" class="tab-content" style="display: none;">
-                            <h2 class="mb-4">Settings</h2>
+                            <h2 class="mb-4">الإعدادات</h2>
                             
                             <div class="card settings-section">
-                                <div class="card-header">Trading Settings</div>
+                                <div class="card-header">إعدادات التداول</div>
                                 <div class="card-body">
                                     <div class="row mb-3">
                                         <div class="col-md-6">
                                             <div class="form-check form-switch">
                                                 <input class="form-check-input" type="checkbox" id="paper-trading-switch" checked>
                                                 <label class="form-check-label" for="paper-trading-switch">
-                                                    Paper Trading Mode
+                                                    وضع التداول الورقي
                                                 </label>
                                             </div>
                                         </div>
@@ -2520,7 +2702,7 @@ def index():
                                             <div class="form-check form-switch">
                                                 <input class="form-check-input" type="checkbox" id="auto-fallback-switch" checked>
                                                 <label class="form-check-label" for="auto-fallback-switch">
-                                                    Auto Fallback to Paper on Low Balance
+                                                    العودة التلقائية للتداول الورقي عند انخفاض الرصيد
                                                 </label>
                                             </div>
                                         </div>
@@ -2528,43 +2710,43 @@ def index():
                                     
                                     <div class="row mb-3">
                                         <div class="col-md-6">
-                                            <label for="min-trade-amount" class="form-label">Min Trade Amount (USDT)</label>
+                                            <label for="min-trade-amount" class="form-label">الحد الأدنى لحجم الصفقة (USDT)</label>
                                             <input type="number" class="form-control" id="min-trade-amount" value="4.5" step="0.1">
                                         </div>
                                         <div class="col-md-6">
-                                            <label for="max-trade-amount" class="form-label">Max Trade Amount (USDT)</label>
+                                            <label for="max-trade-amount" class="form-label">الحد الأقصى لحجم الصفقة (USDT)</label>
                                             <input type="number" class="form-control" id="max-trade-amount" value="6.5" step="0.1">
                                         </div>
                                     </div>
                                     
                                     <div class="row mb-3">
                                         <div class="col-md-6">
-                                            <label for="max-open-trades" class="form-label">Max Open Trades</label>
+                                            <label for="max-open-trades" class="form-label">الحد الأقصى للصفقات المفتوحة</label>
                                             <input type="number" class="form-control" id="max-open-trades" value="3" min="1" max="10">
                                         </div>
                                         <div class="col-md-6">
-                                            <label for="signal-quality" class="form-label">Minimum Signal Quality (%)</label>
+                                            <label for="signal-quality" class="form-label">الحد الأدنى لجودة الإشارة (%)</label>
                                             <input type="number" class="form-control" id="signal-quality" value="70" min="50" max="100">
                                         </div>
                                     </div>
                                     
                                     <div class="row">
                                         <div class="col-12">
-                                            <button id="save-trading-settings" class="btn btn-primary">Save Settings</button>
+                                            <button id="save-trading-settings" class="btn btn-primary">حفظ الإعدادات</button>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             
                             <div class="card settings-section">
-                                <div class="card-header">Strategy Settings</div>
+                                <div class="card-header">إعدادات الاستراتيجيات</div>
                                 <div class="card-body">
                                     <div class="row">
                                         <div class="col-md-6">
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="bb-stoch-switch" checked>
                                                 <label class="form-check-label" for="bb-stoch-switch">
-                                                    BB + Stoch Strategy
+                                                    استراتيجية BB + Stoch
                                                 </label>
                                             </div>
                                         </div>
@@ -2572,7 +2754,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="macd-ema-switch" checked>
                                                 <label class="form-check-label" for="macd-ema-switch">
-                                                    MACD + EMA Strategy
+                                                    استراتيجية MACD + EMA
                                                 </label>
                                             </div>
                                         </div>
@@ -2583,7 +2765,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="ema-rsi-switch" checked>
                                                 <label class="form-check-label" for="ema-rsi-switch">
-                                                    EMA + RSI Strategy
+                                                    استراتيجية EMA + RSI
                                                 </label>
                                             </div>
                                         </div>
@@ -2591,7 +2773,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="pullback-switch" checked>
                                                 <label class="form-check-label" for="pullback-switch">
-                                                    Pullback Strategy
+                                                    استراتيجية Pullback
                                                 </label>
                                             </div>
                                         </div>
@@ -2602,7 +2784,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="momentum-switch" checked>
                                                 <label class="form-check-label" for="momentum-switch">
-                                                    Momentum Strategy
+                                                    استراتيجية Momentum
                                                 </label>
                                             </div>
                                         </div>
@@ -2610,7 +2792,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="elliott-switch" checked>
                                                 <label class="form-check-label" for="elliott-switch">
-                                                    Elliott Wave Strategy
+                                                    استراتيجية Elliott Wave
                                                 </label>
                                             </div>
                                         </div>
@@ -2621,7 +2803,7 @@ def index():
                                             <div class="form-check form-switch strategy-switch">
                                                 <input class="form-check-input" type="checkbox" id="range-switch" checked>
                                                 <label class="form-check-label" for="range-switch">
-                                                    Range Reversal Strategy
+                                                    استراتيجية Range Reversal
                                                 </label>
                                             </div>
                                         </div>
@@ -2629,21 +2811,21 @@ def index():
                                     
                                     <div class="row mt-3">
                                         <div class="col-12">
-                                            <button id="save-strategy-settings" class="btn btn-primary">Save Settings</button>
+                                            <button id="save-strategy-settings" class="btn btn-primary">حفظ الإعدادات</button>
                                         </div>
                                     </div>
                                 </div>
                             </div>
                             
                             <div class="card settings-section">
-                                <div class="card-header">Notification Settings</div>
+                                <div class="card-header">إعدادات الإشعارات</div>
                                 <div class="card-body">
                                     <div class="row mb-3">
                                         <div class="col-md-6">
                                             <div class="form-check form-switch">
                                                 <input class="form-check-input" type="checkbox" id="telegram-notifications-switch" checked>
                                                 <label class="form-check-label" for="telegram-notifications-switch">
-                                                    Telegram Notifications
+                                                    إشعارات تلغرام
                                                 </label>
                                             </div>
                                         </div>
@@ -2651,7 +2833,7 @@ def index():
                                             <div class="form-check form-switch">
                                                 <input class="form-check-input" type="checkbox" id="email-notifications-switch">
                                                 <label class="form-check-label" for="email-notifications-switch">
-                                                    Email Notifications
+                                                    إشعارات البريد الإلكتروني
                                                 </label>
                                             </div>
                                         </div>
@@ -2659,18 +2841,18 @@ def index():
                                     
                                     <div class="row mb-3">
                                         <div class="col-md-6">
-                                            <label for="min-profit-notification" class="form-label">Min Profit for Notification (%)</label>
+                                            <label for="min-profit-notification" class="form-label">الحد الأدنى للربح للإشعار (%)</label>
                                             <input type="number" class="form-control" id="min-profit-notification" value="1.0" step="0.1">
                                         </div>
                                         <div class="col-md-6">
-                                            <label for="max-loss-notification" class="form-label">Max Loss for Notification (%)</label>
+                                            <label for="max-loss-notification" class="form-label">الحد الأقصى للخسارة للإشعار (%)</label>
                                             <input type="number" class="form-control" id="max-loss-notification" value="-1.0" step="0.1">
                                         </div>
                                     </div>
                                     
                                     <div class="row">
                                         <div class="col-12">
-                                            <button id="save-notification-settings" class="btn btn-primary">Save Settings</button>
+                                            <button id="save-notification-settings" class="btn btn-primary">حفظ الإعدادات</button>
                                         </div>
                                     </div>
                                 </div>
@@ -2701,7 +2883,7 @@ def index():
                     socket = new WebSocket(wsUrl);
                     
                     socket.onopen = function(e) {
-                        console.log("WebSocket connection established");
+                        console.log("تم إنشاء اتصال WebSocket");
                         
                         // Request initial data
                         socket.send(JSON.stringify({type: "get_initial_data"}));
@@ -2713,12 +2895,12 @@ def index():
                     };
                     
                     socket.onclose = function(event) {
-                        console.log("WebSocket connection closed. Reconnecting in 5 seconds...");
+                        console.log("تم إغلاق اتصال WebSocket. إعادة المحاولة بعد 5 ثواني...");
                         setTimeout(initWebSocket, 5000);
                     };
                     
                     socket.onerror = function(error) {
-                        console.error("WebSocket error:", error);
+                        console.error("خطأ في WebSocket:", error);
                     };
                 }
                 
@@ -2764,6 +2946,10 @@ def index():
                         case "settings_updated":
                             showSettingsUpdated();
                             break;
+                            
+                        case "trading_status_changed":
+                            updateTradingStatus(data.payload.enabled);
+                            break;
                     }
                 }
                 
@@ -2771,28 +2957,10 @@ def index():
                 function updateDashboard(data) {
                     // Update balance
                     document.getElementById('balance').textContent = `$${data.balance.toFixed(2)}`;
-                    document.getElementById('balance-status').textContent = data.paper_trading ? 'Paper Trading' : 'Real Trading';
+                    document.getElementById('balance-status').textContent = data.paper_trading ? 'تداول ورقي' : 'تداول حقيقي';
                     
                     // Update trading status
-                    const tradingStatus = document.getElementById('trading-status');
-                    const tradingStatusText = document.getElementById('trading-status-text');
-                    const toggleTradingBtn = document.getElementById('toggle-trading');
-                    
-                    if (data.trading_enabled) {
-                        tradingStatus.classList.remove('status-inactive');
-                        tradingStatus.classList.add('status-active');
-                        tradingStatusText.textContent = 'Trading Enabled';
-                        toggleTradingBtn.textContent = 'Disable Trading';
-                        toggleTradingBtn.classList.remove('btn-primary');
-                        toggleTradingBtn.classList.add('btn-danger');
-                    } else {
-                        tradingStatus.classList.remove('status-active');
-                        tradingStatus.classList.add('status-inactive');
-                        tradingStatusText.textContent = 'Trading Disabled';
-                        toggleTradingBtn.textContent = 'Enable Trading';
-                        toggleTradingBtn.classList.remove('btn-danger');
-                        toggleTradingBtn.classList.add('btn-primary');
-                    }
+                    updateTradingStatus(data.trading_enabled);
                     
                     // Update open trades count
                     document.getElementById('open-trades-count').textContent = data.open_trades_count;
@@ -2802,10 +2970,19 @@ def index():
                     const marketRegimeEl = document.getElementById('market-regime');
                     const volatilityStateEl = document.getElementById('volatility-state');
                     
-                    marketRegimeEl.textContent = data.market_state.market_regime.charAt(0).toUpperCase() + data.market_state.market_regime.slice(1);
+                    let regimeText = 'غير معروف';
+                    if (data.market_state.market_regime === 'trending') regimeText = 'موجه';
+                    else if (data.market_state.market_regime === 'ranging') regimeText = 'جانبي';
+                    else if (data.market_state.market_regime === 'volatile') regimeText = 'متقلب';
+                    
+                    marketRegimeEl.textContent = regimeText;
                     marketRegimeEl.className = `market-regime regime-${data.market_state.market_regime}`;
                     
-                    volatilityStateEl.textContent = `${data.market_state.volatility_state.charAt(0).toUpperCase() + data.market_state.volatility_state.slice(1)} Volatility`;
+                    let volatilityText = 'تقلب متوسط';
+                    if (data.market_state.volatility_state === 'low') volatilityText = 'تقلب منخفض';
+                    else if (data.market_state.volatility_state === 'high') volatilityText = 'تقلب مرتفع';
+                    
+                    volatilityStateEl.textContent = volatilityText;
                     volatilityStateEl.className = `volatility-${data.market_state.volatility_state}`;
                     
                     // Update signal quality
@@ -2840,6 +3017,29 @@ def index():
                     initVolatilityChart(data.volatility_data);
                 }
                 
+                // Update trading status
+                function updateTradingStatus(enabled) {
+                    const tradingStatus = document.getElementById('trading-status');
+                    const tradingStatusText = document.getElementById('trading-status-text');
+                    const toggleTradingBtn = document.getElementById('toggle-trading');
+                    
+                    if (enabled) {
+                        tradingStatus.classList.remove('status-inactive');
+                        tradingStatus.classList.add('status-active');
+                        tradingStatusText.textContent = 'التداول مفعل';
+                        toggleTradingBtn.textContent = 'تعطيل التداول';
+                        toggleTradingBtn.classList.remove('btn-primary');
+                        toggleTradingBtn.classList.add('btn-danger');
+                    } else {
+                        tradingStatus.classList.remove('status-active');
+                        tradingStatus.classList.add('status-inactive');
+                        tradingStatusText.textContent = 'التداول معطل';
+                        toggleTradingBtn.textContent = 'تفعيل التداول';
+                        toggleTradingBtn.classList.remove('btn-danger');
+                        toggleTradingBtn.classList.add('btn-primary');
+                    }
+                }
+                
                 // Update open trades
                 function updateOpenTrades(trades) {
                     openTrades = {};
@@ -2848,7 +3048,7 @@ def index():
                     container.innerHTML = '';
                     
                     if (trades.length === 0) {
-                        container.innerHTML = '<div class="text-center py-5"><p>No open trades</p></div>';
+                        container.innerHTML = '<div class="text-center py-5"><p>لا توجد صفقات مفتوحة</p></div>';
                         return;
                     }
                     
@@ -2876,16 +3076,16 @@ def index():
                         <div class="card-body">
                             <div class="row">
                                 <div class="col-md-6">
-                                    <p><strong>Strategy:</strong> ${trade.strategy_name}</p>
-                                    <p><strong>Entry Price:</strong> $${trade.entry_price.toFixed(4)}</p>
-                                    <p><strong>Current Price:</strong> $${trade.current_price.toFixed(4)}</p>
-                                    <p><strong>Stop Loss:</strong> $${trade.stop_loss.toFixed(4)}</p>
+                                    <p><strong>الاستراتيجية:</strong> ${trade.strategy_name}</p>
+                                    <p><strong>سعر الدخول:</strong> $${trade.entry_price.toFixed(4)}</p>
+                                    <p><strong>السعر الحالي:</strong> $${trade.current_price.toFixed(4)}</p>
+                                    <p><strong>وقف الخسارة:</strong> $${trade.stop_loss.toFixed(4)}</p>
                                 </div>
                                 <div class="col-md-6">
-                                    <p><strong>Target 1:</strong> $${trade.target_price_1.toFixed(4)}</p>
-                                    <p><strong>Target 2:</strong> $${trade.target_price_2.toFixed(4)}</p>
-                                    <p><strong>Quantity:</strong> ${trade.quantity.toFixed(4)}</p>
-                                    <p><strong>Notional Value:</strong> $${(trade.quantity * trade.entry_price).toFixed(2)}</p>
+                                    <p><strong>الهدف الأول:</strong> $${trade.target_price_1.toFixed(4)}</p>
+                                    <p><strong>الهدف الثاني:</strong> $${trade.target_price_2.toFixed(4)}</p>
+                                    <p><strong>الكمية:</strong> ${trade.quantity.toFixed(4)}</p>
+                                    <p><strong>القيمة الاسمية:</strong> $${(trade.quantity * trade.entry_price).toFixed(2)}</p>
                                 </div>
                             </div>
                             <div class="progress mt-3" style="height: 10px;">
@@ -2928,7 +3128,7 @@ def index():
                     
                     // Remove the "no trades" message if it exists
                     const noTradesMsg = container.querySelector('.text-center');
-                    if (noTradesMsg && noTradesMsg.textContent.includes('No open trades')) {
+                    if (noTradesMsg && noTradesMsg.textContent.includes('لا توجد صفقات')) {
                         container.innerHTML = '';
                     }
                     
@@ -2952,7 +3152,7 @@ def index():
                     // Check if there are any trades left
                     const container = document.getElementById('open-trades-container');
                     if (Object.keys(openTrades).length === 0) {
-                        container.innerHTML = '<div class="text-center py-5"><p>No open trades</p></div>';
+                        container.innerHTML = '<div class="text-center py-5"><p>لا توجد صفقات مفتوحة</p></div>';
                     }
                     
                     // Update the open trades count
@@ -2968,7 +3168,7 @@ def index():
                     container.innerHTML = '';
                     
                     if (notifications.length === 0) {
-                        container.innerHTML = '<div class="text-center py-5"><p>No notifications</p></div>';
+                        container.innerHTML = '<div class="text-center py-5"><p>لا توجد إشعارات</p></div>';
                         return;
                     }
                     
@@ -2983,7 +3183,7 @@ def index():
                     const div = document.createElement('div');
                     div.className = `notification-item notification-${notification.type}`;
                     
-                    const time = new Date(notification.timestamp).toLocaleString();
+                    const time = new Date(notification.timestamp).toLocaleString('ar-SA');
                     
                     div.innerHTML = `
                         <div class="d-flex justify-content-between">
@@ -3003,7 +3203,7 @@ def index():
                     
                     // Remove the "no notifications" message if it exists
                     const noNotificationsMsg = container.querySelector('.text-center');
-                    if (noNotificationsMsg && noNotificationsMsg.textContent.includes('No notifications')) {
+                    if (noNotificationsMsg && noNotificationsMsg.textContent.includes('لا توجد إشعارات')) {
                         container.innerHTML = '';
                     }
                     
@@ -3024,7 +3224,7 @@ def index():
                     container.innerHTML = '';
                     
                     if (rejections.length === 0) {
-                        container.innerHTML = '<div class="text-center py-5"><p>No rejections</p></div>';
+                        container.innerHTML = '<div class="text-center py-5"><p>لا توجد عمليات رفض</p></div>';
                         return;
                     }
                     
@@ -3039,7 +3239,7 @@ def index():
                     const div = document.createElement('div');
                     div.className = 'rejection-item';
                     
-                    const time = new Date(rejection.timestamp).toLocaleString();
+                    const time = new Date(rejection.timestamp).toLocaleString('ar-SA');
                     
                     div.innerHTML = `
                         <div class="d-flex justify-content-between">
@@ -3061,7 +3261,7 @@ def index():
                     
                     // Remove the "no rejections" message if it exists
                     const noRejectionsMsg = container.querySelector('.text-center');
-                    if (noRejectionsMsg && noRejectionsMsg.textContent.includes('No rejections')) {
+                    if (noRejectionsMsg && noRejectionsMsg.textContent.includes('لا توجد عمليات')) {
                         container.innerHTML = '';
                     }
                     
@@ -3083,12 +3283,21 @@ def index():
                     const volatilityStateEl = document.getElementById('volatility-state');
                     
                     if (marketRegimeEl) {
-                        marketRegimeEl.textContent = state.market_regime.charAt(0).toUpperCase() + state.market_regime.slice(1);
+                        let regimeText = 'غير معروف';
+                        if (state.market_regime === 'trending') regimeText = 'موجه';
+                        else if (state.market_regime === 'ranging') regimeText = 'جانبي';
+                        else if (state.market_regime === 'volatile') regimeText = 'متقلب';
+                        
+                        marketRegimeEl.textContent = regimeText;
                         marketRegimeEl.className = `market-regime regime-${state.market_regime}`;
                     }
                     
                     if (volatilityStateEl) {
-                        volatilityStateEl.textContent = `${state.volatility_state.charAt(0).toUpperCase() + state.volatility_state.slice(1)} Volatility`;
+                        let volatilityText = 'تقلب متوسط';
+                        if (state.volatility_state === 'low') volatilityText = 'تقلب منخفض';
+                        else if (state.volatility_state === 'high') volatilityText = 'تقلب مرتفع';
+                        
+                        volatilityStateEl.textContent = volatilityText;
                         volatilityStateEl.className = `volatility-${state.volatility_state}`;
                     }
                     
@@ -3099,6 +3308,10 @@ def index():
                         
                         Object.entries(state.trend_details_by_tf).forEach(([timeframe, details]) => {
                             const trendClass = `trend-${details.trend}`;
+                            
+                            let trendText = 'محايد';
+                            if (details.trend === 'bullish') trendText = 'صاعد';
+                            else if (details.trend === 'bearish') trendText = 'هابط';
                             
                             const timeframeEl = document.createElement('div');
                             timeframeEl.className = 'd-flex justify-content-between align-items-center mb-3 p-3 border rounded';
@@ -3153,7 +3366,7 @@ def index():
                         data: {
                             labels: data.labels,
                             datasets: [{
-                                label: 'Profit/Loss (%)',
+                                label: 'الربح/الخسارة (%)',
                                 data: data.values,
                                 borderColor: data.values.map(v => v >= 0 ? '#28a745' : '#dc3545'),
                                 backgroundColor: 'rgba(0, 0, 0, 0.1)',
@@ -3214,7 +3427,7 @@ def index():
                             maintainAspectRatio: false,
                             plugins: {
                                 legend: {
-                                    position: 'right'
+                                    position: 'left'
                                 }
                             }
                         }
@@ -3230,7 +3443,7 @@ def index():
                         data: {
                             labels: data.labels,
                             datasets: [{
-                                label: 'Volatility (%)',
+                                label: 'التقلب (%)',
                                 data: data.values,
                                 borderColor: '#36A2EB',
                                 backgroundColor: 'rgba(54, 162, 235, 0.1)',
@@ -3269,10 +3482,11 @@ def index():
                     const alert = document.createElement('div');
                     alert.className = 'alert alert-success alert-dismissible fade show position-fixed';
                     alert.style.top = '20px';
-                    alert.style.right = '20px';
+                    alert.style.left = '20px';
+                    alert.style.right = 'auto';
                     alert.style.zIndex = '9999';
                     alert.innerHTML = `
-                        Settings updated successfully!
+                        تم تحديث الإعدادات بنجاح!
                         <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                     `;
                     
@@ -3314,12 +3528,34 @@ def index():
                     
                     // Toggle trading button
                     document.getElementById('toggle-trading').addEventListener('click', function() {
-                        const enabled = this.textContent === 'Disable Trading';
+                        const enabled = this.textContent === 'تعطيل التداول';
                         
-                        socket.send(JSON.stringify({
-                            type: 'toggle_trading',
-                            payload: { enabled: !enabled }
-                        }));
+                        // Send WebSocket message to toggle trading
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            socket.send(JSON.stringify({
+                                type: 'toggle_trading',
+                                payload: { enabled: !enabled }
+                            }));
+                        } else {
+                            console.error('WebSocket غير متصل');
+                            // Fallback to HTTP request
+                            fetch('/api/toggle_trading', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({ enabled: !enabled })
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    updateTradingStatus(!enabled);
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error toggling trading:', error);
+                            });
+                        }
                     });
                     
                     // Save trading settings
@@ -3333,10 +3569,31 @@ def index():
                             signal_quality: parseInt(document.getElementById('signal-quality').value)
                         };
                         
-                        socket.send(JSON.stringify({
-                            type: 'update_trading_settings',
-                            payload: settings
-                        }));
+                        // Send WebSocket message
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            socket.send(JSON.stringify({
+                                type: 'update_trading_settings',
+                                payload: settings
+                            }));
+                        } else {
+                            // Fallback to HTTP request
+                            fetch('/api/update_trading_settings', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify(settings)
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    showSettingsUpdated();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error updating trading settings:', error);
+                            });
+                        }
                     });
                     
                     // Save strategy settings
@@ -3351,10 +3608,31 @@ def index():
                             USE_RANGE_REVERSAL_STRATEGY: document.getElementById('range-switch').checked
                         };
                         
-                        socket.send(JSON.stringify({
-                            type: 'update_strategy_settings',
-                            payload: strategies
-                        }));
+                        // Send WebSocket message
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            socket.send(JSON.stringify({
+                                type: 'update_strategy_settings',
+                                payload: strategies
+                            }));
+                        } else {
+                            // Fallback to HTTP request
+                            fetch('/api/update_strategy_settings', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify(strategies)
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    showSettingsUpdated();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error updating strategy settings:', error);
+                            });
+                        }
                     });
                     
                     // Save notification settings
@@ -3366,10 +3644,31 @@ def index():
                             max_loss_notification: parseFloat(document.getElementById('max-loss-notification').value)
                         };
                         
-                        socket.send(JSON.stringify({
-                            type: 'update_notification_settings',
-                            payload: settings
-                        }));
+                        // Send WebSocket message
+                        if (socket && socket.readyState === WebSocket.OPEN) {
+                            socket.send(JSON.stringify({
+                                type: 'update_notification_settings',
+                                payload: settings
+                            }));
+                        } else {
+                            // Fallback to HTTP request
+                            fetch('/api/update_notification_settings', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify(settings)
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    showSettingsUpdated();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error updating notification settings:', error);
+                            });
+                        }
                     });
                 });
             </script>
@@ -3428,7 +3727,7 @@ def get_status():
     
     # Get performance data (mock data for now)
     performance_data = {
-        "labels": ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"],
+        "labels": ["يوم 1", "يوم 2", "يوم 3", "يوم 4", "يوم 5", "يوم 6", "يوم 7"],
         "values": [1.2, -0.5, 2.1, 0.8, -1.2, 1.5, 0.9]
     }
     
@@ -3475,8 +3774,14 @@ def toggle_trading():
     with trading_status_lock:
         is_trading_enabled = enabled
     
-    action = "enabled" if enabled else "disabled"
-    log_and_notify("info", f"Trading {action}", "trading_status")
+    action = "مفعل" if enabled else "معطل"
+    log_and_notify("info", f"التداول {action}", "trading_status")
+    
+    # Broadcast the status change via WebSocket
+    broadcast({
+        "type": "trading_status_changed",
+        "payload": {"enabled": enabled}
+    })
     
     return jsonify({"success": True, "enabled": enabled})
 
@@ -3503,7 +3808,7 @@ def update_trading_settings():
     # Save settings to Redis
     save_settings_to_redis()
     
-    log_and_notify("info", "Trading settings updated", "settings_update")
+    log_and_notify("info", "تم تحديث إعدادات التداول", "settings_update")
     
     return jsonify({"success": True})
 
@@ -3524,7 +3829,7 @@ def update_strategy_settings():
     # Save settings to Redis
     save_settings_to_redis()
     
-    log_and_notify("info", "Strategy settings updated", "settings_update")
+    log_and_notify("info", "تم تحديث إعدادات الاستراتيجيات", "settings_update")
     
     return jsonify({"success": True})
 
@@ -3537,7 +3842,7 @@ def update_notification_settings():
     
     try:
         redis_client.set('notification_settings', json.dumps(data))
-        log_and_notify("info", "Notification settings updated", "settings_update")
+        log_and_notify("info", "تم تحديث إعدادات الإشعارات", "settings_update")
         return jsonify({"success": True})
     except Exception as e:
         logger.error(f"❌ [Settings] Error updating notification settings: {e}")
@@ -3596,7 +3901,7 @@ def websocket_connection(ws):
         
         # Get performance data (mock data for now)
         performance_data = {
-            "labels": ["Day 1", "Day 2", "Day 3", "Day 4", "Day 5", "Day 6", "Day 7"],
+            "labels": ["يوم 1", "يوم 2", "يوم 3", "يوم 4", "يوم 5", "يوم 6", "يوم 7"],
             "values": [1.2, -0.5, 2.1, 0.8, -1.2, 1.5, 0.9]
         }
         
@@ -3649,9 +3954,140 @@ def websocket_connection(ws):
                 
                 if message.get('type') == 'get_initial_data':
                     ws.send(json.dumps(initial_data, cls=NpEncoder))
+                elif message.get('type') == 'toggle_trading':
+                    enabled = message.get('payload', {}).get('enabled', False)
+                    with trading_status_lock:
+                        global is_trading_enabled
+                        is_trading_enabled = enabled
+                    
+                    action = "مفعل" if enabled else "معطل"
+                    log_and_notify("info", f"التداول {action}", "trading_status")
+                    
+                    # Broadcast the status change to all clients
+                    broadcast({
+                        "type": "trading_status_changed",
+                        "payload": {"enabled": enabled}
+                    })
+                    
+                    # Send confirmation back to the client
+                    ws.send(json.dumps({
+                        "type": "trading_status_changed",
+                        "payload": {"enabled": enabled}
+                    }, cls=NpEncoder))
+                    
+                elif message.get('type') == 'update_trading_settings':
+                    settings = message.get('payload', {})
+                    
+                    with trading_mode_lock:
+                        global paper_trading_mode
+                        paper_trading_mode = settings.get('paper_trading', True)
+                    
+                    global AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE
+                    AUTO_FALLBACK_TO_PAPER_ON_LOW_BALANCE = settings.get('auto_fallback', True)
+                    
+                    with trade_amount_lock:
+                        global FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT
+                        FIXED_TRADE_AMOUNT_MIN_USDT = settings.get('min_trade_amount', 4.5)
+                        FIXED_TRADE_AMOUNT_MAX_USDT = settings.get('max_trade_amount', 6.5)
+                    
+                    global MAX_OPEN_TRADES
+                    MAX_OPEN_TRADES = settings.get('max_trades', 3)
+                    
+                    with min_quality_lock:
+                        global MIN_SIGNAL_QUALITY
+                        MIN_SIGNAL_QUALITY = settings.get('signal_quality', 70)
+                    
+                    # Save settings to Redis
+                    save_settings_to_redis()
+                    
+                    log_and_notify("info", "تم تحديث إعدادات التداول", "settings_update")
+                    
+                    # Broadcast the update to all clients
+                    broadcast({
+                        "type": "settings_updated",
+                        "payload": {"success": True}
+                    })
+                    
+                    # Send confirmation back to the client
+                    ws.send(json.dumps({
+                        "type": "settings_updated",
+                        "payload": {"success": True}
+                    }, cls=NpEncoder))
+                    
+                elif message.get('type') == 'update_strategy_settings':
+                    strategies = message.get('payload', {})
+                    
+                    global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY
+                    global USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY
+                    global USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY
+                    
+                    USE_BB_STOCH_STRATEGY = strategies.get('USE_BB_STOCH_STRATEGY', True)
+                    USE_MACD_EMA_STRATEGY = strategies.get('USE_MACD_EMA_STRATEGY', True)
+                    USE_EMA_RSI_STRATEGY = strategies.get('USE_EMA_RSI_STRATEGY', True)
+                    USE_PULLBACK_STRATEGY = strategies.get('USE_PULLBACK_STRATEGY', True)
+                    USE_MOMENTUM_VOLATILITY_STRATEGY = strategies.get('USE_MOMENTUM_VOLATILITY_STRATEGY', True)
+                    USE_ELLIOTT_WAVE_STRATEGY = strategies.get('USE_ELLIOTT_WAVE_STRATEGY', True)
+                    USE_RANGE_REVERSAL_STRATEGY = strategies.get('USE_RANGE_REVERSAL_STRATEGY', True)
+                    
+                    # Save settings to Redis
+                    save_settings_to_redis()
+                    
+                    log_and_notify("info", "تم تحديث إعدادات الاستراتيجيات", "settings_update")
+                    
+                    # Broadcast the update to all clients
+                    broadcast({
+                        "type": "settings_updated",
+                        "payload": {"success": True}
+                    })
+                    
+                    # Send confirmation back to the client
+                    ws.send(json.dumps({
+                        "type": "settings_updated",
+                        "payload": {"success": True}
+                    }, cls=NpEncoder))
+                    
+                elif message.get('type') == 'update_notification_settings':
+                    settings = message.get('payload', {})
+                    
+                    if redis_client:
+                        try:
+                            redis_client.set('notification_settings', json.dumps(settings))
+                            log_and_notify("info", "تم تحديث إعدادات الإشعارات", "settings_update")
+                            
+                            # Broadcast the update to all clients
+                            broadcast({
+                                "type": "settings_updated",
+                                "payload": {"success": True}
+                            })
+                            
+                            # Send confirmation back to the client
+                            ws.send(json.dumps({
+                                "type": "settings_updated",
+                                "payload": {"success": True}
+                            }, cls=NpEncoder))
+                        except Exception as e:
+                            logger.error(f"❌ [Settings] Error updating notification settings: {e}")
+                            
+                            # Send error back to the client
+                            ws.send(json.dumps({
+                                "type": "settings_updated",
+                                "payload": {"success": False, "error": str(e)}
+                            }, cls=NpEncoder))
+                    else:
+                        # Send error back to the client
+                        ws.send(json.dumps({
+                            "type": "settings_updated",
+                            "payload": {"success": False, "error": "Redis not available"}
+                        }, cls=NpEncoder))
                     
             except Exception as e:
                 logger.error(f"❌ [WebSocket] Error processing message: {e}")
+                
+                # Send error back to the client
+                ws.send(json.dumps({
+                    "type": "error",
+                    "payload": {"error": str(e)}
+                }, cls=NpEncoder))
                 
     except Exception as e:
         logger.error(f"❌ [WebSocket] Error in connection: {e}")
