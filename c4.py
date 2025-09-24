@@ -2164,12 +2164,9 @@ def close_trade(symbol: str, exit_reason: str, current_price: float):
             
             # تحديث في الكاش
             with signal_cache_lock:
-                open_signals_cache[symbol]['status'] = 'closed'
-                open_signals_cache[symbol]['closing_price'] = current_price
-                open_signals_cache[symbol]['closed_at'] = datetime.now(timezone.utc).isoformat()
-                open_signals_cache[symbol]['profit_percentage'] = profit_percent
-                open_signals_cache[symbol]['closing_reason'] = exit_reason
-            
+                if symbol in open_signals_cache:
+                    del open_signals_cache[symbol]
+
             # تحديث الرصيد للصفقات الحقيقية
             if is_real_trade:
                 with balance_lock:
@@ -2353,7 +2350,12 @@ def start_signal_scanning_thread():
                 scan_all_symbols_for_signals()
                 # الانتظار حتى بداية الشمعة التالية (5 دقائق)
                 now = datetime.now(timezone.utc)
-                next_candle = now.replace(second=0, microsecond=0) + timedelta(minutes=5)
+                next_candle_minute = (now.minute // 5 + 1) * 5
+                if next_candle_minute >= 60:
+                    next_candle = now.replace(hour=(now.hour + 1) % 24, minute=0, second=0, microsecond=0)
+                else:
+                    next_candle = now.replace(minute=next_candle_minute, second=0, microsecond=0)
+                
                 sleep_time = (next_candle - now).total_seconds()
                 time.sleep(max(1, sleep_time))
             except Exception as e:
@@ -2753,126 +2755,107 @@ def dashboard():
         // الاتصال بـ WebSocket
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
-        const socket = new WebSocket(wsUrl);
+        let socket;
+
+        function connectWebSocket() {
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = function(event) {
+                console.log("WebSocket connected");
+            };
+
+            socket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleWebSocketMessage(data);
+            };
+
+            socket.onclose = function(event) {
+                console.log("WebSocket disconnected. Reconnecting in 5 seconds...");
+                setTimeout(connectWebSocket, 5000);
+            };
+
+            socket.onerror = function(error) {
+                console.error("WebSocket error:", error);
+                socket.close();
+            };
+        }
         
         // متغيرات عامة
         let openTrades = {};
-        let notifications = [];
-        let rejections = [];
-        let marketState = {
-            trend_details_by_tf: {},
-            market_regime: "unknown",
-            volatility_state: "medium"
-        };
-        
-        // عند الاتصال بـ WebSocket
-        socket.onopen = function(event) {
-            console.log("WebSocket connected");
-            loadInitialData();
-        };
-        
-        // عند استلام رسالة من WebSocket
-        socket.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            
-            switch(data.type) {
-                case 'price_update':
-                    updatePrices(data.payload);
-                    break;
-                case 'new_notification':
-                    addNotification(data.payload);
-                    break;
-                case 'new_rejection':
-                    addRejection(data.payload);
-                    break;
-                case 'market_state_update':
-                    updateMarketState(data.payload);
-                    break;
-                case 'trade_opened':
-                    addOpenTrade(data.payload);
-                    break;
-                case 'trade_updated':
-                    updateOpenTrade(data.payload);
-                    break;
-                case 'trade_closed':
-                    removeOpenTrade(data.payload);
-                    break;
-            }
-        };
-        
-        // عند انقطاع الاتصال بـ WebSocket
-        socket.onclose = function(event) {
-            console.log("WebSocket disconnected");
-            // محاولة إعادة الاتصال بعد 5 ثواني
-            setTimeout(function() {
-                window.location.reload();
-            }, 5000);
-        };
         
         // تحميل البيانات الأولية
         function loadInitialData() {
-            // طلب البيانات الأولية من الخادم
             fetch('/api/initial-data')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.json();
+                })
                 .then(data => {
-                    // تحديث حالة التداول
+                    if (data.error) {
+                        console.error('API Error:', data.error);
+                        return;
+                    }
                     updateTradingStatus(data.trading_enabled);
-                    
-                    // تحديث نوع التداول
                     updateTradingMode(data.paper_trading_mode);
-                    
-                    // تحديث الرصيد
                     updateBalance(data.balance);
-                    
-                    // تحديث الإعدادات
                     updateSettings(data.settings);
                     
-                    // تحديث الصفقات المفتوحة
-                    data.open_trades.forEach(trade => {
-                        addOpenTrade(trade);
-                    });
+                    openTrades = {};
+                    (data.open_trades || []).forEach(addOpenTrade);
+                    updateOpenTradesTable();
                     
-                    // تحديث الإشعارات
-                    data.notifications.forEach(notification => {
-                        addNotification(notification);
-                    });
-                    
-                    // تحديث سجل الرفض
-                    data.rejections.forEach(rejection => {
-                        addRejection(rejection);
-                    });
-                    
-                    // تحديث حالة السوق
-                    updateMarketState(data.market_state);
+                    updateNotificationsContainer(data.notifications || []);
+                    updateRejectionTable(data.rejections || []);
+                    updateMarketState(data.market_state || {});
                 })
                 .catch(error => {
                     console.error('Error loading initial data:', error);
                 });
         }
         
-        // تحديث حالة التداول
+        function handleWebSocketMessage(data) {
+            switch(data.type) {
+                case 'price_update':
+                    updatePrices(data.payload);
+                    break;
+                case 'new_notification':
+                    loadInitialData(); // Reload all data to ensure sync
+                    break;
+                case 'new_rejection':
+                    loadInitialData(); // Reload all data
+                    break;
+                case 'market_state_update':
+                    updateMarketState(data.payload);
+                    break;
+                case 'trade_opened':
+                case 'trade_updated':
+                case 'trade_closed':
+                    loadInitialData(); // Reload all data to ensure sync
+                    break;
+            }
+        }
+        
         function updateTradingStatus(enabled) {
             const statusElement = document.getElementById('trading-status');
             const toggleButton = document.getElementById('toggle-trading');
-            
             if (enabled) {
                 statusElement.textContent = 'مفعل';
-                statusElement.className = 'status-active';
+                statusElement.className = 'fw-bold status-active';
                 toggleButton.textContent = 'إيقاف التداول';
                 toggleButton.className = 'btn btn-danger btn-sm mt-2';
             } else {
                 statusElement.textContent = 'غير مفعل';
-                statusElement.className = 'status-inactive';
+                statusElement.className = 'fw-bold status-inactive';
                 toggleButton.textContent = 'تفعيل التداول';
                 toggleButton.className = 'btn btn-primary btn-sm mt-2';
             }
         }
-        
-        // تحديث نوع التداول
+
         function updateTradingMode(paperMode) {
             const modeElement = document.getElementById('trading-mode');
             const toggleButton = document.getElementById('toggle-mode');
-            
             if (paperMode) {
                 modeElement.textContent = 'ورقي';
                 toggleButton.textContent = 'تبديل إلى حقيقي';
@@ -2881,15 +2864,13 @@ def dashboard():
                 toggleButton.textContent = 'تبديل إلى ورقي';
             }
         }
-        
-        // تحديث الرصيد
+
         function updateBalance(balance) {
-            const balanceElement = document.getElementById('balance');
-            balanceElement.textContent = `$${balance.toFixed(2)}`;
+            document.getElementById('balance').textContent = `$${(balance || 0).toFixed(2)}`;
         }
-        
-        // تحديث الإعدادات
+
         function updateSettings(settings) {
+            if (!settings) return;
             document.getElementById('min-amount').value = settings.FIXED_TRADE_AMOUNT_MIN_USDT;
             document.getElementById('max-amount').value = settings.FIXED_TRADE_AMOUNT_MAX_USDT;
             document.getElementById('max-trades-setting').value = settings.MAX_OPEN_TRADES;
@@ -2904,328 +2885,165 @@ def dashboard():
             document.getElementById('strategy-elliott').checked = settings.USE_ELLIOTT_WAVE_STRATEGY;
             document.getElementById('strategy-range').checked = settings.USE_RANGE_REVERSAL_STRATEGY;
         }
-        
-        // تحديث حالة السوق
+
         function updateMarketState(state) {
-            marketState = state;
-            
-            // تحديث نظام السوق
-            const regimeElement = document.getElementById('market-regime');
-            const regimeIndicator = document.getElementById('market-regime-indicator');
-            
-            regimeElement.textContent = getMarketRegimeText(state.market_regime);
-            regimeIndicator.className = `market-state-indicator ${state.market_regime}`;
-            
-            // تحديث مستوى التقلب
-            const volatilityElement = document.getElementById('volatility-state');
-            const volatilityIndicator = document.getElementById('volatility-indicator');
-            
-            volatilityElement.textContent = getVolatilityStateText(state.volatility_state);
-            volatilityIndicator.className = `market-state-indicator volatility-${state.volatility_state}`;
-            
-            // تحديث اتجاه الفريمات
+            if (!state) return;
+            const regimeText = { trending: 'موجه', ranging: 'جانبي', volatile: 'متقلب', unknown: 'غير معروف' };
+            const volatilityText = { low: 'منخفض', medium: 'متوسط', high: 'مرتفع' };
+            const trendText = { bullish: 'صاعد', bearish: 'هابط', neutral: 'محايد' };
+
+            document.getElementById('market-regime').textContent = regimeText[state.market_regime] || 'غير معروف';
+            document.getElementById('market-regime-indicator').className = `market-state-indicator ${state.market_regime || 'unknown'}`;
+            document.getElementById('volatility-state').textContent = volatilityText[state.volatility_state] || 'متوسط';
+            document.getElementById('volatility-indicator').className = `market-state-indicator volatility-${state.volatility_state || 'medium'}`;
+
             if (state.trend_details_by_tf) {
                 ['5m', '15m', '1h'].forEach(tf => {
-                    if (state.trend_details_by_tf[tf]) {
-                        const trend = state.trend_details_by_tf[tf].trend;
-                        const adx = state.trend_details_by_tf[tf].adx;
-                        const rsi = state.trend_details_by_tf[tf].rsi;
-                        
-                        document.getElementById(`trend-${tf}`).textContent = getTrendText(trend);
-                        document.getElementById(`trend-${tf}-indicator`).className = `trend-indicator trend-${trend}`;
-                        document.getElementById(`adx-${tf}`).textContent = adx.toFixed(1);
-                        document.getElementById(`rsi-${tf}`).textContent = rsi.toFixed(1);
+                    const details = state.trend_details_by_tf[tf];
+                    if (details) {
+                        document.getElementById(`trend-${tf}`).textContent = trendText[details.trend] || 'محايد';
+                        document.getElementById(`trend-${tf}-indicator`).className = `trend-indicator trend-${details.trend || 'neutral'}`;
+                        document.getElementById(`adx-${tf}`).textContent = (details.adx || 0).toFixed(1);
+                        document.getElementById(`rsi-${tf}`).textContent = (details.rsi || 0).toFixed(1);
                     }
                 });
             }
         }
         
-        // الحصول على نص نظام السوق
-        function getMarketRegimeText(regime) {
-            switch(regime) {
-                case 'trending': return 'موجه';
-                case 'ranging': return 'جانبي';
-                case 'volatile': return 'متقلب';
-                default: return 'غير معروف';
-            }
-        }
-        
-        // الحصول على نص مستوى التقلب
-        function getVolatilityStateText(state) {
-            switch(state) {
-                case 'low': return 'منخفض';
-                case 'medium': return 'متوسط';
-                case 'high': return 'مرتفع';
-                default: return 'متوسط';
-            }
-        }
-        
-        // الحصول على نص الاتجاه
-        function getTrendText(trend) {
-            switch(trend) {
-                case 'bullish': return 'صاعد';
-                case 'bearish': return 'هابط';
-                default: return 'محايد';
-            }
-        }
-        
-        // إضافة صفقة مفتوحة
         function addOpenTrade(trade) {
             openTrades[trade.symbol] = trade;
-            updateOpenTradesTable();
         }
-        
-        // تحديث صفقة مفتوحة
-        function updateOpenTrade(trade) {
-            if (openTrades[trade.symbol]) {
-                openTrades[trade.symbol] = {...openTrades[trade.symbol], ...trade};
-                updateOpenTradesTable();
-            }
-        }
-        
-        // إزالة صفقة مفتوحة
-        function removeOpenTrade(trade) {
-            if (openTrades[trade.symbol]) {
-                delete openTrades[trade.symbol];
-                updateOpenTradesTable();
-            }
-        }
-        
-        // تحديث جدول الصفقات المفتوحة
+
         function updateOpenTradesTable() {
             const tableBody = document.getElementById('open-trades-table');
-            const badge = document.getElementById('open-trades-badge');
-            const count = document.getElementById('open-trades-count');
-            
             const trades = Object.values(openTrades);
-            badge.textContent = trades.length;
-            count.textContent = trades.length;
-            
+            document.getElementById('open-trades-badge').textContent = trades.length;
+            document.getElementById('open-trades-count').textContent = trades.length;
+
             if (trades.length === 0) {
                 tableBody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">لا توجد صفقات مفتوحة</td></tr>';
                 return;
             }
-            
+
             tableBody.innerHTML = trades.map(trade => {
-                const profitPercent = ((trade.current_price || trade.entry_price) - trade.entry_price) / trade.entry_price * 100;
+                const currentPrice = trade.current_price || trade.entry_price;
+                const profitPercent = ((currentPrice - trade.entry_price) / trade.entry_price) * 100;
                 const profitClass = profitPercent >= 0 ? 'text-success' : 'text-danger';
-                const profitSign = profitPercent >= 0 ? '+' : '';
                 
                 return `
                     <tr>
-                        <td>${trade.symbol}</td>
+                        <td><strong>${trade.symbol}</strong></td>
                         <td>${getStrategyName(trade.strategy_name)}</td>
                         <td>${trade.entry_price.toFixed(4)}</td>
                         <td>${trade.target_price_1.toFixed(4)}</td>
                         <td>${trade.target_price_2.toFixed(4)}</td>
                         <td>${trade.stop_loss.toFixed(4)}</td>
-                        <td class="${profitClass}">${profitSign}${profitPercent.toFixed(2)}%</td>
+                        <td class="${profitClass}">${profitPercent.toFixed(2)}%</td>
                         <td>
-                            <div class="btn-group btn-group-sm" role="group">
-                                <button type="button" class="btn btn-outline-danger" onclick="closeTrade('${trade.symbol}')">
-                                    <i class="bi bi-x-circle"></i>
-                                </button>
-                            </div>
+                            <button class="btn btn-outline-danger btn-sm" onclick="closeTrade('${trade.symbol}')">
+                                <i class="bi bi-x-circle"></i> إغلاق
+                            </button>
                         </td>
                     </tr>
                 `;
             }).join('');
         }
-        
-        // الحصول على اسم الاستراتيجية
-        function getStrategyName(strategyKey) {
-            const strategies = {
-                'BB_Stoch_Strategy': 'BB + Stoch',
-                'MACD_EMA_Strategy': 'MACD + EMA',
-                'EMA_RSI_Strategy': 'EMA + RSI',
-                'Pullback_Strategy': 'Pullback',
-                'Momentum_Volatility_Strategy': 'Momentum',
-                'Elliott_Wave_Strategy': 'Elliott Wave',
-                'Range_Reversal_Strategy': 'Range Reversal'
-            };
-            
-            return strategies[strategyKey] || strategyKey;
-        }
-        
-        // إضافة إشعار
-        function addNotification(notification) {
-            notifications.unshift(notification);
-            if (notifications.length > 20) {
-                notifications = notifications.slice(0, 20);
-            }
-            updateNotificationsContainer();
-        }
-        
-        // تحديث حاوية الإشعارات
-        function updateNotificationsContainer() {
+
+        const strategyNames = {
+            'BB_Stoch_Strategy': 'BB + Stoch', 'MACD_EMA_Strategy': 'MACD + EMA', 'EMA_RSI_Strategy': 'EMA + RSI',
+            'Pullback_Strategy': 'Pullback', 'Momentum_Volatility_Strategy': 'Momentum', 'Elliott_Wave_Strategy': 'Elliott Wave',
+            'Range_Reversal_Strategy': 'Range Reversal'
+        };
+        function getStrategyName(key) { return strategyNames[key] || key; }
+
+        function updateNotificationsContainer(notifications) {
             const container = document.getElementById('notifications-container');
-            
-            if (notifications.length === 0) {
+            if (!notifications || notifications.length === 0) {
                 container.innerHTML = '<div class="notification-item text-center text-muted">لا توجد إشعارات</div>';
                 return;
             }
-            
-            container.innerHTML = notifications.map(notification => {
-                const typeClass = getNotificationTypeClass(notification.type);
-                const typeIcon = getNotificationTypeIcon(notification.type);
-                const time = new Date(notification.timestamp).toLocaleTimeString('ar-SA');
-                
+            container.innerHTML = notifications.map(n => {
+                const icons = { info: 'bi-info-circle', warning: 'bi-exclamation-triangle', error: 'bi-x-circle', success: 'bi-check-circle', system: 'bi-gear' };
+                const colors = { info: 'text-info', warning: 'text-warning', error: 'text-danger', success: 'text-success', system: 'text-primary' };
                 return `
                     <div class="notification-item">
                         <div class="d-flex">
-                            <div class="me-2">
-                                <i class="${typeIcon} ${typeClass}"></i>
-                            </div>
+                            <div class="me-3"><i class="bi ${icons[n.type] || 'bi-bell'} ${colors[n.type] || 'text-secondary'} fs-4"></i></div>
                             <div class="flex-grow-1">
-                                <div>${notification.message}</div>
-                                <div class="small text-muted">${time}</div>
+                                <div>${n.message}</div>
+                                <div class="small text-muted">${new Date(n.timestamp).toLocaleTimeString('ar-EG')}</div>
                             </div>
                         </div>
-                    </div>
-                `;
+                    </div>`;
             }).join('');
         }
-        
-        // الحصول على صنف نوع الإشعار
-        function getNotificationTypeClass(type) {
-            switch(type) {
-                case 'info': return 'text-info';
-                case 'warning': return 'text-warning';
-                case 'error': return 'text-danger';
-                case 'success': return 'text-success';
-                default: return 'text-secondary';
-            }
-        }
-        
-        // الحصول على أيقونة نوع الإشعار
-        function getNotificationTypeIcon(type) {
-            switch(type) {
-                case 'info': return 'bi bi-info-circle';
-                case 'warning': return 'bi bi-exclamation-triangle';
-                case 'error': return 'bi bi-x-circle';
-                case 'success': return 'bi bi-check-circle';
-                default: return 'bi bi-bell';
-            }
-        }
-        
-        // إضافة سجل رفض
-        function addRejection(rejection) {
-            rejections.unshift(rejection);
-            if (rejections.length > 30) {
-                rejections = rejections.slice(0, 30);
-            }
-            updateRejectionTable();
-        }
-        
-        // تحديث جدول الرفض
-        function updateRejectionTable() {
+
+        function updateRejectionTable(rejections) {
             const tableBody = document.getElementById('rejection-table');
-            
-            if (rejections.length === 0) {
+            if (!rejections || rejections.length === 0) {
                 tableBody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">لا توجد سجلات رفض</td></tr>';
                 return;
             }
-            
-            tableBody.innerHTML = rejections.map(rejection => {
-                const time = new Date(rejection.timestamp).toLocaleTimeString('ar-SA');
-                
-                return `
-                    <tr>
-                        <td>${time}</td>
-                        <td>${rejection.symbol}</td>
-                        <td>${rejection.reason}</td>
-                    </tr>
-                `;
-            }).join('');
+            tableBody.innerHTML = rejections.map(r => `
+                <tr>
+                    <td>${new Date(r.timestamp).toLocaleTimeString('ar-EG')}</td>
+                    <td>${r.symbol}</td>
+                    <td>${r.reason}</td>
+                </tr>
+            `).join('');
         }
-        
-        // تحديث الأسعار
+
         function updatePrices(prices) {
-            // تحديث الصفقات المفتوحة بالأسعار الجديدة
+            let updated = false;
             Object.keys(openTrades).forEach(symbol => {
                 if (prices[symbol]) {
                     openTrades[symbol].current_price = prices[symbol];
+                    updated = true;
                 }
             });
-            
-            updateOpenTradesTable();
-        }
-        
-        // إغلاق صفقة
-        function closeTrade(symbol) {
-            if (confirm(`هل أنت متأكد من إغلاق صفقة ${symbol}؟`)) {
-                fetch(`/api/close-trade?symbol=${symbol}`, {
-                    method: 'POST'
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert('تم إغلاق الصفقة بنجاح');
-                    } else {
-                        alert('فشل في إغلاق الصفقة: ' + data.error);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error closing trade:', error);
-                    alert('حدث خطأ أثناء إغلاق الصفقة');
-                });
+            if (updated) {
+                updateOpenTradesTable();
             }
         }
         
-        // تبديل حالة التداول
+        function closeTrade(symbol) {
+            if (!confirm(`هل أنت متأكد من رغبتك في إغلاق صفقة ${symbol} يدويًا؟`)) return;
+            fetch(`/api/close-trade?symbol=${symbol}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('تم إرسال طلب إغلاق الصفقة.');
+                        loadInitialData(); // Refresh data
+                    } else {
+                        alert('فشل إغلاق الصفقة: ' + data.error);
+                    }
+                }).catch(err => console.error('Close trade error:', err));
+        }
+
         document.getElementById('toggle-trading').addEventListener('click', function() {
-            const enabled = document.getElementById('trading-status').textContent === 'مفعل';
-            
+            const isEnabled = document.getElementById('trading-status').classList.contains('status-active');
             fetch('/api/toggle-trading', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ enabled: !enabled })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    updateTradingStatus(!enabled);
-                } else {
-                    alert('فشل في تغيير حالة التداول: ' + data.error);
-                }
-            })
-            .catch(error => {
-                console.error('Error toggling trading:', error);
-                alert('حدث خطأ أثناء تغيير حالة التداول');
-            });
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: !isEnabled })
+            }).then(res => res.json()).then(data => {
+                if(data.success) updateTradingStatus(data.enabled);
+            }).catch(err => console.error('Toggle trading error:', err));
         });
-        
-        // تبديل نوع التداول
+
         document.getElementById('toggle-mode').addEventListener('click', function() {
-            const paperMode = document.getElementById('trading-mode').textContent === 'ورقي';
-            
+            const isPaper = document.getElementById('trading-mode').textContent === 'ورقي';
             fetch('/api/toggle-mode', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ paper_mode: !paperMode })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    updateTradingMode(!paperMode);
-                } else {
-                    alert('فشل في تغيير نوع التداول: ' + data.error);
-                }
-            })
-            .catch(error => {
-                console.error('Error toggling trading mode:', error);
-                alert('حدث خطأ أثناء تغيير نوع التداول');
-            });
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ paper_mode: !isPaper })
+            }).then(res => res.json()).then(data => {
+                if(data.success) updateTradingMode(data.paper_mode);
+            }).catch(err => console.error('Toggle mode error:', err));
         });
-        
-        // حفظ الإعدادات
+
         document.getElementById('settings-form').addEventListener('submit', function(e) {
             e.preventDefault();
-            
             const settings = {
                 FIXED_TRADE_AMOUNT_MIN_USDT: parseFloat(document.getElementById('min-amount').value),
                 FIXED_TRADE_AMOUNT_MAX_USDT: parseFloat(document.getElementById('max-amount').value),
@@ -3239,27 +3057,24 @@ def dashboard():
                 USE_ELLIOTT_WAVE_STRATEGY: document.getElementById('strategy-elliott').checked,
                 USE_RANGE_REVERSAL_STRATEGY: document.getElementById('strategy-range').checked
             };
-            
             fetch('/api/save-settings', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(settings)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    alert('تم حفظ الإعدادات بنجاح');
+            }).then(res => res.json()).then(data => {
+                if(data.success) {
+                    alert('تم حفظ الإعدادات بنجاح.');
                     document.getElementById('max-trades').textContent = settings.MAX_OPEN_TRADES;
                 } else {
-                    alert('فشل في حفظ الإعدادات: ' + data.error);
+                    alert('فشل حفظ الإعدادات: ' + data.error);
                 }
-            })
-            .catch(error => {
-                console.error('Error saving settings:', error);
-                alert('حدث خطأ أثناء حفظ الإعدادات');
-            });
+            }).catch(err => console.error('Save settings error:', err));
+        });
+
+        // Initial Load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadInitialData();
+            connectWebSocket();
         });
     </script>
 </body>
@@ -3275,8 +3090,11 @@ def get_initial_data():
         with trading_status_lock:
             trading_enabled = is_trading_enabled
         
+        # --- FIX START ---
+        # Read the global variable into a local one to avoid UnboundLocalError
         with trading_mode_lock:
-            paper_trading_mode = paper_trading_mode
+            current_paper_trading_mode = paper_trading_mode
+        # --- FIX END ---
         
         with balance_lock:
             balance = usdt_balance
@@ -3316,7 +3134,7 @@ def get_initial_data():
         
         return jsonify({
             'trading_enabled': trading_enabled,
-            'paper_trading_mode': paper_trading_mode,
+            'paper_trading_mode': current_paper_trading_mode, # Use the correctly read variable
             'balance': balance,
             'settings': settings,
             'open_trades': open_trades,
@@ -3326,7 +3144,7 @@ def get_initial_data():
         })
     
     except Exception as e:
-        logger.error(f"❌ [API] Error getting initial data: {e}")
+        logger.error(f"❌ [API] Error getting initial data: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/toggle-trading', methods=['POST'])
@@ -3361,6 +3179,7 @@ def toggle_mode():
         with trading_mode_lock:
             paper_trading_mode = paper_mode
         
+        save_settings_to_redis()
         log_and_notify('info', f"🔄 نوع التداول تغير إلى {'ورقي' if paper_mode else 'حقيقي'}", 'system')
         
         return jsonify({'success': True, 'paper_mode': paper_mode})
@@ -3380,21 +3199,21 @@ def save_settings():
         data = request.get_json()
         
         with trade_amount_lock:
-            FIXED_TRADE_AMOUNT_MIN_USDT = data.get('FIXED_TRADE_AMOUNT_MIN_USDT', FIXED_TRADE_AMOUNT_MIN_USDT)
-            FIXED_TRADE_AMOUNT_MAX_USDT = data.get('FIXED_TRADE_AMOUNT_MAX_USDT', FIXED_TRADE_AMOUNT_MAX_USDT)
+            FIXED_TRADE_AMOUNT_MIN_USDT = float(data.get('FIXED_TRADE_AMOUNT_MIN_USDT', FIXED_TRADE_AMOUNT_MIN_USDT))
+            FIXED_TRADE_AMOUNT_MAX_USDT = float(data.get('FIXED_TRADE_AMOUNT_MAX_USDT', FIXED_TRADE_AMOUNT_MAX_USDT))
         
-        MAX_OPEN_TRADES = data.get('MAX_OPEN_TRADES', MAX_OPEN_TRADES)
+        MAX_OPEN_TRADES = int(data.get('MAX_OPEN_TRADES', MAX_OPEN_TRADES))
         
         with min_quality_lock:
-            MIN_SIGNAL_QUALITY = data.get('MIN_SIGNAL_QUALITY', MIN_SIGNAL_QUALITY)
+            MIN_SIGNAL_QUALITY = int(data.get('MIN_SIGNAL_QUALITY', MIN_SIGNAL_QUALITY))
         
-        USE_BB_STOCH_STRATEGY = data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY)
-        USE_MACD_EMA_STRATEGY = data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY)
-        USE_EMA_RSI_STRATEGY = data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY)
-        USE_PULLBACK_STRATEGY = data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY)
-        USE_MOMENTUM_VOLATILITY_STRATEGY = data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY)
-        USE_ELLIOTT_WAVE_STRATEGY = data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY)
-        USE_RANGE_REVERSAL_STRATEGY = data.get('USE_RANGE_REVERSAL_STRATEGY', USE_RANGE_REVERSAL_STRATEGY)
+        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', USE_BB_STOCH_STRATEGY))
+        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', USE_MACD_EMA_STRATEGY))
+        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', USE_EMA_RSI_STRATEGY))
+        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', USE_PULLBACK_STRATEGY))
+        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', USE_MOMENTUM_VOLATILITY_STRATEGY))
+        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', USE_ELLIOTT_WAVE_STRATEGY))
+        USE_RANGE_REVERSAL_STRATEGY = bool(data.get('USE_RANGE_REVERSAL_STRATEGY', USE_RANGE_REVERSAL_STRATEGY))
         
         # حفظ الإعدادات في Redis
         save_settings_to_redis()
@@ -3418,20 +3237,28 @@ def close_trade_api():
         if not symbol:
             return jsonify({'success': False, 'error': 'Symbol is required'}), 400
         
-        # الحصول على السعر الحالي
+        with signal_cache_lock:
+            if symbol not in open_signals_cache:
+                return jsonify({'success': False, 'error': 'Trade not found or already closed'}), 404
+        
         with live_prices_lock:
             if symbol not in live_prices:
-                return jsonify({'success': False, 'error': 'Price not available'}), 400
-            
-            current_price = live_prices[symbol]
+                # Fallback to fetching current price if not in WebSocket cache
+                try:
+                    ticker = client.get_symbol_ticker(symbol=symbol)
+                    current_price = float(ticker['price'])
+                except Exception as fetch_err:
+                    logger.error(f"Could not fetch price for manual close of {symbol}: {fetch_err}")
+                    return jsonify({'success': False, 'error': 'Price not available'}), 400
+            else:
+                current_price = live_prices[symbol]
         
-        # إغلاق الصفقة
         close_trade(symbol, 'manual_close', current_price)
         
         return jsonify({'success': True})
     
     except Exception as e:
-        logger.error(f"❌ [API] Error closing trade: {e}")
+        logger.error(f"❌ [API] Error closing trade: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @sock.route('/ws')
@@ -3442,11 +3269,11 @@ def websocket_connection(ws):
     
     try:
         while True:
-            # استلام الرسائل (ليست هناك حاجة لمعالجتها في هذه الحالة)
-            data = ws.receive()
-            # يمكن معالجة الرسائل الواردة هنا إذا لزم الأمر
+            # This loop keeps the connection alive.
+            # We can handle incoming messages here if needed in the future.
+            ws.receive(timeout=60) # Timeout to allow checking loop condition
     except Exception as e:
-        logger.warning(f"WebSocket connection closed: {e}")
+        logger.warning(f"WebSocket connection closed or timed out: {e}")
     finally:
         with ws_clients_lock:
             if ws in ws_clients:
@@ -3492,12 +3319,15 @@ def main():
         # بدء التقارير الدورية
         start_periodic_reports()
         
-        # بدء تطبيق Flask
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+        logger.info("✅ Bot is fully initialized and running.")
         
     except Exception as e:
-        logger.critical(f"❌ [Main] Error in main function: {e}")
+        logger.critical(f"❌ [Main] A critical error occurred during initialization: {e}", exc_info=True)
         exit(1)
 
 if __name__ == '__main__':
     main()
+    # Use a production-ready WSGI server like gunicorn or uWSGI instead of app.run for deployment
+    # For simplicity in this script, we'll keep app.run() but the main logic starts in main()
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000)
