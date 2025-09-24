@@ -1,9 +1,9 @@
-# ملف c4_5min_v35_0_2.py - نسخة V35.0.2 (إصلاح الاستقرار وزيادة فعالية الإشارات)
+# ملف c4_5min_v35_0_3.py - نسخة V35.0.3 (إصلاح الاستقرار وتحسين التسجيل)
 # --- وصف التعديلات:
-# 1. [إصلاح WebSocket] تعديل طريقة تشغيل الخادم لحل خطأ "RuntimeError" وضمان استقرار لوحة التحكم.
-# 2. [تحسين الإشارات] تخفيف صرامة بعض الفلاتر الديناميكية وشروط الاستراتيجيات لزيادة عدد الإشارات الصالحة.
-# 3. [تسجيل مُحسَّن] إضافة سجلات تفصيلية لتوضيح سبب رفض الإشارات، مما يساعد في التحليل المستقبلي.
-# 4. [تحسينات عامة] تحسينات طفيفة على الأداء واستقرار الكود.
+# 1. [إصلاح WebSocket] إضافة آلية Ping/Pong للحفاظ على استقرار الاتصال وتقليل أخطاء "Connection closed: 1001".
+# 2. [تحسين سجل الرفض] تعديل الاستراتيجيات لتسجيل سبب فشل الفلاتر أو الشروط الأساسية في واجهة المستخدم، مما يوفر شفافية كاملة.
+# 3. [تحسين تتبع البحث] إضافة سجلات لتأكيد أن عملية البحث عن الإشارات تعمل بشكل مستمر في الخلفية.
+# 4. [إصلاحات الواجهة] تصحيح منطق عرض أسماء الاستراتيجيات في الواجهة وإزالة نافذة التأكيد.
 
 import time
 import os
@@ -48,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV35.0.2_5min')
+logger = logging.getLogger('CryptoBotV35.0.3_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -180,18 +180,14 @@ REJECTION_REASONS_AR = {
 
     # Strategy Specific Rejections
     "EMA_RSI: Bearish long-term trend": "EMA_RSI: اتجاه هابط طويل الأجل",
-    "BB: Price below EMA50 (bearish trend)": "BB: السعر تحت EMA50 (اتجاه هابط)",
-    "MACD: Strongly bearish trend": "MACD: الاتجاه هابط بقوة",
-    "Pullback: Trend is not strongly bullish": "Pullback: الاتجاه ليس صاعدًا بقوة",
-    "Momentum: EMAs not in bullish order": "Momentum: المتوسطات ليست في ترتيب صاعد",
-    "Elliott Wave: Strongly bearish trend": "موجات إليوت: الاتجاه هابط بقوة",
-    "Elliott Wave: Insufficient swing points": "موجات إليوت: نقاط تذبذب غير كافية",
-    "Elliott Wave: Error in pattern detection": "موجات إليوت: خطأ في اكتشاف النمط",
-    "Range Reversal: Trend too strong (ADX > 23)": "انعكاس نطاقي: الاتجاه قوي جدًا (ADX > 23)",
-    "Range Reversal: RSI not in oversold zone": "انعكاس نطاقي: RSI ليس في منطقة تشبع بيعي",
-    "MACD Momentum Negative": "زخم الماكد سلبي",
-    "Bearish Trend": "اتجاه هابط",
-    "RSI Out of Range": "مؤشر القوة النسبية خارج النطاق"
+    "BB_Stoch: Bearish trend": "BB_Stoch: اتجاه هابط (السعر تحت EMA50)",
+    "MACD: Bearish trend": "MACD: ترتيب المتوسطات هابط",
+    "Pullback: Weak trend": "Pullback: الاتجاه ضعيف (ADX منخفض)",
+    "Momentum: Bearish EMA order": "Momentum: المتوسطات ليست في ترتيب صاعد",
+    "Elliott_Wave: Bearish trend": "موجات إليوت: الاتجاه العام هابط",
+    "Elliott_Wave: Invalid Fib retracement": "موجات إليوت: تصحيح فيبوناتشي غير صالح",
+    "Range_Reversal: Strong trend": "انعكاس نطاقي: الاتجاه قوي جدًا (ADX مرتفع)",
+    "Range_Reversal: RSI not oversold": "انعكاس نطاقي: RSI ليس في منطقة تشبع بيعي",
 }
 
 # --- إعداد تطبيق Flask و WebSocket ---
@@ -1271,396 +1267,266 @@ def bb_stoch_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     استراتيجية BB + Stochastics
     """
     try:
-        if not USE_BB_STOCH_STRATEGY:
-            return None
+        if not USE_BB_STOCH_STRATEGY: return None
             
         last_row = df.iloc[-1]
         prev_row = df.iloc[-2]
         
         # فحص الفلاتر الديناميكية
         dynamic_filters = check_bb_stoch_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] BB_Stoch for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
+        if not dynamic_filters['bb_width_ok']: log_rejection(symbol, "DYN_BB_WIDTH_LOW"); return None
+        if not dynamic_filters['stoch_ok']: log_rejection(symbol, "DYN_STOCH_LOW"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
+
+        # فحص اتجاه السوق
+        if last_row['ema50'] < last_row['ema200'] or last_row['close'] < last_row['ema50']:
+            log_rejection(symbol, "BB_Stoch: Bearish trend")
             return None
         
         # شروط الاستراتيجية
-        condition1 = last_row['close'] > last_row['bb_middle']  # السعر فوق منتصف البولينجر
-        condition2 = last_row['stoch_k'] > last_row['stoch_d']  # ستوكاستيك صاعد
-        condition3 = last_row['stoch_k'] < 80  # ستوكاستيك ليس في منطقة الشراء المفرط
-        condition4 = prev_row['stoch_k'] <= prev_row['stoch_d']  # تقاطع صاعد في الستوكاستيك
-        
-        # فحص اتجاه السوق
-        if last_row['ema50'] < last_row['ema200'] or last_row['close'] < last_row['ema50']:
-            logger.debug(f"[Strategy Check] BB_Stoch for {symbol}: Rejected due to bearish trend.")
-            return None
+        condition1 = last_row['close'] > last_row['bb_middle']
+        condition2 = last_row['stoch_k'] > last_row['stoch_d']
+        condition3 = last_row['stoch_k'] < 80
+        condition4 = prev_row['stoch_k'] <= prev_row['stoch_d']
         
         if condition1 and condition2 and condition3 and condition4:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.5), last_row['close'] * 0.985)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.5)
             target2 = last_row['close'] + (atr * 3.0)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-                quality_score += 10
-            if last_row['rsi'] > 50 and last_row['rsi'] < 70:
-                quality_score += 10
-            if last_row['macd_hist'] > 0:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2: quality_score += 10
+            if 50 < last_row['rsi'] < 70: quality_score += 10
+            if last_row['macd_hist'] > 0: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'BB_Stoch_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'BB_Stoch_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in BB_Stoch strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in BB_Stoch for {symbol}: {e}"); return None
 
 def macd_ema_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية MACD + EMA
     """
     try:
-        if not USE_MACD_EMA_STRATEGY:
+        if not USE_MACD_EMA_STRATEGY: return None
+        last_row, prev_row = df.iloc[-1], df.iloc[-2]
+        
+        dynamic_filters = check_macd_ema_dynamic_filters(df)
+        if not dynamic_filters['adx_ok']: log_rejection(symbol, "DYN_ADX_LOW"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
+        if not dynamic_filters['momentum_ok']: log_rejection(symbol, "DYN_MACD_MOMENTUM_LOW"); return None
+
+        if last_row['ema9'] < last_row['ema21'] or last_row['ema21'] < last_row['ema50']:
+            log_rejection(symbol, "MACD: Bearish trend")
             return None
             
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
-        
-        # فحص الفلاتر الديناميكية
-        dynamic_filters = check_macd_ema_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] MACD_EMA for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
-            return None
-        
-        # شروط الاستراتيجية
-        condition1 = last_row['macd'] > last_row['macd_signal']  # MACD فوق إشارته
-        condition2 = prev_row['macd'] <= prev_row['macd_signal']  # تقاطع صاعد
-        condition3 = last_row['macd_hist'] > 0  # MACD histogram موجب
-        condition4 = last_row['close'] > last_row['ema9']  # السعر فوق EMA9
-        
-        # فحص اتجاه السوق
-        if last_row['ema9'] < last_row['ema21'] or last_row['ema21'] < last_row['ema50']:
-            logger.debug(f"[Strategy Check] MACD_EMA for {symbol}: Rejected due to bearish trend.")
-            return None
-        
+        condition1 = last_row['macd'] > last_row['macd_signal']
+        condition2 = prev_row['macd'] <= prev_row['macd_signal']
+        condition3 = last_row['macd_hist'] > 0
+        condition4 = last_row['close'] > last_row['ema9']
+
         if condition1 and condition2 and condition3 and condition4:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.7), last_row['close'] * 0.98)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.8)
             target2 = last_row['close'] + (atr * 3.5)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3:
-                quality_score += 10
-            if last_row['rsi'] > 50 and last_row['rsi'] < 65:
-                quality_score += 10
-            if last_row['ema9'] > last_row['ema21'] and last_row['ema21'] > last_row['ema50']:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3: quality_score += 10
+            if 50 < last_row['rsi'] < 65: quality_score += 10
+            if last_row['ema9'] > last_row['ema21'] > last_row['ema50']: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'MACD_EMA_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'MACD_EMA_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in MACD_EMA strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in MACD_EMA for {symbol}: {e}"); return None
 
 def ema_rsi_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية EMA + RSI
     """
     try:
-        if not USE_EMA_RSI_STRATEGY:
-            return None
-            
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
-        
-        # فحص الفلاتر الديناميكية
+        if not USE_EMA_RSI_STRATEGY: return None
+        last_row, prev_row = df.iloc[-1], df.iloc[-2]
+
         dynamic_filters = check_ema_rsi_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] EMA_RSI for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
-            return None
-        
-        # شروط الاستراتيجية
-        condition1 = prev_row['rsi'] < 55 and last_row['rsi'] > 55 # تقاطع صاعد لمستوى 55
-        condition2 = last_row['close'] > last_row['ema9']  # السعر فوق EMA9
-        condition3 = last_row['ema9'] > last_row['ema21']  # EMA9 فوق EMA21
-        
-        # فحص اتجاه السوق طويل الأجل
+        if not dynamic_filters['rsi_in_range']: log_rejection(symbol, "DYN_RSI_OOR"); return None
+        if not dynamic_filters['ema_spread_ok']: log_rejection(symbol, "DYN_EMA_SPREAD_LOW"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
+
         if last_row['ema50'] < last_row['ema200']:
-            logger.debug(f"[Strategy Check] EMA_RSI for {symbol}: Rejected due to long-term bearish trend.")
+            log_rejection(symbol, "EMA_RSI: Bearish long-term trend")
             return None
+        
+        condition1 = prev_row['rsi'] < 55 and last_row['rsi'] > 55
+        condition2 = last_row['close'] > last_row['ema9']
+        condition3 = last_row['ema9'] > last_row['ema21']
         
         if condition1 and condition2 and condition3:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.6), last_row['close'] * 0.982)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.6)
             target2 = last_row['close'] + (atr * 3.2)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.25:
-                quality_score += 10
-            if last_row['rsi'] > 50 and last_row['rsi'] < 65:
-                quality_score += 10
-            if last_row['macd_hist'] > 0:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.25: quality_score += 10
+            if 50 < last_row['rsi'] < 65: quality_score += 10
+            if last_row['macd_hist'] > 0: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'EMA_RSI_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'EMA_RSI_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in EMA_RSI strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in EMA_RSI for {symbol}: {e}"); return None
 
 def pullback_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية Pullback
     """
     try:
-        if not USE_PULLBACK_STRATEGY:
-            return None
-            
+        if not USE_PULLBACK_STRATEGY: return None
         last_row = df.iloc[-1]
         
-        # فحص الفلاتر الديناميكية
         dynamic_filters = check_pullback_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] Pullback for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
-            return None
+        if not dynamic_filters['pullback_ok']: log_rejection(symbol, "DYN_PULLBACK_SHALLOW"); return None
+        if not dynamic_filters['recovery_ok']: log_rejection(symbol, "DYN_RECOVERY_FAIL"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
         
-        # شروط الاستراتيجية
+        if last_row['ema50'] < last_row['ema200'] or last_row['adx'] < 18:
+            log_rejection(symbol, "Pullback: Weak trend")
+            return None
+            
         recent_high = df['high'].rolling(10).max().iloc[-1]
         pullback_percent = (recent_high - last_row['close']) / recent_high
         recent_low = df['low'].rolling(5).min().iloc[-1]
         recovery_percent = (last_row['close'] - recent_low) / recent_low
         
-        condition1 = pullback_percent >= 0.025  # ارتداد 2.5% على الأقل
-        condition2 = recovery_percent >= 0.01  # تعافي 1% على الأقل
-        condition3 = last_row['close'] > last_row['ema21']  # السعر فوق EMA21
-        condition4 = last_row['ema21'] > last_row['ema50']  # EMA21 فوق EMA50
-        
-        # فحص اتجاه السوق
-        if last_row['ema50'] < last_row['ema200'] or last_row['adx'] < 18:
-            logger.debug(f"[Strategy Check] Pullback for {symbol}: Rejected due to weak trend.")
-            return None
-        
+        condition1 = pullback_percent >= 0.025
+        condition2 = recovery_percent >= 0.01
+        condition3 = last_row['close'] > last_row['ema21']
+        condition4 = last_row['ema21'] > last_row['ema50']
+
         if condition1 and condition2 and condition3 and condition4:
             atr = last_row['atr']
             stop_loss = max(recent_low - (atr * 0.3), last_row['close'] * 0.985)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.7)
             target2 = recent_high
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-                quality_score += 10
-            if last_row['rsi'] > 45 and last_row['rsi'] < 65:
-                quality_score += 10
-            if last_row['macd_hist'] > 0:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2: quality_score += 10
+            if 45 < last_row['rsi'] < 65: quality_score += 10
+            if last_row['macd_hist'] > 0: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'Pullback_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'Pullback_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in Pullback strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in Pullback for {symbol}: {e}"); return None
 
 def momentum_volatility_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية الزخم والتقلب
     """
     try:
-        if not USE_MOMENTUM_VOLATILITY_STRATEGY:
-            return None
-            
+        if not USE_MOMENTUM_VOLATILITY_STRATEGY: return None
         last_row = df.iloc[-1]
         
-        # فحص الفلاتر الديناميكية
         dynamic_filters = check_momentum_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] Momentum for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
-            return None
+        if not dynamic_filters['momentum_ok']: log_rejection(symbol, "DYN_MOMENTUM_SCORE_LOW"); return None
+        if not dynamic_filters['volatility_ok']: log_rejection(symbol, "DYN_VOLATILITY_OOR"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
         
-        # شروط الاستراتيجية
+        if last_row['ema50'] < last_row['ema200']:
+            log_rejection(symbol, "Momentum: Bearish EMA order")
+            return None
+            
         price_change = (last_row['close'] - df['close'].iloc[-5]) / df['close'].iloc[-5]
         atr_percent = last_row['atr_percent'] / 100
         
         condition1 = price_change >= 0.01
         condition2 = atr_percent <= 0.02
         condition3 = last_row['close'] > last_row['ema9']
-        condition4 = last_row['ema9'] > last_row['ema21'] and last_row['ema21'] > last_row['ema50']
-        
-        # فحص اتجاه السوق
-        if last_row['ema50'] < last_row['ema200']:
-            logger.debug(f"[Strategy Check] Momentum for {symbol}: Rejected due to bearish EMA order.")
-            return None
+        condition4 = last_row['ema9'] > last_row['ema21'] > last_row['ema50']
         
         if condition1 and condition2 and condition3 and condition4:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.8), last_row['close'] * 0.98)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 2.0)
             target2 = last_row['close'] + (atr * 4.0)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3:
-                quality_score += 10
-            if last_row['rsi'] > 50 and last_row['rsi'] < 70:
-                quality_score += 10
-            if last_row['macd_hist'] > 0 and last_row['macd_hist'] > df['macd_hist'].iloc[-2]:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3: quality_score += 10
+            if 50 < last_row['rsi'] < 70: quality_score += 10
+            if last_row['macd_hist'] > df['macd_hist'].iloc[-2]: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'Momentum_Volatility_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'Momentum_Volatility_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in Momentum_Volatility strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in Momentum_Volatility for {symbol}: {e}"); return None
 
 def elliott_wave_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية موجات إليوت
     """
     try:
-        if not USE_ELLIOTT_WAVE_STRATEGY:
-            return None
-            
+        if not USE_ELLIOTT_WAVE_STRATEGY: return None
         last_row = df.iloc[-1]
         
-        # فحص الفلاتر الديناميكية
         dynamic_filters = check_elliott_wave_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] Elliott Wave for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
+        if not dynamic_filters['fib_ok']: log_rejection(symbol, "Elliott_Wave: Invalid Fib retracement"); return None
+        if not dynamic_filters['adx_ok']: log_rejection(symbol, "DYN_ADX_LOW"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
+
+        if last_row['ema50'] < last_row['ema200']:
+            log_rejection(symbol, "Elliott_Wave: Bearish trend")
             return None
-        
-        # شروط الاستراتيجية
+            
         fib_retracement = get_wave_retracement(df)
         condition1 = 0.382 <= fib_retracement <= 0.618
         condition2 = last_row['close'] > last_row['ema21']
         condition3 = last_row['ema21'] > last_row['ema50']
         
-        # فحص اتجاه السوق
-        if last_row['ema50'] < last_row['ema200']:
-            logger.debug(f"[Strategy Check] Elliott Wave for {symbol}: Rejected due to bearish trend.")
-            return None
-        
         if condition1 and condition2 and condition3:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.7), last_row['close'] * 0.98)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.8)
             target2 = last_row['close'] + (atr * 3.6)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2:
-                quality_score += 10
-            if last_row['rsi'] > 45 and last_row['rsi'] < 65:
-                quality_score += 10
-            if last_row['macd_hist'] > 0:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.2: quality_score += 10
+            if 45 < last_row['rsi'] < 65: quality_score += 10
+            if last_row['macd_hist'] > 0: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'Elliott_Wave_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'Elliott_Wave_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in Elliott_Wave strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in Elliott_Wave for {symbol}: {e}"); return None
 
 def range_reversal_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
     """
     استراتيجية انعكاس النطاق
     """
     try:
-        if not USE_RANGE_REVERSAL_STRATEGY:
-            return None
-            
-        last_row = df.iloc[-1]
-        prev_row = df.iloc[-2]
+        if not USE_RANGE_REVERSAL_STRATEGY: return None
+        last_row, prev_row = df.iloc[-1], df.iloc[-2]
         
-        # فحص الفلاتر الديناميكية
         dynamic_filters = check_range_reversal_dynamic_filters(df)
-        if not all(dynamic_filters.values()):
-            failed_reasons = {k for k, v in dynamic_filters.items() if not v}
-            logger.debug(f"[Strategy Check] Range Reversal for {symbol}: Dynamic filters failed. Reasons: {failed_reasons}")
-            return None
+        if not dynamic_filters['adx_ok']: log_rejection(symbol, "Range_Reversal: Strong trend"); return None
+        if not dynamic_filters['rsi_ok']: log_rejection(symbol, "Range_Reversal: RSI not oversold"); return None
+        if not dynamic_filters['volume_ok']: log_rejection(symbol, "DYN_VOLUME_LOW"); return None
         
-        # شروط الاستراتيجية
         condition1 = last_row['adx'] < 23
         condition2 = last_row['rsi'] < 30
         condition3 = last_row['close'] > prev_row['close']
@@ -1669,35 +1535,20 @@ def range_reversal_strategy(df: pd.DataFrame, symbol: str) -> Optional[Dict]:
         if condition1 and condition2 and condition3 and condition4:
             atr = last_row['atr']
             stop_loss = max(last_row['low'] - (atr * 0.5), last_row['close'] * 0.985)
-            
-            # حساب الأهداف
             target1 = last_row['close'] + (atr * 1.5)
             target2 = last_row['close'] + (atr * 3.0)
             
-            # حساب جودة الإشارة
             quality_score = 70
-            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3:
-                quality_score += 10
-            if last_row['rsi'] > 20 and last_row['rsi'] < 35:
-                quality_score += 10
-            if last_row['macd_hist'] > df['macd_hist'].iloc[-3]:
-                quality_score += 10
+            if last_row['volume'] > df['volume'].rolling(20).mean().iloc[-1] * 1.3: quality_score += 10
+            if 20 < last_row['rsi'] < 35: quality_score += 10
+            if last_row['macd_hist'] > df['macd_hist'].iloc[-3]: quality_score += 10
                 
-            return {
-                'symbol': symbol,
-                'strategy_name': 'Range_Reversal_Strategy',
-                'entry_price': last_row['close'],
-                'stop_loss': stop_loss,
-                'target_price_1': target1,
-                'target_price_2': target2,
-                'quality_score': min(quality_score, 100),
-                'atr_percent': last_row['atr_percent']
-            }
-            
+            return {'symbol': symbol, 'strategy_name': 'Range_Reversal_Strategy', 'entry_price': last_row['close'],
+                    'stop_loss': stop_loss, 'target_price_1': target1, 'target_price_2': target2,
+                    'quality_score': min(quality_score, 100), 'atr_percent': last_row['atr_percent']}
         return None
     except Exception as e:
-        logger.error(f"❌ [Strategy] Error in Range_Reversal strategy for {symbol}: {e}")
-        return None
+        logger.error(f"❌ [Strategy] Error in Range_Reversal for {symbol}: {e}"); return None
 
 # --- دوال إدارة الصفقات ---
 def get_open_trades_count() -> int:
@@ -2039,7 +1890,7 @@ def scan_symbol_for_signals(symbol: str) -> Optional[Dict]:
         for strategy in strategies:
             signal = strategy(df, symbol)
             if signal:
-                logger.info(f"[Signal Found] Strategy {strategy.__name__} found a signal for {symbol}.")
+                logger.info(f"💡 [Signal Found] Strategy {strategy.__name__} found a signal for {symbol}.")
                 return signal
         
         return None
@@ -2056,6 +1907,7 @@ def scan_all_symbols_for_signals():
     random.shuffle(symbols_to_scan)
     
     for symbol in symbols_to_scan:
+        logger.info(f"🔍 Scanning {symbol} for signals...") # *** NEW: Added log for active scanning
         with signal_cache_lock:
             if symbol in open_signals_cache: continue
         
@@ -2079,6 +1931,7 @@ def start_signal_scanning_thread():
                 else:
                     next_candle = now.replace(minute=next_candle_minute, second=0, microsecond=0)
                 sleep_time = (next_candle - now).total_seconds()
+                logger.info(f"Scan finished. Sleeping for {sleep_time:.0f} seconds until next candle.")
                 time.sleep(max(1, sleep_time))
             except Exception as e:
                 logger.error(f"❌ [Signal Scanning] Error in thread: {e}")
@@ -2171,7 +2024,7 @@ def dashboard():
                     <div class="card-body p-0" style="max-height: 250px; overflow-y: auto;">
                         <table class="table table-sm table-striped mb-0">
                             <tbody id="rejection-table">
-                                <tr><td class="text-center p-3 text-muted">لا توجد سجلات رفض</td></tr>
+                                <tr><td class="text-center p-3 text-muted">سجل الرفض فارغ</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -2250,14 +2103,25 @@ def dashboard():
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // *** FIX: Changed strategy keys to match backend signal names
         const STRATEGY_DEFINITIONS = {
-            'USE_BB_STOCH_STRATEGY': 'BB + Stoch',
-            'USE_MACD_EMA_STRATEGY': 'MACD + EMA',
-            'USE_EMA_RSI_STRATEGY': 'EMA + RSI',
-            'USE_PULLBACK_STRATEGY': 'Pullback',
-            'USE_MOMENTUM_VOLATILITY_STRATEGY': 'Momentum',
-            'USE_ELLIOTT_WAVE_STRATEGY': 'Elliott Wave',
-            'USE_RANGE_REVERSAL_STRATEGY': 'Range Reversal'
+            'BB_Stoch_Strategy': 'BB + Stoch',
+            'MACD_EMA_Strategy': 'MACD + EMA',
+            'EMA_RSI_Strategy': 'EMA + RSI',
+            'Pullback_Strategy': 'Pullback',
+            'Momentum_Volatility_Strategy': 'Momentum',
+            'Elliott_Wave_Strategy': 'Elliott Wave',
+            'Range_Reversal_Strategy': 'Range Reversal'
+        };
+
+        const STRATEGY_FORM_KEYS = {
+            'USE_BB_STOCH_STRATEGY': 'BB_Stoch_Strategy',
+            'USE_MACD_EMA_STRATEGY': 'MACD_EMA_Strategy',
+            'USE_EMA_RSI_STRATEGY': 'EMA_RSI_Strategy',
+            'USE_PULLBACK_STRATEGY': 'Pullback_Strategy',
+            'USE_MOMENTUM_VOLATILITY_STRATEGY': 'Momentum_Volatility_Strategy',
+            'USE_ELLIOTT_WAVE_STRATEGY': 'Elliott_Wave_Strategy',
+            'USE_RANGE_REVERSAL_STRATEGY': 'Range_Reversal_Strategy'
         };
 
         function connectWebSocket() {
@@ -2267,7 +2131,10 @@ def dashboard():
 
             socket.onopen = () => console.log("WebSocket connected");
             socket.onmessage = (event) => handleWebSocketMessage(JSON.parse(event.data));
-            socket.onclose = () => setTimeout(connectWebSocket, 5000);
+            socket.onclose = () => {
+                console.log("WebSocket disconnected. Reconnecting in 5 seconds...");
+                setTimeout(connectWebSocket, 5000);
+            };
             socket.onerror = (error) => {
                 console.error("WebSocket error:", error);
                 socket.close();
@@ -2287,8 +2154,10 @@ def dashboard():
         }
 
         function handleWebSocketMessage(data) {
-            // A simple and robust way to handle updates is to reload all data.
-            // This prevents the UI from getting out of sync.
+            // *** FIX: Handle ping to keep connection alive
+            if (data.type === 'ping') return;
+            
+            // Reload data on relevant updates to keep UI in sync
             if (['new_notification', 'new_rejection', 'trade_opened', 'trade_updated', 'trade_closed'].includes(data.type)) {
                 loadInitialData();
             } else if (data.type === 'price_update') {
@@ -2342,10 +2211,10 @@ def dashboard():
             document.getElementById('max-trades').textContent = settings.MAX_OPEN_TRADES;
             
             const container = document.getElementById('strategies-container');
-            container.innerHTML = Object.entries(STRATEGY_DEFINITIONS).map(([key, name]) => `
+            container.innerHTML = Object.entries(STRATEGY_FORM_KEYS).map(([key, name]) => `
                 <div class="form-check">
                     <input class="form-check-input" type="checkbox" id="${key}" ${settings[key] ? 'checked' : ''}>
-                    <label class="form-check-label" for="${key}">${name}</label>
+                    <label class="form-check-label" for="${key}">${STRATEGY_DEFINITIONS[name]}</label>
                 </div>
             `).join('');
         }
@@ -2385,7 +2254,7 @@ def dashboard():
                 const pnl = ((price - trade.entry_price) / trade.entry_price) * 100;
                 return `
                     <tr>
-                        <td><strong>${trade.symbol}</strong><br><small class="text-muted">${STRATEGY_DEFINITIONS[trade.strategy_name.replace('Strategy','STRATEGY').replace('_','_USE_')+'_STRATEGY'] || trade.strategy_name}</small></td>
+                        <td><strong>${trade.symbol}</strong><br><small class="text-muted">${STRATEGY_DEFINITIONS[trade.strategy_name] || trade.strategy_name}</small></td>
                         <td>${trade.entry_price.toFixed(4)}</td>
                         <td>${trade.target_price_2.toFixed(4)}</td>
                         <td>${trade.stop_loss.toFixed(4)}</td>
@@ -2410,7 +2279,7 @@ def dashboard():
         
         function updateRejectionTable(rejections) {
             const tableBody = document.getElementById('rejection-table');
-            tableBody.innerHTML = rejections.length === 0 ? '<tr><td class="text-center p-3 text-muted">لا توجد سجلات رفض</td></tr>' : rejections.map(r => `
+            tableBody.innerHTML = rejections.length === 0 ? '<tr><td class="text-center p-3 text-muted">سجل الرفض فارغ</td></tr>' : rejections.map(r => `
                 <tr><td><small>${new Date(r.timestamp).toLocaleTimeString('ar-EG')} <strong>${r.symbol}</strong>: ${r.reason}</small></td></tr>
             `).join('');
         }
@@ -2424,12 +2293,12 @@ def dashboard():
         }
 
         function closeTrade(symbol) {
-            if (!confirm(`هل أنت متأكد من رغبتك في إغلاق صفقة ${symbol} يدويًا؟`)) return;
+            // *** FIX: Removed confirm() popup
             fetch(`/api/close-trade?symbol=${symbol}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
                     if (data.success) {
-                        alert('تم إرسال طلب إغلاق الصفقة.');
+                        console.log('Close trade request sent successfully.');
                         delete openTrades[symbol];
                         updateOpenTradesTable();
                     } else {
@@ -2462,7 +2331,7 @@ def dashboard():
                 MAX_OPEN_TRADES: parseInt(document.getElementById('max-trades-setting').value),
                 MIN_SIGNAL_QUALITY: parseInt(document.getElementById('min-quality').value)
             };
-            Object.keys(STRATEGY_DEFINITIONS).forEach(key => {
+            Object.keys(STRATEGY_FORM_KEYS).forEach(key => {
                 settings[key] = document.getElementById(key).checked;
             });
 
@@ -2562,23 +2431,34 @@ def toggle_mode():
 @app.route('/api/save-settings', methods=['POST'])
 def save_settings():
     """حفظ الإعدادات"""
+    global MAX_OPEN_TRADES, FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT, MIN_SIGNAL_QUALITY
+    global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY, USE_PULLBACK_STRATEGY
+    global USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY
     try:
         data = request.get_json()
         with trade_amount_lock:
-            globals()['FIXED_TRADE_AMOUNT_MIN_USDT'] = float(data['FIXED_TRADE_AMOUNT_MIN_USDT'])
-            globals()['FIXED_TRADE_AMOUNT_MAX_USDT'] = float(data['FIXED_TRADE_AMOUNT_MAX_USDT'])
-        globals()['MAX_OPEN_TRADES'] = int(data['MAX_OPEN_TRADES'])
+            FIXED_TRADE_AMOUNT_MIN_USDT = float(data['FIXED_TRADE_AMOUNT_MIN_USDT'])
+            FIXED_TRADE_AMOUNT_MAX_USDT = float(data['FIXED_TRADE_AMOUNT_MAX_USDT'])
+        MAX_OPEN_TRADES = int(data['MAX_OPEN_TRADES'])
         with min_quality_lock:
-            globals()['MIN_SIGNAL_QUALITY'] = int(data['MIN_SIGNAL_QUALITY'])
+            MIN_SIGNAL_QUALITY = int(data['MIN_SIGNAL_QUALITY'])
         
-        for key in STRATEGY_NAMES.keys():
-            globals()[f"USE_{key.upper()}"] = bool(data.get(f"USE_{key.upper()}", False))
-
-        save_settings_to_redis()
-        log_and_notify('info', "🔄 تم تحديث الإعدادات من لوحة التحكم", 'system')
-        return jsonify({'success': True})
+        # Update strategy toggles
+        USE_BB_STOCH_STRATEGY = bool(data.get('USE_BB_STOCH_STRATEGY', False))
+        USE_MACD_EMA_STRATEGY = bool(data.get('USE_MACD_EMA_STRATEGY', False))
+        USE_EMA_RSI_STRATEGY = bool(data.get('USE_EMA_RSI_STRATEGY', False))
+        USE_PULLBACK_STRATEGY = bool(data.get('USE_PULLBACK_STRATEGY', False))
+        USE_MOMENTUM_VOLATILITY_STRATEGY = bool(data.get('USE_MOMENTUM_VOLATILITY_STRATEGY', False))
+        USE_ELLIOTT_WAVE_STRATEGY = bool(data.get('USE_ELLIOTT_WAVE_STRATEGY', False))
+        USE_RANGE_REVERSAL_STRATEGY = bool(data.get('USE_RANGE_REVERSAL_STRATEGY', False))
+        
+        if save_settings_to_redis():
+            log_and_notify('info', "🔄 تم تحديث الإعدادات من لوحة التحكم", 'system')
+            return jsonify({'success': True})
+        else:
+            return jsonify({'success': False, 'error': 'Failed to save to Redis'}), 500
     except Exception as e:
-        logger.error(f"❌ [API] Error saving settings: {e}")
+        logger.error(f"❌ [API] Error saving settings: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/close-trade', methods=['POST'])
@@ -2613,14 +2493,20 @@ def websocket_connection(ws):
     with ws_clients_lock:
         ws_clients.append(ws)
     try:
+        # *** NEW: Ping/Pong mechanism to keep connection alive
         while ws.connected:
-            # Keep the connection alive
-            time.sleep(1)
+            try:
+                ws.send(json.dumps({'type': 'ping'}))
+                time.sleep(20)  # Send a ping every 20 seconds
+            except Exception:
+                break # Exit the loop if sending fails
     except Exception as e:
-        logger.warning(f"WebSocket connection closed: {e}")
+        logger.warning(f"WebSocket connection logic error: {e}")
     finally:
         with ws_clients_lock:
-            if ws in ws_clients: ws_clients.remove(ws)
+            if ws in ws_clients: 
+                ws_clients.remove(ws)
+                logger.info("WebSocket client removed.")
 
 # --- دالة رئيسية ومنطق التشغيل ---
 def start_bot_logic():
