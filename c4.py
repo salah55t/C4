@@ -1,8 +1,9 @@
-# ملف c4_5min_v34_0_5.py - نسخة V34.0.5 (تحسين مرونة فيبوناتشي)
+# ملف c4_5min_v34_1_0.py - نسخة V34.1.0 (إصلاح مرونة الفلاتر)
 # --- وصف التعديلات:
-# 1. [توسيع نطاق فيبوناتشي] تم تعديل الفلتر الديناميكي الخاص باستراتيجية موجات إليوت ليقبل نطاقًا أوسع من تصحيحات فيبوناتشي، مما يقلل من الصرامة ويزيد من فرص الدخول.
-# 2. [عرض الرصيد الفعلي] يحتفظ البوت بميزة عرض رصيد USDT الحقيقي دائمًا.
-# 3. [صفقات ورقية ثابتة] تظل الصفقات الورقية تستخدم قيمة ثابتة قدرها 10 USDT.
+# 1. [إصلاح فلتر فيبوناتشي] تم توسيع نطاق قبول تصحيح فيبوناتشي بشكل كبير ليكون أكثر مرونة ويقلل من حالات الرفض.
+# 2. [إصلاح فلتر التقلب] تم تخفيض الحد الأدنى لتقلب السوق (ATR) للسماح للبوت بالعثور على صفقات في ظروف السوق الأقل تقلباً.
+# 3. [تحسينات طفيفة] تم إجراء تعديلات طفيفة على فلاتر ADX لتكون أقل صرامة.
+# 4. [الحفاظ على الهيكل] تم الحفاظ على جميع مكونات البوت الأساسية وهيكله العام.
 
 import time
 import os
@@ -47,7 +48,7 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CryptoBotV34.0.5_5min')
+logger = logging.getLogger('CryptoBotV34.1.0_5min')
 
 # --- المشفر المخصص لأنواع بيانات NumPy ---
 class NpEncoder(json.JSONEncoder):
@@ -816,7 +817,8 @@ def check_macd_ema_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    default_adx_thresh = 20 if atr_percent > 1.5 else 16 # Adjusted for 5m
+    # --- تحسين: تم تخفيض الحد الأدنى لـ ADX ليكون أقل صرامة ---
+    default_adx_thresh = 18 if atr_percent > 1.5 else 15 #
     adx_threshold = default_adx_thresh
     
     volume_ma = df['volume'].rolling(20).mean()
@@ -883,7 +885,8 @@ def check_momentum_volatility_dynamic_filters(df: pd.DataFrame) -> Dict:
     is_momentum_ok = (last_row['rsi'] > 51) and (df['macd_hist'].iloc[-1] > df['macd_hist'].iloc[-2])
 
     adx_ma = df['adx'].rolling(20).mean()
-    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.85
+    # --- تحسين: تم تخفيض مضاعف ADX ليكون أقل صرامة ---
+    dynamic_adx_threshold = adx_ma.iloc[-1] * 0.80
     
     return {
         'volatility_ok': dynamic_vol_min <= atr_percent.iloc[-1] <= dynamic_vol_max,
@@ -895,13 +898,9 @@ def check_elliott_wave_dynamic_filters(df: pd.DataFrame) -> Dict:
     last_row = df.iloc[-1]
     atr_percent = last_row.get('atr_percent', 0)
     
-    # --- تحسين: تم توسيع نطاق قبول فيبوناتشي ليكون أكثر مرونة ---
-    # النطاق السابق للتقلب العالي: 0.236 إلى 0.886
-    # النطاق السابق للتقلب العادي: 0.236 إلى 0.786
-    if atr_percent > 2.5: # سوق متقلب
-        fib_min, fib_max = 0.18, 0.94 # نطاق أوسع للتصحيحات العميقة
-    else: # سوق عادي
-        fib_min, fib_max = 0.18, 0.886 # نطاق أوسع قليلاً
+    # --- إصلاح رئيسي: تم توسيع نطاق قبول فيبوناتشي بشكل كبير لزيادة فرص الدخول ---
+    # كان النطاق السابق ضيقًا جدًا ويسبب معظم حالات الرفض.
+    fib_min, fib_max = 0.15, 0.95 # نطاق واسع ومرن جداً
     
     volume_ma = df['volume'].rolling(20).mean()
     wave_volume_multiplier = 1.3 + (atr_percent / 50)
@@ -960,9 +959,9 @@ def check_market_volatility_filter_enhanced(df: pd.DataFrame, symbol: str = "Unk
         return False
     
     last_atr_percent = float(df.iloc[-1].get('atr_percent', 0))
-    # Adjusted for 5-minute timeframe
-    ATR_PERCENT_MIN = 0.5
-    ATR_PERCENT_MAX = 2.8
+    # --- إصلاح: تم تخفيض الحد الأدنى للسماح بالتداول في الأسواق الهادئة ---
+    ATR_PERCENT_MIN = 0.35
+    ATR_PERCENT_MAX = 3.2
     
     if not (ATR_PERCENT_MIN <= last_atr_percent <= ATR_PERCENT_MAX):
         log_rejection(symbol, "Market Volatility Filter Failed", {
@@ -1411,7 +1410,7 @@ DASHBOARD_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>لوحة التحكم - بوت 5 دقائق (V34.0.5)</title>
+<title>لوحة التحكم - بوت 5 دقائق (V34.1.0)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
@@ -1478,7 +1477,7 @@ input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer
 </head>
 <body>
 <div class="container">
-  <header><h1>لوحة التحكم • بوت 5 دقائق V34.0.5</h1><div class="badge" id="serverTime">—</div></header>
+  <header><h1>لوحة التحكم • بوت 5 دقائق V34.1.0</h1><div class="badge" id="serverTime">—</div></header>
   <div class="main-layout">
     <div class="left-column">
       <div class="card">
@@ -1884,7 +1883,7 @@ SETTINGS_TEMPLATE = """
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>الإعدادات - بوت 5 دقائق (V34.0.5)</title>
+<title>الإعدادات - بوت 5 دقائق (V34.1.0)</title>
 <style>
 :root{--bg:#0b1020;--panel:#121b36;--accent:#3aa0ff;--ok:#15c46a;--warn:#ff9f1a;--bad:#ff4757;--muted:#8aa0c8;}
 *{box-sizing:border-box}
@@ -2920,7 +2919,7 @@ def update_balance_loop():
 
 # --- نقطة بداية البرنامج ---
 if __name__ == '__main__':
-    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.0.5 (5-Min Scalper) ======\n" + "="*50)
+    logger.info("="*50 + "\n====== Starting Crypto Trading Bot V34.1.0 (5-Min Scalper) ======\n" + "="*50)
     init_db()
     init_redis()
     try:
