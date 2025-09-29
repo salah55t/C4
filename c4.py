@@ -1035,136 +1035,477 @@ def calculate_dynamic_take_profit(df: pd.DataFrame, entry_price: float, stop_los
     
     return target1, target2
 
-# --- استراتيجيات التداول المعدلة ---
-def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200: return False
 
-    last = df.iloc[-1]
-    if not (last['ema50'] > last['ema200'] and last['close'] > last['ema9']):
-        return False
-        
-    filters = check_ema_rsi_dynamic_filters(df)
-    if not filters['rsi_ok']: log_rejection(symbol_name, "DYN_RSI_OOR"); return False
-    if not filters['ema_ok']: log_rejection(symbol_name, "DYN_EMA_SPREAD_LOW"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-        
-    return True
-
+# --- استراتيجيات مُعدّلة - تم استبدالها هنا بالنسخ المفصلة التي أرسلها المستخدم
+# ------------------------------------------------------------------
+# --- استراتيجية 1: BB + Stochastic (ارتداد مبكر من النطاقات) ---
 def check_bb_stoch_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الارتداد من حدود البولينجر مع تأكيد من Stochastic
+    مناسبة للسكالبينج على 5 دقائق - تستهدف الارتدادات السريعة
+    """
     symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False
-    
+
+    if len(df) < 50:
+        return False
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    
-    if not (last['close'] > last['ema50'] and (df['low'].tail(3) <= df['bb_lower'].tail(3)).any() and last['close'] > last['bb_lower']):
-        return False
-    
-    if not ((prev['stoch_k'] < 30) and (last['stoch_k'] > prev['stoch_k'])): return False
+    prev2 = df.iloc[-3]
 
+    # 1. شرط الاتجاه الصاعد على المدى المتوسط
+    if last['close'] < last['ema50']:
+        log_rejection(symbol_name, "BB: Price below EMA50 (bearish trend)")
+        return False
+
+    # 2. السعر لامس أو اخترق النطاق السفلي في آخر 3 شموع
+    touched_lower_band = (
+        df['low'].tail(3).min() <= df['bb_lower'].tail(3).max() * 1.002  # 0.2% tolerance
+    )
+
+    if not touched_lower_band:
+        return False
+
+    # 3. السعر بدأ بالارتداد للأعلى (close أعلى من bb_lower الآن)
+    price_rebounded = last['close'] > last['bb_lower'] * 1.001
+
+    if not price_rebounded:
+        return False
+
+    # 4. شرط Stochastic: كان في منطقة تشبع بيعي وبدأ بالصعود
+    stoch_oversold = prev['stoch_k'] < 30
+    stoch_turning_up = (last['stoch_k'] > prev['stoch_k']) and (prev['stoch_k'] > prev2['stoch_k'])
+
+    if not (stoch_oversold and stoch_turning_up):
+        return False
+
+    # 5. حجم التداول: يجب أن يكون أعلى من المتوسط (دليل على قوة الحركة)
+    volume_ma = df['volume'].rolling(20).mean()
+    if last['volume'] < volume_ma.iloc[-1] * 1.1:
+        return False
+
+    # 6. الفلاتر الديناميكية
     filters = check_bb_stoch_dynamic_filters(df)
-    if not filters['bb_width_ok']: log_rejection(symbol_name, "DYN_BB_WIDTH_LOW"); return False
-    if not filters['stoch_ok']: log_rejection(symbol_name, "DYN_STOCH_LOW"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
+
+    if not filters['bb_width_ok']:
+        log_rejection(symbol_name, "DYN_BB_WIDTH_LOW")
+        return False
+
+    if not filters['stoch_ok']:
+        log_rejection(symbol_name, "DYN_STOCH_LOW")
+        return False
+
+    if not filters['volume_ok']:
+        log_rejection(symbol_name, "DYN_VOLUME_LOW")
+        return False
+
+    # 7. تأكيد إضافي: RSI ليس في منطقة تشبع شرائي مفرط
+    if last['rsi'] > 75:
+        return False
 
     return True
 
-def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200: return False
-    
-    last = df.iloc[-1]
-    
-    is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
-    is_long_term_bearish = last['close'] < last['sma200']
 
-    if is_mtf_bearish and is_long_term_bearish:
+# --- استراتيجية 2: MACD + EMA (زخم وتقاطع) ---
+def check_macd_ema_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الزخم القوي مع تأكيد من MACD و EMA
+    تستهدف الحركات القوية المدعومة بزخم متزايد
+    """
+    symbol_name = getattr(df, 'name', 'Unknown')
+
+    if len(df) < 200:
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+
+    # 1. الاتجاه العام: تجنب الدخول في اتجاه هابط قوي
+    long_term_bearish = (
+        mtf_trend.get('15m') == 'bearish' and 
+        mtf_trend.get('1h') == 'bearish' and 
+        last['close'] < last['sma200']
+    )
+
+    if long_term_bearish:
         log_rejection(symbol_name, "MACD: Strongly bearish trend")
         return False
 
+    # 2. MACD في منطقة إيجابية ومتزايد
+    macd_positive = last['macd'] > 0
+    macd_hist_positive = last['macd_hist'] > 0
+
+    if not (macd_positive and macd_hist_positive):
+        return False
+
+    # 3. MACD Histogram يتزايد لمدة 3 شموع متتالية (زخم قوي)
     hist = df['macd_hist'].tail(4).values
-    if not (last['macd'] > 0 and last['macd_hist'] > 0 and hist[3] > hist[2] > hist[1]):
+    histogram_increasing = (hist[-1] > hist[-2] > hist[-3])
+
+    if not histogram_increasing:
         return False
-        
+
+    # 4. السعر فوق EMA21 (اتجاه قصير المدى صاعد)
+    if last['close'] < last['ema21']:
+        return False
+
+    # 5. تقاطع MACD مع خط الإشارة للأعلى حديثاً (في آخر 3 شموع)
+    macd_crossover_recent = (
+        (prev['macd'] <= prev['macd_signal']) and 
+        (last['macd'] > last['macd_signal'])
+    ) or (
+        (prev2['macd'] <= prev2['macd_signal']) and 
+        (prev['macd'] > prev['macd_signal'])
+    )
+
+    if not macd_crossover_recent:
+        return False
+
+    # 6. الفلاتر الديناميكية
     filters = check_macd_ema_dynamic_filters(df)
-    if not filters['adx_ok']: log_rejection(symbol_name, "DYN_ADX_LOW", {'adx': f"{last['adx']:.1f}"}); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-    if not filters['momentum_ok']: log_rejection(symbol_name, "DYN_MACD_MOMENTUM_LOW"); return False
-        
-    return True
 
-def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 200: return False
-
-    last = df.iloc[-1]
-    if not (last['ema21'] > last['ema50'] > last['ema200'] and (df['low'].tail(3) <= df['ema21'].tail(3)).any()):
+    if not filters['adx_ok']:
+        log_rejection(symbol_name, "DYN_ADX_LOW", {'adx': f"{last['adx']:.1f}"})
         return False
-    
-    filters = check_pullback_dynamic_filters(df, mtf_trend)
-    if not filters['recovery_ok']: log_rejection(symbol_name, "DYN_RECOVERY_FAIL"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-        
-    return True
 
-def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False
-
-    last = df.iloc[-1]
-    if not (last['ema9'] > last['ema21'] > last['ema50']):
+    if not filters['volume_ok']:
+        log_rejection(symbol_name, "DYN_VOLUME_LOW")
         return False
-        
-    filters = check_momentum_volatility_dynamic_filters(df)
-    if not filters['volatility_ok']: log_rejection(symbol_name, "DYN_VOLATILITY_OOR"); return False
-    if not filters['momentum_ok']: log_rejection(symbol_name, "DYN_MOMENTUM_SCORE_LOW"); return False
-    if not filters['adx_ok']: log_rejection(symbol_name, "DYN_ADX_LOW"); return False
-        
-    return True
 
-def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
-    symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 100: return False
-
-    last = df.iloc[-1]
-    
-    is_mtf_bearish = mtf_trend.get('15m') == 'bearish' and mtf_trend.get('1h') == 'bearish'
-    is_long_term_bearish = last['close'] < last['ema200']
-    
-    if is_mtf_bearish and is_long_term_bearish:
-        log_rejection(symbol_name, "Elliott Wave: Strongly bearish trend")
+    if not filters['momentum_ok']:
+        log_rejection(symbol_name, "DYN_MACD_MOMENTUM_LOW")
         return False
-    
-    if last['adx'] < 22: return False
-    if last['macd'] <= 0: return False
-        
-    filters = check_elliott_wave_dynamic_filters(df)
-    if not filters['fibonacci_ok']: log_rejection(symbol_name, "DYN_FIB_RETRACEMENT_OOR"); return False
-    if not filters['volume_ok']: log_rejection(symbol_name, "DYN_VOLUME_LOW"); return False
-    if not filters['momentum_ok']: log_rejection(symbol_name, "DYN_MACD_MOMENTUM_LOW"); return False
-        
+
+    # 7. RSI في منطقة محايدة إلى صاعدة (50-75)
+    if not (50 < last['rsi'] < 75):
+        return False
+
     return True
 
-def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+
+# --- استراتيجية 3: EMA + RSI (ارتداد سريع) ---
+def check_ema_rsi_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الارتداد السريع من مستويات الدعم (EMA) مع RSI
+    مناسبة للسكالبينج السريع على 5 دقائق
+    """
     symbol_name = getattr(df, 'name', 'Unknown')
-    if len(df) < 50: return False
+
+    if len(df) < 200:
+        return False
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    price_crossed_down = prev['low'] <= prev['bb_lower']
-    price_rebounded_up = last['close'] > last['bb_lower']
-
-    if not (price_crossed_down and price_rebounded_up):
+    # 1. الاتجاه طويل المدى صاعد
+    if not (last['ema50'] > last['ema200'] and last['close'] > last['ema200']):
+        log_rejection(symbol_name, "EMA_RSI: Bearish long-term trend")
         return False
-    
+
+    # 2. السعر فوق EMA9 (اتجاه فوري صاعد)
+    if last['close'] < last['ema9']:
+        return False
+
+    # 3. السعر لامس EMA21 في آخر 3 شموع (ارتداد من الدعم)
+    touched_ema21 = df['low'].tail(3).min() <= df['ema21'].tail(3).max() * 1.003
+
+    if not touched_ema21:
+        return False
+
+    # 4. EMA9 > EMA21 > EMA50 (ترتيب صاعد)
+    emas_aligned = last['ema9'] > last['ema21'] > last['ema50']
+
+    if not emas_aligned:
+        return False
+
+    # 5. RSI في منطقة محايدة (45-70) - ليس مبالغ فيه
+    filters = check_ema_rsi_dynamic_filters(df)
+
+    if not filters['rsi_ok']:
+        log_rejection(symbol_name, "DYN_RSI_OOR")
+        return False
+
+    # 6. المسافة بين EMA9 و EMA21 مناسبة (زخم موجود)
+    if not filters['ema_ok']:
+        log_rejection(symbol_name, "DYN_EMA_SPREAD_LOW")
+        return False
+
+    # 7. حجم التداول مرتفع
+    if not filters['volume_ok']:
+        log_rejection(symbol_name, "DYN_VOLUME_LOW")
+        return False
+
+    # 8. شمعة صاعدة حالية (close > open)
+    bullish_candle = last['close'] > df.iloc[-1].get('open', last['close'])
+
+    if not bullish_candle:
+        return False
+
+    # 9. MACD إيجابي (زخم صاعد)
+    if last['macd'] < 0:
+        return False
+
+    return True
+
+
+# --- استراتيجية 4: Pullback (ارتداد بحجم تداول) ---
+def check_pullback_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الارتداد من التصحيح في اتجاه صاعد قوي
+    تستهدف دخول بعد تراجع صحي مع تأكيد بالحجم
+    """
+    symbol_name = getattr(df, 'name', 'Unknown')
+
+    if len(df) < 200:
+        return False
+
+    last = df.iloc[-1]
+
+    # 1. الاتجاه العام صاعد قوي (ترتيب EMAs صاعد)
+    trend_bullish = (
+        last['ema21'] > last['ema50'] > last['ema200'] and
+        last['close'] > last['ema50']
+    )
+
+    if not trend_bullish:
+        log_rejection(symbol_name, "Pullback: Trend is not strongly bullish")
+        return False
+
+    # 2. حدث تراجع (pullback) حديث: السعر لامس EMA21 في آخر 5 شموع
+    pullback_occurred = (df['low'].tail(5) <= df['ema21'].tail(5) * 1.005).any()
+
+    if not pullback_occurred:
+        return False
+
+    # 3. السعر يتعافى الآن من التراجع
+    filters = check_pullback_dynamic_filters(df, mtf_trend)
+
+    if not filters['recovery_ok']:
+        log_rejection(symbol_name, "DYN_RECOVERY_FAIL")
+        return False
+
+    # 4. حجم التداول مرتفع (دليل على دخول مشترين)
+    if not filters['volume_ok']:
+        log_rejection(symbol_name, "DYN_VOLUME_LOW")
+        return False
+
+    # 5. RSI ليس في تشبع شرائي مفرط (أقل من 70)
+    if last['rsi'] > 70:
+        return False
+
+    # 6. MACD فوق الصفر أو بدأ بالصعود
+    macd_bullish = last['macd'] > 0 or last['macd_hist'] > df.iloc[-2]['macd_hist']
+
+    if not macd_bullish:
+        return False
+
+    # 7. ADX فوق 20 (اتجاه قوي موجود)
+    if last['adx'] < 20:
+        return False
+
+    # 8. السعر الحالي فوق VWAP (دعم إضافي)
+    if last['close'] < last.get('vwap', last['close'] * 0.99):
+        return False
+
+    return True
+
+
+# --- استراتيجية 5: Momentum + Volatility (زخم متزايد) ---
+def check_momentum_volatility_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الزخم المتزايد مع تقلبات مناسبة
+    تستهدف اللحظات التي يكون فيها الزخم قوي والتقلب معتدل
+    """
+    symbol_name = getattr(df, 'name', 'Unknown')
+
+    if len(df) < 50:
+        return False
+
+    last = df.iloc[-1]
+
+    # 1. EMAs في ترتيب صاعد (EMA9 > EMA21 > EMA50)
+    emas_bullish = last['ema9'] > last['ema21'] > last['ema50']
+
+    if not emas_bullish:
+        log_rejection(symbol_name, "Momentum: EMAs not in bullish order")
+        return False
+
+    # 2. الفلاتر الديناميكية للزخم والتقلب
+    filters = check_momentum_volatility_dynamic_filters(df)
+
+    # 3. التقلب في النطاق الأمثل
+    if not filters['volatility_ok']:
+        log_rejection(symbol_name, "DYN_VOLATILITY_OOR")
+        return False
+
+    # 4. الزخم موجود وقوي
+    if not filters['momentum_ok']:
+        log_rejection(symbol_name, "DYN_MOMENTUM_SCORE_LOW")
+        return False
+
+    # 5. ADX يؤكد قوة الاتجاه
+    if not filters['adx_ok']:
+        log_rejection(symbol_name, "DYN_ADX_LOW")
+        return False
+
+    # 6. MACD Histogram متزايد
+    macd_increasing = last['macd_hist'] > df.iloc[-2]['macd_hist'] > df.iloc[-3]['macd_hist']
+
+    if not macd_increasing:
+        return False
+
+    # 7. حجم التداول أعلى من المتوسط
+    volume_ma = df['volume'].rolling(20).mean()
+    if last['volume'] < volume_ma.iloc[-1] * 1.15:
+        return False
+
+    # 8. RSI في منطقة الزخم (55-75)
+    if not (55 < last['rsi'] < 75):
+        return False
+
+    # 9. السعر فوق Bollinger Band الوسطى (قوة)
+    if last['close'] < last['bb_middle']:
+        return False
+
+    return True
+
+
+# --- استراتيجية 6: Elliott Wave (موجات إليوت) ---
+def check_elliott_wave_strategy_enhanced(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية موجات إليوت المبسطة
+    تبحث عن نهاية الموجة التصحيحية (Wave 2 أو 4) وبداية الموجة الدافعة
+    """
+    symbol_name = getattr(df, 'name', 'Unknown')
+
+    if len(df) < 100:
+        return False
+
+    last = df.iloc[-1]
+
+    # 1. تجنب الاتجاه الهابط القوي
+    strong_bearish = (
+        mtf_trend.get('15m') == 'bearish' and 
+        mtf_trend.get('1h') == 'bearish' and 
+        last['close'] < last['ema200']
+    )
+
+    if strong_bearish:
+        log_rejection(symbol_name, "Elliott Wave: Strongly bearish trend")
+        return False
+
+    # 2. ADX يجب أن يكون فوق 22 (اتجاه موجود)
+    if last['adx'] < 22:
+        return False
+
+    # 3. MACD إيجابي (زخم صاعد)
+    if last['macd'] <= 0:
+        return False
+
+    # 4. حساب تصحيح فيبوناتشي
+    filters = check_elliott_wave_dynamic_filters(df)
+
+    if not filters['fibonacci_ok']:
+        log_rejection(symbol_name, "DYN_FIB_RETRACEMENT_OOR")
+        return False
+
+    # 5. حجم التداول مرتفع (دليل على بداية موجة جديدة)
+    if not filters['volume_ok']:
+        log_rejection(symbol_name, "DYN_VOLUME_LOW")
+        return False
+
+    # 6. زخم MACD متزايد
+    if not filters['momentum_ok']:
+        log_rejection(symbol_name, "DYN_MACD_MOMENTUM_LOW")
+        return False
+
+    # 7. السعر فوق EMA21
+    if last['close'] < last['ema21']:
+        return False
+
+    # 8. RSI في منطقة صحية (45-70)
+    if not (45 < last['rsi'] < 70):
+        return False
+
+    # 9. Stochastic بدأ بالصعود من منطقة منخفضة
+    if df.iloc[-2]['stoch_k'] > 40:  # لم يكن في منطقة منخفضة
+        return False
+
+    if last['stoch_k'] <= df.iloc[-2]['stoch_k']:  # لم يبدأ بالصعود
+        return False
+
+    return True
+
+
+# --- استراتيجية 7: Range Reversal (انعكاس نطاقي) ---
+def check_range_reversal_strategy(df: pd.DataFrame, mtf_trend: Dict) -> bool:
+    """
+    استراتيجية الانعكاس في السوق النطاقي
+    تستهدف الارتدادات من حدود النطاق في غياب اتجاه قوي
+    """
+    symbol_name = getattr(df, 'name', 'Unknown')
+
+    if len(df) < 50:
+        return False
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    # 1. السوق في نطاق (ADX منخفض)
     filters = check_range_reversal_dynamic_filters(df)
-    if not filters['adx_ok']: log_rejection(symbol_name, "Range Reversal: Trend too strong (ADX > 23)"); return False
-    if not filters['rsi_ok']: log_rejection(symbol_name, "Range Reversal: RSI not in oversold zone"); return False
-    
+
+    if not filters['adx_ok']:
+        log_rejection(symbol_name, "Range Reversal: Trend too strong (ADX > 23)")
+        return False
+
+    # 2. السعر لامس النطاق السفلي (Bollinger Lower Band)
+    price_crossed_lower = prev['low'] <= prev['bb_lower'] * 1.002
+
+    if not price_crossed_lower:
+        return False
+
+    # 3. السعر ارتد للأعلى (close فوق bb_lower)
+    price_rebounded = last['close'] > last['bb_lower'] * 1.005
+
+    if not price_rebounded:
+        return False
+
+    # 4. RSI في منطقة تشبع بيعي
+    if not filters['rsi_ok']:
+        log_rejection(symbol_name, "Range Reversal: RSI not in oversold zone")
+        return False
+
+    # 5. Stochastic في تشبع بيعي وبدأ بالصعود
+    stoch_oversold = prev['stoch_k'] < 25
+    stoch_turning = last['stoch_k'] > prev['stoch_k']
+
+    if not (stoch_oversold and stoch_turning):
+        return False
+
+    # 6. حجم التداول مرتفع (دليل على انعكاس حقيقي)
+    volume_ma = df['volume'].rolling(20).mean()
+    if last['volume'] < volume_ma.iloc[-1] * 1.2:
+        return False
+
+    # 7. شمعة صاعدة قوية
+    bullish_candle = last['close'] > last.get('open', last['close'] * 0.999)
+
+    if not bullish_candle:
+        return False
+
+    # 8. MACD Histogram بدأ بالتحسن
+    if last['macd_hist'] <= df.iloc[-2]['macd_hist']:
+        return False
+
+    # 9. السعر قريب من middle band (هدف واضح)
+    distance_to_middle = abs(last['close'] - last['bb_middle']) / last['close']
+    if distance_to_middle < 0.003:  # أقل من 0.3%
+        return False
+
     return True
 # --- نهاية الاستراتيجيات ---
+
 
 def get_formatted_quantity(symbol: str, quantity: Decimal) -> str:
     """
