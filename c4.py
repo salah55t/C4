@@ -1933,10 +1933,10 @@ def api_settings():
         try:
             data = request.get_json()
             
-            # تحديث الإعدادات بدون استخدام global
-            nonlocal MIN_SIGNAL_QUALITY, FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT, MAX_OPEN_TRADES
-            nonlocal USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY
-            nonlocal USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY
+            # تحديث الإعدادات باستخدام global بشكل صحيح
+            global MIN_SIGNAL_QUALITY, FIXED_TRADE_AMOUNT_MIN_USDT, FIXED_TRADE_AMOUNT_MAX_USDT, MAX_OPEN_TRADES
+            global USE_BB_STOCH_STRATEGY, USE_MACD_EMA_STRATEGY, USE_EMA_RSI_STRATEGY
+            global USE_PULLBACK_STRATEGY, USE_MOMENTUM_VOLATILITY_STRATEGY, USE_ELLIOTT_WAVE_STRATEGY, USE_RANGE_REVERSAL_STRATEGY
             
             with min_quality_lock:
                 MIN_SIGNAL_QUALITY = int(data.get('min_quality', MIN_SIGNAL_QUALITY))
